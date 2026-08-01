@@ -1,0 +1,6 @@
+fastapi>=0.109,<0.112
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+pydantic
+openai

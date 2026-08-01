@@ -1,0 +1,82 @@
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>БОРИС — макет 2</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:#F6F7FB;color:#1D2939;padding:40px 24px}
+.wrap{max-width:1180px;margin:0 auto}
+.keep{border:2px dashed #C7D2E4;border-radius:16px;padding:18px;margin-bottom:32px;background:#fff}
+.keep .lbl{font-size:12px;font-weight:700;color:#98A2B3;letter-spacing:.08em;text-transform:uppercase;margin-bottom:12px}
+.k6{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.kc{background:#F6F7FB;border:1px solid #E3E7F0;border-radius:12px;padding:14px 16px;font-size:13px;color:#667085}
+.kc b{display:block;font-size:15px;color:#1D2939;margin-bottom:2px}
+.bar{background:linear-gradient(135deg,#2F6FED,#1E4FD8);border-radius:16px;padding:22px 28px;color:#fff;display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:28px}
+.bar h2{font-size:20px;font-weight:800;margin-bottom:4px}
+.bar p{font-size:14px;opacity:.85}
+.cta{background:#fff;color:#2F6FED;border:none;border-radius:12px;padding:14px 26px;font-size:15px;font-weight:700;cursor:pointer;white-space:nowrap}
+.sec{display:flex;justify-content:space-between;align-items:center;margin:0 0 16px;flex-wrap:wrap;gap:12px}
+.sec h2{font-size:20px;font-weight:700}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{background:#fff;border:1px solid #E3E7F0;border-radius:20px;padding:7px 16px;font-size:13px;color:#667085;cursor:pointer}
+.chip.on{background:#E7EFFE;border-color:#2F6FED;color:#2F6FED;font-weight:700}
+.gal{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;margin-bottom:36px}
+.tile{background:#fff;border:1px solid #E3E7F0;border-radius:16px;overflow:hidden;transition:.2s;cursor:pointer}
+.tile:hover{transform:translateY(-3px);box-shadow:0 12px 24px rgba(16,24,40,.10)}
+.ph{height:130px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700}
+.tile .m{padding:12px 14px}
+.tile .m b{display:block;font-size:14px;margin-bottom:2px}
+.tile .m span{font-size:12px;color:#98A2B3}
+.add{border:2px dashed #D0D5DD;border-radius:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:186px;color:#667085;cursor:pointer}
+.add div{font-size:30px;color:#2F6FED;margin-bottom:6px}
+.mod{background:rgba(16,24,40,.5);border-radius:20px;padding:40px;display:flex;justify-content:center}
+.mw{background:#fff;border-radius:20px;padding:32px;max-width:640px;width:100%}
+.mw h3{font-size:20px;font-weight:800;margin-bottom:6px}
+.mw .sub{font-size:14px;color:#667085;margin-bottom:22px}
+.lb{font-size:14px;color:#667085;margin-bottom:6px;display:block}
+.inp{width:100%;border:1px solid #E3E7F0;border-radius:10px;padding:12px;font-size:15px;margin-bottom:18px;background:#fff}
+.ta{min-height:96px}
+.more{color:#2F6FED;font-weight:700;font-size:14px;margin-bottom:22px;cursor:pointer}
+.gen{width:100%;background:#2F6FED;color:#fff;border:none;border-radius:12px;padding:15px;font-size:16px;font-weight:700;cursor:pointer}
+.note{font-size:13px;color:#98A2B3;text-align:center;margin-top:26px}
+</style></head><body><div class="wrap">
+
+<div class="keep"><div class="lbl">остаётся как есть — не трогаем</div>
+<div class="k6">
+  <div class="kc"><b>СДЕЛАЛ · 5</b>баннеров для объявлений</div>
+  <div class="kc"><b>Мои фото</b>загруженные вами изображения</div>
+  <div class="kc"><b>СОБРАЛ · 642</b>качественных фото</div>
+  <div class="kc"><b>Студия картинок Бориса</b>баннеры и инфографика от ИИ</div>
+  <div class="kc"><b>РАЗРАБОТАЛ · 16</b>баннеров для тарифов</div>
+  <div class="kc"><b>Купить баннеры</b>готовые баннеры из галереи</div>
+</div></div>
+
+<div class="bar">
+  <div><h2>Создайте новый баннер</h2><p>Опишите нишу — Борис придумает текст и нарисует. Осталось 4 генерации из 20.</p></div>
+  <button class="cta">✨ Создать баннер</button>
+</div>
+
+<div class="sec"><h2>Ваши баннеры</h2>
+  <div class="chips"><span class="chip on">Все</span><span class="chip">Инфографика</span><span class="chip">Профиль магазина</span><span class="chip">Загруженные</span></div>
+</div>
+
+<div class="gal">
+  <div class="tile"><div class="ph" style="background:#E7EFFE;color:#1E4FD8">1080 × 1080</div><div class="m"><b>Шкафы-купе Пенза</b><span>вчера</span></div></div>
+  <div class="tile"><div class="ph" style="background:#EFEBFE;color:#6344E8">1202 × 436</div><div class="m"><b>Эвакуатор Москва</b><span>3 дня назад</span></div></div>
+  <div class="tile"><div class="ph" style="background:#FEF3E2;color:#B54708">1080 × 1080</div><div class="m"><b>Книга жизни</b><span>неделю назад</span></div></div>
+  <div class="tile"><div class="ph" style="background:#E6F4EC;color:#12805C">1242 × 936</div><div class="m"><b>Септик под ключ</b><span>неделю назад</span></div></div>
+  <div class="add"><div>+</div>Новый баннер</div>
+</div>
+
+<div class="mod"><div class="mw">
+  <h3>Создать баннер</h3><div class="sub">Так выглядит форма после нажатия кнопки</div>
+  <label class="lb">Формат</label>
+  <div class="inp">📋 Инфографика для объявления (1080×1080)</div>
+  <label class="lb">Опишите нишу — Борис придумает текст и подберёт стиль</label>
+  <div class="inp ta" style="color:#98A2B3">Например: делаем шкафы-купе на заказ в Пензе, работаем 5 лет…</div>
+  <div class="more">▸ Тонкая настройка (необязательно)</div>
+  <button class="gen">✨ Сгенерировать баннер</button>
+</div></div>
+
+<div class="note">Внизу — модальное окно, оно открывается по кнопке и не занимает экран постоянно</div>
+
+</div></body></html>

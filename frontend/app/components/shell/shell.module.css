@@ -1,0 +1,160 @@
+/* Оболочка нового интерфейса. Только токены из globals.css. */
+.shell { display: flex; min-height: 100vh; background: var(--b-bg); }
+
+/* ---------- левое меню ---------- */
+.side {
+  width: var(--b-sidebar); flex: 0 0 var(--b-sidebar);
+  background: var(--b-surface); border-right: 1px solid var(--b-line);
+  display: flex; flex-direction: column;
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  transition: width var(--b-anim), flex-basis var(--b-anim);
+}
+.sideMin { width: var(--b-sidebar-min); flex-basis: var(--b-sidebar-min); }
+
+.brand {
+  padding: var(--b-s-4); border-bottom: 1px solid var(--b-line);
+  display: flex; align-items: center; gap: var(--b-s-3);
+}
+.brandText { min-width: 0; flex: 1; }
+.brandName {
+  font-size: var(--b-fs-h3); font-weight: 800; color: var(--b-ink);
+  line-height: 1.1; white-space: nowrap;
+}
+.brandSub {
+  font-size: 11px; color: var(--b-muted); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.collapse {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--b-faint); font-size: 16px; padding: var(--b-s-1) 6px;
+  border-radius: var(--b-r-sm);
+}
+.collapse:hover { background: var(--b-blue-soft); color: var(--b-blue); }
+
+.company { padding: var(--b-s-3) var(--b-s-4); border-bottom: 1px solid var(--b-line); }
+.companyBox {
+  background: var(--b-bg); border: 1px solid var(--b-line);
+  border-radius: var(--b-r-sm); padding: var(--b-s-3);
+}
+.companyName {
+  font-size: var(--b-fs-sm); font-weight: 700; color: var(--b-ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.online { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: var(--b-fs-xs); color: var(--b-ok); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--b-ok); flex: 0 0 7px; }
+.select {
+  width: 100%; margin-top: var(--b-s-2); height: 34px;
+  border: 1px solid var(--b-line); border-radius: var(--b-r-sm);
+  padding: 0 var(--b-s-2); font-size: var(--b-fs-xs); color: var(--b-ink);
+  background: var(--b-surface); cursor: pointer;
+}
+.select:focus { outline: none; border-color: var(--b-blue); box-shadow: var(--b-focus); }
+
+.nav { flex: 1; padding: var(--b-s-3) var(--b-s-2) var(--b-s-5); }
+.group { margin-bottom: var(--b-s-4); }
+.groupTitle {
+  font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--b-faint); padding: 0 var(--b-s-3) var(--b-s-2);
+}
+.item {
+  width: 100%; display: flex; align-items: center; gap: var(--b-s-3);
+  background: transparent; border: none; cursor: pointer; text-align: left;
+  padding: 9px var(--b-s-3); border-radius: var(--b-r-sm);
+  font-size: var(--b-fs-body); color: var(--b-text);
+  transition: background var(--b-anim), color var(--b-anim);
+}
+.item:hover { background: var(--b-blue-soft); color: var(--b-blue); }
+.item:focus-visible { outline: none; box-shadow: var(--b-focus); }
+.itemActive { background: var(--b-blue-soft); color: var(--b-blue); font-weight: 700; }
+.ico { width: 20px; text-align: center; flex: 0 0 20px; font-size: 15px; }
+.label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sideMin .label, .sideMin .groupTitle, .sideMin .brandText,
+.sideMin .company { display: none; }
+.sideMin .item { justify-content: center; padding: 9px 0; }
+.sideMin .brand { justify-content: center; }
+
+/* ---------- верхняя панель ---------- */
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.top {
+  height: var(--b-topbar); flex: 0 0 var(--b-topbar);
+  background: var(--b-surface); border-bottom: 1px solid var(--b-line);
+  display: flex; align-items: center; gap: var(--b-s-4);
+  padding: 0 var(--b-s-5); position: sticky; top: 0; z-index: 30;
+}
+.hello { min-width: 0; flex: 1; }
+.helloTitle {
+  font-size: var(--b-fs-h3); font-weight: 700; color: var(--b-ink); line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.helloSub {
+  font-size: var(--b-fs-xs); color: var(--b-muted); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.topActions { display: flex; align-items: center; gap: var(--b-s-2); }
+.ghost {
+  background: var(--b-surface); color: var(--b-blue);
+  border: 1.5px solid var(--b-blue); border-radius: var(--b-r-sm);
+  padding: 7px 14px; font-size: var(--b-fs-sm); font-weight: 600;
+  cursor: pointer; white-space: nowrap; transition: background var(--b-anim);
+}
+.ghost:hover { background: var(--b-blue-soft); }
+.iconBtn {
+  width: 36px; height: 36px; border-radius: var(--b-r-sm);
+  background: transparent; border: 1px solid transparent; cursor: pointer;
+  color: var(--b-muted); font-size: 16px;
+}
+.iconBtn:hover { background: var(--b-bg); color: var(--b-blue); }
+.user { display: flex; flex-direction: column; align-items: flex-end; padding-left: var(--b-s-3); border-left: 1px solid var(--b-line); }
+.userName { font-size: var(--b-fs-sm); font-weight: 700; color: var(--b-ink); }
+.userRole { font-size: var(--b-fs-xs); color: var(--b-muted); }
+
+/* ---------- рабочая область ---------- */
+.body { flex: 1; display: flex; gap: var(--b-s-5); padding: var(--b-s-5); align-items: flex-start; }
+.content { flex: 1; min-width: 0; max-width: var(--b-content-max); }
+.aside { width: var(--b-help); flex: 0 0 var(--b-help); position: sticky; top: calc(var(--b-topbar) + var(--b-s-5)); }
+
+/* ---------- модалка переключения ---------- */
+.overlay {
+  position: fixed; inset: 0; background: rgba(16,24,40,.55);
+  display: flex; align-items: center; justify-content: center; padding: var(--b-s-5); z-index: 80;
+}
+.modal {
+  background: var(--b-surface); border-radius: var(--b-r-lg);
+  width: 100%; max-width: 560px; padding: var(--b-s-6);
+}
+.modalTitle { font-size: var(--b-fs-h2); font-weight: 800; color: var(--b-ink); margin: 0 0 var(--b-s-5); }
+.opt {
+  display: flex; gap: var(--b-s-4); align-items: flex-start;
+  border: 1.5px solid var(--b-line); border-radius: var(--b-r-md);
+  padding: var(--b-s-4); margin-bottom: var(--b-s-3); cursor: pointer;
+  background: var(--b-surface); width: 100%; text-align: left;
+  transition: border-color var(--b-anim), background var(--b-anim);
+}
+.opt:hover { border-color: var(--b-blue); background: var(--b-blue-soft); }
+.optCur { border-color: var(--b-blue); background: var(--b-blue-soft); }
+.optName { font-size: var(--b-fs-h3); font-weight: 700; color: var(--b-ink); }
+.optDesc { font-size: var(--b-fs-sm); color: var(--b-muted); margin-top: 3px; }
+.badge {
+  font-size: 11px; font-weight: 700; color: var(--b-blue);
+  background: var(--b-surface); border: 1px solid var(--b-blue-line);
+  border-radius: 20px; padding: 2px 10px; white-space: nowrap;
+}
+.note { font-size: var(--b-fs-sm); color: var(--b-muted); margin-top: var(--b-s-4); }
+
+/* ---------- адаптив ---------- */
+@media (max-width: 1180px) {
+  .aside { display: none; }
+}
+@media (max-width: 900px) {
+  .side { position: fixed; z-index: 60; transform: translateX(-100%); transition: transform var(--b-anim); box-shadow: var(--b-shadow-lift); }
+  .sideOpen { transform: translateX(0); }
+  .burger { display: inline-block; }
+  .body { padding: var(--b-s-4); }
+  .top { padding: 0 var(--b-s-4); }
+  .helloSub { display: none; }
+}
+@media (min-width: 901px) { .burger { display: none; } }
+@media (max-width: 640px) {
+  .user, .ghost { display: none; }
+  .modal { padding: var(--b-s-4); }
+}

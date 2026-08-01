@@ -1,0 +1,353 @@
+{
+  "_comment": "Сырые элементы в конверте fetch_new(): message = Message.to_dict(), sender = User.to_dict(), chat = сведения о чате. Опорное время для тестов: 2026-07-29T13:00:00+00:00",
+  "sources": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "platform": "telegram",
+      "source_kind": "group",
+      "external_id": "-1001234567890",
+      "username": "biznes_chat_msk",
+      "title": "Бизнес-чат Москва",
+      "topic_id": null,
+      "last_seen_external_id": 5000
+    },
+    {
+      "id": "22222222-2222-2222-2222-222222222222",
+      "platform": "telegram",
+      "source_kind": "topic",
+      "external_id": "-1009876543210",
+      "username": null,
+      "title": "Форум предпринимателей",
+      "topic_id": 77,
+      "topic_title": "Реклама и продвижение",
+      "last_seen_external_id": 0
+    },
+    {
+      "id": "33333333-3333-3333-3333-333333333333",
+      "platform": "telegram",
+      "source_kind": "channel",
+      "external_id": "-1005555555555",
+      "username": "marketing_news",
+      "title": "Маркетинг Новости",
+      "topic_id": null,
+      "last_seen_external_id": 0
+    }
+  ],
+  "items": {
+    "11111111-1111-1111-1111-111111111111": [
+      {
+        "message": {
+          "_": "Message",
+          "id": 5001,
+          "date": "2026-07-29T12:40:00+00:00",
+          "message": "Ищу авитолога на постоянку. Объявления есть, а заявок с Авито почти нет. Пишите в лс, обсудим бюджет.",
+          "from_id": {
+            "_": "PeerUser",
+            "user_id": 700100200
+          },
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 1234567890
+          },
+          "views": null,
+          "reply_to": null
+        },
+        "sender": {
+          "id": 700100200,
+          "username": "ivan_stroy",
+          "first_name": "Иван",
+          "last_name": "Петров"
+        },
+        "chat": {
+          "id": -1001234567890,
+          "username": "biznes_chat_msk",
+          "title": "Бизнес-чат Москва"
+        }
+      },
+      {
+        "message": {
+          "_": "Message",
+          "id": 5002,
+          "date": "2026-07-29T12:45:00+00:00",
+          "message": "ВАКАНСИЯ: ищем авитолога в штат, оформление по ТК, обучение за счёт компании.",
+          "from_id": {
+            "_": "PeerUser",
+            "user_id": 700300400
+          },
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 1234567890
+          },
+          "reply_to": null
+        },
+        "sender": {
+          "id": 700300400,
+          "username": "hr_mebel",
+          "first_name": "Ольга",
+          "last_name": null
+        },
+        "chat": {
+          "id": -1001234567890,
+          "username": "biznes_chat_msk",
+          "title": "Бизнес-чат Москва"
+        }
+      },
+      {
+        "message": {
+          "_": "Message",
+          "id": 5003,
+          "date": "2026-07-29T11:10:00+00:00",
+          "message": "Всем привет, кто-нибудь пробовал массовую загрузку на Авито через фид? Сколько это стоит?",
+          "from_id": {
+            "_": "PeerUser",
+            "user_id": 700100200
+          },
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 1234567890
+          },
+          "reply_to": null
+        },
+        "sender": {
+          "id": 700100200,
+          "username": "ivan_stroy",
+          "first_name": "Иван",
+          "last_name": "Петров"
+        },
+        "chat": {
+          "id": -1001234567890,
+          "username": "biznes_chat_msk",
+          "title": "Бизнес-чат Москва"
+        }
+      },
+      {
+        "message": {
+          "_": "Message",
+          "id": 5004,
+          "date": "2026-07-29T10:00:00+00:00",
+          "message": "Погода отличная, всем хорошего дня коллеги",
+          "from_id": {
+            "_": "PeerUser",
+            "user_id": 700500600
+          },
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 1234567890
+          },
+          "reply_to": null
+        },
+        "sender": {
+          "id": 700500600,
+          "username": null,
+          "first_name": "Сергей",
+          "last_name": null
+        },
+        "chat": {
+          "id": -1001234567890,
+          "username": "biznes_chat_msk",
+          "title": "Бизнес-чат Москва"
+        }
+      },
+      {
+        "message": {
+          "_": "Message",
+          "id": 5005,
+          "date": "2026-07-29T12:55:00+00:00",
+          "message": "",
+          "media": {
+            "_": "MessageMediaPhoto"
+          },
+          "from_id": {
+            "_": "PeerUser",
+            "user_id": 700500600
+          },
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 1234567890
+          },
+          "reply_to": null
+        },
+        "sender": {
+          "id": 700500600,
+          "username": null,
+          "first_name": "Сергей",
+          "last_name": null
+        },
+        "chat": {
+          "id": -1001234567890,
+          "username": "biznes_chat_msk",
+          "title": "Бизнес-чат Москва"
+        }
+      },
+      {
+        "message": {
+          "_": "Message",
+          "id": 4999,
+          "date": "2026-07-28T09:00:00+00:00",
+          "message": "Нужен авитолог срочно, кто возьмёт?",
+          "from_id": {
+            "_": "PeerUser",
+            "user_id": 700700800
+          },
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 1234567890
+          },
+          "reply_to": null
+        },
+        "sender": {
+          "id": 700700800,
+          "username": "old_msg",
+          "first_name": "Старое",
+          "last_name": "Сообщение"
+        },
+        "chat": {
+          "id": -1001234567890,
+          "username": "biznes_chat_msk",
+          "title": "Бизнес-чат Москва"
+        }
+      }
+    ],
+    "22222222-2222-2222-2222-222222222222": [
+      {
+        "message": {
+          "_": "Message",
+          "id": 812,
+          "date": "2026-07-29T12:20:00+00:00",
+          "message": "Подскажите, кто ведёт Авито под ключ? Нужна автоматизация Авито, руками уже не тянем.",
+          "from_id": {
+            "_": "PeerUser",
+            "user_id": 800100100
+          },
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 9876543210
+          },
+          "reply_to": {
+            "_": "MessageReplyHeader",
+            "forum_topic": true,
+            "reply_to_msg_id": 815,
+            "reply_to_top_id": 77
+          }
+        },
+        "sender": {
+          "id": 800100100,
+          "username": "anna_dv",
+          "first_name": "Анна",
+          "last_name": "Дворецкая"
+        },
+        "chat": {
+          "id": -1009876543210,
+          "username": null,
+          "title": "Форум предпринимателей"
+        }
+      },
+      {
+        "message": {
+          "_": "Message",
+          "id": 813,
+          "date": "2026-07-26T08:00:00+00:00",
+          "message": "Ищу подрядчика на ведение Telegram и нужен SMM для небольшого магазина.",
+          "from_id": {
+            "_": "PeerUser",
+            "user_id": 800200200
+          },
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 9876543210
+          },
+          "reply_to": {
+            "_": "MessageReplyHeader",
+            "forum_topic": true,
+            "reply_to_top_id": 77
+          }
+        },
+        "sender": {
+          "id": 800200200,
+          "username": null,
+          "first_name": "Марат",
+          "last_name": null
+        },
+        "chat": {
+          "id": -1009876543210,
+          "username": null,
+          "title": "Форум предпринимателей"
+        }
+      }
+    ],
+    "33333333-3333-3333-3333-333333333333": [
+      {
+        "message": {
+          "_": "Message",
+          "id": 341,
+          "date": "2026-07-29T12:00:00+00:00",
+          "message": "Разбор: почему нет заявок с Avito у мебельных магазинов и что с этим делать.",
+          "from_id": null,
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 5555555555
+          },
+          "post_author": "Редакция",
+          "views": 1420,
+          "forwards": 12,
+          "reply_to": null
+        },
+        "sender": null,
+        "chat": {
+          "id": -1005555555555,
+          "username": "marketing_news",
+          "title": "Маркетинг Новости"
+        }
+      },
+      {
+        "message": {
+          "_": "Message",
+          "id": 342,
+          "date": "2026-07-29T12:30:00+00:00",
+          "message": "Looking for an Avito specialist to manage our listings, any recommendations?",
+          "from_id": {
+            "_": "PeerUser",
+            "user_id": 900100100
+          },
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 5555555555
+          },
+          "reply_to": null
+        },
+        "sender": {
+          "id": 900100100,
+          "username": "john_d",
+          "first_name": "John",
+          "last_name": "D"
+        },
+        "chat": {
+          "id": -1005555555555,
+          "username": "marketing_news",
+          "title": "Маркетинг Новости"
+        }
+      },
+      {
+        "message": {
+          "_": "Message",
+          "id": 343,
+          "date": "2026-07-29T12:50:00+00:00",
+          "message": "Ищу авитолога на постоянку! Объявления есть, а заявок с Авито почти нет. Пишите в лс, обсудим бюджет 🙏",
+          "from_id": null,
+          "peer_id": {
+            "_": "PeerChannel",
+            "channel_id": 5555555555
+          },
+          "post_author": "Редакция",
+          "reply_to": null
+        },
+        "sender": null,
+        "chat": {
+          "id": -1005555555555,
+          "username": "marketing_news",
+          "title": "Маркетинг Новости"
+        }
+      }
+    ]
+  }
+}

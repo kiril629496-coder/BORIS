@@ -1,0 +1,715 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+body {
+  font-family: var(--font-inter), Arial, Helvetica, sans-serif;
+}
+
+/* Универсальный hover-подъём для карточек и кнопок лендинга */
+.lift-on-hover {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s ease;
+}
+.lift-on-hover:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 20px 40px rgba(47, 111, 237, 0.15);
+}
+
+
+/* === СЕТКА 2x2 ДЛЯ МАРКЕТИНГА (эталон) === */
+.b-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 20px;
+  align-items: stretch;
+}
+@media (min-width: 1180px) {
+  .b-grid-2 { grid-template-columns: 1fr 1fr; }
+}
+
+.b-cell { display: flex; flex-direction: column; height: 100%; }
+
+.b-card-eq {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  margin-top: 0 !important;
+  max-width: none !important;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #EEF2FA;
+  border-radius: 14px;
+  background: #FFFFFF;
+  box-shadow: 0 1px 3px rgba(16,24,40,0.05);
+  transition: transform .22s cubic-bezier(.4,0,.2,1),
+              box-shadow .22s cubic-bezier(.4,0,.2,1),
+              border-color .22s ease;
+  animation: bRise .5s cubic-bezier(.16,1,.3,1) both;
+}
+
+/* верхняя градиентная линия, проявляется на hover */
+.b-card-eq::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #4C8DFF, #9B87F5, #12B76A);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform .35s cubic-bezier(.4,0,.2,1);
+}
+
+.b-card-eq:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 28px rgba(16,24,40,.10), 0 4px 10px rgba(16,24,40,.05);
+  border-color: #DCE5F5;
+}
+.b-card-eq:hover::before { transform: scaleX(1); }
+
+/* иконка «дышит» при наведении на карточку */
+.b-card-eq .b-icon-sm { transition: transform .28s cubic-bezier(.34,1.56,.64,1); }
+.b-card-eq:hover .b-icon-sm { transform: scale(1.12) rotate(-4deg); }
+
+/* лесенка появления */
+.b-grid-2 > *:nth-child(1) .b-card-eq,
+.b-grid-2 > .b-card-eq:nth-child(1) { animation-delay: .00s; }
+.b-grid-2 > *:nth-child(2) .b-card-eq,
+.b-grid-2 > .b-card-eq:nth-child(2) { animation-delay: .08s; }
+.b-grid-2 > *:nth-child(3) .b-card-eq,
+.b-grid-2 > .b-card-eq:nth-child(3) { animation-delay: .16s; }
+.b-grid-2 > *:nth-child(4) .b-card-eq,
+.b-grid-2 > .b-card-eq:nth-child(4) { animation-delay: .24s; }
+
+@keyframes bRise {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .b-card-eq { animation: none; transition: none; }
+  .b-card-eq:hover { transform: none; }
+}
+
+
+/* === ФИКС: карточка внутри b-cell тянется на всю ячейку === */
+.b-cell > .b-card-eq {
+  flex: 1 1 auto;
+  margin-bottom: 0 !important;
+}
+
+/* содержимое карточки прижимаем к верху, низ не растягиваем */
+.b-card-eq > *:last-child { margin-bottom: 0; }
+
+/* кнопки внутри карточек не растягиваются на всю ширину */
+.b-card-eq button { align-self: flex-start; width: auto; }
+
+
+/* === ЗАДАЧИ И ПЛАН === */
+.b-task-row {
+  background: #FFFFFF;
+  border: 1px solid #EEF2FA;
+  border-left: 4px solid #E3E7F0;
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: 0 1px 2px rgba(16,24,40,.04);
+  transition: transform .2s cubic-bezier(.4,0,.2,1),
+              box-shadow .2s ease, border-left-color .25s ease;
+  animation: bRise .45s cubic-bezier(.16,1,.3,1) both;
+}
+.b-task-row:hover {
+  transform: translateX(4px);
+  box-shadow: 0 8px 20px rgba(16,24,40,.08);
+  border-left-color: #2F6FED;
+}
+.b-task-row:nth-child(1){animation-delay:.00s}
+.b-task-row:nth-child(2){animation-delay:.05s}
+.b-task-row:nth-child(3){animation-delay:.10s}
+.b-task-row:nth-child(4){animation-delay:.15s}
+.b-task-row:nth-child(5){animation-delay:.20s}
+.b-task-row:nth-child(n+6){animation-delay:.25s}
+
+/* пульс у задач в работе */
+.account-tasks-block [style*="#2F6FED"] { }
+@keyframes bPulse {
+  0%,100% { opacity: 1; }
+  50% { opacity: .45; }
+}
+
+
+/* === ПАНЕЛЬ ДИРЕКТОРА === */
+.b-client-card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #FFFFFF;
+  border: 1px solid #EEF2FA;
+  border-radius: 16px;
+  padding: 22px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(16,24,40,.05);
+  transition: transform .22s cubic-bezier(.4,0,.2,1), box-shadow .22s ease, border-color .22s ease;
+  animation: bRise .5s cubic-bezier(.16,1,.3,1) both;
+}
+.b-client-card::before {
+  content:""; position:absolute; top:0; left:0; right:0; height:3px;
+  background: linear-gradient(90deg,#4C8DFF,#9B87F5,#12B76A);
+  transform: scaleX(0); transform-origin:left;
+  transition: transform .35s cubic-bezier(.4,0,.2,1);
+}
+.b-client-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 14px 32px rgba(16,24,40,.12);
+  border-color: #DCE5F5;
+}
+.b-client-card:hover::before { transform: scaleX(1); }
+
+/* светофор баланса */
+.b-client-card.b-bal-warn { border-color:#FEC84B; background:#FFFCF5; }
+.b-client-card.b-bal-crit {
+  border-color:#FDA29B; background:#FFFBFA;
+  animation: bRise .5s cubic-bezier(.16,1,.3,1) both, bCrit 2.4s ease-in-out .6s infinite;
+}
+@keyframes bCrit {
+  0%,100% { outline-color: rgba(240,68,56,0); }
+  50%     { outline-color: rgba(240,68,56,.35); }
+}
+.b-client-card.b-bal-crit {
+  outline: 3px solid rgba(240,68,56,0);
+  outline-offset: 2px;
+}
+.b-client-card.b-bal-crit:hover,
+.b-client-card.b-bal-warn:hover {
+  box-shadow: 0 14px 32px rgba(240,68,56,.18);
+  transform: translateY(-5px);
+}
+.b-client-card:nth-child(1){animation-delay:.00s}
+.b-client-card:nth-child(2){animation-delay:.06s}
+.b-client-card:nth-child(3){animation-delay:.12s}
+.b-client-card:nth-child(4){animation-delay:.18s}
+.b-client-card:nth-child(5){animation-delay:.24s}
+.b-client-card:nth-child(6){animation-delay:.30s}
+.b-client-card:nth-child(n+7){animation-delay:.36s}
+
+@media (prefers-reduced-motion: reduce) {
+  .b-client-card { animation: none; transition: none; }
+  .b-client-card:hover { transform: none; }
+}
+
+
+/* === ЖИВОЙ БОРИС — ВИДЖЕТ === */
+.b-boris-fab {
+  transition: transform .3s cubic-bezier(.34,1.56,.64,1), box-shadow .3s ease;
+  animation: bBreathe 3.6s ease-in-out infinite;
+  position: relative;
+}
+@keyframes bBreathe {
+  0%,100% { transform: scale(1) translateY(0); }
+  50%     { transform: scale(1.045) translateY(-2px); }
+}
+.b-boris-fab:hover {
+  animation: none;
+  transform: scale(1.12) translateY(-4px) rotate(-3deg);
+  box-shadow: 0 12px 32px rgba(47,111,237,.55) !important;
+}
+.b-boris-fab:active { transform: scale(0.96); }
+
+/* волны вокруг Бориса, когда он хочет заговорить */
+.b-boris-fab::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 2px solid rgba(47,111,237,.5);
+  opacity: 0;
+  animation: bRipple 2.8s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes bRipple {
+  0%   { transform: scale(.9); opacity: .7; }
+  70%  { transform: scale(1.45); opacity: 0; }
+  100% { opacity: 0; }
+}
+
+/* тревога — красный пульс */
+.b-boris-fab.b-boris-alert {
+  background: linear-gradient(135deg, #F97066, #D92D20) !important;
+  box-shadow: 0 6px 20px rgba(217,45,32,.5) !important;
+}
+.b-boris-fab.b-boris-alert::after { border-color: rgba(217,45,32,.6); }
+
+@media (prefers-reduced-motion: reduce) {
+  .b-boris-fab, .b-boris-fab::after { animation: none; }
+}
+
+
+.b-boris-bubble {
+  animation: bBubbleIn .45s cubic-bezier(.16,1,.3,1) both;
+}
+@keyframes bBubbleIn {
+  from { opacity: 0; transform: translateY(12px) scale(.94); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* === ЭТАЛОННЫЙ СТИЛЬ КАБИНЕТА ===
+   Снят с вкладки «Тарифы и Финансы». Применять на других вкладках
+   вместо инлайновых стилей, чтобы кабинет выглядел одинаково. */
+
+.b-ref-section { margin-bottom: 32px; }
+.b-ref-h { margin: 0 0 14px; font-size: 18px; color: #1D2939; }
+
+.b-ref-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.b-ref-card {
+  background: #FFFFFF;
+  border: 1px solid #E3E7F0;
+  border-radius: 16px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  height: 100%;
+  box-sizing: border-box;
+  position: relative;
+  overflow: hidden;
+  transition: box-shadow .2s ease, transform .2s ease;
+}
+.b-ref-card:hover {
+  box-shadow: 0 4px 10px rgba(16,24,40,.08), 0 12px 24px rgba(16,24,40,.10);
+  transform: translateY(-3px);
+}
+
+/* бледный декоративный круг в углу — цвет задаётся инлайном */
+.b-ref-blob {
+  position: absolute;
+  top: -40px; right: -40px;
+  width: 120px; height: 120px;
+  border-radius: 50%;
+  opacity: .08;
+  pointer-events: none;
+}
+
+/* градиент иконки задаётся инлайном */
+.b-ref-icon {
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 28px;
+  margin-bottom: 16px;
+}
+
+.b-ref-name {
+  font-weight: 700; font-size: 16px; color: #1D2939;
+  margin-bottom: 8px;
+  min-height: 40px;
+  display: flex; align-items: center;
+}
+.b-ref-value {
+  color: #1D2939; font-weight: 800; font-size: 26px;
+  margin-bottom: 14px; letter-spacing: -.02em;
+}
+.b-ref-badge {
+  display: inline-block;
+  font-size: 13px; font-weight: 700;
+  border-radius: 20px; padding: 5px 14px;
+  margin-bottom: 22px;
+}
+
+/* прижимает кнопку к низу — карточки выравниваются */
+.b-ref-foot { margin-top: auto; width: 100%; }
+
+.b-ref-btn {
+  width: 100%;
+  background: #FFFFFF;
+  border: 1.5px solid #2F6FED;
+  color: #2F6FED;
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-weight: 700; font-size: 15px;
+  cursor: pointer;
+  transition: background .2s ease, color .2s ease, transform .2s ease;
+}
+.b-ref-btn:hover { background: #2F6FED; color: #FFFFFF; transform: translateY(-1px); }
+.b-ref-btn:disabled { border-color: #E3E7F0; color: #98A2B3; cursor: default; transform: none; background: #F6F7FB; }
+
+@media (prefers-reduced-motion: reduce) {
+  .b-ref-card, .b-ref-btn { transition: none; }
+  .b-ref-card:hover, .b-ref-btn:hover { transform: none; }
+}
+
+/* Ограничение ширины рабочей области: контент не растягивается
+   на весь широкий монитор, а идёт колонкой по центру */
+.b-content-col > * {
+  max-width: 1280px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* выпадающие списки — единый заметный вид */
+
+.b-select {
+  width: 100% !important;
+  height: 48px !important;
+  padding: 0 44px 0 14px !important;
+  font-size: 15px !important;
+  color: #1D2939 !important;
+  background-color: #FFFFFF !important;
+  border: 1.5px solid #E3E7F0 !important;
+  border-radius: 10px !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9'%3E%3Cpath d='M1 1l6 6 6-6' stroke='%232F6FED' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 16px center !important;
+  cursor: pointer !important;
+  transition: border-color .18s ease, box-shadow .18s ease !important;
+}
+.b-select:hover { border-color: #2F6FED !important; }
+.b-select:focus {
+  outline: none !important;
+  border-color: #2F6FED !important;
+  box-shadow: 0 0 0 4px rgba(47,111,237,0.12) !important;
+}
+
+.b-select {
+  padding-left: 46px !important;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%232F6FED' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M2 4h12M2 8h12M2 12h8'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9'%3E%3Cpath d='M1 1l6 6 6-6' stroke='%232F6FED' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") !important;
+  background-position: left 16px center, right 16px center !important;
+  background-repeat: no-repeat, no-repeat !important;
+  background-color: #FFFFFF !important;
+  box-shadow: 0 1px 2px rgba(16,24,40,0.04) !important;
+}
+.b-select:hover {
+  border-color: #2F6FED !important;
+  background-color: #F8FAFF !important;
+  box-shadow: 0 4px 12px rgba(47,111,237,0.12) !important;
+}
+.b-select:focus {
+  background-color: #FFFFFF !important;
+  box-shadow: 0 0 0 4px rgba(47,111,237,0.14) !important;
+}
+
+/* Кнопки по всему кабинету: подъём, тень, отклик на нажатие */
+.b-content-col button,
+.boris-btn-hover,
+.b-nav {
+  transition: transform .18s cubic-bezier(.34,1.56,.64,1), box-shadow .18s ease, filter .18s ease !important;
+}
+.b-content-col button:hover,
+.boris-btn-hover:hover,
+.b-nav:hover {
+  transform: translateY(-2px) !important;
+  box-shadow: 0 6px 16px rgba(16,24,40,0.14) !important;
+  filter: brightness(1.04) !important;
+}
+.b-content-col button:active,
+.boris-btn-hover:active {
+  transform: translateY(0) scale(.98) !important;
+  box-shadow: 0 2px 6px rgba(16,24,40,0.10) !important;
+}
+.b-content-col button:disabled:hover {
+  transform: none !important;
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+/* Свёрнутые блоки — как кнопки, со стрелкой и подсветкой */
+.b-content-col summary {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding: 8px 14px !important;
+  border-radius: 10px !important;
+  background: #F2F6FF !important;
+  color: #2F6FED !important;
+  font-weight: 700 !important;
+  transition: background .18s ease, transform .18s ease !important;
+}
+.b-content-col summary:hover {
+  background: #E4EDFF !important;
+  transform: translateY(-1px) !important;
+}
+
+/* Все иконки — круглые, растут при наведении (эталонный стиль) */
+.b-icon-sm,
+.b-ref-ic {
+  border-radius: 50% !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex-shrink: 0 !important;
+  transition: transform .28s cubic-bezier(.34,1.56,.64,1) !important;
+}
+.b-icon-sm:hover,
+.b-ref-ic:hover,
+.boris-card-hover:hover .b-icon-sm,
+.boris-card-hover:hover .b-ref-ic,
+.b-card-eq:hover .b-icon-sm,
+.b-nav:hover .b-icon-sm,
+.b-content-col h3:hover .b-icon-sm,
+.b-content-col h4:hover .b-icon-sm,
+.b-content-col div:hover > .b-icon-sm {
+  transform: scale(1.14) rotate(-4deg) !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .b-icon-sm, .b-ref-ic { transition: none !important; }
+  .b-icon-sm:hover, .b-ref-ic:hover { transform: none !important; }
+}
+
+/* Свёрнутые блоки: кнопка со стрелкой, текст строго по общей левой линии */
+.b-content-col summary {
+  margin-left: -14px !important;
+  background: #FFFFFF !important;
+  border: 1.5px solid #2F6FED !important;
+  color: #2F6FED !important;
+  font-size: 15px !important;
+  padding: 10px 16px !important;
+  box-shadow: 0 1px 2px rgba(16,24,40,0.04) !important;
+  list-style: none !important;
+}
+.b-content-col summary::-webkit-details-marker { display: none !important; }
+.b-content-col summary::before {
+  content: "" !important;
+  width: 10px !important;
+  height: 10px !important;
+  border-right: 2px solid #2F6FED !important;
+  border-bottom: 2px solid #2F6FED !important;
+  transform: rotate(-45deg) !important;
+  transition: transform .22s ease !important;
+  margin-right: 4px !important;
+}
+.b-content-col details[open] > summary::before {
+  transform: rotate(45deg) !important;
+}
+.b-content-col summary:hover {
+  background: #2F6FED !important;
+  color: #FFFFFF !important;
+  transform: translateY(-2px) !important;
+  box-shadow: 0 6px 16px rgba(47,111,237,0.28) !important;
+}
+.b-content-col summary:hover::before {
+  border-color: #FFFFFF !important;
+}
+
+/* Свёрнутые блоки — левый край строго по линии карточек, единый отступ снизу */
+.b-content-col summary {
+  margin-left: 0 !important;
+  margin-bottom: 14px !important;
+}
+
+/* Ровный зазор сверху у свёрнутого блока «Купить баннеры» */
+.b-content-col > div > details:first-of-type > summary,
+.b-content-col details > summary { margin-top: 4px !important; }
+.b-content-col > div > div > details { margin-top: 24px !important; }
+
+/* Текст свёрнутых блоков — в общую левую линию с подписями вокруг */
+.b-content-col summary { margin-left: -16px !important; }
+.b-content-col > div > details > summary { margin-left: 0 !important; }
+
+/* Свёрнутые блоки — простой текст со стрелкой, без рамок и отступов */
+.b-content-col summary {
+  margin-left: 0 !important;
+  margin-top: 0 !important;
+  margin-bottom: 14px !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  color: #2F6FED !important;
+  font-size: 15px !important;
+  font-weight: 700 !important;
+}
+.b-content-col summary:hover {
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  color: #1E4FD8 !important;
+}
+.b-content-col summary:hover::before { border-color: #1E4FD8 !important; }
+
+/* Свёрнутые блоки — вид кнопки */
+.b-content-col summary {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  margin: 0 0 16px 0 !important;
+  padding: 10px 18px !important;
+  background: #FFFFFF !important;
+  border: 1.5px solid #2F6FED !important;
+  border-radius: 10px !important;
+  color: #2F6FED !important;
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  box-shadow: 0 1px 2px rgba(16,24,40,0.04) !important;
+}
+.b-content-col summary:hover {
+  background: #2F6FED !important;
+  color: #FFFFFF !important;
+  transform: translateY(-2px) !important;
+  box-shadow: 0 6px 16px rgba(47,111,237,0.28) !important;
+}
+.b-content-col summary:hover::before { border-color: #FFFFFF !important; }
+
+/* Карточки кабинета менеджера: подъём, увеличение и тень при наведении */
+.b-mgr-card {
+  transition: transform .22s cubic-bezier(.34,1.56,.64,1), box-shadow .22s ease, border-color .22s ease;
+  will-change: transform;
+}
+.b-mgr-card:hover {
+  transform: translateY(-6px) scale(1.02);
+  box-shadow: 0 18px 40px rgba(16,24,40,.14);
+  border-color: #C8D9FF;
+}
+.b-mgr-card:hover .b-mgr-ic {
+  transform: scale(1.12) rotate(-4deg);
+}
+.b-mgr-ic {
+  transition: transform .28s cubic-bezier(.34,1.56,.64,1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .b-mgr-card, .b-mgr-card:hover, .b-mgr-ic { transition: none; transform: none; }
+}
+
+/* Кабинет менеджера на телефоне */
+@media (max-width: 640px) {
+  .b-mgr-card:hover { transform: none; box-shadow: 0 2px 10px rgba(16,24,40,.06); }
+  .b-mgr-hero { padding: 22px 18px !important; }
+  .b-mgr-hero .b-mgr-sum { font-size: 30px !important; }
+}
+
+/* Кабинет менеджера — во всю ширину, перебивает .b-content-col > * */
+.b-mgr-wrap {
+  max-width: none !important;
+  width: 100% !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+/* Синяя шапка кабинета менеджера и кнопки на ней */
+.b-mgr-hero {
+  transition: transform .22s cubic-bezier(.34,1.56,.64,1), box-shadow .22s ease;
+}
+.b-mgr-hero:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 22px 48px rgba(47,111,237,.38);
+}
+.b-mgr-btn {
+  transition: transform .18s cubic-bezier(.34,1.56,.64,1), box-shadow .18s ease, filter .18s ease;
+}
+.b-mgr-btn:hover {
+  transform: translateY(-2px) scale(1.05);
+  box-shadow: 0 10px 24px rgba(16,24,40,.22);
+  filter: brightness(1.05);
+}
+@media (prefers-reduced-motion: reduce) {
+  .b-mgr-hero, .b-mgr-hero:hover, .b-mgr-btn, .b-mgr-btn:hover { transition: none; transform: none; }
+}
+
+/* ============================================================
+   ДИЗАЙН-ТОКЕНЫ BORIS
+   Единственный источник значений для нового интерфейса.
+   В новых компонентах не писать цвета и размеры напрямую.
+   ============================================================ */
+:root {
+  /* цвет: основа */
+  --b-blue:        #2F6FED;
+  --b-blue-dark:   #1E4FD8;
+  --b-blue-soft:   #EEF3FF;
+  --b-blue-line:   #D5E4FB;
+
+  /* цвет: текст */
+  --b-ink:         #1D2939;
+  --b-text:        #475467;
+  --b-muted:       #667085;
+  --b-faint:       #98A2B3;
+
+  /* цвет: поверхности */
+  --b-bg:          #F6F7FB;
+  --b-surface:     #FFFFFF;
+  --b-line:        #E3E7F0;
+  --b-line-soft:   #F1F3F9;
+
+  /* цвет: статусы */
+  --b-danger:      #F04438;
+  --b-danger-text: #B42318;
+  --b-danger-bg:   #FEE4E2;
+  --b-warn:        #B54708;
+  --b-warn-bg:     #FEF0C7;
+  --b-ok:          #027A48;
+  --b-ok-bg:       #D1FADF;
+
+  /* цвет: направления карточек сценариев */
+  --b-cat-avito:   #2F6FED;
+  --b-cat-leads:   #12805C;
+  --b-cat-revive:  #E8850B;
+  --b-cat-diag:    #7C5CFC;
+  --b-cat-niche:   #D93D86;
+  --b-cat-geo:     #5B3FD9;
+  --b-cat-social:  #0EA5E9;
+  --b-cat-content: #CA8A04;
+
+  /* радиусы — ровно три, больше не заводить */
+  --b-r-sm:  10px;
+  --b-r-md:  14px;
+  --b-r-lg:  18px;
+
+  /* отступы */
+  --b-s-1: 4px;  --b-s-2: 8px;  --b-s-3: 12px;
+  --b-s-4: 16px; --b-s-5: 24px; --b-s-6: 32px; --b-s-7: 48px;
+
+  /* типографика */
+  --b-fs-h1: 26px; --b-fs-h2: 20px; --b-fs-h3: 17px;
+  --b-fs-body: 14px; --b-fs-sm: 13px; --b-fs-xs: 12px;
+  --b-lh: 1.55;
+
+  /* размеры оболочки */
+  --b-sidebar:      264px;
+  --b-sidebar-min:  72px;
+  --b-topbar:       64px;
+  --b-help:         320px;
+  --b-content-max:  1180px;
+
+  /* тени и состояния */
+  --b-shadow:      0 1px 2px rgba(16,24,40,.05);
+  --b-shadow-lift: 0 8px 24px rgba(47,111,237,.10);
+  --b-focus:       0 0 0 3px rgba(47,111,237,.18);
+  --b-anim:        .18s cubic-bezier(.4,0,.2,1);
+  --b-anim-slow:   .3s cubic-bezier(.4,0,.2,1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --b-anim: 0s; --b-anim-slow: 0s; }
+}

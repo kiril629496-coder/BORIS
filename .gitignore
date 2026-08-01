@@ -1,0 +1,63 @@
+venv/
+node_modules/
+.next/
+__pycache__/
+*.pyc
+
+# --- архив старой истории git ---
+.git.dirty_*/
+
+# --- секреты ---
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.p12
+*.key
+backend/certs/
+!.env.example
+!**/.env.example
+
+# --- дампы и бэкапы БД ---
+backups/
+*.sql.gz
+*.dump
+boris_files_final.zip
+boris_files_new/
+
+# --- временные копии кода ---
+*.bak
+*.bak_*
+*.backup
+*.backup_*
+*.before_*
+*.broken_*
+*.orig
+*.save
+*.DEPRECATED_*
+_old_backups_archive/
+_shell_backup_*/
+backend/app/api/_backups/
+
+# --- бинарники и медиа ---
+backend/images/
+backend/posting_banners/
+*.mp4
+*.tar.gz
+*.tgz
+*.zip
+
+# --- логи ---
+*.log
+
+# --- крупные выгрузки данных ---
+docs/*.xlsx
+docs/category_backups/
+docs/feed_backup_*.json
+tasks_backup.json
+
+# --- добор: копии с цифровым суффиксом и мусор macOS ---
+*.bak*
+*.backup*
+.DS_Store

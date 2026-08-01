@@ -1,0 +1,16 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# копируем только package.json (без lock — чтобы не падало)
+COPY frontend/package.json ./
+
+# ставим зависимости внутри контейнера
+RUN npm install
+
+# копируем весь frontend
+COPY frontend/ ./
+
+EXPOSE 3000
+
+CMD ["npm", "run", "dev"]
