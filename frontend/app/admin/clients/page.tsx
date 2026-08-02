@@ -58,6 +58,13 @@ export default function AdminClientsPage() {
   const [paidAt, setPaidAt] = useState("");
   const [paymentId, setPaymentId] = useState("");
   const [comment, setComment] = useState("");
+  const [rop, setRop] = useState(false);
+  const [ropRenew, setRopRenew] = useState(false);
+  const [ropMinutes, setRopMinutes] = useState("1500");
+  const [ropChats, setRopChats] = useState("450");
+  const [ropRepCalls, setRopRepCalls] = useState("30");
+  const [ropRepChats, setRopRepChats] = useState("30");
+  const [ropDays, setRopDays] = useState("30");
 
   function reset() {
     setPlan(null); setResult(null); setError("");
@@ -85,6 +92,10 @@ export default function AdminClientsPage() {
       tier, slots: Number(slots) || 0, slot_days: Number(slotDays) || 30,
       amount_rub: Number(amount) || 0, period_days: Number(periodDays) || 30,
       paid_at: paidAt || null, payment_id: paymentId, comment,
+      rop, rop_renew: ropRenew,
+      rop_minutes: Number(ropMinutes) || 0, rop_chats: Number(ropChats) || 0,
+      rop_rep_calls: Number(ropRepCalls) || 0, rop_rep_chats: Number(ropRepChats) || 0,
+      rop_days: Number(ropDays) || 30,
       dry_run: dry,
     };
   }
@@ -209,7 +220,7 @@ export default function AdminClientsPage() {
                 </select>
               </div>
               <div>
-                <label style={S.label}>Слотов выдать</label>
+                <label style={S.label}>Слотов всего должно быть</label>
                 <input style={{ ...S.input, minWidth: 110 }} type="number" min={0} max={50}
                        value={slots} onChange={(e) => { setSlots(e.target.value); reset(); }} />
               </div>
@@ -241,6 +252,61 @@ export default function AdminClientsPage() {
                 <input style={{ ...S.input, minWidth: 150 }} value={paymentId}
                        onChange={(e) => { setPaymentId(e.target.value); reset(); }} />
               </div>
+            </div>
+
+            <div style={{ marginTop: 16, padding: 14, border: "1px solid #E3E7F0", borderRadius: 12 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={rop}
+                       onChange={(e) => { setRop(e.target.checked); reset(); }} />
+                <b style={{ fontSize: 14 }}>Начислить пакет РОП</b>
+              </label>
+              {rop && (
+                <>
+                  <div style={{ fontSize: 13, color: "#8A5A00", background: "#FFF8E6",
+                                border: "1px solid #F5D98B", borderRadius: 8,
+                                padding: "8px 10px", margin: "10px 0" }}>
+                    РОП будет начислен на {(card.accounts || []).length} аккаунт(ов).
+                    Каждый аккаунт получит ОТДЕЛЬНЫЙ лимит: {ropMinutes} минут,
+                    {" "}{ropChats} разборов, {ropRepCalls} отчётов по звонкам и
+                    {" "}{ropRepChats} по перепискам. Лимиты между аккаунтами не делятся.
+                  </div>
+                  <div style={S.row}>
+                    <div>
+                      <label style={S.label}>Минут</label>
+                      <input style={{ ...S.input, minWidth: 110 }} value={ropMinutes}
+                             onChange={(e) => { setRopMinutes(e.target.value); reset(); }} />
+                    </div>
+                    <div>
+                      <label style={S.label}>Разборов переписок</label>
+                      <input style={{ ...S.input, minWidth: 110 }} value={ropChats}
+                             onChange={(e) => { setRopChats(e.target.value); reset(); }} />
+                    </div>
+                    <div>
+                      <label style={S.label}>Отчётов по звонкам</label>
+                      <input style={{ ...S.input, minWidth: 110 }} value={ropRepCalls}
+                             onChange={(e) => { setRopRepCalls(e.target.value); reset(); }} />
+                    </div>
+                    <div>
+                      <label style={S.label}>Отчётов по перепискам</label>
+                      <input style={{ ...S.input, minWidth: 110 }} value={ropRepChats}
+                             onChange={(e) => { setRopRepChats(e.target.value); reset(); }} />
+                    </div>
+                    <div>
+                      <label style={S.label}>Дней</label>
+                      <input style={{ ...S.input, minWidth: 90 }} value={ropDays}
+                             onChange={(e) => { setRopDays(e.target.value); reset(); }} />
+                    </div>
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8,
+                                  marginTop: 10, cursor: "pointer" }}>
+                    <input type="checkbox" checked={ropRenew}
+                           onChange={(e) => { setRopRenew(e.target.checked); reset(); }} />
+                    <span style={{ fontSize: 13, color: "#9B1C1C" }}>
+                      Начать новый период РОП (перезапишет активный период, израсходованное обнулится)
+                    </span>
+                  </label>
+                </>
+              )}
             </div>
 
             <div style={{ marginTop: 12 }}>

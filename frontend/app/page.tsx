@@ -31,7 +31,8 @@ import {
 } from 'lucide-react';
 import { Mascot } from './components/Mascot';
 
-import { registerUser, persistSession } from './lib/register';
+import { registerUser, persistSession, rememberVerification } from './lib/register';
+import TurnstileBox from './lib/turnstile';
 interface LandingPageProps {
  previewContent?: Record<string, any>; // Optional content passed from Admin Panel live-preview
 }
@@ -71,6 +72,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ previewContent }) => {
   const [regError, setRegError] = useState('');
  const [regSuccess, setRegSuccess] = useState(false);
  const [consentChecked, setConsentChecked] = useState(false);
+ const [regToken, setRegToken] = useState('');
+ const [regCaptchaKey, setRegCaptchaKey] = useState(0);
 
  // Fetch landing page content
  useEffect(() => {
@@ -307,14 +310,28 @@ export const LandingPage: React.FC<LandingPageProps> = ({ previewContent }) => {
     e.preventDefault();
     setRegError('');
     if (!regEmail || !regPassword) return;
+    if (!regToken) { setRegError('Подтвердите, что вы не робот.'); return; }
     const r = await registerUser({
       email: regEmail,
       password: regPassword,
       accountName: regCompany,
       plannedAccounts: regPlanned,
+      turnstileToken: regToken,
     });
-    if (!r.ok) { setRegError(r.error); return; }
-    persistSession(r.data, true);
+    if (!r.ok) { setRegError(r.error); setRegToken(''); setRegCaptchaKey(k => k + 1); return; }
+    const isPending = r.data && r.data.user && r.data.user.status === 'pending_verification';
+    const saved = persistSession(r.data, true);
+    if (!saved) {
+      // ветка «адрес уже занят»: backend не выдаёт токен, на /verify вести некуда
+      setRegError('Мы отправили письмо на указанный адрес. Если аккаунт уже существует — войдите.');
+      setRegToken(''); setRegCaptchaKey(k => k + 1);
+      return;
+    }
+    if (isPending) {
+      rememberVerification(r.data);   // без verification_id экран /verify будет пустым
+      window.location.href = '/verify';
+      return;
+    }
     setRegSuccess(true);
     setTimeout(() => {
       window.location.href = '/dashboard/home';
@@ -1318,9 +1335,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({ previewContent }) => {
  {regError && (
    <div className="text-[13px] sm:text-[14px] text-red-600 bg-red-50 border border-red-200 rounded-[8px] py-3 px-4 text-center mb-2">{regError}</div>
  )}
+ <TurnstileBox onToken={setRegToken} resetKey={regCaptchaKey} />
  <button
  type="submit"
- disabled={!consentChecked}
+ disabled={!consentChecked || !regToken}
  className={`w-full py-4 rounded-[8px] font-bold text-center block text-white transition-colors shadow-lg text-[13px] sm:text-[14px] ${
  consentChecked 
  ? 'bg-[#2F6FED] hover:bg-[#2058D0] cursor-pointer' 

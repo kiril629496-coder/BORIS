@@ -61,3 +61,12 @@ tasks_backup.json
 *.bak*
 *.backup*
 .DS_Store
+
+# --- checkpoint 02.08: временные файлы и разовые артефакты ---
+audit_c.txt
+backend/0.
+backend/.email_worker_heartbeat
+email_probe.sh
+email_probe.txt
+frontend/patch_landing_vid.py
+tasks_worker.txt

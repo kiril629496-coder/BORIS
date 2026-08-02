@@ -360,12 +360,21 @@ def resolve_by_tree(user_text, account_id=None, answers=None, use_cache=True, db
 
             if pick["confidence"] < CONF_AUTO or gap < CONF_GAP:
                 opts = [pick["choice"]] + pick["alternatives"]
+                _shown = [o for o in opts if o][:4] or kids[:4]
+                # Одна догадка модели без альтернатив - это не выбор.
+                # Показывать её единственной кнопкой нельзя: клиент решит,
+                # что система предлагает осмысленный вариант.
+                if len(_shown) == 1 and not pick["alternatives"]:
+                    out["status"] = "awaiting_adviz_fields"
+                    out["reason"] = "no_confident_option"
+                    out["path"] = path
+                    return out
                 out["status"] = "need_answer"
                 out["path"] = path
                 out["question"] = {
                     "level": depth,
                     "text": "Уточните, что именно вы размещаете:",
-                    "options": [o for o in opts if o][:4] or kids[:4]}
+                    "options": _shown}
                 return out
 
             path = (path + SEP + pick["choice"]) if path else pick["choice"]

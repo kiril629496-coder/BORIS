@@ -137,20 +137,21 @@ def _normalize_keyboard(buttons: list) -> list:
     return out
 
 
-def send_telegram_message_with_buttons(chat_id: str, text: str, buttons: list):
-    """buttons — список [{"text": "...", "callback_data": "..."}], один ряд кнопок."""
+def send_telegram_message_with_buttons(chat_id: str, text: str, buttons: list, thread_id=None):
+    """buttons — список [{"text": "...", "callback_data": "..."}], один ряд кнопок.
+    thread_id — необязательный id темы супергруппы; без него поведение прежнее."""
     if not BOT_TOKEN or not chat_id:
         return {"ok": False, "error": "no_token_or_chat_id"}
     try:
-        resp = _telegram_post(
-            f"{API_BASE}/sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "reply_markup": {"inline_keyboard": _normalize_keyboard(buttons)},
-            },
-        )
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": _normalize_keyboard(buttons)},
+        }
+        if thread_id:
+            payload["message_thread_id"] = int(thread_id)
+        resp = _telegram_post(f"{API_BASE}/sendMessage", payload)
         return resp.json()
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}
@@ -262,6 +263,16 @@ def _handle_callback_query(callback_query: dict):
         alerts_handler.handle(data, callback_query)
         return
 
+    # --- новый контур AI-МОПа: ветка mp:* ДО старого разбора action:draft_id ---
+    if data.split(":", 1)[0] == "mp":
+        try:
+            from app.mop_core import handle_mop_callback
+            if handle_mop_callback(data, callback_query):
+                return
+        except Exception as _e:
+            print(f"MOP callback error: {_e}", flush=True)
+        return
+
     action, draft_id = data.split(":", 1)
 
     draft = _load_pending_draft(draft_id)
@@ -361,6 +372,14 @@ def _telegram_poll_loop():
                 _thr = message.get("message_thread_id")
                 if _thr:
                     print(f"TG_TOPIC chat_id={chat_id} thread_id={_thr} text={text[:40]!r}", flush=True)
+
+                if not text.startswith("/start"):
+                    try:
+                        from app.mop_core import handle_mop_message
+                        if handle_mop_message(message):
+                            continue
+                    except Exception as _e:
+                        print(f"MOP message error: {_e}", flush=True)
 
                 if not text.startswith("/start") and _handle_plain_message_for_edit(chat_id, text):
                     continue

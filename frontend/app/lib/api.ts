@@ -52,6 +52,36 @@ export function logout() {
   window.location.href = "/login";
 }
 
+/* Ключ публичного verification_id - тот же, что VERIFY_ID_KEY в app/lib/register.ts.
+   Литералом, а не импортом: register.ts импортирует из api.ts, обратный импорт даст цикл. */
+const VERIFY_ID_KEY = "boris_verification_id";
+export const LS_LOGIN_NOTE = "boris_login_note";
+
+/* Приводит любое тело ошибки к единой форме. В JSX уходит только message;
+   сырой объект живёт в raw и никогда не рендерится. */
+function _normErr(httpStatus: number, data: any) {
+  const d = data && data.detail;
+  const code = d && typeof d === "object" && !Array.isArray(d) ? d.code : undefined;
+  const message =
+    (d && typeof d === "object" && typeof d.message === "string" && d.message) ||
+    (typeof d === "string" && d) ||
+    (data && typeof data.message === "string" && data.message) ||
+    ("Ошибка " + httpStatus);
+  return { status: "error", httpStatus, code, message, raw: d };
+}
+
+/* Неподтверждённая почта: уводим на экран ввода кода.
+   На самих /verify и /login редирект не делаем - иначе зациклимся. */
+function _gotoVerify() {
+  if (typeof window === "undefined") return;
+  const p = window.location.pathname;
+  if (p.startsWith("/verify") || p.startsWith("/login")) return;
+  if (localStorage.getItem(VERIFY_ID_KEY)) { window.location.href = "/verify"; return; }
+  localStorage.setItem(LS_LOGIN_NOTE,
+    "Войдите снова, чтобы получить новый код подтверждения");
+  logout();
+}
+
 export const LS_PENDING = "boris_pendingNavigation";
 
 /** Режимы старого кабинета, которые открываются не вкладкой, а флагом. */
@@ -106,7 +136,13 @@ export async function apiFetch(url: string, init: any = {}): Promise<Response> {
 export async function apiGet(url: string): Promise<any> {
   const r = await apiFetch(url);
   try {
-    return await r.json();
+    const data = await r.json();
+    if (!r.ok) {
+      const e = _normErr(r.status, data);
+      if (e.code === "email_not_verified") _gotoVerify();
+      return e;
+    }
+    return data;
   } catch {
     return { status: "error", message: "Некорректный ответ сервера" };
   }
@@ -119,7 +155,13 @@ export async function apiPost(url: string, body: any): Promise<any> {
     body: JSON.stringify(body),
   });
   try {
-    return await r.json();
+    const data = await r.json();
+    if (!r.ok) {
+      const e = _normErr(r.status, data);
+      if (e.code === "email_not_verified") _gotoVerify();
+      return e;
+    }
+    return data;
   } catch {
     return { status: "error", message: "Некорректный ответ сервера" };
   }

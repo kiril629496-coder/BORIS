@@ -486,6 +486,12 @@ def scenario_progress(scenario_type, facts, steps_state=None):
         # результат последнего действия — чтобы клиент видел его после перезагрузки
         item["result"] = (steps_state.get(st["key"]) or {}).get("result")
         item["result_at"] = (steps_state.get(st["key"]) or {}).get("result_at")
+        # шаг не считается выполненным, если последнее действие вернуло ok: false.
+        # ручную отметку клиента не перебиваем — это его осознанное решение.
+        if (item["status"] == "completed" and manual != "done"
+                and isinstance(item["result"], dict)
+                and item["result"].get("ok") is False):
+            item["status"] = "attention"
         item.pop("done", None)
         out.append(item)
     total = len(out)

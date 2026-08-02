@@ -179,7 +179,49 @@ def _memory_reply(mem):
     return val or name
 
 
-def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = None) -> str:
+_STYLE_HINTS = {
+    "shorter": "Сократи ответ без потери смысла.",
+    "detailed": "Дай более подробный ответ.",
+    "sales": "Усиль выгоду и следующий шаг, без давления.",
+    "clarifying": "Задай один конкретный уточняющий вопрос.",
+    "no_discount": "Не предлагай скидку и не обещай снижение цены.",
+    "softer": "Сделай тон мягче и дружелюбнее.",
+    "business": "Деловой и лаконичный стиль.",
+}
+
+
+def _style_block(style_hint):
+    """Стиль только по белому списку. Текст из callback_data в промпт не попадает.
+    knowledge_only здесь НЕТ намеренно: у него отдельный путь без модели."""
+    txt = _STYLE_HINTS.get(style_hint)
+    return "\n\nДОПОЛНИТЕЛЬНО К ОТВЕТУ:\n" + txt if txt else ""
+
+
+def _usage_cost(prompt_tokens, completion_tokens):
+    """Единственное место расчёта стоимости в модуле."""
+    usd = (prompt_tokens * _GPT54_INPUT_PER_TOKEN_USD
+           + completion_tokens * _GPT54_OUTPUT_PER_TOKEN_USD)
+    return usd * _USD_TO_RUB
+
+
+def _usage_meta(usage, model="gpt-5.4"):
+    pt = int(usage.get("prompt_tokens", 0) or 0)
+    ct = int(usage.get("completion_tokens", 0) or 0)
+    return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct,
+            "cost_rub": round(_usage_cost(pt, ct), 4), "model": model}
+
+
+_MEM_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+              "cost_rub": 0.0, "model": "memory"}
+
+
+def _wrap(text, usage, return_meta):
+    """return_meta=False -> строка как раньше. True -> {"text", "usage"}."""
+    return {"text": text, "usage": usage} if return_meta else text
+
+
+def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = None,
+                            style_hint: str = None, return_meta: bool = False):
     """Генерирует черновик ответа клиенту через GPT, с учётом:
     1) информации о компании (niche/tone/description/advantages),
     2) конкретного объявления, по которому идёт чат (если определено),
@@ -221,9 +263,9 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
                 print("[memory] ответ из факта #%s (%s)%s" %
                       (_mem.get("fact_id"), _mem.get("source"),
                        " | факт приоритетнее правил" if _mem.get("fact_wins") else ""))
-                return _memory_reply(_mem)
+                return _wrap(_memory_reply(_mem), dict(_MEM_USAGE), return_meta)
             print("[memory] знания нет -> уточняющий ответ")
-            return str(_mem.get("reply") or "Уточню и вернусь к вам.")
+            return _wrap(str(_mem.get("reply") or "Уточню и вернусь к вам."), dict(_MEM_USAGE), return_meta)
 
     company_context = ""
     if account:
@@ -371,14 +413,14 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
             headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
             json={
                 "model": "gpt-5.4",
-                "messages": [{"role": "user", "content": system_prompt}],
+                "messages": [{"role": "user", "content": system_prompt + _style_block(style_hint)}],
                 "max_completion_tokens": 400,
             },
             proxies=proxies,
             timeout=60,
         )
         if resp.status_code != 200:
-            return f"[Ошибка генерации черновика: {resp.status_code}]"
+            return _wrap(f"[Ошибка генерации черновика: {resp.status_code}]", None, return_meta)
         data = resp.json()
 
         usage = data.get("usage", {})
@@ -390,9 +432,9 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
         except Exception as _e:
             print("[usage]", str(_e)[:100], flush=True)
 
-        return data["choices"][0]["message"]["content"].strip()
+        return _wrap(data["choices"][0]["message"]["content"].strip(), _usage_meta(usage), return_meta)
     except Exception as e:
-        return f"[Ошибка генерации черновика: {str(e)[:150]}]"
+        return _wrap(f"[Ошибка генерации черновика: {str(e)[:150]}]", None, return_meta)
 
 
 # Тарифы GPT-5.4 (см. память проекта, 06.07.2026): $2.50/1M input, $15.00/1M output
@@ -408,8 +450,7 @@ def _log_messenger_usage(account_id: str, prompt_tokens: int, completion_tokens:
     from app.db.session import SessionLocal
     from app.models.storage import Storage
 
-    cost_usd = prompt_tokens * _GPT54_INPUT_PER_TOKEN_USD + completion_tokens * _GPT54_OUTPUT_PER_TOKEN_USD
-    cost_rub = cost_usd * _USD_TO_RUB
+    cost_rub = _usage_cost(prompt_tokens, completion_tokens)
 
     month_key = datetime.datetime.now().strftime("%Y-%m")
     key = f"messenger_usage:{month_key}"
@@ -582,6 +623,60 @@ def set_messenger_item_whitelist(account_id: str, item_ids: list):
         db.close()
 
 
+def _mop_incoming(account_id, chat_id, avito_message_id, incoming_text, chat,
+                  proactive_event=None):
+    """Новый контур. Две короткие сессии, сеть строго между ними."""
+    from app.db.session import SessionLocal as _SL
+    from app import mop_core as _mc
+
+    db = _SL()
+    try:
+        st = _mc.begin_incoming(db, account_id, str(chat_id),
+                                str(avito_message_id), incoming_text or "")
+    except Exception as e:
+        print("MOP_BEGIN_ERR %s/%s: %s" % (account_id, chat_id, e), flush=True)
+        return "begin_failed"
+    finally:
+        db.close()
+
+    draft_id = st["draft_id"]
+
+    if not st["need_generate"]:
+        db = _SL()
+        try:
+            res = _mc.push_card(db, draft_id)
+        except Exception as e:
+            print("MOP_PUSH_ERR %s: %s" % (draft_id, e), flush=True)
+            res = None
+        finally:
+            db.close()
+        if res == _mc.ROUTE_MISSING:
+            return "route_missing"
+        return "card_sent" if res else "card_failed"
+
+    try:
+        gen = generate_ai_draft_reply(account_id, chat,
+                                      proactive_event=proactive_event,
+                                      return_meta=True)
+    except Exception as e:
+        gen = {"text": "[Ошибка генерации: %s]" % str(e)[:150], "usage": None}
+    txt = (gen or {}).get("text") or ""
+    usage = (gen or {}).get("usage")
+    ok = bool(usage) and not txt.strip().startswith("[Ошибка")
+
+    db = _SL()
+    try:
+        if not ok:
+            _mc.generation_failed(db, draft_id, txt[:300])
+            return "gen_failed"
+        return _mc.finish_incoming(db, draft_id, txt, usage)
+    except Exception as e:
+        print("MOP_FINISH_ERR %s: %s" % (draft_id, e), flush=True)
+        return "card_failed"
+    finally:
+        db.close()
+
+
 def _process_account_messenger_check(account_id: str, telegram_chat_id: str):
 
     # GATE: пакет менеджера оплачен? нет остатка сообщений — не отвечаем
@@ -593,6 +688,18 @@ def _process_account_messenger_check(account_id: str, telegram_chat_id: str):
     """Проверяет непрочитанные чаты ОДНОГО аккаунта — вынесено отдельно, чтобы запускать
     параллельно через пул потоков для многих аккаунтов сразу."""
     import uuid
+    _contour = "legacy"
+    try:
+        from app.db.session import SessionLocal as _MopSL
+        from app import mop_core as _mc_probe
+        _mdb = _MopSL()
+        try:
+            _contour = _mc_probe.contour_of(_mdb, account_id)
+        finally:
+            _mdb.close()
+    except Exception as _ce:
+        print("MOP_CONTOUR_ERR %s: %s" % (account_id, _ce), flush=True)
+        _contour = "legacy"
     from app.telegram_bot import send_telegram_message_with_buttons, save_pending_draft
 
     my_user_id, _ = _get_user_id_and_token(account_id)
@@ -629,6 +736,12 @@ def _process_account_messenger_check(account_id: str, telegram_chat_id: str):
                 already_processed = _get_last_processed_message_id(account_id, chat_id)
                 if already_processed == "empty_chat_greeted":
                     continue  # уже поздоровались с этим пустым чатом раньше
+                if _contour == "new":
+                    if _mop_incoming(account_id, chat_id, "empty:%s" % chat_id,
+                                     "", chat, "empty_chat") == "card_sent":
+                        _set_last_processed_message_id(account_id, chat_id,
+                                                       "empty_chat_greeted")
+                    continue
                 draft_text = generate_ai_draft_reply(account_id, chat, proactive_event="empty_chat")
                 draft_id = str(uuid.uuid4())[:12]
                 save_pending_draft(draft_id, account_id, chat_id, draft_text)
@@ -657,6 +770,11 @@ def _process_account_messenger_check(account_id: str, telegram_chat_id: str):
             last_text = (last_message.get("content") or {}).get("text", "")
             proactive_event = "viewed_phone" if _SYSTEM_NUDGE_PREFIX in last_text else None
 
+            if _contour == "new":
+                if _mop_incoming(account_id, chat_id, last_message_id,
+                                 last_text, chat, proactive_event) == "card_sent":
+                    _set_last_processed_message_id(account_id, chat_id, last_message_id)
+                continue
             draft_text = generate_ai_draft_reply(account_id, chat, proactive_event=proactive_event)
             draft_id = str(uuid.uuid4())[:12]
             save_pending_draft(draft_id, account_id, chat_id, draft_text)
@@ -1354,6 +1472,20 @@ def _store_messages_locally(account_id: str, avito_chat_id: str, item_context: s
                 continue
             text = (m.get("content") or {}).get("text", "")
             _im = item_meta or {}
+            # _STORE_MTYPE_FIX: переменные вычисляются здесь же
+            _content = m.get("content") or {}
+            _mtype = m.get("type") or ("system" if (text or "").startswith(
+                "[Системное сообщение]") else "text")
+            _cref = None
+            if _mtype == "voice":
+                _cref = (_content.get("voice") or {}).get("voice_id")
+            elif _mtype == "image":
+                _img = _content.get("image") or {}
+                _cref = _img.get("image_id") or (
+                    next(iter((_img.get("sizes") or {}).values()), None))
+            elif _mtype in ("video", "file"):
+                _blk = _content.get(_mtype) or {}
+                _cref = _blk.get("id") or _blk.get(_mtype + "_id")
             _it_id = str(_im.get("id") or "") or None
             _it_title = _im.get("title") or None
             _it_url = _im.get("url") or None
@@ -1366,8 +1498,6 @@ def _store_messages_locally(account_id: str, avito_chat_id: str, item_context: s
                 "msg_type": ("system" if (text or "").startswith("[Системное сообщение]")
                              else ("seller" if str(m.get("direction","")).lower().startswith("out") else "user")),
                 "text": text,
-                "content_type": _mtype,
-                "media_ref": _cref,
                 "content_type": _mtype,
                 "media_ref": _cref,
                 "avito_created_at": m.get("created"),

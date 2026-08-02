@@ -9,7 +9,7 @@ import {
 } from "../lib/register";
 
 const CELLS = 6;
-const COOLDOWN_SEC = 60;
+const COOLDOWN_SEC = 180;
 
 const cardStyle: React.CSSProperties = {
   background:"#FFFFFF", borderRadius:"16px", padding:"40px", width:"400px",

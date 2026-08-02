@@ -36,18 +36,10 @@ async def site_order(name: str = Form(""), phone: str = Form(...), niche: str = 
     smtp_pass = os.environ.get("SMTP_PASS")
     if smtp_host and smtp_user and smtp_pass:
         try:
-            import smtplib
-            from email.mime.text import MIMEText
+            from app.services import email_service as _es
             recipients = ["ostapenko-kirill-86@yandex.ru", "eliseev-ko@mail.ru"]
             body = text.replace("<b>", "").replace("</b>", "")
-            msg = MIMEText(body, "plain", "utf-8")
-            msg["Subject"] = "Новая заявка на сайт — БОРИС"
-            msg["From"] = smtp_user
-            msg["To"] = ", ".join(recipients)
-            port = int(os.environ.get("SMTP_PORT", "465"))
-            with smtplib.SMTP_SSL(smtp_host, port) as srv:
-                srv.login(smtp_user, smtp_pass)
-                srv.sendmail(smtp_user, recipients, msg.as_string())
+            _es.send_email(recipients, "Новая заявка на сайт — БОРИС", body)
         except Exception as e:
             print("site_order email failed:", e)
 

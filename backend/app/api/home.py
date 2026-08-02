@@ -76,6 +76,41 @@ def _active(db, account_id):
 
 # ------------------------------------------------------------------ обзор
 
+def _parse_validator_report(raw_text):
+    """Разбирает сохранённый текст страницы валидатора Avito в список
+    {title, reason}. В сеть не ходит. При любом неожиданном формате
+    возвращает пустой список и не роняет шаг."""
+    import re as _re
+    try:
+        lines = [l.strip() for l in (raw_text or "").split("\n") if l.strip()]
+        start = -1
+        for i, l in enumerate(lines):
+            if "Сообщения и ошибки" in l:
+                start = i + 1
+                break
+        if start < 0:
+            return []
+        items, title, parts = [], None, []
+
+        def _flush():
+            if title and parts:
+                items.append({"title": title,
+                              "reason": ". ".join(parts)[:400] + "."})
+
+        for l in lines[start:]:
+            m = _re.match(r"^(\d+)\t+(.+)$", l)
+            if m:
+                _flush()
+                title, parts = m.group(2).strip(), []
+                continue
+            if title is None or l.startswith("Подробнее"):
+                continue
+            if len(parts) < 12:
+                parts.append(l.rstrip("."))
+        _flush()
+        return items[:50]
+    except Exception:
+        return []
 @router.get("/overview")
 def overview(account_id: str):
     """Всё для рабочего стола одним запросом."""
@@ -592,6 +627,8 @@ def scenario_action(req: ActionRequest):
                     _say(acc, "feed_checked", "Проверил файл выгрузки у Avito: %d %s" % (
                         len(ids), S._plural(len(ids), "объявление", "объявления", "объявлений")))
                     result = {"ok": bool(okv), "valid": okv, "count": len(ids), "details": v,
+                              "result_type": "feed_validation",
+                              "items": _parse_validator_report((v or {}).get("raw_text")),
                               "summary": ("Файл принят Avito, %d %s готовы к выгрузке"
                                           % (len(ids), S._plural(len(ids), "объявление",
                                                                  "объявления", "объявлений")))
@@ -630,13 +667,18 @@ def scenario_action(req: ActionRequest):
                 from app.services.tree_resolver import resolve_by_tree, extract_fields
 
                 answers = p.get("answers") or {}
+                _answers_saved = True
                 if answers:
                     prev = S._load(db, acc, "card_answers", {}) or {}
                     prev.update({k: v for k, v in answers.items() if str(v).strip()})
-                    S._save(db, acc, "card_answers", prev)
-                    _say(acc, "card_fields", "Запомнил %d %s по товарам" % (
-                        len(answers), S._plural(len(answers), "уточнение",
-                                                "уточнения", "уточнений")))
+                    # _save никогда не бросает и возвращает False при сбое записи.
+                    # Без этой проверки клиент видел "Запомнил ...", хотя ответы
+                    # не сохранились, и на следующем шаге его спрашивали заново.
+                    _answers_saved = bool(S._save(db, acc, "card_answers", prev))
+                    if _answers_saved:
+                        _say(acc, "card_fields", "Запомнил %d %s по товарам" % (
+                            len(answers), S._plural(len(answers), "уточнение",
+                                                    "уточнения", "уточнений")))
 
                 saved = S._load(db, acc, "card_answers", {}) or {}
                 drafts = _load_drafts(acc) or []
@@ -669,6 +711,9 @@ def scenario_action(req: ActionRequest):
                             "no_leaf": "Похоже, нужная категория пока отсутствует в дереве BORIS",
                             "need_answer": "Не удалось однозначно определить категорию",
                             "not_found": "Не удалось определить категорию",
+                            "no_confident_option": (
+                                "Не удалось надёжно определить категорию. "
+                                "Возможно, нужной категории пока нет в дереве BORIS."),
                         }
                         _st = str(r.get("status") or "")
                         _rs = str(r.get("reason") or "")
@@ -722,6 +767,10 @@ def scenario_action(req: ActionRequest):
                                                                  "вопроса", "вопросов")))
                               if qs else ("Все карточки готовы." if ready == total
                                           else "Требуют внимания: %d." % need)))}
+                if not _answers_saved:
+                    result["ok"] = False
+                    result["summary"] = ("Не удалось сохранить ваши ответы. "
+                                         "Попробуйте ещё раз.")
 
             elif req.action == "republish_apply":
                 ids = [str(x) for x in (p.get("item_ids") or []) if str(x).strip()]

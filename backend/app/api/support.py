@@ -48,15 +48,12 @@ class StatusMsg(BaseModel):
 
 
 def _send_email(subject, body):
-    h = os.environ.get("SMTP_HOST"); u = os.environ.get("SMTP_USER"); p = os.environ.get("SMTP_PASS")
-    to = os.environ.get("SUPPORT_EMAIL", u)
-    if not (h and u and p):
+    """Письмо на служебный ящик поддержки. Отправка — через единый EmailService."""
+    from app.services import email_service as _es
+    to = os.environ.get("SUPPORT_EMAIL") or os.environ.get("SMTP_USER")
+    if not to:
         return
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject; msg["From"] = u; msg["To"] = to
-    port = int(os.environ.get("SMTP_PORT", "465"))
-    with smtplib.SMTP_SSL(h, port) as s:
-        s.login(u, p); s.sendmail(u, [to], msg.as_string())
+    _es.send_email(to, subject, body)
 
 
 def _notify_client(db, account_id: str, text_msg: str):

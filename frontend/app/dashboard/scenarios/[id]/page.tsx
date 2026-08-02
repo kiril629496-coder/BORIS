@@ -24,7 +24,8 @@ const CATEGORY_ACTIONS: any[] = [
     key: "absent",
     label: "Моей категории здесь нет",
     enabled: true,
-    show: (c: any) => c.category_state === "need_answer",
+    show: (c: any) => c.category_state === "need_answer"
+      || c.category_reason === "no_confident_option",
   },
   {
     // Включится, когда на бэке появится действие пересчёта категории
@@ -396,7 +397,7 @@ export default function ScenarioPage() {
                       <div className={res.ok === false ? styles.resWarn : styles.resOk} data-testid="step-result">
                         <b>{res.summary}</b>
                         {res.note && <div className={styles.resNote}>{res.note}</div>}
-                        {(res.items || []).length > 0 && res.count > 0 && (
+                        {(res.items || []).length > 0 && res.count > 0 && !res.result_type && (
                           <div className={styles.resNext}>
                             Ничего из этого я не снял и не изменил. Посмотрите список
                             и решите сами — снятие делается в кабинете.

@@ -409,6 +409,96 @@ def get_parsed_products(account_id: str = "default"):
         db.close()
 
 
+_KN_TYPES = (
+    ("contacts", ("contact", "kontakt"), ("контакт", "связаться")),
+    ("delivery", ("delivery", "dostavka", "shipping"), ("доставка", "отгрузка", "самовывоз")),
+    ("payment", ("payment", "oplata", "/pay"), ("оплата", "способы оплаты", "реквизиты")),
+    ("warranty", ("warranty", "garant", "guarantee"), ("гарантия", "гарантии")),
+    ("about", ("about", "o-nas", "o-kompanii", "company"), ("о компании", "о нас", "кто мы")),
+    ("faq", ("faq", "voprosy", "question", "/help"), ("вопрос", "частые вопросы")),
+)
+_KN_BAD_EXT = (".pdf", ".jpg", ".jpeg", ".png", ".zip", ".doc", ".docx", ".xls", ".xlsx")
+_KN_PRODUCT = ("/view/", "/product/", "/tovar/")
+_KN_MAX_PAGES = 6
+_KN_TIMEOUT = 10
+_KN_MAX_CHARS = 8000
+
+
+def _kn_norm(u):
+    """Адрес без якоря, параметров и хвостового слэша — для дедупликации."""
+    u = (u or "").split("#")[0].split("?")[0].strip().lower()
+    return u[:-1] if u.endswith("/") and len(u) > 8 else u
+
+
+def _kn_clean_text(html):
+    """Текст страницы без скриптов, стилей и навигации."""
+    from bs4 import BeautifulSoup as _BS
+    sp = _BS(html, "lxml")
+    for bad in sp(["script", "style", "noscript", "nav", "header", "footer", "svg"]):
+        bad.decompose()
+    title = (sp.title.text.strip() if sp.title else "")[:200]
+    txt = " ".join(sp.get_text(" ", strip=True).split())
+    return title, txt[:_KN_MAX_CHARS]
+
+
+def _collect_site_knowledge(soup, base_url, headers):
+    """Служебные страницы того же сайта из УЖЕ загруженного soup.
+
+    Второго обхода нет: ссылки берутся из главной, открываются максимум 6,
+    тем же requests и теми же заголовками. Ошибка не влияет на товары.
+    """
+    from urllib.parse import urljoin, urlparse
+    out = {"base_domain": "", "collected": 0, "pages": [], "skipped": []}
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+        out["base_domain"] = host
+        found, seen = [], set()
+        for a in soup.find_all("a", href=True):
+            href = (a.get("href") or "").strip()
+            low = href.lower()
+            if (not href or low.startswith("#") or low.startswith("mailto:")
+                    or low.startswith("tel:") or low.startswith("javascript:")):
+                continue
+            if any(low.endswith(x) for x in _KN_BAD_EXT):
+                continue
+            if any(x in low for x in _KN_PRODUCT):
+                continue
+            full = urljoin(base_url, href)
+            if (urlparse(full).hostname or "").lower() != host:
+                continue
+            key = _kn_norm(full)
+            if key in seen:
+                continue
+            label = " ".join((a.get_text(" ", strip=True) or "").split()).lower()[:120]
+            for kind, in_url, in_text in _KN_TYPES:
+                if any(x in low for x in in_url) or any(x in label for x in in_text):
+                    seen.add(key)
+                    found.append((kind, full))
+                    break
+            if len(found) >= _KN_MAX_PAGES:
+                break
+
+        for kind, url in found:
+            try:
+                r = requests.get(url, headers=headers, timeout=_KN_TIMEOUT)
+                if r.status_code != 200:
+                    out["skipped"].append("%s: HTTP %s" % (kind, r.status_code))
+                    continue
+                title, text = _kn_clean_text(r.text)
+                if len(text) < 40:
+                    out["skipped"].append("%s: пустая страница" % kind)
+                    continue
+                out["pages"].append({"type": kind, "url": url, "title": title,
+                                     "text": text, "chars": len(text)})
+            except Exception as e:
+                out["skipped"].append("%s: %s" % (kind, str(e)[:60]))
+        out["collected"] = len(out["pages"])
+    except Exception as e:
+        out["skipped"].append("блок целиком: %s" % str(e)[:80])
+        out["pages"], out["collected"] = [], 0
+    return out
+
+
 @router.post("/parse")
 def parse_site(req: ParseRequest):
     try:
@@ -704,12 +794,21 @@ def parse_site(req: ParseRequest):
                     prod["image"] = _download_product_photo(req.account_id, prod["image"], idx)
                     prod["images"] = [prod["image"]]
             _save_parsed_products(req.account_id, req.url, unique[:50])
+
+        # Знания о бизнесе из служебных страниц. Полностью добавочно:
+        # products и остальные ключи ответа не меняются.
+        try:
+            knowledge = _collect_site_knowledge(soup, req.url, headers)
+        except Exception as _kn_e:
+            knowledge = {"base_domain": "", "collected": 0, "pages": [],
+                         "skipped": ["блок целиком: %s" % str(_kn_e)[:80]]}
         return {
             "url": req.url,
             "platform": platform,
             "rendered_with_browser": rendered,
             "found": len(unique),
-            "products": unique[:50]
+            "products": unique[:50],
+            "knowledge": knowledge
         }
     
     except Exception as e:

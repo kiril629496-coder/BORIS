@@ -120,6 +120,8 @@ def _account_banner_dir(account_id: str, subfolder: str) -> str:
     return path
 
 
+from fastapi import Depends as _DepSec
+from app.api.auth import require_owner as _ReqOwner, get_current_user as _CurUser
 @router.post("/infographic")
 def create_infographic(req: InfographicRequest):
     from banner_generator import generate_infographic_banner
@@ -352,13 +354,25 @@ def _describe_reference_style_multi(image_urls: list) -> str:
 
 
 @router.get("/browse_all")
-def browse_all_banners(limit: int = 200):
+def browse_all_banners(limit: int = 200, user=_DepSec(_CurUser)):
     """Показывает ВСЕ когда-либо сгенерированные баннеры по всем клиентам - владелец
     просматривает их и выбирает, что добавить в курируемую витрину примеров (showcase)."""
     import os as _os_ex
+    _allowed = None
+    if getattr(user, "role", "") != "owner":
+        from app.db.session import SessionLocal as _SLb
+        from app.models.account import Account as _AccB
+        _dbb = _SLb()
+        try:
+            _allowed = {a.account_id for a in _dbb.query(_AccB).filter(
+                _AccB.owner_user_id == user.id).all()}
+        finally:
+            _dbb.close()
     results = []
     if _os_ex.path.isdir(IMAGES_DIR):
         for account_folder in _os_ex.listdir(IMAGES_DIR):
+            if _allowed is not None and account_folder not in _allowed:
+                continue
             banners_root = _os_ex.path.join(IMAGES_DIR, account_folder, "banners")
             if not _os_ex.path.isdir(banners_root):
                 continue
@@ -381,7 +395,7 @@ def browse_all_banners(limit: int = 200):
 
 
 @router.get("/showcase")
-def get_banner_showcase(account_id: str):
+def get_banner_showcase(account_id: str, user=_DepSec(_CurUser)):
     """Курируемая витрина баннеров-образцов, вручную отобранных владельцем."""
     from app.db.session import SessionLocal
     from app.models.storage import Storage
@@ -390,6 +404,21 @@ def get_banner_showcase(account_id: str):
     try:
         row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "banner_showcase").first()
         items = _json_sc.loads(row.value) if row else []
+        if getattr(user, "role", "") != "owner":
+            from app.models.account import Account as _AccSc
+            _allowed = {a.account_id for a in db.query(_AccSc).filter(
+                _AccSc.owner_user_id == user.id).all()}
+
+            def _is_own(it):
+                u = (it.get("url") if isinstance(it, dict) else str(it)) or ""
+                if u.startswith("http://") or u.startswith("https://"):
+                    return True
+                if not u.startswith("/images/"):
+                    return False
+                seg = u.split("/", 3)
+                return len(seg) > 2 and seg[2] in _allowed
+
+            items = [it for it in items if _is_own(it)]
         return {"status": "ok", "showcase": items}
     finally:
         db.close()

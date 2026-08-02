@@ -129,6 +129,12 @@ async def check_account_access(request: Request, user=Depends(get_current_user_o
     if request.url.path in ("/api/accounts/agency_overview", "/api/accounts/billing_preview", "/api/accounts/add_account"):
         return user
 
+    # Исключение: экран подключения аккаунтов инбокса работает на уровне ВЛАДЕЛЬЦА -
+    # слоты выбираются по owner_user_id через _owner_scope, account_id в запросе нет.
+    # Без этого клиент с оплаченными слотами получал 403 и не мог подключить Avito.
+    if request.url.path in ("/api/inbox/slots", "/api/inbox/accounts"):
+        return user
+
     # Исключение: общие справочники (города cities_50k, станции метро metro_stations)
     # лежат под account_id="global" и одинаковы для всех клиентов. Разрешаем ТОЛЬКО
     # чтение: /api/storage/save под это исключение не попадает, изоляция не слабеет.
@@ -323,7 +329,7 @@ def register(req: RegisterRequest, request: Request):
         db.commit()
 
         if not _qa:
-            _sent, _why = _ml.send_verification_code(user.email, _code)
+            _sent, _why = _ml.send_verification_code(user.email, _code, verification_id=_vid)
             if not _sent:
                 logger.warning("register: письмо с кодом не ушло (%s)", _why)
         else:
@@ -472,7 +478,7 @@ def _vf_issue_and_send(db, _vf, _ml, user, norm: str, ip: str, qa: bool):
     _vf.log_event(db, "send", norm, ip)
     db.commit()
     if not qa:
-        sent, why = _ml.send_verification_code(user.email, code)
+        sent, why = _ml.send_verification_code(user.email, code, verification_id=vid)
         if not sent:
             logger.warning("verification: письмо с кодом не ушло (%s)", why)
     else:

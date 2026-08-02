@@ -13,6 +13,8 @@ def _run_bg():
         stderr=subprocess.STDOUT,
     )
 
+from fastapi import Depends as _DepSec
+from app.api.auth import require_owner as _ReqOwner
 @router.post("/run")
 def qa_run():
     _run_bg()
@@ -33,7 +35,7 @@ def qa_landing():
     return {"status": "ok", "message": "Аудит лендинга запущен (ПК+моб, vision). Отчёт придёт в Telegram через 1-2 минуты."}
 
 @router.get("/reports")
-def qa_reports():
+def qa_reports(_=_DepSec(_ReqOwner)):
     files = sorted(glob.glob("/root/BORIS/backend/images/qa/report_*.html"), reverse=True)[:20]
     reports = [{"name": os.path.basename(f), "url": f"/images/qa/{os.path.basename(f)}"} for f in files]
     return {"status": "ok", "reports": reports}

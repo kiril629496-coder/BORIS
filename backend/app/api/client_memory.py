@@ -444,6 +444,10 @@ def stems(s):
     """Огрубление до основы — падежи и числа перестают мешать совпадению."""
     import re as _re
     out = set()
+    _short_ok = {"итр"}
+    for w3 in _re.findall(r"\b[а-яёa-z0-9]{3}\b", str(s or ""), _re.I):
+        if w3.lower() in _short_ok:
+            out.add(w3.lower())
     for w in _re.findall(r"[а-яёa-z0-9]{4,}", str(s or ""), _re.I):
         w = w.lower()
         st = w[:5] if len(w) > 5 else w
@@ -474,21 +478,64 @@ def find_answer(db, account_id, question, shared=True, min_overlap=2):
         "  FROM client_facts f LEFT JOIN client_aliases al ON al.fact_id = f.id"
         " WHERE f.account_id IN :accs"
         "   AND (f.status = 'confirmed' OR (f.status = 'draft' AND f.confidence >= 80))"
+        "   AND f.category <> 'rule'"
         " GROUP BY f.id"
     ).bindparams(bindparam("accs", expanding=True)), {"accs": accs}).all()
 
+    # маркеры намерения вопроса: цена / покупка / изготовление / залог
+    _price_q = bool(qw & stems(CAT_WORDS.get("cena", "")))
+    _sale_q = bool(qw & {"прода", "купит", "покуп"})
+    _make_q = bool(qw & {"изгот", "произв"})
+    _dep_q = bool(qw & {"залог", "депоз", "обесп"})
+    _avail_q = bool(qw & {"налич", "досту", "свобо", "остал", "имеет"}) or (
+        bool(qw & {"сейча", "сегод"}) and not _price_q)
+    cands = []
     best, best_score, best_raw = None, 0, 0
     for r in rows:
         # слова самого факта и отдельно слова-маркеры категории
         subj = len(qw & stems("%s %s %s" % (r[3], r[4], r[9])))
         cw = len(qw & stems(CAT_WORDS.get(r[2], "")))
+        _fw = stems("%s %s" % (r[3], r[4]))
+        # наличие подтверждает только менеджер: база на такой вопрос не отвечает
+        if _avail_q:
+            continue
+        # факт про залог отвечает только на явный вопрос о залоге
+        if "залог" in _fw and not _dep_q:
+            continue
+        # вопрос о покупке: арендные и залоговые факты не отвечают
+        if _sale_q and ({"аренд", "залог"} & _fw):
+            continue
+        # вопрос о сроке изготовления: цена отвечает только своя, предметная
+        if _make_q and r[2] == "cena" and not ({"изгот", "произв"} & _fw):
+            continue
+        # ценовой вопрос требует ценового факта
+        if _price_q and r[2] != "cena":
+            continue
         # маркер категории лишь уточняет намерение, но не заменяет
         # совпадения по сути: иначе «сколько стоит X» цепляет любую цену
         if not (subj >= min_overlap or (subj >= 1 and cw >= 1)):
             continue
         score = subj * 2 + cw + (1 if r[2] == "faq" else 0) + (1 if r[8] == "confirmed" else 0)
-        if score > best_score:
-            best, best_score, best_raw = r, score, subj
+        cands.append((score, subj, r, len(qw & stems(r[3]))))
+
+    if cands:
+        _mx = max(c[0] for c in cands)
+        _top = [c for c in cands if c[0] == _mx]
+        # ничью не разрешаем порядком строк из БД: честнее переспросить.
+        # шаг 1: предметное преимущество — больше совпадений с ИМЕНЕМ факта
+        _name_hits = max(c[3] for c in _top)
+        _top = [c for c in _top if c[3] == _name_hits]
+        # шаг 2: одинаковое имя, но цена и услуга — это один предмет, не двусмысленность
+        # шаг 2 применяется ТОЛЬКО к ценовому вопросу: без маркеров цены
+        # отдавать число вместо описания услуги нельзя
+        if len(_top) > 1 and _price_q:
+            _nm_norm = {" ".join(str(c[2][3]).lower().split()) for c in _top}
+            if len(_nm_norm) == 1:
+                _cena = [c for c in _top if c[2][2] == "cena"]
+                if len(_cena) == 1:
+                    _top = _cena
+        if len(_top) == 1:
+            best, best_score, best_raw = _top[0][2], _top[0][0], _top[0][1]
 
     if not best:
         return {
@@ -1094,6 +1141,63 @@ def _conflicts_for(db, account_id, category, name, value):
              "confidence": r[3], "source": r[4]} for r in rows]
 
 
+OCCASION_WORDS = ("юбилей", "юбиле", "свадьб", "день рожден", "днюх", "новый год",
+                  "новогодн", "рождеств", "8 март", "23 фев", "годовщин", "выпускн",
+                  "корпоратив", "8 марта", "днём рожден", "днем рожден")
+
+
+def _word_forms(name):
+    """Падежные формы для КОРОТКИХ названий. Огрубление режет слово до 5 букв,
+    поэтому «тост» и «тоста» не сводятся — добавляем формы явно."""
+    n = _norm_m(name)
+    if " " in n or len(n) > 6 or len(n) < 3:
+        return []
+    if n.endswith("я"):        # песня -> песни, песне, песню, песней
+        b = n[:-1]; out = {b + "и", b + "е", b + "ю", b + "ей"}
+    elif n.endswith("а"):      # книга -> книги, книге, книгу, книгой
+        b = n[:-1]; out = {b + "и", b + "е", b + "у", b + "ой"}
+    elif n.endswith("ь"):
+        b = n[:-1]; out = {b + "я", b + "ю", b + "ем", b + "е"}
+    else:                      # тост -> тоста, тосту, тостом, тосте, тосты
+        out = {n + "а", n + "у", n + "ом", n + "е", n + "ы"}
+    return sorted(out - {n})
+
+
+def _other_service_names(db, account_id, own_name):
+    """Названия ДРУГИХ услуг/товаров этого аккаунта — алиас не должен их содержать."""
+    rows = db.execute(text(
+        "SELECT DISTINCT lower(btrim(name)) FROM client_facts"
+        " WHERE account_id=:a AND status <> 'rejected' AND length(btrim(name)) >= 4"
+        "   AND lower(btrim(name)) <> :n"), {"a": account_id, "n": _norm_m(own_name)}).all()
+    return [r[0] for r in rows if r[0]]
+
+
+def _prep_aliases(name, aliases, others=None):
+    """Правила алиасов (закреплены 01.08):
+    1) повод (юбилей/свадьба/др) — не алиас услуги;
+    2) коротким названиям добавляются падежные формы;
+    3) нормализация: нижний регистр, схлопывание пробелов, дедуп,
+       алиас, равный названию, не сохраняется.
+    Возвращает (готовые, отсеянные_поводы)."""
+    base = _norm_m(name)
+    good, dropped, seen = [], [], {base}
+    for al in (aliases or []):
+        a = _norm_m(al)
+        if not a or a in seen:
+            continue
+        if any(w in a for w in OCCASION_WORDS):
+            dropped.append(str(al).strip())
+            continue
+        if any(o in a for o in (others or [])):
+            dropped.append(str(al).strip())
+            continue
+        seen.add(a); good.append(a)
+    for f in _word_forms(name):
+        if f not in seen:
+            seen.add(f); good.append(f)
+    return good, dropped
+
+
 def _save_manual_fact(db, account_id, who, category, name, value, unit="",
                       valid_until=None, scope="account", aliases=None, snippet=""):
     h = _fhash_m(category, name, value)
@@ -1112,10 +1216,8 @@ def _save_manual_fact(db, account_id, who, category, name, value, unit="",
     fid = db.execute(text(
         "SELECT id FROM client_facts WHERE account_id=:a AND fact_hash=:h"),
         {"a": account_id, "h": h}).scalar()
-    for al in (aliases or []):
-        al = str(al).strip()
-        if not al:
-            continue
+    _good, _ = _prep_aliases(name, aliases, _other_service_names(db, account_id, name))
+    for al in _good:
         try:
             db.execute(text(
                 "INSERT INTO client_aliases (account_id, fact_id, alias, source_type)"
@@ -1190,7 +1292,13 @@ def fact_add(body: ManualFact, user=Depends(get_current_user)):
                     "UPDATE client_facts SET status='rejected', updated_at=:t"
                     " WHERE id = ANY(:ids)"), {"ids": old, "t": _now()})
         db.commit()
-        return {"status": "ok", "fact_ids": ids, "replaced": len(conflicts) if body.force else 0}
+        _, _dropped = _prep_aliases(name, body.aliases)
+        res = {"status": "ok", "fact_ids": ids,
+               "replaced": len(conflicts) if body.force else 0}
+        if _dropped:
+            res["warning"] = ("Не сохранены как алиасы (это поводы, а не названия услуг): "
+                              + ", ".join(_dropped))
+        return res
     finally:
         db.close()
 
@@ -1262,8 +1370,9 @@ def fact_bulk(body: BulkFacts, user=Depends(get_current_user)):
         for p in parsed:
             if p["conflicts"] and not body.force:
                 continue
-            _save_manual_fact(db, body.account_id, who, body.category, p["name"],
-                              p["value"] or p["name"], "", None, body.scope, p["aliases"])
+            if p["value"]:
+                _save_manual_fact(db, body.account_id, who, body.category, p["name"],
+                                  p["value"], "", None, body.scope, p["aliases"])
             if p["price"]:
                 _save_manual_fact(db, body.account_id, who, "cena", p["name"],
                                   p["price"], "₽", None, body.scope, p["aliases"])

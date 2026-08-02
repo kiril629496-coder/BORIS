@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Mascot } from '../components/Mascot';
 import { useRouter } from "next/navigation";
 import TurnstileBox from "../lib/turnstile";
@@ -12,6 +12,16 @@ export default function Login() {
   const [planned, setPlanned] = useState("");
   const [mode, setMode] = useState<"login" | "register">("login");
   const [error, setError] = useState("");
+
+  /* Сообщение, оставленное api.ts при выходе из-за неподтверждённой почты.
+     Показываем один раз и сразу убираем ключ. */
+  useEffect(() => {
+    const note = localStorage.getItem("boris_login_note");
+    if (note) {
+      setError(note);
+      localStorage.removeItem("boris_login_note");
+    }
+  }, []);
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const [token, setToken] = useState("");

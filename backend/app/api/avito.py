@@ -184,6 +184,8 @@ def _extract_token(token_data):
         raise HTTPException(status_code=400, detail=msg or "Avito не подключён к этому аккаунту")
     return token_data["access_token"]
 
+from fastapi import Depends as _DepSec
+from app.api.auth import require_owner as _ReqOwner, get_current_user as _CurUser
 @router.get("/check")
 def check_avito(account_id: str = "otdushi"):
     token_data = get_avito_token(account_id)
@@ -3515,7 +3517,7 @@ def weekly_summary(account_id: str = "otdushi"):
 
 
 @router.get("/director_overview")
-def director_overview():
+def director_overview(_=_DepSec(_ReqOwner)):
     """Сводка по всем клиентам для Бориса-директора: последний снимок статистики каждого."""
     from app.db.session import SessionLocal
     from app.models.storage import Storage
@@ -4390,7 +4392,7 @@ def wordstat_history(account_id: str):
 
 
 @router.get("/director/new_clients")
-def new_clients_overview():
+def new_clients_overview(_=_DepSec(_ReqOwner)):
     """Список клиентов-пользователей для панели Директора: кто зарегался, когда,
     сколько дней триала осталось, сколько аккаунтов подключил. Owner в список не входит."""
     from app.db.session import SessionLocal
