@@ -1,0 +1,48 @@
+{
+  "schema_version": 4,
+  "description": "Контракт Базы знаний BORIS. Проверяется загрузчиком app/niches.py при импорте.",
+
+  "common_required_sections": [
+    "_confidence_values", "_source_priority", "_metrics", "_operators",
+    "_detect_modes", "_detect_per", "_niche_thresholds",
+    "business_results", "scenarios", "goals", "problems", "capabilities",
+    "kpi", "competitor_types", "materials", "channels", "requirements"
+  ],
+
+  "niche_required_fields": [
+    "slug", "schema_version", "version", "name", "aliases", "summary",
+    "avito", "thresholds", "goals", "problems", "capabilities", "kpi",
+    "competitor_types", "materials_needed", "connect", "buyer_questions",
+    "collect_from_client", "limits", "sources"
+  ],
+
+  "confidence_values": ["confirmed", "observed", "hypothesis"],
+  "confidence_note": "Только словарное значение. Числовой confidence (как в client_facts) запрещён и блокирует файл.",
+
+  "detect_modes": ["state", "trend"],
+  "detect_per": ["account", "item", "active_item"],
+  "threshold_sources": ["niche", "const"],
+
+  "threshold_required_fields": ["value", "confidence", "source", "scope", "last_verified"],
+  "threshold_scopes": ["per_account", "per_item", "per_active_item"],
+
+  "module_slices": {
+    "onboarding": ["summary", "goals", "problems", "capabilities", "connect", "materials_needed"],
+    "scenarios": ["goals", "problems"],
+    "mop": ["buyer_questions", "collect_from_client", "limits"],
+    "rop": ["buyer_questions", "kpi", "thresholds"],
+    "ads": ["collect_from_client", "avito", "limits"],
+    "banners": ["summary", "competitor_types"],
+    "competitors": ["competitor_types", "avito"],
+    "inbox": ["buyer_questions", "collect_from_client"],
+    "categories": ["avito"],
+    "analytics": ["kpi", "thresholds", "seasonality"]
+  },
+
+  "resolve": {
+    "stem_length": 5,
+    "stop_words": ["на", "под", "в", "во", "и", "для", "с", "со", "от", "по", "из",
+                   "заказ", "ключ", "наличии", "недорого", "дешево", "качественные",
+                   "цена", "цены", "купить", "продажа", "услуги", "работы"]
+  }
+}

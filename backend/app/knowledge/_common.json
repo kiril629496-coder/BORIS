@@ -1,0 +1,969 @@
+{
+  "schema_version": 4,
+  "version": 4,
+  "approved_by": "TO_CONFIRM",
+  "approved_at": null,
+  "verified_against_code": "2026-08-04",
+  "_status_values": {
+    "works": "Работает",
+    "beta": "Beta — работает с ограничениями",
+    "soon": "Скоро — этот сценарий уже в разработке"
+  },
+  "_status_note": "Статус описывает ГОТОВНОСТЬ ФУНКЦИИ В ПРОДУКТЕ. Доступность конкретному клиенту вычисляется отдельно из needs (что подключить, что оплатить) и limits (какая квота). «Требует подключения» и «требует тарифа» больше не статусы — это состояние клиента, а не свойство функции.",
+  "_operators": ["lt", "lte", "gt", "gte", "eq", "ne"],
+  "_metrics": {
+    "active_items": {
+      "label": "Активных объявлений",
+      "source": "/api/home/overview → numbers.active_items",
+      "available": true
+    },
+    "items_total": {
+      "label": "Всего объявлений",
+      "source": "overview → numbers.items_total",
+      "available": true
+    },
+    "feed_items": {
+      "label": "Позиций в фиде",
+      "source": "overview → numbers.feed_items",
+      "available": true
+    },
+    "ready_to_publish": {
+      "label": "Готово к публикации",
+      "source": "overview → numbers.ready_to_publish",
+      "available": true
+    },
+    "views": {
+      "label": "Просмотры",
+      "source": "storage daily_stats:<дата>",
+      "available": true
+    },
+    "contacts": {
+      "label": "Обращения",
+      "source": "storage daily_stats:<дата>",
+      "available": true
+    },
+    "avg_reply_minutes": {
+      "label": "Среднее время ответа",
+      "source": null,
+      "available": false
+    },
+    "cpl": {
+      "label": "Цена обращения",
+      "source": null,
+      "available": false
+    },
+    "ctr": {
+      "label": "CTR",
+      "source": null,
+      "available": false
+    },
+    "sales": {
+      "label": "Продажи",
+      "source": null,
+      "available": false
+    },
+    "profit": {
+      "label": "Прибыль",
+      "source": null,
+      "available": false
+    },
+    "zero_view_items_ratio": {
+      "label": "Доля объявлений без единого просмотра",
+      "source": "storage daily_stats:<дата> → items[], доля с views = 0",
+      "available": true
+    },
+    "views_per_item": {
+      "label": "Просмотров на одно объявление",
+      "source": "storage daily_stats → sum(views) / items_count",
+      "available": true
+    }
+  },
+  "_niche_thresholds": {
+    "min_active_items": {
+      "label": "Сколько объявлений считать достаточным",
+      "used_by": ["few_ads"]
+    },
+    "min_views": {
+      "label": "Сколько просмотров на объявление в неделю считать нормой",
+      "used_by": ["no_views"]
+    },
+    "min_contacts": {
+      "label": "Сколько обращений в неделю считать нормой",
+      "used_by": ["few_leads"]
+    },
+    "max_zero_view_ratio": {
+      "label": "Какую долю объявлений без просмотров считать нормой",
+      "used_by": ["dead_items"]
+    }
+  },
+  "_niche_thresholds_note": "Значения задаёт ниша в блоке thresholds. Логика detect общая для платформы, цифры — нишевые. Если ниша порог не задала, проблема не проверяется и показывается вопросом (if_missing: ask).",
+  "business_results": {
+    "more_requests": {
+      "label": "Больше обращений от клиентов",
+      "description": "Стабильный поток заявок, а не редкие случайные звонки.",
+      "scenarios": ["more_leads", "avito_start"],
+      "kpi": ["contacts", "views"]
+    },
+    "more_sales": {
+      "label": "Больше продаж",
+      "description": "Из тех же обращений получается больше сделок.",
+      "scenarios": ["more_leads", "revive"],
+      "kpi": ["contacts", "leads"]
+    },
+    "save_time": {
+      "label": "Меньше ручной работы",
+      "description": "Рутину забирает BORIS, люди занимаются клиентами.",
+      "scenarios": [],
+      "kpi": []
+    },
+    "reduce_cost": {
+      "label": "Меньше расходов",
+      "description": "Тот же результат обходится дешевле.",
+      "scenarios": [],
+      "kpi": ["cpl"]
+    },
+    "scale_business": {
+      "label": "Рост без потери управляемости",
+      "description": "Больше объявлений, городов и площадок без роста нагрузки на людей.",
+      "scenarios": ["avito_start", "revive"],
+      "kpi": ["active_items", "feed_items"]
+    },
+    "increase_profit": {
+      "label": "Больше прибыли",
+      "description": "Выручка растёт быстрее расходов.",
+      "scenarios": [],
+      "kpi": ["profit"]
+    }
+  },
+  "_chain": "ниша → цели → проблемы → бизнес-результат → сценарии → возможности BORIS → подключения → KPI",
+  "scenarios": {
+    "avito_start": {
+      "label": "Запустить Авито с нуля",
+      "description": "Перенесу товары с вашего сайта в Авито: разберу каталог, соберу объявления с уникальными текстами, проверю выгрузку валидатором.",
+      "status": "works",
+      "needs": {
+        "all": [],
+        "any": [],
+        "license": [],
+        "materials": ["photos"]
+      },
+      "limits": null,
+      "code_ref": "app/scenarios.py CATALOG.avito_start"
+    },
+    "more_leads": {
+      "label": "Получить больше заявок",
+      "description": "Проверю объявления, поставлю цель по заявкам, посмотрю спрос и продвижение.",
+      "status": "works",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "app/scenarios.py CATALOG.more_leads"
+    },
+    "revive": {
+      "label": "Оживить кабинет",
+      "description": "Покажу, какие объявления перестали работать, и подготовлю замену.",
+      "status": "works",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": {
+        "text": "За один раз обновляю до 10 объявлений",
+        "reason": "уникализация — платные вызовы модели"
+      },
+      "code_ref": "app/scenarios.py CATALOG.revive"
+    }
+  },
+  "_scenarios_note": "В CATALOG ровно три ключа. Цель без готового сценария получает пустой список и статус soon — придуманные заранее ключи разойдутся с кодом.",
+  "goals": {
+    "leads_10_day": {
+      "label": "Получать 10 заявок в день",
+      "description": "Выйти на предсказуемый поток обращений.",
+      "result": "more_requests",
+      "scenarios": ["more_leads"],
+      "status": "works"
+    },
+    "load_production": {
+      "label": "Загрузить производство заказами",
+      "description": "Чтобы мощности не простаивали.",
+      "result": "more_requests",
+      "scenarios": ["avito_start", "more_leads"],
+      "status": "works"
+    },
+    "scale_avito": {
+      "label": "Вырасти на Авито",
+      "description": "Больше объявлений и охвата на площадке.",
+      "result": "scale_business",
+      "scenarios": ["avito_start", "revive"],
+      "status": "works"
+    },
+    "increase_sales": {
+      "label": "Продавать больше",
+      "description": "Поднять выручку за счёт объявлений и работы с обращениями.",
+      "result": "more_sales",
+      "scenarios": ["more_leads", "revive"],
+      "status": "works"
+    },
+    "automate_sales": {
+      "label": "Освободить менеджеров от переписки",
+      "description": "Ответы клиентам берёт на себя BORIS.",
+      "result": "save_time",
+      "scenarios": [],
+      "status": "soon",
+      "soon_note": "Сценарий в разработке. Сама возможность отвечать клиентам уже работает — включается лицензией ИИ-менеджера."
+    },
+    "new_city": {
+      "label": "Выйти в новый город",
+      "description": "Продавать то же самое в соседнем регионе.",
+      "result": "scale_business",
+      "scenarios": [],
+      "status": "soon",
+      "soon_note": "Этот сценарий уже находится в разработке."
+    },
+    "higher_check": {
+      "label": "Продавать дороже",
+      "description": "Поднять средний чек за счёт подачи и работы с возражениями.",
+      "result": "increase_profit",
+      "scenarios": [],
+      "status": "soon",
+      "soon_note": "Этот сценарий уже находится в разработке."
+    },
+    "return_clients": {
+      "label": "Вернуть тех, кто не купил",
+      "description": "Поднять базу обращений, которые не дошли до сделки.",
+      "result": "more_sales",
+      "scenarios": [],
+      "status": "soon",
+      "soon_note": "Этот сценарий уже находится в разработке."
+    }
+  },
+  "problems": {
+    "few_ads": {
+      "label": "Каталог может быть представлен не полностью",
+      "description": "Ниже порога BORIS задаёт вопрос о полноте каталога, но НЕ утверждает, что причина слабых результатов найдена.",
+      "detect": {
+        "metric": "active_items",
+        "operator": "lt",
+        "threshold": {
+          "source": "niche",
+          "key": "min_active_items",
+          "if_missing": "ask"
+        },
+        "period": "current",
+        "min_samples": 1,
+        "mode": "state",
+        "per": "account"
+      },
+      "result": "more_requests",
+      "scenarios": ["avito_start", "revive"],
+      "status": "works",
+      "message_template": "Каталог может быть недостаточно представлен. Сейчас активно {value} объявлений. Проверьте, охвачены ли основные виды продукции, города и поисковые формулировки.",
+      "forbidden_wording": ["У вас слишком мало объявлений"],
+      "after_threshold": "При значении порога и выше проблема не срабатывает — дальше оценивается качество каталога: доля объявлений без просмотров, просмотры на объявление, обращения, дублирование названий, охват товарных направлений"
+    },
+    "nothing_ready": {
+      "label": "Нечего выгружать — ни одно объявление не готово",
+      "description": "Черновики есть, но ни один не доведён до публикации.",
+      "detect": {
+        "metric": "ready_to_publish",
+        "operator": "eq",
+        "threshold": {
+          "source": "const",
+          "value": 0
+        },
+        "period": "current",
+        "min_samples": 1,
+        "mode": "state",
+        "per": "account"
+      },
+      "result": "more_requests",
+      "scenarios": ["avito_start"],
+      "status": "works"
+    },
+    "empty_feed": {
+      "label": "Выгрузка пуста — Авито нечего забирать",
+      "description": "В фиде нет ни одной позиции.",
+      "detect": {
+        "metric": "feed_items",
+        "operator": "eq",
+        "threshold": {
+          "source": "const",
+          "value": 0
+        },
+        "period": "current",
+        "min_samples": 1,
+        "mode": "state",
+        "per": "account"
+      },
+      "result": "more_requests",
+      "scenarios": ["avito_start"],
+      "status": "works"
+    },
+    "few_leads": {
+      "label": "Клиенты обращаются реже, чем нужно бизнесу",
+      "description": "Обращений меньше, чем ожидает владелец.",
+      "detect": {
+        "metric": "contacts",
+        "operator": "lt",
+        "threshold": {
+          "source": "niche",
+          "key": "min_contacts",
+          "if_missing": "ask"
+        },
+        "period": "7d",
+        "min_samples": 4,
+        "mode": "state",
+        "per": "account"
+      },
+      "result": "more_requests",
+      "scenarios": ["more_leads"],
+      "status": "works"
+    },
+    "no_views": {
+      "label": "Ваши объявления получают слишком мало внимания",
+      "description": "Показов почти нет — объявления не попадают в выдачу.",
+      "detect": {
+        "metric": "views",
+        "operator": "lt",
+        "threshold": {
+          "source": "niche",
+          "key": "min_views",
+          "if_missing": "ask"
+        },
+        "period": "7d",
+        "min_samples": 4,
+        "mode": "state",
+        "per": "item"
+      },
+      "result": "more_requests",
+      "scenarios": ["revive"],
+      "status": "works"
+    },
+    "dead_items": {
+      "label": "Большая часть ваших объявлений не получает показов",
+      "description": "Позиции висят в кабинете, но их никто не видит — каталог работает вхолостую.",
+      "detect": {
+        "metric": "zero_view_items_ratio",
+        "mode": "state",
+        "operator": "gt",
+        "threshold": {
+          "source": "niche",
+          "key": "max_zero_view_ratio",
+          "if_missing": "ask"
+        },
+        "per": "account",
+        "period": "7d",
+        "min_samples": 4
+      },
+      "result": "more_requests",
+      "scenarios": ["revive", "more_leads"],
+      "scenario_context": {
+        "revive": "если объявления раньше получали просмотры и перестали",
+        "more_leads": "если показов не было изначально — каталог слишком слабый"
+      },
+      "status": "works"
+    },
+    "expensive_leads": {
+      "label": "Каждое обращение обходится слишком дорого",
+      "description": "Продвижение съедает больше, чем приносит.",
+      "detect": null,
+      "detect_blocked_by": "расход на продвижение в разрезе аккаунта не считается",
+      "result": "reduce_cost",
+      "scenarios": [],
+      "status": "soon"
+    },
+    "low_conversion": {
+      "label": "Обращения есть, а сделок мало",
+      "description": "Люди пишут, но до покупки доходят единицы.",
+      "detect": null,
+      "detect_blocked_by": "продажи в BORIS не фиксируются",
+      "result": "more_sales",
+      "scenarios": [],
+      "status": "soon"
+    },
+    "slow_reply": {
+      "label": "Клиенты ждут ответа слишком долго",
+      "description": "Пока менеджер отвечает, покупатель уходит к соседу.",
+      "detect": null,
+      "detect_blocked_by": "среднее время ответа не считается",
+      "result": "more_sales",
+      "scenarios": [],
+      "status": "soon"
+    },
+    "no_repeat_sales": {
+      "label": "Клиенты покупают один раз и не возвращаются",
+      "description": "Повторных обращений почти нет.",
+      "detect": null,
+      "detect_blocked_by": "истории покупок нет",
+      "result": "more_sales",
+      "scenarios": [],
+      "status": "soon"
+    },
+    "weak_content": {
+      "label": "Ваши объявления проигрывают соседним по подаче",
+      "description": "Тексты и фотографии слабее, чем у тех, кто рядом в выдаче.",
+      "detect": null,
+      "detect_blocked_by": "сравнение с конкурентами не работает",
+      "result": "more_requests",
+      "scenarios": [],
+      "status": "soon"
+    }
+  },
+  "capabilities": {
+    "write_ads": {
+      "label": "BORIS пишет объявления за вас",
+      "description": "Готовит заголовки и описания под требования категории Авито.",
+      "status": "works",
+      "needs": {
+        "all": [],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": {
+        "text": "Количество объявлений зависит от тарифа",
+        "reason": "лимит listings"
+      },
+      "code_ref": "generate_ads, drafts"
+    },
+    "unique_texts": {
+      "label": "BORIS делает каждое объявление непохожим на остальные",
+      "description": "Переписывает описания, чтобы дубли не резались площадкой.",
+      "status": "works",
+      "needs": {
+        "all": [],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": {
+        "text": "До 10 переписываний за один раз",
+        "reason": "платные вызовы модели"
+      },
+      "code_ref": "POST /avito/rewrite_text"
+    },
+    "make_banners": {
+      "label": "BORIS создаёт рекламные баннеры автоматически",
+      "description": "Рисует изображения для объявлений и постов по описанию бизнеса.",
+      "status": "works",
+      "needs": {
+        "all": [],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": {
+        "text": "Количество баннеров зависит от тарифа: 3 в пробном, 15 и 40 в платных",
+        "reason": "лимит banners"
+      },
+      "code_ref": "app/api/banners.py"
+    },
+    "import_from_site": {
+      "label": "BORIS переносит товары с вашего сайта в Авито",
+      "description": "Разбирает каталог и собирает из него готовые черновики.",
+      "status": "beta",
+      "beta_limits": "работает без браузера: сайты на React и Vue отдают пустой результат; уверенно читаются Tilda и обычная разметка",
+      "needs": {
+        "all": [],
+        "any": [],
+        "license": [],
+        "materials": ["website"]
+      },
+      "limits": {
+        "text": "За один раз разбираю до 20 позиций",
+        "reason": "защита от выгрузки всего каталога"
+      },
+      "code_ref": "parse_site"
+    },
+    "check_feed": {
+      "label": "BORIS проверяет выгрузку до публикации",
+      "description": "Прогоняет фид через валидатор Авито, чтобы площадка приняла объявления.",
+      "status": "works",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "feed_check"
+    },
+    "refresh_ads": {
+      "label": "BORIS находит уставшие объявления и обновляет их",
+      "description": "Показывает, что перестало работать, и готовит замену.",
+      "status": "works",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": {
+        "text": "До 10 объявлений за подтверждение",
+        "reason": "платные вызовы модели"
+      },
+      "code_ref": "republish_check, republish_apply"
+    },
+    "duplicate_ads": {
+      "label": "BORIS размножает объявления, которые приносят заявки",
+      "description": "Делает легальные дубли с уникальными текстами.",
+      "status": "works",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "auto_duplicate_run"
+    },
+    "unified_inbox": {
+      "label": "BORIS собирает переписки всех аккаунтов в одно окно",
+      "description": "Диалоги со всех подключённых аккаунтов в одном месте.",
+      "status": "works",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "app/api/inbox_slots.py"
+    },
+    "answer_clients": {
+      "label": "BORIS отвечает клиентам вместо менеджеров",
+      "description": "Отвечает на вопросы покупателей только по подтверждённым вами знаниям.",
+      "status": "works",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": ["mop"],
+        "materials": ["faq"]
+      },
+      "limits": null,
+      "code_ref": "app/api/messenger.py, лицензия mop"
+    },
+    "analyze_calls": {
+      "label": "BORIS проверяет, как менеджеры общаются с клиентами",
+      "description": "Разбирает диалоги и показывает, где теряются сделки.",
+      "status": "beta",
+      "beta_limits": "разбор переписок работает, звонки требуют колтрекинга — он не подключён",
+      "needs": {
+        "all": [],
+        "any": [],
+        "license": ["rop"],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "лицензия rop, app/api/calltracking.py"
+    },
+    "learn_business": {
+      "label": "BORIS изучает ваш бизнес и запоминает ответы",
+      "description": "Собирает факты из объявлений и переписок и спрашивает подтверждение.",
+      "status": "works",
+      "needs": {
+        "all": [],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "client_memory, client_facts"
+    },
+    "social_posting": {
+      "label": "BORIS ведёт ваши соцсети",
+      "description": "Готовит и публикует посты с картинками по расписанию.",
+      "status": "works",
+      "needs": {
+        "all": [],
+        "any": ["telegram", "vk"],
+        "license": [],
+        "materials": []
+      },
+      "limits": {
+        "text": "В пробном режиме 6 публикаций",
+        "reason": "trial_total постинга"
+      },
+      "code_ref": "app/api/posting.py"
+    },
+    "daily_report": {
+      "label": "BORIS присылает отчёт о том, что сделал",
+      "description": "Сводка по аккаунту за день и за неделю.",
+      "status": "beta",
+      "beta_limits": "отчёт собирается, автоматическая рассылка по расписанию не включена",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "app/api/inbox_daily.py"
+    },
+    "check_account_health": {
+      "label": "BORIS следит, чтобы с аккаунтом было всё в порядке",
+      "description": "Проверяет выгрузку, картинки и настройки продавца.",
+      "status": "beta",
+      "beta_limits": "проверяется наличие и корректность, но не качество содержимого",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "feed_health"
+    },
+    "collect_semantics": {
+      "label": "BORIS смотрит, что люди ищут в вашей нише",
+      "description": "Показывает спрос по словам и его сезонность.",
+      "status": "beta",
+      "beta_limits": "источник — Яндекс Вордстат",
+      "needs": {
+        "all": [],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "loadWordstatHistory"
+    },
+    "analyze_competitors": {
+      "label": "BORIS сравнивает вас с конкурентами",
+      "description": "Смотрит цены и предложения тех, кто рядом в выдаче.",
+      "status": "soon",
+      "soon_reason": "в app/api/parser.py прямо указано, что анализ конкурентов и парсинг Авито сейчас не работают",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "app/api/parser.py"
+    },
+    "find_lost_clients": {
+      "label": "BORIS возвращает клиентов, которые не купили",
+      "description": "Поднимает старые обращения и напоминает о себе.",
+      "status": "soon",
+      "soon_reason": "модули реактивации есть в рабочем дереве, но не подключены к продукту",
+      "needs": {
+        "all": ["avito"],
+        "any": [],
+        "license": ["mop"],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "backend/app/reactivation_*.py"
+    },
+    "build_site": {
+      "label": "BORIS собирает сайт для вашего бизнеса",
+      "description": "Простой сайт с товарами и контактами.",
+      "status": "soon",
+      "soon_reason": "вкладка показывает только обучающие видео, самой сборки нет",
+      "needs": {
+        "all": [],
+        "any": [],
+        "license": [],
+        "materials": []
+      },
+      "limits": null,
+      "code_ref": "вкладка sitebuild"
+    }
+  },
+  "kpi": {
+    "contacts": {
+      "label": "Обращения",
+      "description": "Сколько раз вам написали.",
+      "metric": "contacts",
+      "status": "works"
+    },
+    "views": {
+      "label": "Просмотры",
+      "description": "Сколько раз посмотрели объявления.",
+      "metric": "views",
+      "status": "works"
+    },
+    "active_items": {
+      "label": "Работающие объявления",
+      "description": "Сколько позиций сейчас в продаже.",
+      "metric": "active_items",
+      "status": "works"
+    },
+    "feed_items": {
+      "label": "Готово к выгрузке",
+      "description": "Сколько позиций Авито может забрать.",
+      "metric": "feed_items",
+      "status": "works"
+    },
+    "leads": {
+      "label": "Заявки",
+      "description": "Обращения, доведённые до заявки.",
+      "metric": null,
+      "status": "beta",
+      "note": "считается только при подключённом едином окне"
+    },
+    "cpl": {
+      "label": "Цена заявки",
+      "description": "Сколько стоит одно обращение.",
+      "metric": null,
+      "status": "soon"
+    },
+    "ctr": {
+      "label": "Отклик на показ",
+      "description": "Какая доля просмотров переходит в обращение.",
+      "metric": null,
+      "status": "soon"
+    },
+    "sales": {
+      "label": "Продажи",
+      "description": "Закрытые сделки.",
+      "metric": null,
+      "status": "soon"
+    },
+    "profit": {
+      "label": "Прибыль",
+      "description": "Результат за вычетом расходов.",
+      "metric": null,
+      "status": "soon"
+    }
+  },
+  "competitor_types": {
+    "factory": {
+      "label": "Заводы и производители",
+      "description": "Продают своё производство: цена ниже, сроки дольше."
+    },
+    "dealer": {
+      "label": "Дилеры и перекупщики",
+      "description": "Перепродают чужое, берут наличием и скоростью."
+    },
+    "private": {
+      "label": "Частники",
+      "description": "Работают без юрлица, демпингуют, качество плавает."
+    },
+    "aggregator": {
+      "label": "Агрегаторы и посредники",
+      "description": "Собирают заявки и передают исполнителям."
+    },
+    "marketplace": {
+      "label": "Маркетплейсы",
+      "description": "Ozon, Wildberries и подобные площадки."
+    }
+  },
+  "materials": {
+    "photos": {
+      "label": "Фотографии товаров или работ",
+      "description": "Без них объявление не создать.",
+      "required_for": ["avito_start", "write_ads"],
+      "status": "works"
+    },
+    "price_list": {
+      "label": "Цены и варианты",
+      "description": "Чтобы BORIS отвечал на самый частый вопрос покупателя.",
+      "required_for": [],
+      "status": "works"
+    },
+    "catalog": {
+      "label": "Каталог товаров",
+      "description": "Список позиций файлом или на сайте.",
+      "required_for": [],
+      "status": "works"
+    },
+    "website": {
+      "label": "Сайт",
+      "description": "Источник для переноса товаров.",
+      "required_for": ["import_from_site"],
+      "status": "works"
+    },
+    "logo": {
+      "label": "Логотип",
+      "description": "Нужен для баннеров и постов.",
+      "required_for": [],
+      "status": "works"
+    },
+    "faq": {
+      "label": "Ответы на частые вопросы",
+      "description": "Чтобы BORIS отвечал вашими словами, а не общими фразами.",
+      "required_for": ["answer_clients"],
+      "status": "works"
+    },
+    "warranty_terms": {
+      "label": "Условия гарантии",
+      "description": "Идут в объявления и в ответы клиентам.",
+      "required_for": [],
+      "status": "works"
+    },
+    "delivery_terms": {
+      "label": "Условия доставки",
+      "description": "Один из самых частых вопросов покупателей.",
+      "required_for": [],
+      "status": "works"
+    },
+    "payment_methods": {
+      "label": "Способы оплаты",
+      "description": "Наличные, счёт, рассрочка.",
+      "required_for": [],
+      "status": "works"
+    },
+    "certificates": {
+      "label": "Сертификаты и документы",
+      "description": "Подтверждают качество, усиливают описания.",
+      "required_for": [],
+      "status": "works"
+    }
+  },
+  "channels": {
+    "avito": {
+      "label": "Авито",
+      "description": "Основная площадка BORIS.",
+      "status": "works",
+      "integration": "объявления, выгрузка, переписки, статистика"
+    },
+    "telegram": {
+      "label": "Telegram",
+      "description": "Публикации и уведомления.",
+      "status": "works",
+      "integration": "постинг и уведомления"
+    },
+    "vk": {
+      "label": "VK",
+      "description": "Публикации в сообщество.",
+      "status": "works",
+      "integration": "постинг"
+    },
+    "website": {
+      "label": "Сайт",
+      "description": "Источник товаров для переноса.",
+      "status": "beta",
+      "integration": "разбор каталога без браузера"
+    },
+    "ozon": {
+      "label": "Ozon",
+      "description": "Маркетплейс.",
+      "status": "soon",
+      "integration": "учитывается в профиле, интеграции нет"
+    },
+    "wildberries": {
+      "label": "Wildberries",
+      "description": "Маркетплейс.",
+      "status": "soon",
+      "integration": "учитывается в профиле, интеграции нет"
+    },
+    "yandex_maps": {
+      "label": "Яндекс Карты",
+      "description": "Карточка организации.",
+      "status": "soon",
+      "integration": "учитывается в профиле, интеграции нет"
+    },
+    "2gis": {
+      "label": "2ГИС",
+      "description": "Карточка организации.",
+      "status": "soon",
+      "integration": "учитывается в профиле, интеграции нет"
+    },
+    "youtube": {
+      "label": "YouTube",
+      "description": "Видео о товарах и работах.",
+      "status": "soon",
+      "integration": "учитывается в профиле, интеграции нет"
+    },
+    "other": {
+      "label": "Другое",
+      "description": "Свободный вариант ответа клиента.",
+      "status": "works",
+      "integration": "только для профиля"
+    }
+  },
+  "requirements": {
+    "connections": {
+      "avito": {
+        "label": "Подключён аккаунт Авито",
+        "check": "accounts.avito_client_id заполнен"
+      },
+      "telegram": {
+        "label": "Подключён Telegram",
+        "check": "channel_tg в проекте постинга либо telegram_chat_id аккаунта"
+      },
+      "vk": {
+        "label": "Подключено сообщество VK",
+        "check": "vk_owner_id в проекте постинга"
+      },
+      "website": {
+        "label": "Указан сайт",
+        "check": "accounts.company_website заполнен"
+      }
+    },
+    "licenses": {
+      "mop": {
+        "label": "Лицензия ИИ-менеджера по продажам",
+        "check": "ai_licenses.product='mop', paid_until в будущем"
+      },
+      "rop": {
+        "label": "Лицензия ИИ-руководителя отдела продаж",
+        "check": "ai_licenses.product='rop', paid_until в будущем"
+      }
+    },
+    "tariffs": {
+      "trial": {
+        "label": "Пробный период, 4 дня",
+        "limits": {
+          "listings": 50,
+          "banners": 3,
+          "ai_templates": 5,
+          "images": 20
+        }
+      },
+      "tariff_1": {
+        "label": "Тариф 1",
+        "price_rub": 7000,
+        "limits": {
+          "listings": 1000,
+          "banners": 15,
+          "ai_templates": 30,
+          "images": 100
+        }
+      },
+      "tariff_2": {
+        "label": "Тариф 2",
+        "price_rub": 14000,
+        "limits": {
+          "listings": 3000,
+          "banners": 40,
+          "ai_templates": 50,
+          "images": 100
+        }
+      }
+    }
+  },
+  "_detect_modes": {
+    "state": "сравнение текущего значения с порогом",
+    "trend": "изменение значения за окно времени"
+  },
+  "_detect_per": {
+    "account": "агрегат по аккаунту",
+    "item": "на одно объявление",
+    "active_item": "на одно активное объявление"
+  },
+  "_trend_example": {
+    "metric": "views_per_item",
+    "mode": "trend",
+    "window": "28d",
+    "operator": "down",
+    "percent": 20,
+    "note": "формат заложен; в первой версии платформы используется только mode=state"
+  },
+  "_confidence_values": {
+    "confirmed": "подтверждено данными или решением владельца",
+    "observed": "наблюдение по одному клиенту, на нишу пока не переносится",
+    "hypothesis": "рабочая гипотеза, ждёт подтверждения"
+  },
+  "_confidence_note": "В client_facts колонка confidence — ЧИСЛО 0-100. Здесь это перечисление. Загрузчику запрещено копировать значение напрямую между хранилищами.",
+  "_source_priority": ["dialogs", "onboarding", "client", "manual", "analytics", "support"],
+  "_source_priority_note": "Порядок разрешения конфликта, когда один и тот же факт приходит из нескольких источников: левее — приоритетнее."
+}

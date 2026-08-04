@@ -1,0 +1,238 @@
+{
+  "slug": "korpusnaya-mebel",
+  "schema_version": 4,
+  "version": 1,
+  "approved_by": "TO_CONFIRM",
+  "approved_at": null,
+  "last_verified": "2026-08-04",
+  "name": "Корпусная мебель на заказ",
+  "aliases": ["корпусная мебель", "мебель на заказ", "мебель по индивидуальным размерам", "шкафы-купе", "шкафы купе на заказ", "кухни на заказ", "кухонные гарнитуры", "гардеробные", "гардеробные на заказ", "прихожие", "встроенная мебель", "мебель под ключ"],
+  "summary": "Производство корпусной мебели по индивидуальным проектам: замер, проектирование, изготовление и установка у заказчика.",
+  "avito": {
+    "status": "confirmed",
+    "confidence": "confirmed",
+    "last_verified": "2026-08-04",
+    "categories": [
+      {
+        "name": "Шкафы, комоды и стеллажи",
+        "template_id": "68076",
+        "category_path": "Для дома и дачи > Мебель и интерьер > Шкафы, комоды и стеллажи",
+        "fields_count": 60,
+        "note": "Основная категория. В базе лежит четырьмя строками (id 1, 10, 11, 13), в том числе под именем «гардеробные на заказ» — соответствие вести по template_id, не по имени"
+      },
+      {
+        "name": "Кухонные гарнитуры",
+        "template_id": "95712",
+        "category_path": "Для дома и дачи > Мебель и интерьер > Кухонные гарнитуры",
+        "fields_count": 57,
+        "note": "Две строки в базе (id 3, 12)"
+      },
+      {
+        "name": "Прихожие",
+        "template_id": "TO_CONFIRM",
+        "category_path": "TO_CONFIRM",
+        "fields_count": 10,
+        "note": "⚠️ Всего 10 характеристик против 57-60 у соседних категорий. Объявления по прихожим заведомо ранжируются слабее — это ограничение площадки, а не клиента"
+      }
+    ]
+  },
+  "thresholds": {
+    "min_active_items": {
+      "value": 50,
+      "unit": "активных объявлений",
+      "confidence": "hypothesis",
+      "source": "manual",
+      "scope": "per_account",
+      "last_verified": "2026-08-04",
+      "note": "Продуктовый порог, а не доказанный оптимум. Данные не показывают, что рост количества сам по себе поднимает обращения: 70 объявлений дали почти столько же обращений, сколько 210"
+    },
+    "min_views": {
+      "value": 3,
+      "unit": "просмотров на объявление за 7 дней",
+      "confidence": "observed",
+      "source": "analytics",
+      "scope": "per_item",
+      "last_verified": "2026-08-04",
+      "note": "Замер 29.07-04.08: 4,5 и 6,4 на объявление в неделю. Порог поставлен ниже обоих наблюдений"
+    },
+    "min_contacts": {
+      "value": 5,
+      "unit": "обращений за 7 дней",
+      "confidence": "observed",
+      "source": "analytics",
+      "scope": "per_account",
+      "last_verified": "2026-08-04",
+      "note": "Замер 29.07-04.08: 9 и 11 обращений в неделю"
+    },
+    "max_zero_view_ratio": {
+      "value": 0.6,
+      "unit": "доля позиций без единого просмотра",
+      "confidence": "observed",
+      "source": "analytics",
+      "scope": "per_account",
+      "last_verified": "2026-08-04",
+      "note": "У наблюдаемого клиента доля мёртвых позиций 0,65-0,84 — проблема сработает, и это будет правдой"
+    }
+  },
+  "goals": ["load_production", "increase_sales", "scale_avito"],
+  "problems": ["dead_items", "few_leads", "no_views", "weak_content"],
+  "capabilities": ["write_ads", "unique_texts", "make_banners", "refresh_ads", "duplicate_ads", "answer_clients", "learn_business", "unified_inbox"],
+  "kpi": {
+    "primary": ["contacts", "views"],
+    "secondary": ["active_items"]
+  },
+  "competitor_types": ["factory", "private", "dealer"],
+  "materials_needed": ["photos", "price_list", "faq", "warranty_terms", "delivery_terms"],
+  "connect": [
+    {
+      "key": "avito",
+      "required": true
+    },
+    {
+      "key": "website",
+      "required": false
+    },
+    {
+      "key": "telegram",
+      "required": false
+    }
+  ],
+  "seasonality": {
+    "status": "unknown",
+    "high": [],
+    "low": [],
+    "prepare_weeks": null,
+    "note": "Данных за полный год нет — снимки статистики ведутся с июля 2026. Заполнять только по опыту Кирилла, с пометкой manual"
+  },
+  "buyer_questions": [
+    {
+      "text": "Делаете мебель по индивидуальным размерам?",
+      "confidence": "observed",
+      "source_priority": "client",
+      "evidence": "client_facts, category=faq, аккаунты andrey_mebel_launzh_moskva_69737 и andrey_launzh_mebel_akkaunt_penza_82435",
+      "last_verified": "2026-08-04"
+    },
+    {
+      "text": "Работаете в определённом стиле?",
+      "confidence": "observed",
+      "source_priority": "client",
+      "evidence": "там же",
+      "last_verified": "2026-08-04"
+    },
+    {
+      "text": "Не могу определиться со стилем и наполнением — поможете?",
+      "confidence": "observed",
+      "source_priority": "client",
+      "evidence": "там же",
+      "last_verified": "2026-08-04"
+    },
+    {
+      "text": "Можно вписаться в мой бюджет?",
+      "confidence": "observed",
+      "source_priority": "client",
+      "evidence": "там же",
+      "last_verified": "2026-08-04"
+    },
+    {
+      "text": "Можно посмотреть материалы вживую?",
+      "confidence": "observed",
+      "source_priority": "client",
+      "evidence": "там же",
+      "last_verified": "2026-08-04"
+    },
+    {
+      "text": "Что входит в работу под ключ?",
+      "confidence": "observed",
+      "source_priority": "client",
+      "evidence": "там же",
+      "last_verified": "2026-08-04"
+    },
+    {
+      "text": "Кто отвечает за результат?",
+      "confidence": "observed",
+      "source_priority": "client",
+      "evidence": "там же",
+      "last_verified": "2026-08-04"
+    }
+  ],
+  "collect_from_client": [
+    {
+      "key": "price_logic",
+      "label": "От чего зависит цена",
+      "why": "Точную цену без размеров назвать нельзя, но объяснить логику расчёта нужно в первом же ответе"
+    },
+    {
+      "key": "lead_time",
+      "label": "Сроки изготовления",
+      "why": "Второй по частоте вопрос после цены"
+    },
+    {
+      "key": "materials",
+      "label": "С какими материалами и фурнитурой работаете",
+      "why": "Идёт и в объявления, и в ответы покупателям"
+    },
+    {
+      "key": "styles",
+      "label": "В каких стилях делаете",
+      "why": "Спрашивают напрямую, а без ответа BORIS вынужден отвечать общими словами"
+    },
+    {
+      "key": "full_cycle",
+      "label": "Что входит в работу под ключ",
+      "why": "Отделяет производителя от посредника — главный аргумент в этой нише"
+    },
+    {
+      "key": "showroom",
+      "label": "Есть ли где посмотреть материалы вживую",
+      "why": "Частый вопрос, закрывает недоверие"
+    }
+  ],
+  "limits": [
+    {
+      "text": "Точную цену нельзя называть до замера — стоимость зависит от размеров, материалов и наполнения",
+      "confidence": "confirmed",
+      "source_priority": "manual",
+      "evidence": "правило РОПа «Не называть точную цену без размеров», client_facts, confidence 100",
+      "last_verified": "2026-08-04"
+    },
+    {
+      "text": "Нельзя обещать срок меньше трёх дней — цикл включает замер, проект, согласование и производство",
+      "confidence": "confirmed",
+      "source_priority": "manual",
+      "evidence": "правило РОПа «Не обещать срок меньше трёх дней», client_facts, confidence 100",
+      "last_verified": "2026-08-04"
+    },
+    {
+      "text": "Цикл работы всегда многошаговый: замер, проектирование, 3D-визуализация, согласование, изготовление, доставка, подъём, сборка, установка. Продажа «в один клик» в этой нише не существует",
+      "confidence": "observed",
+      "source_priority": "client",
+      "evidence": "client_facts, category=usluga, 9 фактов",
+      "last_verified": "2026-08-04"
+    },
+    {
+      "text": "У категории «Прихожие» на Авито всего 10 характеристик против 57-60 у кухонь и шкафов — объявления по прихожим ранжируются слабее независимо от качества",
+      "confidence": "confirmed",
+      "source_priority": "analytics",
+      "evidence": "category_templates, замер полей 04.08",
+      "last_verified": "2026-08-04"
+    }
+  ],
+  "sources": [
+    {
+      "type": "client",
+      "ref": "client_facts аккаунтов Андрея, 63 факта, все confidence 100",
+      "date": "2026-08-04"
+    },
+    {
+      "type": "analytics",
+      "ref": "storage daily_stats, 54 суточных снимка с 08.07 по 04.08",
+      "date": "2026-08-04"
+    },
+    {
+      "type": "manual",
+      "ref": "category_templates, шаблоны 68076 и 95712",
+      "date": "2026-08-04"
+    }
+  ],
+  "_not_included": ["скидка 10% на второе изделие — факт клиента", "работа с 2016 года и опыт 20 лет — факт клиента", "партнёрская комиссия 10% — факт клиента", "конверсия просмотр→обращение 2,8% и 0,8% — знание о клиенте, место в client_facts и аналитике", "работа в «Базис-Мебельщик» и 3ds Max — факт клиента"]
+}
