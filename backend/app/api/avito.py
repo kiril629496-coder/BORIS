@@ -573,6 +573,12 @@ class FeedItem(BaseModel):
     date_end: str = ""
     timezone: str = ""
     source_batch_id: int | None = None
+    # Контракт категории Avito. Пустые = контракт не определён (contract_required).
+    # Заполняются экраном выбора категории; автоподстановка из category_id запрещена.
+    template_id: str = ""
+    category_leaf_id: str = ""
+    category_path: str = ""
+    contract_version: str = ""
 
 class GenerateFeedRequest(BaseModel):
     account_id: str
@@ -1686,7 +1692,11 @@ def _draft_to_feed_item(d: dict) -> "FeedItem":
         params=d.get("params", {}),
         date_begin=d.get("date_begin", ""),
         date_end=d.get("date_end", ""),
-        timezone=d.get("timezone", "")
+        timezone=d.get("timezone", ""),
+        template_id=d.get("template_id") or "",
+        category_leaf_id=d.get("category_leaf_id") or "",
+        category_path=d.get("category_path") or "",
+        contract_version=d.get("contract_version") or "",
     )
 
 
@@ -1862,6 +1872,44 @@ def _publish_drafts_impl(req: PublishDraftsRequest, db):
             _d["timezone"] = req.timezone
     new_feed_items = [_draft_to_feed_item(d) for d in to_publish]
 
+    # --- Контрактная проверка категории (врезка 1/3) ---
+    # Проверяются ТОЛЬКО новые объявления. existing_feed уже сохранён и повторной
+    # проверке не подлежит: у старых записей template_id пуст, и они не должны
+    # блокировать публикацию новых. Атомарность: один невалидный новый элемент с
+    # контрактом -> не сохраняется НИ ОДИН новый, старый фид остаётся прежним.
+    _new_with = [it for it in new_feed_items if str(getattr(it, "template_id", "") or "").strip()]
+    _new_without = [it for it in new_feed_items if not str(getattr(it, "template_id", "") or "").strip()]
+    _contract_report = None
+    if _new_with:
+        from app.api.feed_contract import validate_feed_batch as _vfb
+        _contract_report = _vfb(_new_with, {})
+        if not _contract_report["ok"]:
+            _titles = {it.id: it.title for it in new_feed_items}
+            _audit_log(req.account_id, "publish_contract_failed",
+                       f"Публикация отменена: {len(_contract_report['blocked'])} объявлений не прошли контракт категории",
+                       actor="boris")
+            return {
+                "status": "error",
+                "contract_status": "contract_failed",
+                "message": "Часть объявлений не прошла проверку категории. Публикация отменена, черновики сохранены.",
+                "checked": len(_new_with),
+                "blocked": _contract_report["blocked"],
+                "blocked_count": len(_contract_report["blocked"]),
+                "by_code": _contract_report["by_code"],
+                "without_contract": [it.id for it in _new_without],
+                "contract_report": [
+                    {"item_id": r["id"], "title": _titles.get(r["id"], ""),
+                     "template_id": r["template_id"], "category_leaf": r["category_leaf"],
+                     "code": e["code"], "field": e.get("field", ""),
+                     "label": e.get("label", "") or e.get("field", ""),
+                     "current_value": e.get("value", ""),
+                     "allowed_values": e.get("allowed_values", []),
+                     "format_rule": e.get("format_rule", ""),
+                     "message": e.get("message", "")}
+                    for r in _contract_report["items"] if not r["valid"] for e in r["errors"]
+                ],
+            }
+
     _save_feed_items(req.account_id, existing_feed + new_feed_items)
     _save_drafts(req.account_id, remaining)
 
@@ -1898,7 +1946,26 @@ def _publish_drafts_impl(req: PublishDraftsRequest, db):
         pass  # A/B-связка необязательна для успешной публикации, не должна её ломать
 
     _push_notification(req.account_id, f"✅ Фид опубликован: {len(to_publish)} объявлений, 0 ошибок.")
-    return {"status": "ok", "published": len(to_publish)}
+    # Диагностика контракта в успешном ответе. Существующие поля и значение
+    # status не меняются - фронт может быть на них завязан.
+    _contract_status = "contract_required" if _new_without else "success"
+    return {
+        "status": "ok",
+        "published": len(to_publish),
+        "contract_status": _contract_status,
+        "checked": len(_new_with),
+        "blocked": [],
+        "blocked_count": 0,
+        "without_contract": [
+            str(getattr(it, "id", "") or ("batch_index:%d" % idx))
+            for idx, it in enumerate(_new_without)
+        ],
+        "contract_message": (
+            "Часть объявлений опубликована без проверки параметров категории. "
+            "Определите категорию Avito для полной проверки."
+            if _new_without else ""
+        ),
+    }
 
 
 def _client_money(account_id: str, db) -> dict:

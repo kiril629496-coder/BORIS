@@ -1,4 +1,5 @@
 "use client";
+import { fetchOnboardingStatus } from "../lib/onboardingClient";
 import { useState, useEffect, useRef } from "react";
 import { Sidebar } from "../ui/Sidebar";
 import { Mascot } from '../components/Mascot';
@@ -446,6 +447,8 @@ export default function Home() {
     scheduleDays: ["пн","вт","ср","чт","пт"], delayMin: 2, delayMax: 3,
   });
   const [accounts, setAccounts] = useState<any[]>([]);
+  const [accountsError, setAccountsError] = useState("");
+  const [prefillDone, setPrefillDone] = useState(false);
   const navRouter = useRouter();
   const [userRole, setUserRole] = useState<string>("");
   const [showAccountsList, setShowAccountsList] = useState(false);
@@ -477,7 +480,7 @@ export default function Home() {
       localStorage.removeItem("boris_just_registered");
       showBorisNotify(
         "Добро пожаловать в БОРИС! 👋",
-        "Ваш аккаунт создан, пробный период — 4 дня. Чтобы Борис начал публиковать и вести объявления, укажите Client ID и Client Secret вашего Avito API во вкладке «Компания» — без них он не сможет подключиться к вашему кабинету Avito."
+        "Ваш аккаунт создан, пробный период — 4 дня. Начните с подходящего сценария — БОРИС покажет, что делать шаг за шагом. Подключить Avito можно в любой момент кнопкой «Подключить аккаунт»."
       );
     }
   }, []);
@@ -495,21 +498,45 @@ export default function Home() {
             comment: "",
             company: {},
           })));
-          if (!data.accounts || data.accounts.length === 0) {
-            setShowAddForm(true);
-            setStep(0);
-          }
+          // P0.2: автопоказ визарда снят. Задачу выбирает каталог сценариев,
+          // подключение Avito открывается кнопкой «Подключить аккаунт».
         } else {
-          setShowAddForm(true);
-          setStep(0);
+          setAccountsError(data.message || "Не удалось загрузить список аккаунтов");
         }
       })
-      .catch(() => { setShowAddForm(true); setStep(0); });
+      .catch(() => { setAccountsError("Не удалось связаться с сервером"); });
+  }, []);
+  // P0.2: форма подключения Avito открывается только по явному сигналу.
+  // Параметр ставит кнопка с Главной; после открытия убираем его из адреса,
+  // чтобы обновление страницы не открывало форму снова.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.location.search.indexOf("connect=avito") === -1) return;
+    setShowAddForm(true);
+    setStep(1);
+    window.history.replaceState({}, "", "/dashboard");
   }, []);
   const [newAccount, setNewAccount] = useState({
     name: "", login: "", password: "", comment: "", client_id: "", client_secret: "",
     companyWebsite: "", companyDescription: "", companyNiche: "", companyTone: "Дружелюбный", companyAdvantages: ""
   });
+  // P0.2: один раз при явном открытии формы подставляем то, что клиент уже
+  // рассказал в мастере. Только в пустые поля — поверх набранного не пишем.
+  useEffect(() => {
+    if (!showAddForm || prefillDone) return;
+    setPrefillDone(true);
+    fetchOnboardingStatus()
+      .then((st: any) => {
+        const f: any = (st && st.form_data) || {};
+        setNewAccount((p: any) => ({
+          ...p,
+          name: p.name || f.company_name || "",
+          companyNiche: p.companyNiche || f.company_niche || "",
+          companyWebsite: p.companyWebsite || f.website || "",
+        }));
+      })
+      .catch(() => {});
+  }, [showAddForm, prefillDone]);
   const [analysisQuery, setAnalysisQuery] = useState("");
   const [analysisCities, setAnalysisCities] = useState("Москва, Санкт-Петербург, Казань");
   const [analysisLoading, setAnalysisLoading] = useState(false);
@@ -4597,7 +4624,7 @@ export default function Home() {
         <>
         <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"24px"}}>
           <h2 style={{margin:0, fontSize:"23px"}}>Аккаунты Авито</h2>
-          <button onClick={() => { setShowAddForm(true); setStep(0); }} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 20px", fontWeight:"bold", cursor:"pointer"}}>+ Добавить аккаунт</button>
+          <button onClick={() => { setShowAddForm(true); setStep(1); }} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 20px", fontWeight:"bold", cursor:"pointer"}}>+ Добавить аккаунт</button>
         </div>
 
         {showAddForm && (
@@ -4724,12 +4751,19 @@ export default function Home() {
           <div style={{color:"#667085", fontSize:"15px", marginBottom:"16px"}}>Выберите аккаунт, чтобы продолжить работу</div>
         )}
 
-        {accounts.length === 0 && !showAddForm && (
+        {accountsError && !showAddForm && (
+          <div style={{background:"#FFFFFF", borderRadius:"12px", padding:"32px 24px", border:"1px solid #FEE4E2", textAlign:"center", marginBottom:"16px"}}>
+            <div style={{fontSize:"18px", fontWeight:700, color:"#B42318", marginBottom:"8px"}}>Не удалось загрузить список аккаунтов</div>
+            <div style={{color:"#667085", fontSize:"15px", marginBottom:"20px"}}>{accountsError}</div>
+            <button className="boris-btn-hover" onClick={() => window.location.reload()} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"12px 28px", fontWeight:"bold", fontSize:"15px", cursor:"pointer"}}>Повторить</button>
+          </div>
+        )}
+        {accounts.length === 0 && !showAddForm && !accountsError && (
           <div style={{background:"#FFFFFF", borderRadius:"12px", padding:"40px 24px", border:"1px solid #EEF2FA", textAlign:"center"}}>
             <div style={{fontSize:"40px", marginBottom:"12px"}}>🔌</div>
             <div style={{fontSize:"18px", fontWeight:700, color:"#1D2939", marginBottom:"8px"}}>Пока нет ни одного аккаунта Авито</div>
             <div style={{color:"#667085", fontSize:"15px", marginBottom:"20px"}}>Подключите аккаунт — Борис начнёт работать с вашими объявлениями</div>
-            <button className="boris-btn-hover" onClick={() => { setShowAddForm(true); setStep(0); }} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"12px 28px", fontWeight:"bold", fontSize:"15px", cursor:"pointer"}}>Подключить аккаунт</button>
+            <button className="boris-btn-hover" onClick={() => { setShowAddForm(true); setStep(1); }} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"12px 28px", fontWeight:"bold", fontSize:"15px", cursor:"pointer"}}>Подключить аккаунт</button>
             <div style={{marginTop:"16px"}}>
               <button onClick={() => router.push("/dashboard/home")} style={{background:"none", border:"none", color:"#667085", fontSize:"15px", cursor:"pointer", textDecoration:"underline"}}>Вернуться в кабинет</button>
             </div>

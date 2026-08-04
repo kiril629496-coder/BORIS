@@ -53,7 +53,10 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    if (account) load(account);
+    // P0.2: раньше при пустом account загрузка не запускалась вовсе и
+    // loading висел вечно — клиент без аккаунта не видел кнопку подключения.
+    // load сам обрабатывает пустое значение и снимает loading.
+    load(account);
   }, [account, load]);
 
   const go = (item: any) => {
@@ -143,7 +146,7 @@ export default function HomePage() {
             <div className={styles.emptyText}>
               Добавьте аккаунт — после этого я смогу видеть объявления и работать с ними.
             </div>
-            <button className={styles.btnFill} onClick={() => openRoute("/dashboard")}>Подключить аккаунт</button>
+            <button className={styles.btnFill} onClick={() => openRoute("/dashboard?connect=avito")}>Подключить аккаунт</button>
           </div>
         )}
 
