@@ -458,7 +458,10 @@ def _send_vk(owner_id, text, banner_path):
     V = "5.199"
     group_id = str(owner_id).lstrip("-")
     attachments = None
-    if banner_path and os.path.exists(banner_path):
+    for _try in range(3):
+      if not (banner_path and os.path.exists(banner_path)):
+        break
+      if True:
         try:
             send_path = banner_path
             try:
@@ -479,8 +482,12 @@ def _send_vk(owner_id, text, banner_path):
                 proxies=proxies, timeout=30).json()
             p = sv["response"][0]
             attachments = "photo" + str(p["owner_id"]) + "_" + str(p["id"])
+            break
         except Exception as e:
-            return {"ok": False, "error": "загрузка фото ВК: " + type(e).__name__ + " " + str(e)[:200]}
+            _err = "загрузка фото ВК: " + type(e).__name__ + " " + str(e)[:200]
+            if _try < 2:
+                import time as _t2; _t2.sleep(3); continue
+            return {"ok": False, "error": _err}
     params = {"access_token": token, "v": V, "owner_id": str(owner_id),
               "from_group": 1, "message": text}
     if attachments:
@@ -540,7 +547,18 @@ def _with_tags(text, tags):
     return text.rstrip() + "\n\n" + " ".join(_rnd_t.sample(pool, n))
 
 
+def _air_blocks(text):
+    """Разводит строки поста пустой строкой — «воздух». Если автор уже поставил
+    пустые строки (2 и больше), ничего не трогаем."""
+    t = (text or "").strip()
+    if t.count("\n\n") >= 2:
+        return t
+    lines = [ln.strip() for ln in t.split("\n") if ln.strip()]
+    return "\n\n".join(lines)
+
+
 def _with_contact(text, contact):
+    text = _air_blocks(text)
     contact = (contact or "").strip()
     if not contact:
         return text

@@ -4,6 +4,7 @@ import { Mascot } from '../components/Mascot';
 import { useRouter } from "next/navigation";
 import TurnstileBox from "../lib/turnstile";
 import { registerUser, persistSession, rememberVerification } from "../lib/register";
+import { resolvePostAuthRoute } from "../lib/onboardingClient";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -78,7 +79,7 @@ export default function Login() {
         router.push("/verify");
         return;
       }
-      if (data.user.role === "manager") { router.push("/manager"); } else { router.push("/dashboard/home"); }
+      router.push(await resolvePostAuthRoute(data.user));
     } catch (e) {
       setError("Не удалось связаться с сервером");
       setLoading(false);

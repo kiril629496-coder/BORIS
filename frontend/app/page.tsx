@@ -33,6 +33,7 @@ import { Mascot } from './components/Mascot';
 
 import { registerUser, persistSession, rememberVerification } from './lib/register';
 import TurnstileBox from './lib/turnstile';
+import { resolvePostAuthRoute } from './lib/onboardingClient';
 interface LandingPageProps {
  previewContent?: Record<string, any>; // Optional content passed from Admin Panel live-preview
 }
@@ -333,8 +334,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ previewContent }) => {
       return;
     }
     setRegSuccess(true);
+    const nextRoute = await resolvePostAuthRoute(r.data.user);
     setTimeout(() => {
-      window.location.href = '/dashboard/home';
+      window.location.href = nextRoute;
     }, 1800);
   };
 

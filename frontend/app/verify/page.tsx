@@ -1,4 +1,5 @@
 "use client";
+import { resolvePostAuthRoute } from "../lib/onboardingClient";
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import TurnstileBox from "../lib/turnstile";
@@ -120,8 +121,7 @@ export default function VerifyEmail() {
     }
     forgetVerification();
     persistSession(r.data, true);
-    if (r.data.user?.role === "manager") router.push("/manager");
-    else router.push("/dashboard/home");
+    router.push(await resolvePostAuthRoute(r.data.user));
   };
 
   const doResend = async () => {

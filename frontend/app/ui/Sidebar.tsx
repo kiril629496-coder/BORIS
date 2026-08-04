@@ -11,6 +11,7 @@ import React from "react";
 import { Icon } from "./index";
 import { color, radius, space, font, layout } from "./tokens";
 import { MENU } from "./menu";
+import { useOnboardingGuard } from "../lib/useOnboardingGuard";
 
 export function Sidebar({ activeKey, onSelect, guideKey, mobileOpen, onCloseMobile }:
   { activeKey?: string; onSelect?: (key: string) => void; guideKey?: string;
@@ -75,6 +76,7 @@ export function Shell({ activeKey, children }:
   { activeKey?: string; children: React.ReactNode }) {
   const [open, setOpen] = React.useState(false);
   const [narrow, setNarrow] = React.useState(false);
+  const gate = useOnboardingGuard({ mode: "protect" });
 
   React.useEffect(() => {
     const check = () => setNarrow(window.innerWidth < 900);
@@ -83,6 +85,7 @@ export function Shell({ activeKey, children }:
     return () => window.removeEventListener("resize", check);
   }, []);
 
+  if (!gate.ready) return gate.fallback;
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: color.bg }}>
       {narrow ? (

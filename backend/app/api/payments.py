@@ -459,3 +459,17 @@ def grant_package(acc, pack, p, db, amount=None, source="robokassa", inv_id=None
         else:
             from app.api.billing import add_extra
             add_extra(acc, p["unit"], p["qty"])
+
+    # единый сервис лимитов продукта: период не создаёт, читает уже выставленный
+    try:
+        import logging as _lg
+        from app.product_limits import grant_product_limits
+        _pl = grant_product_limits(db, acc, pack)
+        if _pl.get("status") not in ("granted", "no_reactivation_limit"):
+            _lg.getLogger(__name__).warning(
+                "реактивация: лимит не начислен (%s), пакет=%s аккаунт=%s",
+                _pl.get("status"), pack, acc)
+    except Exception as _e:
+        import logging as _lg
+        _lg.getLogger(__name__).error(
+            "реактивация: сбой начисления лимита, пакет=%s аккаунт=%s: %s", pack, acc, _e)
