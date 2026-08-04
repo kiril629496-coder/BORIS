@@ -27,7 +27,8 @@
   "threshold_scopes": ["per_account", "per_item", "per_active_item"],
 
   "module_slices": {
-    "onboarding": ["summary", "goals", "problems", "capabilities", "connect", "materials_needed"],
+    "onboarding": ["summary", "goals", "problems", "capabilities", "connect",
+                    "materials_needed", "buyer_questions", "avito"],
     "scenarios": ["goals", "problems"],
     "mop": ["buyer_questions", "collect_from_client", "limits"],
     "rop": ["buyer_questions", "kpi", "thresholds"],

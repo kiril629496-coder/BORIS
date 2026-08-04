@@ -57,6 +57,9 @@ TEXT_FIELDS = {
     "city": 120,
     "website": 500,
     "phone": 50,
+    # P0.3: выбор ниши при неоднозначном резолве. Хранится рядом с ответами,
+    # свободный текст company_niche при этом не меняется.
+    "resolved_niche_slug": 64,
 }
 URL_FIELDS = ("website",)
 LIST_FIELDS = ("channels",)
@@ -457,5 +460,115 @@ def complete(user=Depends(get_current_user)):
             {"s": STATUS_COMPLETED, "u": row["user_id"]})
         db.commit()
         return _public(_fetch(db, row["user_id"]))
+    finally:
+        db.close()
+
+
+# --- P0.3: персональный анализ -------------------------------------------
+
+from app import niches as _niches                     # noqa: E402
+from app import analysis_onboarding as _analysis      # noqa: E402
+
+# Внутренняя продуктовая аналитика BORIS. В Яндекс.Метрику ничего не уходит:
+# в кабинете она намеренно отключена ради приватности клиентов.
+ALLOWED_EVENTS = (
+    "onboarding_analysis_opened",
+    "onboarding_analysis_completed",
+    "onboarding_niche_matched",
+    "onboarding_niche_ambiguous",
+    "onboarding_niche_not_found",
+    "onboarding_niche_selected",
+    "onboarding_scenarios_clicked",
+)
+
+
+class EventBody(BaseModel):
+    event: str
+    payload: Dict[str, Any] = {}
+
+
+class NicheChoiceBody(BaseModel):
+    slug: str
+
+
+def _log_event(db, user_id, event, payload=None):
+    """Пишет продуктовое событие. Любая ошибка здесь не должна ломать ответ."""
+    try:
+        db.execute(_sql(
+            "INSERT INTO product_events (user_id, event, payload)"
+            " VALUES (:u, :e, CAST(:p AS jsonb))"),
+            {"u": user_id, "e": event, "p": _dumps(payload or {})})
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+@router.get("/analysis")
+def analysis(user=Depends(get_current_user)):
+    """Персональный анализ. Только form_data и База знаний, без вызовов модели."""
+    db = SessionLocal()
+    try:
+        row = _ensure(db, user)
+        form = row["form_data"] or {}
+
+        chosen = (form.get("resolved_niche_slug") or "").strip()
+        if chosen and _niches.get(chosen):
+            resolution = _niches.NicheResolution("matched", slug=chosen)
+            resolved_by = "user"
+        else:
+            resolution = _niches.resolve(form.get("company_niche") or "")
+            resolved_by = "auto"
+
+        out = _analysis.build(form, _niches, resolution)
+        out["resolved_by"] = resolved_by
+        out["onboarding_status"] = row["status"]
+        out["knowledge"] = {"schema_version": _niches.health().get("schema_version"),
+                            "niches_ok": _niches.health().get("niches_ok")}
+
+        _log_event(db, row["user_id"], "onboarding_analysis_opened",
+                   {"status": resolution.status, "resolved_by": resolved_by})
+        _log_event(db, row["user_id"], "onboarding_niche_" + resolution.status,
+                   {"slug": resolution.slug, "candidates": resolution.candidates})
+        return out
+    finally:
+        db.close()
+
+
+@router.post("/resolve_niche")
+def resolve_niche(body: NicheChoiceBody, user=Depends(get_current_user)):
+    """Выбор ниши при неоднозначном резолве.
+
+    Отдельный эндпоинт, а не /step: экран анализа открывается уже после
+    завершения мастера, а /step для завершённого отвечает 409.
+    Свободный текст company_niche не меняется — сохраняется только выбор.
+    """
+    slug = (body.slug or "").strip()
+    if not _niches.get(slug):
+        raise _fail("onboarding_unknown_niche", [slug])
+
+    db = SessionLocal()
+    try:
+        row = _ensure(db, user)
+        form = dict(row["form_data"] or {})
+        form["resolved_niche_slug"] = slug
+        db.execute(_sql(
+            "UPDATE user_onboarding SET form_data = CAST(:d AS jsonb), updated_at = now()"
+            " WHERE user_id = :u"), {"d": _dumps(form), "u": row["user_id"]})
+        db.commit()
+        _log_event(db, row["user_id"], "onboarding_niche_selected", {"slug": slug})
+        return _public(_fetch(db, row["user_id"]))
+    finally:
+        db.close()
+
+
+@router.post("/event")
+def product_event(body: EventBody, user=Depends(get_current_user)):
+    """Продуктовое событие с фронта. Имена — только из белого списка."""
+    if body.event not in ALLOWED_EVENTS:
+        raise _fail("onboarding_unknown_event", [body.event])
+    db = SessionLocal()
+    try:
+        _log_event(db, getattr(user, "id", 0), body.event, body.payload or {})
+        return {"status": "ok"}
     finally:
         db.close()
