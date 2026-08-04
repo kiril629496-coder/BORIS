@@ -13,6 +13,7 @@ export const MENU: MenuGroup[] = [
     group: "Работа",
     items: [
       { key: "home", label: "Главная", icon: "home", href: "/dashboard/home" },
+      { key: "messages", label: "Сообщения", icon: "messages", href: "/messages" },
       { key: "listings", label: "Объявления", icon: "list" },
       { key: "plan", label: "Задачи и план", icon: "tasks" },
       { key: "settings", label: "Режим работы", icon: "shield" },
@@ -49,8 +50,10 @@ export const MENU: MenuGroup[] = [
 
 /** Ключ пункта по текущему адресу — для экранов вне монолита */
 export function keyByPath(path: string): string {
-  for (const g of MENU)
-    for (const it of g.items)
-      if (it.href && path.startsWith(it.href)) return it.key;
+  const all: MenuItem[] = [];
+  for (const g of MENU) for (const it of g.items) if (it.href) all.push(it);
+  // длинные href первыми: /messages/setup не должен совпасть с /messages
+  all.sort((a, b) => (b.href as string).length - (a.href as string).length);
+  for (const it of all) if (path.startsWith(it.href as string)) return it.key;
   return "";
 }

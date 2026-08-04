@@ -93,7 +93,7 @@ def generate_infographic_banner(
     photo_source: str = "ai",
     ai_quality: str = "medium",
     ai_model: str = "gpt-image-2",
-    own_photo_path: str = None,
+    own_photo_path: str = None, account_id: str = None, operation: str = "генерация изображения",
 ) -> str:
     """
     Инфографика для объявления, 1080x1080.
@@ -118,7 +118,7 @@ def generate_infographic_banner(
             ai_prompt = f"{photo_query}, photorealistic, professional advertising photography, vivid colors, high quality, natural lighting, square composition"
             photo_path = generate_ai_image(
                 ai_prompt, "/tmp/_banner_bg_photo_ai.png",
-                size="1024x1024", quality=ai_quality, model=ai_model,
+                size="1024x1024", quality=ai_quality, model=ai_model, account_id=account_id, operation=operation,
             )
         else:
             photo_path = get_photo_stock(photo_query, "/tmp/_banner_bg_photo.jpg", orientation="square")
@@ -460,7 +460,7 @@ def _generate_single_slide(
     bg_color_bottom: str = "#F7931E",
     photo_source: str = "pexels",  # "pexels" | "ai"
     ai_quality: str = "medium",
-    ai_model: str = "gpt-image-1-mini",
+    ai_model: str = "gpt-image-1-mini", account_id: str = None, operation: str = "генерация изображения",
 ) -> Image.Image:
     """Строит ОДИН самостоятельный слайд размера slide_w x slide_h:
     своё фото-фон (contain+blur, без искажений) + свой текст снизу + иконка."""
@@ -479,7 +479,7 @@ def _generate_single_slide(
                 f"/tmp/_slide_ai_{abs(hash(photo_query))}.png",
                 size="1024x1024",
                 quality=ai_quality,
-                model=ai_model,
+                model=ai_model, account_id=account_id, operation=operation,
             )
         else:
             photo_path = get_photo_stock(photo_query, f"/tmp/_slide_bg_{abs(hash(photo_query))}.jpg", orientation="landscape")
@@ -577,7 +577,7 @@ def generate_carousel_banner_v2(
     variant: str = "pc",
     output_dir: str = "/tmp",
     photo_source: str = "ai",
-    ai_quality: str = "medium",
+    ai_quality: str = "medium", account_id: str = None, operation: str = "генерация изображения",
 ) -> list[str]:
     """Карусель для Максимального тарифа — КАЖДЫЙ слайд самостоятельный
     (своё фото + свой текст), единый стиль (цвета/шрифт/иконка)."""
@@ -605,7 +605,7 @@ def generate_carousel_banner_v2(
             bg_color_top=bg_color_top,
             bg_color_bottom=bg_color_bottom,
             photo_source=photo_source,
-            ai_quality=ai_quality,
+            ai_quality=ai_quality, account_id=account_id, operation=operation,
         )
         path = f"{output_dir}/carousel_v2_{variant}_slide_{i+1}.png"
         slide_img.convert("RGB").save(path, "PNG", quality=95)
@@ -614,7 +614,7 @@ def generate_carousel_banner_v2(
     return saved_paths
 
 
-def generate_ai_image(prompt: str, save_path: str, size: str = "1024x1024", quality: str = "low", model: str = "gpt-image-1-mini") -> str | None:
+def generate_ai_image(prompt: str, save_path: str, size: str = "1024x1024", quality: str = "low", model: str = "gpt-image-1-mini", account_id: str = None, operation: str = "генерация изображения") -> str | None:
     """
     Генерирует изображение через OpenAI Images API (GPT Image).
     quality: 'low' | 'medium' | 'high'. model: 'gpt-image-1-mini' (дёшево) | 'gpt-image-2' (флагман).
@@ -629,6 +629,7 @@ def generate_ai_image(prompt: str, save_path: str, size: str = "1024x1024", qual
         return None
 
     max_attempts = 3
+    logged = set()
     for attempt in range(1, max_attempts + 1):
         try:
             proxies = get_intl_requests_proxies()  # СВЕЖИЙ случайный порт на КАЖДУЮ попытку -
@@ -638,15 +639,39 @@ def generate_ai_image(prompt: str, save_path: str, size: str = "1024x1024", qual
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json={"model": model, "prompt": prompt, "size": size, "quality": quality, "n": 1},
                 proxies=proxies,
-                timeout=90,
+                timeout=240,
             )
             if resp.status_code != 200:
                 print(f"[generate_ai_image] Попытка {attempt}: статус {resp.status_code}, {resp.text[:200]}", flush=True)
                 continue
-            data = resp.json()
-            img_b64 = data["data"][0]["b64_json"]
-            with open(save_path, "wb") as f:
-                f.write(base64.b64decode(img_b64))
+            rid = resp.headers.get("x-request-id")
+            try:
+                data = resp.json()
+                img_b64 = (data.get("data") or [{}])[0].get("b64_json")
+            except Exception as _pe:
+                img_b64 = None
+                print(f"[generate_ai_image] Попытка {attempt}: ответ 200, но разбор не удался: {str(_pe)[:120]}", flush=True)
+            if not img_b64:
+                print(f"[generate_ai_image] Попытка {attempt}: ответ 200 без b64_json (request_id={rid}) - расход не записан", flush=True)
+                continue
+            # провайдер вернул ОПЛАЧИВАЕМЫЙ результат - учитываем ДО локальной обработки
+            if rid not in logged:
+                try:
+                    from app.usage import log_usage as _log_img
+                    _log_img(account_id, "openai", model, operation,
+                             images=1, request_id=rid,
+                             size=size, quality=quality)
+                    if rid:
+                        logged.add(rid)
+                except Exception as _ue:
+                    print("[usage]", str(_ue)[:100], flush=True)
+            try:
+                decoded = base64.b64decode(img_b64)
+                with open(save_path, "wb") as f:
+                    f.write(decoded)
+            except Exception as _fe:
+                print(f"[generate_ai_image] Попытка {attempt}: ответ учтён, но файл не сохранён: {str(_fe)[:120]}", flush=True)
+                continue
             print(f"[generate_ai_image] Сгенерировано через {model}/{quality} (попытка {attempt}): «{prompt[:60]}...»", flush=True)
             return save_path
         except Exception as e:
@@ -674,7 +699,7 @@ def _generate_diagonal_slide(
     phone: str = "",  # телефон — нижняя контактная полоса
     address: str = "",  # адрес/зона доставки — нижняя контактная полоса
     ribbon_text: str = "",  # угловая лента-бейдж, напр. "ОПЫТ 10+ ЛЕТ"
-    ribbon_color: str = "#DC2626",  # цвет ленты (обычно красный, контрастный к accent_color)
+    ribbon_color: str = "#DC2626", account_id: str = None, operation: str = "генерация изображения",  # цвет ленты (обычно красный, контрастный к accent_color)
 ) -> Image.Image:
     """
     Слайд с ДИАГОНАЛЬНОЙ нарезкой: фото занимает параллелограмм слева,
@@ -698,7 +723,7 @@ def _generate_diagonal_slide(
             ai_prompt = f"{photo_query}, photorealistic, professional advertising photography, high quality, natural lighting"
             photo_path = generate_ai_image(
                 ai_prompt, f"/tmp/_diag_ai_{abs(hash(photo_query))}.png",
-                size="1024x1024", quality=ai_quality, model="gpt-image-1-mini",
+                size="1024x1024", quality=ai_quality, model="gpt-image-1-mini", account_id=account_id, operation=operation,
             )
         else:
             photo_path = get_photo_stock(photo_query, f"/tmp/_diag_bg_{abs(hash(photo_query))}.jpg", orientation="landscape")

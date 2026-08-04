@@ -306,10 +306,10 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
     text = post.get("text", "")
     results = {}
     if proj.get("channel_tg") and platforms in ("tg", "both"):
-        results["tg"] = pr._send_telegram(proj["channel_tg"], pr._with_contact(text, proj.get("contact_tg", "")), banner)
+        results["tg"] = pr._send_telegram(proj["channel_tg"], pr._with_tags(pr._with_contact(text, proj.get("contact_tg", "")), proj.get("hashtags")), banner)
     if proj.get("vk_owner_id") and platforms in ("vk", "both"):
-        results["vk"] = pr._send_vk(int(proj["vk_owner_id"]), pr._with_contact(text, proj.get("contact_vk", "")), banner)
-    ok = any(r.get("ok") for r in results.values())
+        results["vk"] = pr._send_vk(int(proj["vk_owner_id"]), pr._with_tags(pr._with_contact(text, proj.get("contact_vk", "")), proj.get("hashtags")), banner)
+    ok = bool(results) and all(r.get("ok") for r in results.values())  # черновик снимаем только если ушло ВЕЗДЕ
     if ok:
         db = SessionLocal()
         try:
@@ -318,7 +318,9 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
             _save(db, body.account_id, "posting_posts", posts)
         finally:
             db.close()
-    return {"status": "ok" if ok else "fail", "results": {k: bool(v.get("ok")) for k, v in results.items()}}
+    return {"status": "ok" if ok else "fail",
+            "results": {k: bool(v.get("ok")) for k, v in results.items()},
+            "errors": {k: str(v.get("error"))[:200] for k, v in results.items() if not v.get("ok")}}
 
 @router.get("/banner")
 def get_banner(f: str):

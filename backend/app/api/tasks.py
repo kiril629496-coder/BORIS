@@ -454,7 +454,7 @@ def _run_product_description(payload):
     price = payload.get("price", "")
     characteristics = payload.get("characteristics", {})
 
-    description = _generate_product_description(title, price, characteristics)
+    description = _generate_product_description(title, price, characteristics, account_id=payload.get("account_id"), operation="product_description")
 
     if product_idx is not None:
         db = SessionLocal()
@@ -541,7 +541,7 @@ def _run_enrich_parsed_descriptions(payload, task=None, db=None):
                 try:
                     p["ai_description"] = _generate_product_description(
                         p.get("title", ""), p.get("price", ""), p.get("characteristics") or {}, sample=sample
-                    )
+                    , account_id=getattr(task, "account_id", None), operation="parsed_description_enrichment")
                     ok = True
                     break
                 except Exception as e:
@@ -614,7 +614,7 @@ def _run_product_banner(payload):
         account_id=account_id,
         raw_description=desc,
         format="infographic",
-        reference_image_urls=[image] if image else []
+        reference_image_urls=[image] if image else [], operation="banner_product_card"
     )
     res = create_full_ai_banner(req)
     banner_url = res.get("url") or (res.get("urls", [None])[0] if res.get("urls") else None)
@@ -769,7 +769,7 @@ def _run_city_analysis(payload, task=None, db=None):
                 top5 = []
                 for it in top5_base:
                     detail = await _fetch_item_detail_headed(it["url"]) if it["url"] else {}
-                    advantages = _summarize_advantages(it["title"], detail.get("description"))
+                    advantages = _summarize_advantages(it["title"], detail.get("description"), account_id=(getattr(task, "account_id", None) or payload.get("account_id")), operation="city_analysis_advantages")
                     top5.append({
                         "title": it["title"], "price": it["price"], "url": it["url"],
                         "photos_count": detail.get("images_count"), "advantages": advantages,
@@ -1002,7 +1002,7 @@ def _run_ab_test(payload):
                 boris_opinion = chat_with_fallback(
                     [Messages(role=MessagesRole.USER, content=prompt)],
                     model=_GC_MODEL, credentials=GIGACHAT_KEY
-                ).strip()
+                , account_id=payload.get("account_id"), operation="ab_test_analysis").strip()
             except Exception as e:
                 boris_opinion = None
 
@@ -1234,7 +1234,7 @@ def _run_pipeline_texts(payload, task=None, db=None):
 
     from app.services.category_resolver import resolve_required_fields
     req_fields = resolve_required_fields(category_id=direction, niche=direction, api_category=category,
-                                          characteristics=_answer_characteristics)
+                                          characteristics=_answer_characteristics, account_id=getattr(task, "account_id", None))
     if req_fields.get("status") != "ok":
         reason = f"Не удалось получить обязательные поля категории: {req_fields.get('message', 'нет причины')}"
         _write_progress(1, 0, count, reason, finished=True)

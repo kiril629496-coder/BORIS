@@ -23,6 +23,8 @@ const inter = Inter({
   subsets: ["latin", "cyrillic"],
 });
 
+import Metrika from "./Metrika";
+
 export const metadata: Metadata = {
   title: "БОРИС — умный сервис интернет-рекламы",
   description: "БОРИС автоматизирует объявления, тексты, баннеры и аналитику. Ваша реклама работает, пока вы занимаетесь бизнесом.",
@@ -47,6 +49,7 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} ${manrope.variable} ${inter.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}        <BorisWidget />
+        <Metrika />
       </body>
     </html>
   );

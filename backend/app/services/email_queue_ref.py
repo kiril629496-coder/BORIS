@@ -67,7 +67,7 @@ def cancel_pending_verification(to_addr) -> int:
         db.close()
 
 
-def enqueue_verification(to, subject, body, verification_id) -> dict:
+def enqueue_verification(to, subject, body, verification_id, html=None) -> dict:
     """
     Письмо с кодом подтверждения. Дедлайн доставки берётся строго из самой
     verification-записи — формула TTL нигде не дублируется.
@@ -91,7 +91,7 @@ def enqueue_verification(to, subject, body, verification_id) -> dict:
         logger.info("email: письмо не ставится в очередь, код неактуален (%s)", stop)
         return {"id": None, "status": stop, "duplicate": False}
 
-    return enqueue_email(to, subject, body, source="auth",
+    return enqueue_email(to, subject, body, html=html, source="auth",
                          idempotency_key="auth-verification:%s" % verification_id,
                          ref_type="verification", ref_id=verification_id,
                          expires_at=expires_at)

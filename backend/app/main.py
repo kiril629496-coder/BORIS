@@ -34,6 +34,7 @@ from app.api.messenger import _reminder_loop
 from app.api.messenger import router as messenger_router
 from app.api.messenger_prompts import router as messenger_prompts_router
 from app.api.auth import router as auth_router, get_current_user_or_internal, check_account_access
+from app.api.onboarding import router as onboarding_router
 from app.models.user import User  # импорт на уровне модуля — чтобы create_all() увидел таблицу users при старте
 import threading as _threading
 
@@ -144,6 +145,7 @@ app.include_router(inbox_daily.router, dependencies=_protected)
 app.include_router(client_memory.router, dependencies=_protected)
 app.include_router(ai_bindings.router, dependencies=_protected)
 app.include_router(admin_clients.router, dependencies=_protected)
+app.include_router(onboarding_router, dependencies=[Depends(get_current_user_or_internal)])
 
 @app.get("/")
 def root():

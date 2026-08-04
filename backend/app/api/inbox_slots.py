@@ -573,7 +573,7 @@ def inbox_dialogs(account_id: str = "all", q: str = "", kind: str = "sales", use
             return {"status": "ok", "dialogs": []}
         q = text(
             "SELECT DISTINCT ON (account_id, avito_chat_id) "
-            "       account_id, avito_chat_id, item_id, item_title, direction, text, avito_created_at, item_owner_id "
+            "       account_id, avito_chat_id, item_id, item_title, direction, text, avito_created_at, item_owner_id, item_url "
             "  FROM messenger_messages WHERE account_id IN :ids "
             " ORDER BY account_id, avito_chat_id, avito_created_at DESC"
         ).bindparams(bindparam("ids", expanding=True))
@@ -582,7 +582,7 @@ def inbox_dialogs(account_id: str = "all", q: str = "", kind: str = "sales", use
         dialogs = []
         _own = {r[0]: (r[1] or "") for r in db.execute(text(
             "SELECT account_id, avito_user_id FROM account_slots WHERE account_id IS NOT NULL")).all()}
-        for acc, cid, item_id, item_title, direction, txt, created, iowner in rows:
+        for acc, cid, item_id, item_title, direction, txt, created, iowner, iurl in rows:
             _is_purchase = bool(iowner) and bool(_own.get(acc)) and str(iowner) != str(_own.get(acc))
             dialogs.append({
                 "account_id": acc,
@@ -590,7 +590,8 @@ def inbox_dialogs(account_id: str = "all", q: str = "", kind: str = "sales", use
                 "avito_chat_id": cid,
                 "client_name": "Покупатель",
                 "item_title": item_title or "",
-                "item_url": "https://www.avito.ru/profile/messenger/channel/" + str(cid),
+                "item_url": iurl or "",
+                "chat_url": "https://www.avito.ru/profile/messenger/channel/" + str(cid),
                 "last_text": txt or "",
                 "last_at": _fmt_ts(created),
                 "unread": unread.get((acc, cid), 0),
@@ -663,7 +664,7 @@ def inbox_thread(account_id: str, avito_chat_id: str, user=Depends(get_current_u
         if account_id not in conn:
             return {"status": "error", "message": "Аккаунт не найден или не подключён"}
         q = text(
-            "SELECT direction, text, avito_created_at, item_title, msg_type, content_type, media_ref "
+            "SELECT direction, text, avito_created_at, item_title, msg_type, content_type, media_ref, item_url "
             "  FROM messenger_messages WHERE account_id = :acc AND avito_chat_id = :cid "
             " ORDER BY avito_created_at ASC, id ASC"
         )
@@ -676,7 +677,7 @@ def inbox_thread(account_id: str, avito_chat_id: str, user=Depends(get_current_u
             "content_type": ct or "text",
             "media_ref": mr,
             "voice_url": (f"/api/inbox/voice?account_id={account_id}&voice_id={mr}" if (ct == "voice" and mr) else None),
-        } for (d, t, c, _title, mt, ct, mr) in rows]
+        } for (d, t, c, _title, mt, ct, mr, _iu) in rows]
         item_title = next((r[3] for r in rows if r[3]), "")
         dialog = {
             "account_id": account_id,
@@ -684,7 +685,8 @@ def inbox_thread(account_id: str, avito_chat_id: str, user=Depends(get_current_u
             "avito_chat_id": avito_chat_id,
             "client_name": "Покупатель",
             "item_title": item_title or "",
-            "item_url": "https://www.avito.ru/profile/messenger/channel/" + str(avito_chat_id),
+            "item_url": next((r[7] for r in rows if r[7]), ""),
+            "chat_url": "https://www.avito.ru/profile/messenger/channel/" + str(avito_chat_id),
             "phone": "",
         }
         return {"status": "ok", "dialog": dialog, "messages": messages}

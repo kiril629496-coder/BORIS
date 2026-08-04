@@ -18,12 +18,12 @@ const STC: Record<string, string> = {
 type Totals = { accounts: number; new_msgs: number; unanswered: number; answered_today: number };
 type Acc = { account_id: string; name: string; phone: string; status: string; unread: number };
 type Dlg = { account_id: string; account_name: string; avito_chat_id: string; client_name: string;
-  item_title: string; item_url: string; last_text: string; last_at: string;
+  item_title: string; item_url: string; chat_url?: string; last_text: string; last_at: string;
   unread: number; answered: boolean };
 type Msg = { direction: "in" | "out"; text: string; at: string; is_new?: boolean;
   msg_type?: string; content_type?: string; media_ref?: string; voice_url?: string };
 type Thread = { account_id: string; account_name: string; avito_chat_id: string;
-  client_name: string; item_title: string; item_url: string; phone: string };
+  client_name: string; item_title: string; item_url: string; chat_url?: string; phone: string };
 
 export default function MessagesPage() {
   const [totals, setTotals] = useState<Totals>({ accounts: 0, new_msgs: 0, unanswered: 0, answered_today: 0 });
@@ -182,7 +182,14 @@ export default function MessagesPage() {
             <a href={thread.item_url} target="_blank" rel="noreferrer"
                style={{ ...font.small, color: color.blue, textDecoration: "none",
                         display: "flex", alignItems: "center", gap: 4 }}>
-              Открыть на Авито <Icon name="arrow" size={13} tone="accent" />
+              Открыть объявление <Icon name="arrow" size={13} tone="accent" />
+            </a>
+          ) : null}
+          {thread.chat_url ? (
+            <a href={thread.chat_url} target="_blank" rel="noreferrer"
+               style={{ ...font.small, color: color.blue, textDecoration: "none",
+                        display: "flex", alignItems: "center", gap: 4 }}>
+              Переписка в Avito <Icon name="arrow" size={13} tone="accent" />
             </a>
           ) : null}
         </div>

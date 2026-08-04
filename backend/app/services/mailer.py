@@ -37,25 +37,21 @@ def send_verification_code(to: str, code: str, verification_id: str = None) -> t
     Письмо с кодом подтверждения. Код в лог не пишется.
     С verification_id письмо идёт через очередь с привязкой к записи:
     прежние ожидающие письма гасятся, устаревший код не доставляется.
-    Без verification_id поведение прежнее — прямая отправка.
+    Без verification_id письмо тоже идёт через очередь, но без привязки.
     """
-    subject = "БОРИС — код подтверждения почты"
-    body = (
-        "Здравствуйте!\n\n"
-        "Код подтверждения для входа в БОРИС:\n\n"
-        "    {code}\n\n"
-        "Код действует 10 минут и используется один раз.\n"
-        "Если вы не регистрировались в БОРИСе, просто удалите это письмо.\n\n"
-        "boris-ai.pro"
-    ).format(code=code)
+    from app.email_templates import render
+    from app.services.verification import CODE_TTL_MINUTES
+    subject, body, html = render(
+        "verify_email", {"code": code, "ttl_minutes": CODE_TTL_MINUTES})[:3]
 
-    if not verification_id:
-        return send_mail(to, subject, body)
-
+    from app.services import email_queue as _eq
     from app.services import email_queue_ref as _ref
     try:
-        _ref.cancel_pending_verification(to)
-        res = _ref.enqueue_verification(to, subject, body, verification_id)
+        if verification_id:
+            _ref.cancel_pending_verification(to)
+            res = _ref.enqueue_verification(to, subject, body, verification_id, html=html)
+        else:
+            res = _eq.enqueue_email(to, subject, body, html=html, source="auth")
     except Exception as exc:
         logger.warning("mailer: очередь недоступна (%s)", type(exc).__name__)
         return False, "queue_error"

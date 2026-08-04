@@ -12,6 +12,7 @@ class MessengerMessage(Base):
     avito_message_id = Column(String, unique=True, index=True)
     item_id = Column(String, nullable=True, index=True)
     item_title = Column(String, nullable=True)
+    item_url = Column(String, nullable=True)
     item_owner_id = Column(String, nullable=True)  # владелец объявления (для отсечки диалогов-покупок)
     direction = Column(String)
     msg_type = Column(String, nullable=True)  # user | seller | system

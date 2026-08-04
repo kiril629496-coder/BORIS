@@ -478,9 +478,12 @@ def find_answer(db, account_id, question, shared=True, min_overlap=2):
         "  FROM client_facts f LEFT JOIN client_aliases al ON al.fact_id = f.id"
         " WHERE f.account_id IN :accs"
         "   AND (f.status = 'confirmed' OR (f.status = 'draft' AND f.confidence >= 80))"
-        "   AND f.category <> 'rule'"
+        "   AND f.category NOT IN ('rule', 'keys')"
+        "   AND (COALESCE(f.scope, 'business') = 'business'"
+        "        OR f.account_id = :self)"
         " GROUP BY f.id"
-    ).bindparams(bindparam("accs", expanding=True)), {"accs": accs}).all()
+    ).bindparams(bindparam("accs", expanding=True)),
+        {"accs": accs, "self": account_id}).all()
 
     # маркеры намерения вопроса: цена / покупка / изготовление / залог
     _price_q = bool(qw & stems(CAT_WORDS.get("cena", "")))
@@ -617,7 +620,7 @@ def by_source(account_id: str, shared: bool = True, user=Depends(get_current_use
         db.close()
 
 
-MODES = ("off", "strict")          # hybrid добавим позже, когда решим по тарифам
+MODES = ("off", "strict", "hybrid")          # hybrid добавим позже, когда решим по тарифам
 
 
 def memory_mode(db, account_id):
@@ -681,7 +684,7 @@ def set_mode(body: ModeBody, user=Depends(get_current_user)):
     if getattr(user, "role", "") != "owner":
         raise HTTPException(status_code=403, detail="Только владелец")
     if body.mode not in MODES:
-        raise HTTPException(status_code=400, detail="Режим должен быть off или strict")
+        raise HTTPException(status_code=400, detail="Режим должен быть off, strict или hybrid")
     db = SessionLocal()
     try:
         db.execute(text(

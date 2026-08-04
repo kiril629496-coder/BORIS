@@ -230,7 +230,7 @@ def parsed_products_to_drafts(req: ProductsToDraftsRequest):
         if override_niche:
             groups = [{"niche": override_niche, "indices": list(range(len(selected_products)))}]
         else:
-            groups = group_products_by_niche(selected_products, account_niche)
+            groups = group_products_by_niche(selected_products, account_niche, account_id=req.account_id)
 
         _TAG_TO_SNAKE = {
             "ServiceType": "service_type", "ServiceSubtype": "service_subtype",
@@ -252,7 +252,7 @@ def parsed_products_to_drafts(req: ProductsToDraftsRequest):
             cat_data = detect_category_endpoint({"account_id": req.account_id, "niche": group_niche})
             category = cat_data.get("category") if cat_data.get("status") == "ok" else "Предложение услуг"
 
-            req_fields = resolve_required_fields(category_id=group_niche, niche=group_niche, api_category=category)
+            req_fields = resolve_required_fields(category_id=group_niche, niche=group_niche, api_category=category, account_id=req.account_id)
             if req_fields.get("status") != "ok":
                 # Категория/шаблон не резолвится (например недоступен парсер документации) -
                 # НЕ создаём черновики вслепую с пустыми обязательными полями, как раньше.
@@ -1071,7 +1071,7 @@ async def _fetch_item_detail_headed(url: str, max_attempts: int = 3):
     return {"images_count": None, "description": None, "error": last_error}
 
 
-def _summarize_advantages(title: str, description: str) -> str:
+def _summarize_advantages(title: str, description: str, account_id: str = None, operation: str = "competitor_advantages_summary") -> str:
     """Через GigaChat кратко выделяет ключевые преимущества из описания конкурента."""
     if not description:
         return "Описание недоступно"
@@ -1088,7 +1088,7 @@ def _summarize_advantages(title: str, description: str) -> str:
         return chat_with_fallback(
             [Messages(role=MessagesRole.USER, content=prompt)],
             model=_GC_MODEL, credentials=GIGACHAT_KEY
-        ).strip()
+        , account_id=account_id, operation=operation).strip()
     except Exception:
         return (description[:200] + "...") if len(description) > 200 else description
 
@@ -1317,7 +1317,7 @@ def _download_product_photo(account_id: str, image_url: str, product_idx: int) -
         return image_url
 
 
-def _generate_product_description(title: str, price: str, characteristics: dict, sample: str = "") -> str:
+def _generate_product_description(title: str, price: str, characteristics: dict, sample: str = "", account_id: str = None, operation: str = "product_description") -> str:
     """Генерирует продающее описание товара для Avito через GigaChat, на основе выгруженных данных."""
     from gigachat_pool import chat_with_fallback
     from gigachat.models import Messages, MessagesRole
@@ -1397,7 +1397,7 @@ def _generate_product_description(title: str, price: str, characteristics: dict,
         return chat_with_fallback(
             [Messages(role=MessagesRole.USER, content=prompt)],
             temperature=0.8, max_tokens=2500
-        ).strip()
+        , account_id=account_id, operation=operation).strip()
     except Exception as e:
         print(f"[parse] ошибка генерации описания: {e}")
         return f"{title}\n\n{chars_text}"  # fallback — сырой текст, если ИИ недоступен

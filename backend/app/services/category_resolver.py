@@ -469,7 +469,7 @@ def crawl_category_tree_partial(top_levels: list) -> dict:
     return {"status": "ok", "leaves_found": len(leaves), "top_levels": top_levels}
 
 
-def _pick_leaf_via_gigachat(candidates: list, niche: str):
+def _pick_leaf_via_gigachat(candidates: list, niche: str, account_id: str = None):
     """Просит GigaChat выбрать ОДИН лист дерева категорий (по номеру в списке), максимально
     подходящий нише клиента. ИИ не может придумать вариант вне перечисленного списка - только
     вернуть номер, отсюда исключено вранье в духе выдуманных категорий."""
@@ -487,7 +487,7 @@ def _pick_leaf_via_gigachat(candidates: list, niche: str):
         'Верни ТОЛЬКО чистый JSON: {"index": <номер выбранной категории из списка выше>}'
     )
     try:
-        raw = chat_with_fallback([Messages(role=MessagesRole.USER, content=prompt)], temperature=0.1, max_tokens=100).strip()
+        raw = chat_with_fallback([Messages(role=MessagesRole.USER, content=prompt)], temperature=0.1, max_tokens=100, account_id=account_id, operation=("category_leaf_selection" if account_id else "system:category_leaf_selection")).strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         match = _re.search(r'\{.*\}', raw, _re.DOTALL)
         if match:
@@ -501,7 +501,7 @@ def _pick_leaf_via_gigachat(candidates: list, niche: str):
     return None
 
 
-def resolve_template_id_for_niche(api_category: str, niche: str) -> dict:
+def resolve_template_id_for_niche(api_category: str, niche: str, account_id: str = None) -> dict:
     """
     api_category - категория, определённая на уровне поиска/API Avito (detect_category_endpoint) -
     в дереве документации это, как правило, ПРОМЕЖУТОЧНЫЙ узел (например "Спорт и отдых"), а не готовая
@@ -528,7 +528,7 @@ def resolve_template_id_for_niche(api_category: str, niche: str) -> dict:
         if len(candidates) == 1:
             leaf = candidates[0]
         else:
-            leaf = _pick_leaf_via_gigachat(candidates, niche)
+            leaf = _pick_leaf_via_gigachat(candidates, niche, account_id=account_id)
             if not leaf:
                 return {"status": "not_found", "message": f"GigaChat не смог выбрать лист дерева категорий для ниши '{niche}'"}
 
@@ -681,7 +681,7 @@ def fetch_template_fields_via_http(template_id) -> list:
     return []
 
 
-def get_category_template(category_id: str, niche: str = None, category_name_hint: str = None, template_id_hint: int = None, api_category: str = None) -> dict:
+def get_category_template(category_id: str, niche: str = None, category_name_hint: str = None, template_id_hint: int = None, api_category: str = None, account_id: str = None) -> dict:
     """
     База знаний полей категории Avito (модель CategoryTemplate), ленивая загрузка:
     - есть в БД -> возвращает сразу
@@ -717,7 +717,7 @@ def get_category_template(category_id: str, niche: str = None, category_name_hin
         template_id = template_id_hint
         found_path = category_name_hint or niche
         if not template_id:
-            found = resolve_template_id_for_niche(api_category or niche, niche)
+            found = resolve_template_id_for_niche(api_category or niche, niche, account_id=account_id)
             if found.get("status") != "ok":
                 return {"status": "not_found", "message": found.get("message", "не удалось определить template_id категории")}
             template_id = found.get("template_id")
@@ -769,7 +769,7 @@ def get_category_template(category_id: str, niche: str = None, category_name_hin
         db.close()
 
 
-def group_products_by_niche(products: list, account_niche: str = None) -> list:
+def group_products_by_niche(products: list, account_niche: str = None, account_id: str = None) -> list:
     """
     Группирует товары по нишам через GigaChat - в одном аккаунте могут быть товары РАЗНЫХ
     категорий Avito (пример: дома из бруса + штукатурка фасадов - разные категории с разными
@@ -800,7 +800,7 @@ def group_products_by_niche(products: list, account_niche: str = None) -> list:
         "Каждый индекс должен попасть ровно в одну группу, ни один индекс не пропускай."
     )
     try:
-        raw = chat_with_fallback([Messages(role=MessagesRole.USER, content=prompt)], temperature=0.1, max_tokens=1500).strip()
+        raw = chat_with_fallback([Messages(role=MessagesRole.USER, content=prompt)], temperature=0.1, max_tokens=1500, account_id=account_id, operation="product_niche_grouping").strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         groups = json.loads(raw)
         if not isinstance(groups, list):
@@ -823,7 +823,7 @@ def group_products_by_niche(products: list, account_niche: str = None) -> list:
     return cleaned
 
 
-def resolve_required_fields(category_id: str, niche: str, characteristics: dict = None, template: dict = None, api_category: str = None) -> dict:
+def resolve_required_fields(category_id: str, niche: str, characteristics: dict = None, template: dict = None, api_category: str = None, account_id: str = None) -> dict:
     """
     Общая точка входа для create_draft_listings (plan_items.py) и parsed_products_to_drafts
     (parser.py): резолвит поля категории (обязательные и необязательные - см. get_category_template)
@@ -834,7 +834,7 @@ def resolve_required_fields(category_id: str, niche: str, characteristics: dict 
     прокидывается в get_category_template как фильтр ветки дерева при поиске template_id.
     Возвращает {"status": "ok"|"not_found", "message"?, "resolved": {tag: value}, "needs_clarification": [...]}
     """
-    template = template or get_category_template(category_id, niche, api_category=api_category)
+    template = template or get_category_template(category_id, niche, api_category=api_category, account_id=account_id)
     if template.get("status") != "ok":
         return {"status": "not_found", "message": template.get("message", "категория не определена"), "resolved": {}, "needs_clarification": []}
 

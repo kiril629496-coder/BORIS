@@ -135,6 +135,12 @@ async def check_account_access(request: Request, user=Depends(get_current_user_o
     if request.url.path in ("/api/inbox/slots", "/api/inbox/accounts"):
         return user
 
+    # Исключение: отдача баннера постинга и чат с Борисом работают на уровне пользователя,
+    # account_id в запросе нет. Баннер отдаётся строго по имени файла из своей папки,
+    # чат не читает данные аккаунтов — чужого эти ручки раскрыть не могут.
+    if request.url.path in ("/api/posting/banner", "/api/chat", "/api/chat/parse_task"):
+        return user
+
     # Исключение: общие справочники (города cities_50k, станции метро metro_stations)
     # лежат под account_id="global" и одинаковы для всех клиентов. Разрешаем ТОЛЬКО
     # чтение: /api/storage/save под это исключение не попадает, изоляция не слабеет.

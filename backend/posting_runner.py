@@ -105,7 +105,7 @@ def _build_text_prompt(theme, client_prompt="", occasion="", examples=None):
         parts.append("Вот примеры уже опубликованных постов этого канала — пиши в ТАКОМ ЖЕ стиле, тоне и формате, но НЕ копируй их дословно:\n\n" + sample)
     parts.append("ВАЖНО: НЕ добавляй в текст никаких ссылок, адресов, @упоминаний и контактов — они подставляются автоматически отдельно. Призыв к действию можно, но БЕЗ конкретной ссылки.")
     parts.append("НЕ заканчивай пост призывом писать в комментарии или ставить реакции. Финальный призыв со ссылкой на контакт добавляется автоматически системой — просто заверши мысль, вопрос читателю допустим.")
-    parts.append("НЕ используй markdown-разметку: никаких **, ##, __, backticks — это обычный текстовый пост, звёздочки будут видны читателю как мусор. Выделяй смысл словами и абзацами, а не форматированием.")
+    parts.append("РАЗМЕТКА: разрешён ТОЛЬКО HTML-тег <b>жирный</b> — оберни в него заголовок первой строки и одну-две ключевые фразы по смыслу. Больше никаких тегов. Markdown запрещён полностью: никаких **, ##, __, backticks — они будут видны читателю как мусор.")
     _t0 = date.today()
     _win = ", ".join((_t0 + timedelta(days=_i)).strftime("%d.%m.%Y") for _i in range(8))
     parts.append("СЕГОДНЯ " + _t0.strftime("%d.%m.%Y") + ". Упоминать события, праздники и любые даты разрешено ТОЛЬКО из этого списка: " + _win + ".")
@@ -257,7 +257,7 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
                 got_stock = False
         if not got_stock:
             generate_ai_image(_build_banner_prompt(theme, banner_prompt, _title, ", ".join((date.today()+timedelta(days=_i)).strftime("%d.%m.%Y") for _i in range(8))), fpath,
-                              size="1024x1024", quality="medium", model="gpt-image-2")
+                              size="1024x1024", quality="medium", model="gpt-image-2", account_id=account_id, operation="banner_social_post")
         import os as _os
         if not (_os.path.exists(fpath) and _os.path.getsize(fpath) > 0):
             print(f"[banner] НЕ создан (таймаут/ошибка генерации): {fpath}")
@@ -326,7 +326,36 @@ def _bump_posts_today(db, account_id):
         db.add(Storage(account_id=account_id, key=key, value="1"))
     db.commit()
 
+def _tg_safe_html(text):
+    """Валидный для Telegram HTML: только разрешённые теги, без вложенности
+    одинаковых и без непарных закрывающих. Иначе Telegram отклоняет сообщение."""
+    import re as _re_tg
+    ALLOWED = ("b", "strong", "i", "em", "u", "s", "code", "pre", "a")
+    t = text or ""
+    t = _re_tg.sub(r"</?\s*([a-zA-Z0-9]+)[^>]*>",
+                   lambda m: m.group(0) if m.group(1).lower() in ALLOWED else "", t)
+    out, stack, pos = [], [], 0
+    for m in _re_tg.finditer(r"</?\s*([a-zA-Z0-9]+)[^>]*>", t):
+        out.append(t[pos:m.start()]); pos = m.end()
+        tag = m.group(1).lower()
+        if not m.group(0).startswith("</"):
+            if tag in stack:
+                continue
+            stack.append(tag); out.append(m.group(0))
+        else:
+            if tag not in stack:
+                continue
+            while stack and stack[-1] != tag:
+                out.append("</%s>" % stack.pop())
+            stack.pop(); out.append(m.group(0))
+    out.append(t[pos:])
+    while stack:
+        out.append("</%s>" % stack.pop())
+    return "".join(out)
+
+
 def _send_telegram(chat_id, text, banner_path):
+    text = _tg_safe_html(text)
     import requests
     from app import telegram_bot
     if not telegram_bot.BOT_TOKEN:
@@ -345,7 +374,7 @@ def _send_telegram(chat_id, text, banner_path):
             try:
                 with open(send_path, "rb") as ph:
                     resp = requests.post(telegram_bot.API_BASE + "/sendPhoto",
-                        data={"chat_id": chat_id, "caption": caption}, files={"photo": ph}, timeout=120)
+                        data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}, files={"photo": ph}, timeout=120)
                 r = resp.json()
                 break
             except Exception as _e:
@@ -355,7 +384,7 @@ def _send_telegram(chat_id, text, banner_path):
             return {"ok": False, "error": "telegram недоступен после 3 попыток"}
         if r.get("ok") and len(text) > 1024:
             requests.post(telegram_bot.API_BASE + "/sendMessage",
-                data={"chat_id": chat_id, "text": text}, timeout=60)
+                data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=60)
         return r
     return telegram_bot.send_telegram_message(chat_id, text)
 
@@ -418,12 +447,14 @@ def _channel_demo(channel):
 
 # --- ОТПРАВКА ПОСТА В ВКОНТАКТЕ ---
 def _send_vk(owner_id, text, banner_path):
-    import os, requests
+    import os, re as _re_vk, requests
     from proxy_pool import get_intl_requests_proxies
+    # ВКонтакте не понимает HTML-разметку - убираем теги, оставляем чистый текст
+    text = _re_vk.sub(r"<[^>]+>", "", text or "")
     token = os.environ.get("VK_TOKEN")
     if not token:
         return {"ok": False, "error": "нет VK_TOKEN"}
-    proxies = get_intl_requests_proxies()
+    proxies = None  # ВК доступен из РФ напрямую; международный прокси только добавлял разовые отказы
     V = "5.199"
     group_id = str(owner_id).lstrip("-")
     attachments = None
@@ -449,7 +480,7 @@ def _send_vk(owner_id, text, banner_path):
             p = sv["response"][0]
             attachments = "photo" + str(p["owner_id"]) + "_" + str(p["id"])
         except Exception as e:
-            return {"ok": False, "error": "загрузка фото ВК: " + str(e)[:200]}
+            return {"ok": False, "error": "загрузка фото ВК: " + type(e).__name__ + " " + str(e)[:200]}
     params = {"access_token": token, "v": V, "owner_id": str(owner_id),
               "from_group": 1, "message": text}
     if attachments:
@@ -490,6 +521,23 @@ _CTA_VARIANTS = [
     "Остались вопросы? Пишите:",
     "Разберём вашу ситуацию — напишите:",
 ]
+
+
+def _with_tags(text, tags):
+    """Клеит 5-7 случайных хештегов из пула проекта последней строкой.
+    Пул — список или строка через пробел/запятую. Пусто — ничего не добавляем."""
+    if not tags:
+        return text
+    import random as _rnd_t
+    if isinstance(tags, str):
+        pool = [t.strip() for t in tags.replace(",", " ").split() if t.strip()]
+    else:
+        pool = [str(t).strip() for t in tags if str(t).strip()]
+    pool = [t if t.startswith("#") else "#" + t for t in pool]
+    if not pool:
+        return text
+    n = min(len(pool), _rnd_t.randint(5, 7))
+    return text.rstrip() + "\n\n" + " ".join(_rnd_t.sample(pool, n))
 
 
 def _with_contact(text, contact):
@@ -640,15 +688,15 @@ def autopost_projects(account_id, owner=False, respect_time=False, only_id=None)
         if (proj.get("mode") or "auto") == "moderate":
             _plat = proj.get("platforms") or "both"
             _cnt = (proj.get("contact_tg") if _plat in ("tg", "both") else proj.get("contact_vk")) or proj.get("contact_vk") or ""
-            _prev = _with_contact(post["text"], _cnt)
+            _prev = _with_tags(_with_contact(post["text"], _cnt), proj.get("hashtags"))
             _save_post_record(account_id, pid, pname, post["text"], post.get("banner"), "draft", preview=_prev)
             print("[autopost_projects] черновик на утверждение:", pname); continue
         platforms = proj.get("platforms") or "both"
         results = {}
         if proj.get("channel_tg") and platforms in ("tg", "both"):
-            results["tg"] = _send_telegram(proj["channel_tg"], _with_contact(post["text"], proj.get("contact_tg", "")), post.get("banner"))
+            results["tg"] = _send_telegram(proj["channel_tg"], _with_tags(_with_contact(post["text"], proj.get("contact_tg", "")), proj.get("hashtags")), post.get("banner"))
         if proj.get("vk_owner_id") and platforms in ("vk", "both"):
-            results["vk"] = _send_vk(int(proj["vk_owner_id"]), _with_contact(post["text"], proj.get("contact_vk", "")), post.get("banner"))
+            results["vk"] = _send_vk(int(proj["vk_owner_id"]), _with_tags(_with_contact(post["text"], proj.get("contact_vk", "")), proj.get("hashtags")), post.get("banner"))
         if any(r.get("ok") for r in results.values()):
             db = SessionLocal()
             try:
@@ -789,9 +837,9 @@ def due_posts_all(dry=False):
                 continue
             results = {}
             if proj.get("channel_tg") and platforms in ("tg","both"):
-                results["tg"] = _send_telegram(proj["channel_tg"], _with_contact(rec["text"], proj.get("contact_tg","")), bpath)
+                results["tg"] = _send_telegram(proj["channel_tg"], _with_tags(_with_contact(rec["text"], proj.get("contact_tg","")), proj.get("hashtags")), bpath)
             if proj.get("vk_owner_id") and platforms in ("vk","both"):
-                results["vk"] = _send_vk(int(proj["vk_owner_id"]), _with_contact(rec["text"], proj.get("contact_vk","")), bpath)
+                results["vk"] = _send_vk(int(proj["vk_owner_id"]), _with_tags(_with_contact(rec["text"], proj.get("contact_vk","")), proj.get("hashtags")), bpath)
             if any(r.get("ok") for r in results.values() if isinstance(r, dict)):
                 _ids = {}
                 _tg = results.get("tg") if isinstance(results.get("tg"), dict) else {}

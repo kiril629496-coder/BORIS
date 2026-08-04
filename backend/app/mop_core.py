@@ -12,7 +12,7 @@ from sqlalchemy import bindparam, text
 # ---------------------------------------------------------------- справочники
 
 STATUSES = (
-    "new", "analyzing", "draft_ready", "editing", "custom_waiting",
+    "new", "analyzing", "draft_ready", "in_progress", "editing", "custom_waiting",
     "waiting_confirm", "sending", "sent", "send_failed",
     "deleted", "human_required", "no_reply_required",
 )
@@ -21,10 +21,15 @@ TERMINAL = ("sent", "no_reply_required")
 
 # из какого статуса в какой можно перейти
 TRANSITIONS = {
-    "new": ("analyzing", "deleted", "human_required", "no_reply_required"),
+    "new": ("analyzing", "draft_ready", "deleted",
+            "human_required", "no_reply_required"),
     "analyzing": ("draft_ready", "deleted", "human_required"),
     "draft_ready": ("editing", "custom_waiting", "analyzing", "sending",
-                    "deleted", "human_required", "no_reply_required"),
+                    "deleted", "human_required", "no_reply_required",
+                    "in_progress", "sent"),
+    "in_progress": ("editing", "custom_waiting", "waiting_confirm", "sending",
+                    "analyzing", "deleted", "human_required",
+                    "no_reply_required", "sent"),
     "editing": ("waiting_confirm", "draft_ready", "deleted", "human_required"),
     "custom_waiting": ("waiting_confirm", "draft_ready", "deleted", "human_required"),
     "waiting_confirm": ("sending", "editing", "deleted", "human_required"),
@@ -42,7 +47,7 @@ EVENTS = (
     "awaiting_expired", "awaiting_cancelled", "approved", "send_started",
     "sent", "send_failed", "send_recovered", "draft_deleted",
     "handed_to_human", "returned_to_ai", "lead_created", "closed_no_reply",
-    "card_posted",
+    "card_posted", "card_no_ai", "taken", "answered_externally",
 )
 
 REPLY_AUTHORS = ("ai", "ai_regenerated", "manager", "supervisor", "imported", "api")
@@ -151,7 +156,7 @@ def claim_for_send(db, draft_id, actor_type, actor_id, channel):
     """Захват под отправку. Второй нажавший получает (None, текущий_статус)."""
     return set_status(
         db, draft_id, "sending",
-        allowed_from=("draft_ready", "waiting_confirm", "send_failed"),
+        allowed_from=("draft_ready", "in_progress", "waiting_confirm", "send_failed"),
         event="send_started", channel=channel,
         actor_type=actor_type, actor_id=actor_id,
         extra_sql=", locked_at = now(), locked_by = :lb",
@@ -186,6 +191,36 @@ def mark_send_failed(db, draft_id, reason, channel=None, actor_id=None):
 
 
 # --------------------------------------------------- карточки каналов и reply
+
+def take_to_work(db, draft_id, tg_user_id, actor_name=None):
+    """Взять карточку в работу. Захватывает только свободную."""
+    lb = str(tg_user_id)
+    row = db.execute(text(
+        "UPDATE mop_drafts SET status = 'in_progress', locked_by = :lb,"
+        " locked_at = now(), updated_at = now()"
+        " WHERE id = :i AND status = 'draft_ready' AND locked_by IS NULL"
+        " RETURNING id, status, locked_by, account_id, avito_chat_id"
+    ), {"i": draft_id, "lb": lb}).fetchone()
+    if row is not None:
+        log_event(db, draft_id, "taken", from_status="draft_ready",
+                  to_status="in_progress", channel="telegram",
+                  actor_type="telegram_user", actor_id=lb,
+                  meta={"actor_name": actor_name} if actor_name else None)
+        db.commit()
+        return "taken", dict(row._mapping)
+    cur = db.execute(text(
+        "SELECT id, status, locked_by FROM mop_drafts WHERE id = :i"
+    ), {"i": draft_id}).fetchone()
+    db.commit()
+    if cur is None:
+        return "bad_status", None
+    d = dict(cur._mapping)
+    if str(d.get("locked_by") or "") == lb:
+        return "already_mine", d
+    if d.get("locked_by"):
+        return "busy", d
+    return "bad_status", d
+
 
 def upsert_card(db, draft_id, channel, chat_id="", thread_id=0,
                 external_message_id=None, rendered_status=None, render_hash=None):
@@ -314,9 +349,27 @@ def classify_send_error(result, exc=None):
 
 # ------------------------------------------------------------------ рендер
 
+def _has_event(db, draft_id, event):
+    """Было ли событие у карточки. Причина берётся из журнала, не из пустоты полей."""
+    return bool(db.execute(text(
+        "SELECT 1 FROM mop_draft_events WHERE draft_id = :i AND event = :e LIMIT 1"
+    ), {"i": draft_id, "e": event}).scalar())
+
+
 def _draft(db, draft_id):
     row = db.execute(text("SELECT * FROM mop_drafts WHERE id = :i"), {"i": draft_id}).fetchone()
-    return dict(row._mapping) if row else None
+    if not row:
+        return None
+    d = dict(row._mapping)
+    # ссылка на объявление: приоритет — тот же item_id, иначе свежайшая непустая
+    d["item_url"] = db.execute(text(
+        "SELECT item_url FROM messenger_messages"
+        " WHERE account_id = :a AND avito_chat_id = :c"
+        "   AND item_url IS NOT NULL AND item_url <> ''"
+        " ORDER BY (item_id IS NOT DISTINCT FROM :it) DESC, id DESC LIMIT 1"
+    ), {"a": d["account_id"], "c": d["avito_chat_id"],
+        "it": d.get("item_id")}).scalar()
+    return d
 
 
 def _last_meta(db, draft_id):
@@ -345,8 +398,11 @@ def card_text(db, draft, city=None, account_name=None):
         lines.append("Объявление: %s" % d["item_title"])
     when = d.get("created_at")
     chat_url = "https://www.avito.ru/profile/messenger/channel/%s" % d["avito_chat_id"]
-    lines.append("Время: %s · <a href=\"%s\">Диалог</a>" % (
-        when.strftime("%H:%M") if when else "—", chat_url))
+    _links = ["<a href=\"%s\">Диалог в Avito</a>" % chat_url]
+    if d.get("item_url"):
+        _links.insert(0, "<a href=\"%s\">Объявление</a>" % d["item_url"])
+    lines.append("Время: %s · %s" % (
+        when.strftime("%H:%M") if when else "—", " · ".join(_links)))
     lines.append("")
     lines.append("<b>Клиент написал:</b>")
     lines.append("«%s»" % (d.get("incoming_text") or "").strip())
@@ -360,6 +416,9 @@ def card_text(db, draft, city=None, account_name=None):
             else "Ваш вариант ответа"
         lines.append("<b>%s:</b>" % who)
         lines.append("«%s»" % d["reply_text"].strip())
+    elif _has_event(db, d["id"], "card_no_ai"):
+        lines.append("")
+        lines.append("<i>AI-черновик недоступен — пакет МОП не подключён</i>")
     if d.get("status") == "send_failed" and d.get("send_error"):
         lines.append("")
         lines.append("<b>Причина:</b> %s" % d["send_error"])
@@ -383,11 +442,23 @@ def card_buttons(draft):
     """Три ряда. Набор зависит от статуса: мёртвые действия не показываем."""
     i = draft["id"]
     st = draft["status"]
+    has_reply = bool((draft.get("reply_text") or "").strip())
     b = lambda t, c: {"text": t, "callback_data": "%s:%s:%s" % (NS, c, i)}
     if st in ("sent", "no_reply_required", "sending"):
         return []
     if st == "human_required":
         return [[b("↩️ Вернуть в работу", "b")]]
+    if st == "draft_ready":
+        return [[b("🙋 Взять в работу", "t")],
+                [b("📌 Создать лид", "l"), b("❌ Закрыть", "x")]]
+    if st == "in_progress":
+        if has_reply:
+            return [[b("✅ Отправить", "a"), b("✏️ Редактировать", "e"),
+                     b("📝 Свой ответ", "c")],
+                    [b("🔄 Другой ответ", "r"), b("👤 Менеджеру", "h"),
+                     b("❌ Закрыть", "x")]]
+        return [[b("📝 Свой ответ", "c")],
+                [b("👤 Менеджеру", "h"), b("❌ Закрыть", "x")]]
     if st == "deleted":
         return [[b("🔄 Новый AI-ответ", "r"), b("📝 Написать свой", "c")],
                 [b("👤 Менеджеру", "h")]]
@@ -537,12 +608,23 @@ def pop_awaiting(db, channel, user_key, chat_id, thread_id):
 
 
 def apply_manual_text(db, draft_id, body, channel, user_key):
-    """Текст человека НИКОГДА не уходит в Avito сразу — только в waiting_confirm."""
+    """Текст человека НИКОГДА не уходит в Avito сразу — только в waiting_confirm.
+
+    Из in_progress текст принимается только от того, кто взял карточку:
+    иначе двое ответят одновременно и клиент получит два разных ответа.
+    """
+    cur = db.execute(text(
+        "SELECT status, COALESCE(locked_by, '') FROM mop_drafts WHERE id = :i"
+    ), {"i": draft_id}).fetchone()
+    if cur is not None and cur[0] == "in_progress":
+        if cur[1] and str(cur[1]) != str(user_key):
+            return None, "занята сотрудником %s" % cur[1]
     db.execute(text(
         "UPDATE mop_drafts SET reply_text = :t, reply_author = 'manager', updated_at = now()"
         " WHERE id = :i"), {"t": body, "i": draft_id})
     db.commit()
-    return set_status(db, draft_id, "waiting_confirm", ("editing", "custom_waiting"),
+    return set_status(db, draft_id, "waiting_confirm",
+                      ("editing", "custom_waiting", "in_progress"),
                       "edited", channel=channel, actor_type="telegram_user",
                       actor_id=str(user_key), payload=body[:500])
 
@@ -626,7 +708,8 @@ def handle_mop_callback(data, callback_query):
             ok, note = do_send(db, draft_id, user)
         elif code == "e":
             r, st = set_status(db, draft_id, "editing",
-                               ("draft_ready", "waiting_confirm", "send_failed"),
+                               ("draft_ready", "in_progress", "waiting_confirm",
+                                "send_failed"),
                                "edit_requested", channel="telegram",
                                actor_type="telegram_user", actor_id=str(user))
             if r is None:
@@ -639,7 +722,8 @@ def handle_mop_callback(data, callback_query):
                 alert = True
         elif code == "c":
             r, st = set_status(db, draft_id, "custom_waiting",
-                               ("draft_ready", "waiting_confirm", "send_failed"),
+                               ("draft_ready", "in_progress", "waiting_confirm",
+                                "send_failed"),
                                "custom_requested", channel="telegram",
                                actor_type="telegram_user", actor_id=str(user))
             if r is None:
@@ -662,15 +746,27 @@ def handle_mop_callback(data, callback_query):
                     note = note or "не удалось подготовить другой вариант"
         elif code == "n":
             note = "назад"
+        elif code == "t":
+            _res, _dd = take_to_work(db, draft_id, user,
+                                     actor_name=(callback_query.get("from") or {}).get("first_name"))
+            if _res == "taken":
+                note = "взяли в работу"
+            elif _res == "already_mine":
+                note = "карточка уже у вас"
+            elif _res == "busy":
+                note = "уже взял: %s" % (_dd or {}).get("locked_by")
+            else:
+                note = "нельзя взять в статусе %s" % (_dd or {}).get("status")
         elif code == "d":
             r, st = set_status(db, draft_id, "deleted",
-                               ("draft_ready", "editing", "custom_waiting", "waiting_confirm"),
+                               ("draft_ready", "in_progress", "editing",
+                                "custom_waiting", "waiting_confirm"),
                                "draft_deleted", channel="telegram",
                                actor_type="telegram_user", actor_id=str(user))
             note = "черновик удалён" if r else "сейчас статус %s" % st
         elif code == "h":
             r, st = set_status(db, draft_id, "human_required",
-                               ("draft_ready", "editing", "custom_waiting",
+                               ("draft_ready", "in_progress", "editing", "custom_waiting",
                                 "waiting_confirm", "deleted", "send_failed", "new"),
                                "handed_to_human", channel="telegram",
                                actor_type="telegram_user", actor_id=str(user))
@@ -695,7 +791,7 @@ def handle_mop_callback(data, callback_query):
                 note = "лид создан"
         elif code == "x":
             r, st = set_status(db, draft_id, "no_reply_required",
-                               ("draft_ready", "new", "human_required"),
+                               ("draft_ready", "in_progress", "new", "human_required"),
                                "closed_no_reply", channel="telegram",
                                actor_type="telegram_user", actor_id=str(user))
             note = "закрыто без ответа" if r else "сейчас статус %s" % st
@@ -869,7 +965,8 @@ HOOKS["generate"] = _generate
 # ------------------------------------------------- п.4: приём входящего (линия Б)
 
 def begin_incoming(db, account_id, avito_chat_id, avito_message_id, incoming_text,
-                   item_id=None, item_title=None, client_name=None):
+                   item_id=None, item_title=None, client_name=None,
+                   ai_enabled=True):
     """Шаг 1. Создаёт/находит карточку и захватывает право на генерацию.
 
     Сессию вызывающий закрывает СРАЗУ после этого вызова — сеть идёт без неё.
@@ -885,12 +982,19 @@ def begin_incoming(db, account_id, avito_chat_id, avito_message_id, incoming_tex
     need_generate = False
     if not body.strip():
         if status == "new":
-            got, _prev = set_status(db, draft_id, "analyzing", ("new",),
-                                    "analyzing_started", channel="telegram",
-                                    actor_type="system")
-            need_generate = got is not None
-            if got is not None:
-                status = "analyzing"
+            if ai_enabled:
+                got, _prev = set_status(db, draft_id, "analyzing", ("new",),
+                                        "analyzing_started", channel="telegram",
+                                        actor_type="system")
+                need_generate = got is not None
+                if got is not None:
+                    status = "analyzing"
+            else:
+                got, _prev = set_status(db, draft_id, "draft_ready", ("new",),
+                                        "card_no_ai", channel="telegram",
+                                        actor_type="system")
+                if got is not None:
+                    status = "draft_ready"
         elif status == "analyzing":
             stale = db.execute(text(
                 "SELECT COALESCE(updated_at, created_at)"

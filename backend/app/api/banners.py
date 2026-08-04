@@ -28,7 +28,7 @@ def _save_banner_record(account_id, filename, folder, theme_label, prompt, sourc
 
 
 
-def _generate_marketing_copy(raw_description: str) -> dict:
+def _generate_marketing_copy(raw_description: str, account_id: str = None, operation: str = "marketing_copy_full_banner") -> dict:
     """Через GigaChat превращает сырое описание бизнеса от клиента в короткие
     продающие заголовок/подзаголовок/цену/преимущества для баннера."""
     try:
@@ -42,7 +42,7 @@ def _generate_marketing_copy(raw_description: str) -> dict:
 
 Описание бизнеса от клиента: {raw_description}'''
 
-        raw = chat_with_fallback([Messages(role=MessagesRole.USER, content=prompt)]).strip()
+        raw = chat_with_fallback([Messages(role=MessagesRole.USER, content=prompt)], account_id=account_id, operation=operation).strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         data = _json.loads(raw)
         return {
@@ -137,7 +137,7 @@ def create_infographic(req: InfographicRequest):
     subtitle = req.subtitle
     price_text = req.price_text
     if len(req.title) > 45 and not req.subtitle:
-        copy = _generate_marketing_copy(req.title)
+        copy = _generate_marketing_copy(req.title, account_id=req.account_id, operation="marketing_copy_infographic")
         title = copy["title"]
         subtitle = copy["subtitle"]
         price_text = copy["price_text"] or req.price_text
@@ -163,10 +163,10 @@ def create_infographic(req: InfographicRequest):
         bg_color_bottom=req.bg_color_bottom,
         accent_color=req.accent_color,
         output_path=fpath,
-        photo_source=req.photo_source,
+        photo_source="ai",  # клиентский баннер всегда рисует OpenAI
         ai_quality=req.ai_quality,
         ai_model=req.ai_model,
-        own_photo_path=own_photo_path,
+        own_photo_path=None, account_id=req.account_id, operation="banner_infographic",
     )
 
     _theme = _slugify_theme(req.title)
@@ -230,7 +230,7 @@ def create_carousel(req: CarouselRequest):
         bg_color_bottom=req.bg_color_bottom,
         variant=req.variant,
         output_dir=folder,
-        photo_source=req.photo_source,
+        photo_source="ai",  # клиентский баннер всегда рисует OpenAI
         ai_quality=req.ai_quality,
     )
 
@@ -247,6 +247,7 @@ def create_carousel(req: CarouselRequest):
 
 class FullAiRequest(BaseModel):
     account_id: str
+    operation: str = "banner_full_ai"
     raw_description: str
     format: str = "infographic"
     accent_color: str = "#FF6B35"
@@ -262,9 +263,11 @@ class FullAiRequest(BaseModel):
     vary_image: bool = False     # варьировать фоновую картинку/сцену между вариантами
     vary_icons: bool = False     # варьировать иконки/бейджи между вариантами
     vary_all: bool = False       # варьировать полностью всё (композиция, текст, цвет, сцена)
+    template_id: str = ""               # id шаблона из banner_library аккаунта
+    use_template_library: bool = False  # opt-in: текст и стиль из библиотеки, фон рисует OpenAI
 
 
-def _describe_reference_style(image_base64: str) -> str:
+def _describe_reference_style(image_base64: str, account_id: str = None, operation: str = "reference_style_analysis") -> str:
     """Через OpenAI Vision описывает стиль/композицию референс-фото словами,
     чтобы использовать это описание как стилевой ориентир для генерации."""
     try:
@@ -298,6 +301,15 @@ def _describe_reference_style(image_base64: str) -> str:
                     print("[_describe_reference_style] Попытка " + str(_attempt) + ": статус " + str(resp.status_code), flush=True)
                     continue
                 data = resp.json()
+                try:
+                    from app.usage import log_usage as _log_ref
+                    _u = data.get("usage") or {}
+                    _log_ref(account_id, "openai", data.get("model") or "gpt-4o-mini", operation,
+                             prompt_tokens=_u.get("prompt_tokens", 0),
+                             completion_tokens=_u.get("completion_tokens", 0),
+                             request_id=resp.headers.get("x-request-id"))
+                except Exception as _ue:
+                    print("[usage]", str(_ue)[:100], flush=True)
                 return data["choices"][0]["message"]["content"].strip()
             except Exception as _e:
                 print("[_describe_reference_style] Попытка " + str(_attempt) + " не удалась: " + str(_e), flush=True)
@@ -308,7 +320,7 @@ def _describe_reference_style(image_base64: str) -> str:
         return ""
 
 
-def _describe_reference_style_multi(image_urls: list) -> str:
+def _describe_reference_style_multi(image_urls: list, account_id: str = None, operation: str = "reference_style_analysis_multi") -> str:
     """Как _describe_reference_style, но принимает до 3 прямых URL уже готовых баннеров
     (без base64) и просит модель выделить ОБЩИЙ стиль между ними как единый ориентир."""
     try:
@@ -343,6 +355,15 @@ def _describe_reference_style_multi(image_urls: list) -> str:
                     print("[_describe_reference_style_multi] Попытка " + str(_attempt) + ": статус " + str(resp.status_code) + " - " + resp.text[:500], flush=True)
                     continue
                 data = resp.json()
+                try:
+                    from app.usage import log_usage as _log_ref
+                    _u = data.get("usage") or {}
+                    _log_ref(account_id, "openai", data.get("model") or "gpt-4o-mini", operation,
+                             prompt_tokens=_u.get("prompt_tokens", 0),
+                             completion_tokens=_u.get("completion_tokens", 0),
+                             request_id=resp.headers.get("x-request-id"))
+                except Exception as _ue:
+                    print("[usage]", str(_ue)[:100], flush=True)
                 return data["choices"][0]["message"]["content"].strip()
             except Exception as _e:
                 print("[_describe_reference_style_multi] Попытка " + str(_attempt) + " не удалась: " + str(_e), flush=True)
@@ -603,10 +624,99 @@ def remove_from_banner_showcase(req: ShowcaseUrlRequest):
         db.close()
 
 
+def _read_storage_json(account_id: str, key: str):
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json
+    db = SessionLocal()
+    try:
+        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == key).first()
+        return _json.loads(row.value) if row else None
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+
+def _load_template(account_id: str, template_id: str) -> dict:
+    """Шаблон строго из библиотеки ЭТОГО аккаунта. Не найден - 404, повреждён - 422."""
+    from fastapi import HTTPException
+    lib = _read_storage_json(account_id, "banner_library")
+    if not isinstance(lib, list) or not lib:
+        raise HTTPException(status_code=404, detail="Библиотека шаблонов не найдена для этого аккаунта")
+    found = [t for t in lib if isinstance(t, dict) and t.get("id") == template_id]
+    if len(found) != 1:
+        raise HTTPException(status_code=404, detail="Шаблон %s не найден" % template_id)
+    t = found[0]
+    if not isinstance(t.get("title"), str) or not t["title"].strip():
+        raise HTTPException(status_code=422, detail="Шаблон повреждён: пустой заголовок")
+    if not isinstance(t.get("subtitle"), str):
+        raise HTTPException(status_code=422, detail="Шаблон повреждён: подзаголовок не строка")
+    if not isinstance(t.get("has_price"), bool):
+        raise HTTPException(status_code=422, detail="Шаблон повреждён: has_price не булево")
+    price = t.get("price") or ""
+    if not isinstance(price, str):
+        raise HTTPException(status_code=422, detail="Шаблон повреждён: цена не строка")
+    if not t["has_price"] and price:
+        raise HTTPException(status_code=422, detail="has_price=false, но цена заполнена")
+    return t
+
+
+def _template_background_query(tpl: dict, style: dict) -> str:
+    """Запрос на ФОН для OpenAI: сцена без единой надписи, текст накладываем сами."""
+    photo = (tpl.get("photo") or "").strip() or (tpl.get("subtype") or "объект")
+    niche = (style or {}).get("niche", "")
+    scene = "строительная бытовка, блок-контейнер" if niche == "bytovki" else "мебель на заказ в интерьере"
+    return (
+        "Photorealistic advertising background photo, square. Scene: " + photo + " (" + scene + "). "
+        "Professional commercial photography, natural lighting, clean uncluttered composition, "
+        "main object slightly left of center, calm neutral background, plenty of empty space "
+        "in the lower third for text overlay. "
+        "ABSOLUTELY NO TEXT: no letters, no words, no numbers, no captions, no signs, no logos, "
+        "no watermarks, no badges, no stars, no stickers anywhere in the image. "
+        "No collage, no frames, no clipart."
+    )
+
+
 @router.post("/full_ai")
 def create_full_ai_banner(req: FullAiRequest):
     from banner_generator import generate_ai_image
     import time as _time
+
+    if req.use_template_library:
+        from fastapi import HTTPException as _HTTPExc
+        import time as _t2, json as _j2, hashlib as _h2
+        from banner_generator import generate_infographic_banner as _gen_info
+        if not req.template_id:
+            raise _HTTPExc(status_code=422, detail="use_template_library=true, но template_id не передан")
+        _tpl = _load_template(req.account_id, req.template_id)
+        _style = _read_storage_json(req.account_id, "brand_style") or {}
+        _colors = _style.get("colors", {}) or {}
+        _scheme = (_style.get("schemes", {}) or {}).get(_tpl.get("scheme", ""), {}) or {}
+        _primary = _scheme.get("primary") or _colors.get("brand") or "#1B4FD8"
+        _accent = _colors.get("accent") or "#FF4D2E"
+        _price = (_tpl.get("price") or "") if _tpl.get("has_price") else ""
+        _q = _template_background_query(_tpl, _style)
+        _folder = _account_banner_dir(req.account_id, "infographic")
+        _fname = "tpl_" + str(req.template_id) + "_" + str(int(_t2.time())) + ".png"
+        _fpath = _folder + "/" + _fname
+        _gen_info(
+            title=_tpl["title"], subtitle=_tpl.get("subtitle", ""), price_text=_price,
+            icon_name="circle-check.svg", bg_color_top=_primary, bg_color_bottom=_primary,
+            accent_color=_accent, output_path=_fpath, photo_query=_q,
+            photo_source="ai", ai_quality=req.quality, ai_model="gpt-image-2",
+            own_photo_path=None, account_id=req.account_id, operation="banner_from_template",
+        )
+        _meta = {"template_id": _tpl.get("id"), "template_type": _tpl.get("type"),
+                 "template_subtype": _tpl.get("subtype"), "template_block": _tpl.get("block"),
+                 "brand_style_niche": _style.get("niche"), "use_template_library": True,
+                 "provider": "openai", "background_prompt_sha256": _h2.sha256(_q.encode()).hexdigest()[:16]}
+        _save_banner_record(req.account_id, _fname, "infographic", _tpl["title"],
+                            _j2.dumps(_meta, ensure_ascii=False), "template", "infographic")
+        print("[banner] шаблон %s: текст дословно, фон от OpenAI, GigaChat не вызывался" % req.template_id)
+        return {"status": "ok", "url": BASE_URL + "/" + req.account_id + "/banners/infographic/" + _fname,
+                "urls": [BASE_URL + "/" + req.account_id + "/banners/infographic/" + _fname],
+                "template_id": _tpl.get("id")}
 
     size_map = {
         "infographic": ("1024x1024", "infographic"),
@@ -643,15 +753,15 @@ def create_full_ai_banner(req: FullAiRequest):
     if req.exact_text:
         copy = {"title": req.exact_text, "subtitle": "", "price_text": "", "advantages": []}
     else:
-        copy = _generate_marketing_copy(req.raw_description)
+        copy = _generate_marketing_copy(req.raw_description, account_id=req.account_id, operation="marketing_copy_full_banner")
 
     style_reference_text = ""
     if req.reference_image_urls:
-        style_desc = _describe_reference_style_multi(req.reference_image_urls)
+        style_desc = _describe_reference_style_multi(req.reference_image_urls, account_id=req.account_id, operation="reference_style_analysis_multi")
         if style_desc:
             style_reference_text = "\n\nStyle reference (match this visual style/layout/palette as closely as possible, based on chosen example banners): " + style_desc
     elif req.reference_image_base64:
-        style_desc = _describe_reference_style(req.reference_image_base64)
+        style_desc = _describe_reference_style(req.reference_image_base64, account_id=req.account_id, operation="reference_style_analysis")
         if style_desc:
             style_reference_text = "\n\nStyle reference (match this visual style/layout/palette as closely as possible): " + style_desc
 
@@ -807,7 +917,7 @@ def create_full_ai_banner(req: FullAiRequest):
         fname = "fullai_" + req.format + suffix + "_" + str(int(_time.time())) + "_" + str(idx) + ".png"
         fpath = folder + "/" + fname
 
-        result = generate_ai_image(slide_prompt, fpath, size=size, quality=req.quality, model="gpt-image-2")
+        result = generate_ai_image(slide_prompt, fpath, size=size, quality=req.quality, model="gpt-image-2", account_id=req.account_id, operation=req.operation)
         if not result:
             if urls:
                 break

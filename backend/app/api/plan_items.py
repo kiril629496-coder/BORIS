@@ -773,7 +773,7 @@ def execute_plan_item(item_id: int):
                             # Теперь достаём шаблон категории и подбираем значения СТРОГО из его enum_values
                             # (или явно спрашиваем клиента, если поле неоднозначно) ДО создания черновиков.
                             from app.services.category_resolver import resolve_required_fields
-                            _req_fields = resolve_required_fields(category_id=topic, niche=topic, api_category=category)
+                            _req_fields = resolve_required_fields(category_id=topic, niche=topic, api_category=category, account_id=item.account_id)
                             if _req_fields.get("status") != "ok":
                                 skipped.append(f"create_draft_listings пропущен для '{topic}': не удалось получить обязательные поля категории ({_req_fields.get('message', 'нет причины')})")
                                 continue
