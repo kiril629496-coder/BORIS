@@ -127,6 +127,13 @@ def structure_fields_via_gpt(raw_text: str, category_name: str) -> list:
     )
     resp.raise_for_status()
     data = resp.json()
+    try:  # учёт расхода: служебный вызов без привязки к клиенту
+        from app.usage import log_usage as _lu
+        _u = data.get("usage") or {}
+        _lu(None, "openai", data.get("model") or "gpt-5.4", "system:category_doc_parse",
+            int(_u.get("prompt_tokens") or 0), int(_u.get("completion_tokens") or 0))
+    except Exception as _e:
+        print("[usage]", str(_e)[:100], flush=True)
     raw = data["choices"][0]["message"]["content"].strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
 
@@ -587,6 +594,13 @@ def pick_value_via_gpt(field: dict, niche: str, allowed_values, format_rule: str
         )
         resp.raise_for_status()
         data = resp.json()
+        try:  # учёт расхода: прямой вызов идёт мимо пула
+            from app.usage import log_usage as _lu
+            _u = data.get("usage") or {}
+            _lu(None, "openai", data.get("model") or "gpt-5.4", "system:category_field_value",
+                int(_u.get("prompt_tokens") or 0), int(_u.get("completion_tokens") or 0))
+        except Exception as _ue:
+            print("[usage]", str(_ue)[:100], flush=True)
         raw = data["choices"][0]["message"]["content"].strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         parsed = _json.loads(raw)

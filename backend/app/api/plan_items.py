@@ -490,6 +490,15 @@ def execute_plan_item(item_id: int):
                         headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
                         json=payload_json, proxies=px, timeout=tmo,
                     )
+                    try:  # учёт расхода: прямой вызов идёт мимо пула
+                        _j = r.json()
+                        from app.usage import log_usage as _lu
+                        _u = _j.get("usage") or {}
+                        _lu(None, "openai", _j.get("model") or "gpt-5.4", "system:plan_execute",
+                            int(_u.get("prompt_tokens") or 0),
+                            int(_u.get("completion_tokens") or 0))
+                    except Exception as _ue:
+                        print("[usage]", str(_ue)[:100], flush=True)
                     return r
                 except Exception as _e:
                     last_err = _e

@@ -14,6 +14,7 @@ export const MENU: MenuGroup[] = [
     items: [
       { key: "home", label: "Главная", icon: "home", href: "/dashboard/home" },
       { key: "messages", label: "Сообщения", icon: "messages", href: "/messages" },
+      { key: "reactivation", label: "Возврат клиентов", icon: "clients", href: "/reactivation" },
       { key: "listings", label: "Объявления", icon: "list" },
       { key: "plan", label: "Задачи и план", icon: "tasks" },
       { key: "settings", label: "Режим работы", icon: "shield" },

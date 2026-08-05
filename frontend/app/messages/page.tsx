@@ -25,6 +25,24 @@ type Msg = { direction: "in" | "out"; text: string; at: string; is_new?: boolean
 type Thread = { account_id: string; account_name: string; avito_chat_id: string;
   client_name: string; item_title: string; item_url: string; chat_url?: string; phone: string };
 
+const MARK_STYLE: Record<string, { bg: string; fg: string; text: string }> = {
+  hot: { bg: "#FEE2E2", fg: "#991B1B", text: "ждёт ответа" },
+  late: { bg: "#FEF3C7", fg: "#92400E", text: "просрочено" },
+  reactivation: { bg: "#DBEAFE", fg: "#1E40AF", text: "можно вернуть" },
+};
+
+function markLabel(m: any) {
+  if (!m) return null;
+  const st = MARK_STYLE[m.queue];
+  if (!st) return null;
+  return (
+    <span style={{ background: st.bg, color: st.fg, borderRadius: 6, padding: "1px 6px",
+      marginRight: 6, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
+      {st.text} · {m.age_days} дн{m.has_draft ? " · черновик" : ""}
+    </span>
+  );
+}
+
 export default function MessagesPage() {
   const [totals, setTotals] = useState<Totals>({ accounts: 0, new_msgs: 0, unanswered: 0, answered_today: 0 });
   const [accounts, setAccounts] = useState<Acc[]>([]);
@@ -38,6 +56,7 @@ export default function MessagesPage() {
   const [sending, setSending] = useState(false);
   const [err, setErr] = useState("");
   const [narrow, setNarrow] = useState(false);
+  const [marks, setMarks] = useState<Record<string, any>>({});
   const streamRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -74,6 +93,8 @@ export default function MessagesPage() {
   const loadDialogs = useCallback(async () => {
     const j = await aGet(`/api/inbox/dialogs?account_id=${encodeURIComponent(scope)}&q=${encodeURIComponent(query)}`);
     if (j && j.status === "ok") setDialogs(j.dialogs || []);
+    const mk = await aGet(`/api/reactivation/marks?account_id=${encodeURIComponent(scope)}`);
+    if (mk && mk.status === "ok") setMarks(mk.marks || {});
   }, [aGet, scope, query]);
 
   const loadThread = useCallback(async (acc: string, cid: string) => {
@@ -163,7 +184,7 @@ export default function MessagesPage() {
           dot={DOT[i % DOT.length]}
           title={<>{d.client_name}{scope === "all" ? (
             <span style={{ ...font.small, marginLeft: 6 }}>· {d.account_name}</span>) : null}</>}
-          subtitle={<>{d.item_title}{d.last_text ? " — " + d.last_text : ""}</>}
+          subtitle={<>{markLabel(marks[d.avito_chat_id])}{d.item_title}{d.last_text ? " — " + d.last_text : ""}</>}
           meta={d.last_at} count={d.unread} danger={!d.answered} />
       ))}
     </Pane>

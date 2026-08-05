@@ -145,6 +145,10 @@ app.include_router(inbox_daily.router, dependencies=_protected)
 app.include_router(client_memory.router, dependencies=_protected)
 app.include_router(ai_bindings.router, dependencies=_protected)
 app.include_router(admin_clients.router, dependencies=_protected)
+# Экран «Возврат клиентов». Импорт рядом с подключением, чтобы не трогать
+# общий блок импортов: он большой и правится параллельно другими задачами.
+from app.api import reactivation as reactivation_api  # noqa: E402
+app.include_router(reactivation_api.router, dependencies=_protected)
 app.include_router(onboarding_router, dependencies=[Depends(get_current_user_or_internal)])
 
 @app.get("/")

@@ -65,6 +65,13 @@ def check_prompt(body: CheckBody):
                   "max_completion_tokens": 2000},
             proxies=proxies, timeout=180)
         data = resp.json()
+        try:  # учёт расхода: прямой вызов идёт мимо пула
+            from app.usage import log_usage as _lu
+            _u = data.get("usage") or {}
+            _lu(None, "openai", data.get("model") or "gpt-5.4", "system:prompt_check",
+                int(_u.get("prompt_tokens") or 0), int(_u.get("completion_tokens") or 0))
+        except Exception as _e:
+            print("[usage]", str(_e)[:100], flush=True)
     except Exception as e:
         return {"status": "error", "message": str(e)[:200]}
 

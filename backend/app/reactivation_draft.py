@@ -99,12 +99,16 @@ def generate(db, account_id, avito_chat_id, item_title=None, reason=None, goal=N
             % (reason or "no_reply", goal or "clarify_relevance",
                GOAL_HINT.get(goal or "", "продолжить разговор по существу"),
                summary or "-", ctx))
-    from gigachat_pool import chat_with_fallback
+    # ТОЛЬКО OpenAI. Решения «писать или не писать клиенту» не должны зависеть от того,
+    # какая модель сегодня доступна: A/B 05.08 показал у GigaChat ложные разрешения —
+    # он не видит невыполненных обещаний продавца и пропускает отказы клиентов.
+    from gigachat_pool import _openai_fallback_completion
     from gigachat.models import Messages, MessagesRole
     sys_role = getattr(MessagesRole, "SYSTEM", MessagesRole.USER)
-    resp = chat_with_fallback(
-        [Messages(role=sys_role, content=SYSTEM), Messages(role=MessagesRole.USER, content=task)],
-        model=model, temperature=0.3, max_tokens=700,
+    resp = _openai_fallback_completion(
+        [Messages(role=sys_role, content=SYSTEM),
+         Messages(role=MessagesRole.USER, content=task)],
+        temperature=0.3, max_completion_tokens=700,
         account_id=account_id, operation=OPERATION)
     body = _extract_text(resp).strip()
     body = re.sub(r"^```(?:json)?|```$", "", body, flags=re.M).strip()

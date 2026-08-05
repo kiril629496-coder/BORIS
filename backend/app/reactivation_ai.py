@@ -189,15 +189,16 @@ def analyze(db, account_id, avito_chat_id, item_title=None, model=None):
     ctx, ids = build_context(db, account_id, avito_chat_id, item_title)
     if not ids:
         return {"ok": False, "error": "в диалоге нет сообщений"}
-    from gigachat_pool import chat_with_fallback
+    # ТОЛЬКО OpenAI. Решения «писать или не писать клиенту» не должны зависеть от того,
+    # какая модель сегодня доступна: A/B 05.08 показал у GigaChat ложные разрешения —
+    # он не видит невыполненных обещаний продавца и пропускает отказы клиентов.
+    from gigachat_pool import _openai_fallback_completion
     from gigachat.models import Messages, MessagesRole
-    # Формат сообщений — объекты Messages, как во всех остальных вызовах пула.
-    # Словари ломают ветку фолбэка на OpenAI: она читает m.role.
     sys_role = getattr(MessagesRole, "SYSTEM", MessagesRole.USER)
-    resp = chat_with_fallback(
+    resp = _openai_fallback_completion(
         [Messages(role=sys_role, content=SYSTEM),
          Messages(role=MessagesRole.USER, content=ctx)],
-        model=model, temperature=0, max_tokens=800,
+        temperature=0, max_completion_tokens=800,
         account_id=account_id, operation=OPERATION)
     data, err = parse_verdict(resp, set(ids))
     if err:
