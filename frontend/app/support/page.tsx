@@ -1,4 +1,5 @@
 "use client";
+import ClientSupport from "../components/ClientSupport";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -13,6 +14,18 @@ export default function SupportPage() {
   const [filter, setFilter] = useState("");
   const [replyFor, setReplyFor] = useState<number | null>(null);
   const [replyText, setReplyText] = useState("");
+  // Админские ручки поддержки отвечают «Доступ запрещён» всем, кроме владельца.
+  // Спрашиваем сервер, а не гадаем по роли из localStorage: если отказ —
+  // показываем клиенту его собственный экран обращений.
+  const [denied, setDenied] = useState<boolean | null>(null);
+  useEffect(() => {
+    const t = typeof window !== "undefined" ? localStorage.getItem("boris_token") : null;
+    if (!t) { setDenied(false); return; }
+    fetch("/api/support/all", { headers: { Authorization: "Bearer " + t } })
+      .then((r) => r.json())
+      .then((d) => setDenied(d && d.status === "error"))
+      .catch(() => setDenied(false));
+  }, []);
 
   const auth = () => {
     const t = localStorage.getItem("boris_token");
@@ -52,6 +65,9 @@ export default function SupportPage() {
   if (!data) return <div style={{ padding: 40, color: "#667085" }}>Загрузка…</div>;
 
   const counts = data["по_статусам"] || {};
+
+  if (denied === null) return null;
+  if (denied) return <ClientSupport />;
 
   return (
     <div className="b-mgr-wrap" style={{ maxWidth: "100%", padding: "clamp(16px,3vw,32px) clamp(12px,2.5vw,36px) 60px",
