@@ -10,7 +10,12 @@ from datetime import date, timedelta
 router = APIRouter(prefix="/api/cpx_advisor", tags=["cpx_advisor"])
 
 # Порог значимости: не судим объявление, пока показов меньше этого числа
-MIN_VIEWS_FOR_JUDGEMENT = 30
+MIN_VIEWS_FOR_JUDGEMENT = 30      # суточный порог, оставлен для истории
+# Недельное окно: суточные пороги писались под аккаунт с сотнями показов
+# на объявление, а у живых клиентов это единицы показов В НЕДЕЛЮ.
+MIN_VIEWS_FOR_JUDGEMENT_7D = 3   # меньше — судить не о чем
+ARCHIVE_MIN_VIEWS_7D = 10        # столько показов без контактов — повод снизить
+WINDOW_DAYS = 7                  # семь ПОЛНЫХ дней, сегодняшний неполный не берём
 # Шаг изменения ставки (для будущих действий; сейчас только в тексте совета)
 BID_STEP_PCT = 15
 
@@ -41,6 +46,29 @@ def _save_json(db, account_id, key, value):
 
 
 @router.get("/run")
+def _aggregate_window(db, account_id: str, days: int = WINDOW_DAYS):
+    """Суммы просмотров и контактов по объявлению за N ПОЛНЫХ прошлых дней.
+
+    Сегодняшний день не берём: он неполный и занижает картину.
+    Возвращает {item_id: {"views": n, "contacts": n, "days": сколько дней были данные}}.
+    """
+    out = {}
+    for back in range(1, days + 1):
+        day = (date.today() - timedelta(days=back)).isoformat()
+        snap = _load_json(db, account_id, f"daily_stats:{day}")
+        if not snap:
+            continue
+        for it in (snap.get("items") or []):
+            iid = it.get("id")
+            if iid is None:
+                continue
+            cur = out.setdefault(iid, {"views": 0, "contacts": 0, "days": 0})
+            cur["views"] += int(it.get("views") or 0)
+            cur["contacts"] += int(it.get("contacts") or 0)
+            cur["days"] += 1
+    return out
+
+
 def run_advisor(account_id: str = "otdushi"):
     """Один прогон Советника: собрать данные, посчитать, сложить рекомендации.
     Вызывается по расписанию (раз в час) или вручную."""
@@ -108,6 +136,7 @@ def run_advisor(account_id: str = "otdushi"):
                 limit_note = f"Расход {spent:.0f}/{daily_limit:.0f}р ({limit_pct}%) — в пределах лимита."
 
         # 5) формула: разбор по объявлениям
+        window = _aggregate_window(db, account_id)
         raise_bids, lower_bids, archive, watching = [], [], [], []
         for it in items_stats:
             if it.get("status") != "active":
@@ -117,28 +146,45 @@ def run_advisor(account_id: str = "otdushi"):
             contacts = it.get("contacts", 0)
             bid = bids_map.get(iid)
             bid_rub = round(bid/100, 2) if isinstance(bid, int) else None
+            w = window.get(iid) or {"views": 0, "contacts": 0, "days": 0}
+            v7, c7, d7 = w["views"], w["contacts"], w["days"]
+            conv7 = round(c7 / v7 * 100, 1) if v7 else None
             entry = {"id": iid, "title": it.get("title", "")[:50],
-                     "views": views, "contacts": contacts, "bid_rub": bid_rub}
+                     # суточные поля — legacy, на новом экране НЕ используются:
+                     # они почти всегда нули и вводят в заблуждение
+                     "views": views, "contacts": contacts,
+                     "bid_rub": bid_rub,
+                     "views_7d": v7, "contacts_7d": c7,
+                     "conversion_7d": conv7, "days_with_data": d7}
 
-            if views < MIN_VIEWS_FOR_JUDGEMENT:
-                entry["why"] = f"мало данных ({views} показов) — наблюдаю, не трогаю"
-                watching.append(entry)
-            elif contacts == 0:
-                if _is_archived(db, account_id, iid):
-                    entry["why"] = f"{views} показов, 0 контактов — продвижение уже снято"
-                    watching.append(entry)
-                else:
-                    entry["why"] = f"{views} показов, 0 контактов — жжёт бюджет впустую"
-                    entry["suggest"] = "снизить ставку или в архив"
-                    archive.append(entry)
-            elif contacts > 0:
-                entry["why"] = f"{contacts} контакт(ов) на {views} показов — работает"
+            if c7 > 0:
+                entry["reason_code"] = "has_contacts"
+                entry["why"] = f"{c7} контакт(ов) на {v7} просмотров за {WINDOW_DAYS} дней — работает"
                 if block_raises:
+                    entry["reason_code"] = "limit"
                     entry["suggest"] = "поднятие заблокировано суточным лимитом"
                     watching.append(entry)
                 else:
                     entry["suggest"] = f"можно поднять ставку на ~{BID_STEP_PCT}% для большего трафика"
                     raise_bids.append(entry)
+            elif v7 < MIN_VIEWS_FOR_JUDGEMENT_7D:
+                entry["reason_code"] = "no_data"
+                entry["why"] = f"{v7} просмотров за {WINDOW_DAYS} дней — объявление почти не показывается"
+                watching.append(entry)
+            elif v7 < ARCHIVE_MIN_VIEWS_7D:
+                entry["reason_code"] = "few_views"
+                entry["why"] = f"{v7} просмотров, 0 обращений — пока рано делать вывод"
+                watching.append(entry)
+            elif _is_archived(db, account_id, iid):
+                entry["reason_code"] = "already_off"
+                entry["why"] = f"{v7} просмотров, 0 обращений — продвижение уже отключено"
+                watching.append(entry)
+            else:
+                # Архив НЕ применяем автоматически — только рекомендация.
+                entry["reason_code"] = "no_contacts"
+                entry["why"] = f"{v7} просмотров за {WINDOW_DAYS} дней, 0 обращений — деньги уходят впустую"
+                entry["suggest"] = "снизить ставку или переработать объявление"
+                archive.append(entry)
 
         advice = {
             "generated_at": __import__("datetime").datetime.now().isoformat(),
@@ -190,6 +236,22 @@ class ApplyOneBody(BaseModel):
     action: str              # "raise" | "lower" | "archive"
 
 
+def _applied_key(item_id, action, generated_at):
+    """Ключ применения. Включает версию рекомендации: после нового расчёта
+    советника то же действие снова становится доступным, иначе однажда
+    изменённое объявление заблокировалось бы навсегда."""
+    return "%s:%s:%s" % (item_id, action, generated_at or "")
+
+
+def _mark_applied(db, account_id, key):
+    log = _load_json(db, account_id, "cpx_applied") or {}
+    log[key] = __import__("datetime").datetime.now().isoformat()
+    if len(log) > 500:                      # держим журнал компактным
+        for old in sorted(log, key=lambda k: log[k])[:200]:
+            log.pop(old, None)
+    _save_json(db, account_id, "cpx_applied", log)
+
+
 @router.post("/apply_one")
 def apply_one(body: ApplyOneBody):
     """Применить ОДНУ рекомендацию вручную (по кнопке). Меняет реальную ставку/статус.
@@ -203,6 +265,18 @@ def apply_one(body: ApplyOneBody):
         # KPI — берём цель и суточный лимит (предохранители)
         kpi = _load_json(db, body.account_id, "kpi_settings") or {}
         max_cpl = kpi.get("max_cost_per_lead_rub", 0)
+
+        # Одно действие на объявление в рамках ОДНОЙ версии рекомендаций.
+        advice_now = _load_json(db, body.account_id, "cpx_advice") or {}
+        gen_at = advice_now.get("generated_at") or ""
+        applied_log = _load_json(db, body.account_id, "cpx_applied") or {}
+        akey = _applied_key(body.item_id, body.action, gen_at)
+        if gen_at and akey in applied_log:
+            return {"status": "blocked", "item_id": body.item_id,
+                    "action": body.action,
+                    "applied_at": applied_log[akey],
+                    "message": "Это действие уже применено к текущей рекомендации. "
+                               "Повтор станет доступен после следующего расчёта советника."}
 
         tok_data = get_avito_token(body.account_id)
         tok = tok_data.get("access_token") if isinstance(tok_data, dict) else tok_data
@@ -249,6 +323,7 @@ def apply_one(body: ApplyOneBody):
                 _db2.commit(); _db2.close()
             except Exception as _e2:
                 print("[cpx] archive flag:", _e2)
+            _mark_applied(db, body.account_id, akey)
             return {"status": "ok", "action": "archive", "item_id": body.item_id}
 
         # raise / lower — считаем новую ставку с шагом и потолками
@@ -266,6 +341,17 @@ def apply_one(body: ApplyOneBody):
         else:
             return {"status": "error", "message": f"неизвестное действие {body.action}"}
 
+        # Avito принимает только суммы, кратные рублю: 154,4 ₽ отвергается
+
+        # с ошибкой «Сумма в строке bidPenny должна быть кратна рублю».
+
+        new_bid = (int(new_bid) // 100) * 100
+
+        if min_bid and new_bid < min_bid:
+
+            new_bid = (int(min_bid) // 100) * 100 or 100
+
+
         payload = {"actionTypeID": action_type, "bidPenny": int(new_bid), "itemID": body.item_id}
         wr = _httpx.post("https://api.avito.ru/cpxpromo/1/setManual",
                          headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
@@ -274,6 +360,7 @@ def apply_one(body: ApplyOneBody):
             return {"status": "error", "code": wr.status_code, "message": wr.text[:200]}
         _audit_log(body.account_id, "cpx_apply_bid",
                    f"объявление {body.item_id}: ставка {cur_bid/100:.0f}→{new_bid/100:.0f}₽ ({body.action})", "user")
+        _mark_applied(db, body.account_id, akey)
         return {"status": "ok", "action": body.action, "item_id": body.item_id,
                 "old_bid_rub": cur_bid/100, "new_bid_rub": new_bid/100}
     finally:
