@@ -43,6 +43,16 @@ def _my_accounts(db, user):
     return [r[0] for r in rows]
 
 
+def _not_disabled(db, accounts):
+    """Явно выключенные аккаунты на экран не попадают. Отсутствие настроек
+    выключением не считается — это «ещё не настраивали»."""
+    if not accounts:
+        return []
+    off = {r[0] for r in db.execute(text(
+        "SELECT account_id FROM reactivation_settings WHERE enabled = false"))}
+    return [a for a in accounts if a not in off]
+
+
 def _mop_accounts(db, accounts):
     """Реактивация работает поверх AI-менеджера: без подключённого МОПа
     аккаунт в очереди не попадает вообще."""
@@ -75,7 +85,7 @@ def _queue_of(row):
 
 
 def _rows(db, accounts):
-    accounts = _mop_accounts(db, accounts)
+    accounts = _mop_accounts(db, _not_disabled(db, accounts))
     if not accounts:
         return []
     sql = text(
@@ -133,6 +143,14 @@ def queues(db=Depends(_db), user=Depends(get_current_user)):
     res["sending_enabled"] = False
     res["mop_connected"] = bool(_mop_accounts(db, _my_accounts(db, user)))
     return res
+
+
+@router.get("/health")
+def health_index(db=Depends(_db), user=Depends(get_current_user)):
+    """Индекс здоровья отдела продаж по аккаунтам этого пользователя."""
+    from app.reactivation_health import health
+    accs = _mop_accounts(db, _not_disabled(db, _my_accounts(db, user)))
+    return health(db, accs)
 
 
 @router.get("/marks")

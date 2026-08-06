@@ -52,6 +52,7 @@ export default function ReactivationPage() {
   const [items, setItems] = useState<Card[]>([]);
   const [open, setOpen] = useState<Detail | null>(null);
   const [busy, setBusy] = useState(false);
+  const [health, setHealth] = useState<any>(null);
   const [err, setErr] = useState("");
 
   const loadQueues = useCallback(async () => {
@@ -68,6 +69,9 @@ export default function ReactivationPage() {
     } catch (e: any) { setErr(String(e?.message || e)); }
   }, []);
 
+  useEffect(() => {
+    apiGet("/api/reactivation/health").then(setHealth).catch(() => {});
+  }, []);
   useEffect(() => { loadQueues(); }, [loadQueues]);
   useEffect(() => { loadItems(tab); setOpen(null); }, [tab, loadItems]);
 
@@ -134,6 +138,36 @@ export default function ReactivationPage() {
       {err ? (
         <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", color: "#991B1B",
           padding: 12, borderRadius: 12, marginBottom: 16 }}>{err}</div>
+      ) : null}
+
+      {health && health.score != null ? (
+        <div style={{
+          border: "1px solid #E3E7F0", borderRadius: 16, padding: 16, marginBottom: 20,
+          background: health.light === "red" ? "#FEF2F2"
+            : health.light === "yellow" ? "#FFFBEB" : "#F0FDF4",
+        }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+            <span style={{ fontSize: 26 }}>
+              {health.light === "red" ? "\u{1F534}" : health.light === "yellow" ? "\u{1F7E1}" : "\u{1F7E2}"}
+            </span>
+            <span style={{ fontSize: 22, fontWeight: 800 }}>{health.score}/100</span>
+            <span style={{ color: "#6B7280" }}>здоровье отдела продаж</span>
+          </div>
+          {health.parts ? (
+            <div style={{ ...S.meta, marginTop: 6 }}>
+              снижение:{" "}
+              {Object.entries(health.parts)
+                .filter(([, v]: any) => v)
+                .map(([k, v]: any) => k + " \u2212" + v)
+                .join(" · ") || "нет"}
+            </div>
+          ) : null}
+          {health.todo && health.todo.length ? (
+            <div style={{ marginTop: 8, fontSize: 14 }}>
+              <b>Чтобы поднять:</b> {health.todo.join("; ")}
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       <div style={S.tabs}>
