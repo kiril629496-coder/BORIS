@@ -57,6 +57,21 @@ export default function MessagesPage() {
   const [err, setErr] = useState("");
   const [narrow, setNarrow] = useState(false);
   const [marks, setMarks] = useState<Record<string, any>>({});
+  const [crmTasks, setCrmTasks] = useState<any[]>([]);
+  const [crmBadges, setCrmBadges] = useState<Record<string, any>>({});
+  const [crmOpen, setCrmOpen] = useState(false);
+  const [mopDraft, setMopDraft] = useState<any>(null);
+  const [mopText, setMopText] = useState("");
+  const [mopEdit, setMopEdit] = useState(false);
+  const [sleepMode, setSleepMode] = useState(false);
+  const [sleepQueues, setSleepQueues] = useState<any[]>([]);
+  const [sleepQueue, setSleepQueue] = useState("");
+  const [sleepItems, setSleepItems] = useState<any[]>([]);
+  const [crmForm, setCrmForm] = useState(false);
+  const [crmDate, setCrmDate] = useState("");
+  const [crmTime, setCrmTime] = useState("");
+  const [crmType, setCrmType] = useState("позвонить");
+  const [crmTitle, setCrmTitle] = useState("");
   const streamRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -93,15 +108,45 @@ export default function MessagesPage() {
   const loadDialogs = useCallback(async () => {
     const j = await aGet(`/api/inbox/dialogs?account_id=${encodeURIComponent(scope)}&q=${encodeURIComponent(query)}`);
     if (j && j.status === "ok") setDialogs(j.dialogs || []);
-    const mk = await aGet(`/api/reactivation/marks?account_id=${encodeURIComponent(scope)}`);
+    // scope="all" — служебное значение фронта. Проверка изоляции его не знает и
+    // отвечает 403, поэтому для всех аккаунтов параметр просто не передаём.
+    const mk = await aGet("/api/reactivation/marks"
+      + (scope === "all" ? "" : `?account_id=${encodeURIComponent(scope)}`));
     if (mk && mk.status === "ok") setMarks(mk.marks || {});
+    if (scope !== "all") {
+      const bg = await aGet(`/api/crm/badges?account_id=${encodeURIComponent(scope)}`);
+      if (bg && bg.status === "ok") setCrmBadges(bg.badges || {});
+    }
   }, [aGet, scope, query]);
 
   const loadThread = useCallback(async (acc: string, cid: string) => {
     const j = await aGet(`/api/inbox/thread?account_id=${encodeURIComponent(acc)}&avito_chat_id=${encodeURIComponent(cid)}`);
     if (j && j.status === "ok") { setThread(j.dialog); setMessages(j.messages || []); }
+    const tk = await aGet(`/api/crm/tasks?account_id=${encodeURIComponent(acc)}&chat_id=${encodeURIComponent(cid)}`);
+    if (tk && tk.status === "ok") setCrmTasks(tk.tasks || []);
+    const dr = await aGet(`/api/messenger/pending_drafts?account_id=${encodeURIComponent(acc)}`);
+    if (dr && dr.status === "ok") {
+      const mine = (dr.drafts || []).find((x: any) => x.avito_chat_id === cid);
+      setMopDraft(mine || null);
+      setMopText(mine ? mine.text || "" : "");
+      setMopEdit(false);
+    }
   }, [aGet]);
 
+  const loadSleep = useCallback(async () => {
+    const q = await aGet("/api/reactivation/queues");
+    if (q && Array.isArray(q.queues)) {
+      setSleepQueues(q.queues);
+      const first = sleepQueue || (q.queues[0] && (q.queues[0].key || q.queues[0].name)) || "";
+      if (first) {
+        setSleepQueue(first);
+        const c = await aGet("/api/reactivation/candidates?queue=" + encodeURIComponent(first));
+        setSleepItems((c && (c.items || c.candidates)) || []);
+      }
+    }
+  }, [aGet, sleepQueue]);
+
+  useEffect(() => { if (sleepMode) loadSleep(); }, [sleepMode, loadSleep]);
   useEffect(() => { loadAccounts(); }, [loadAccounts]);
   useEffect(() => { loadDialogs(); }, [loadDialogs]);
   useEffect(() => {
@@ -178,7 +223,31 @@ export default function MessagesPage() {
       {dialogs.length === 0 ? (
         <div style={{ ...font.small, textAlign: "center", padding: space.xl }}>Диалогов пока нет</div>
       ) : null}
-      {dialogs.map((d, i) => (
+      <div style={{ display: "flex", gap: 6, padding: "0 8px 10px" }}>
+        <button onClick={() => setSleepMode(false)} style={{ flex: 1, border: "1px solid " + color.line, background: sleepMode ? "#fff" : color.blue, color: sleepMode ? color.heading : "#fff", borderRadius: 8, padding: "7px 10px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Активные</button>
+        <button onClick={() => setSleepMode(true)} style={{ flex: 1, border: "1px solid " + color.line, background: sleepMode ? color.blue : "#fff", color: sleepMode ? "#fff" : color.heading, borderRadius: 8, padding: "7px 10px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Спящие</button>
+      </div>
+      {sleepMode && (
+        <div style={{ padding: "0 8px 10px" }}>
+          {sleepQueues.length > 0 && (
+            <select value={sleepQueue} onChange={async (e) => { const q = e.target.value; setSleepQueue(q); const c = await aGet("/api/reactivation/candidates?queue=" + encodeURIComponent(q)); setSleepItems((c && (c.items || c.candidates)) || []); }} style={{ width: "100%", border: "1px solid " + color.line, borderRadius: 8, padding: "7px 9px", fontSize: 13, marginBottom: 8 }}>
+              {sleepQueues.map((q: any, i: number) => <option key={i} value={q.key || q.name}>{(q.title || q.label || q.name || q.key) + (q.count != null ? " — " + q.count : "")}</option>)}
+            </select>
+          )}
+          {sleepItems.length === 0 && <div style={{ ...font.small, textAlign: "center", padding: 24 }}>В этой очереди пока пусто</div>}
+          {sleepItems.map((c: any, i: number) => (
+            <div key={i} style={{ border: "1px solid " + color.line, borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+              <div style={{ ...font.small, fontWeight: 700, color: color.heading }}>{c.client_name || c.title || c.item_title || "Клиент"}</div>
+              <div style={font.small}>{(c.last_message || c.note || "").slice(0, 90)}</div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                <button onClick={async () => { await aPost("/api/reactivation/candidate/" + c.id + "/take", {}); loadSleep(); }} style={{ border: "none", background: color.blue, color: "#fff", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Взять в работу</button>
+                <button onClick={async () => { await aPost("/api/reactivation/candidate/" + c.id + "/exclude", {}); loadSleep(); }} style={{ border: "1px solid " + color.line, background: "#fff", borderRadius: 8, padding: "5px 12px", fontSize: 12, cursor: "pointer" }}>Исключить</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {!sleepMode && dialogs.map((d, i) => (
         <ListItem key={d.account_id + d.avito_chat_id}
           active={openCid === d.avito_chat_id} onClick={() => open(d)}
           dot={DOT[i % DOT.length]}
@@ -225,7 +294,104 @@ export default function MessagesPage() {
           ) : null}
           <span>ID диалога: {thread.avito_chat_id}</span>
         </div>
+
+        <div style={{ marginTop: space.sm, border: "1px solid " + color.line, borderRadius: radius.sm, overflow: "hidden" }}>
+          <div onClick={() => setCrmOpen(!crmOpen)}
+               style={{ padding: "9px 12px", cursor: "pointer", display: "flex", alignItems: "center",
+                        gap: space.sm, background: color.surfaceAlt, ...font.small }}>
+            <b style={{ color: color.heading }}>Напоминания</b>
+            {crmTasks.filter((t: any) => t.status === "overdue").length > 0 && (
+              <span style={{ background: "#FEE4E2", color: "#B42318", borderRadius: 10, padding: "1px 8px", fontWeight: 700 }}>
+                просрочено {crmTasks.filter((t: any) => t.status === "overdue").length}
+              </span>
+            )}
+            {crmTasks.filter((t: any) => t.status === "today").length > 0 && (
+              <span style={{ background: "#D1FADF", color: "#027A48", borderRadius: 10, padding: "1px 8px", fontWeight: 700 }}>
+                сегодня {crmTasks.filter((t: any) => t.status === "today").length}
+              </span>
+            )}
+            {crmTasks.length === 0 && <span>задач нет</span>}
+            <span style={{ marginLeft: "auto" }}>{crmOpen ? "свернуть" : "развернуть"}</span>
+          </div>
+
+          {crmOpen && (
+            <div style={{ padding: "10px 12px" }}>
+              {crmTasks.filter((t: any) => t.status !== "done").map((t: any) => (
+                <div key={t.id} style={{ display: "flex", alignItems: "flex-start", gap: space.sm,
+                                         padding: "7px 0", borderBottom: "1px solid " + color.line }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 4, marginTop: 6, flexShrink: 0,
+                                 background: t.status === "overdue" ? "#F04438" : t.status === "today" ? "#12B76A" : "#98A2B3" }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ ...font.small, color: color.heading, fontWeight: 600 }}>{t.title}</div>
+                    <div style={font.small}>{t.type} · {t.due_date}{t.due_time ? " " + t.due_time : ""}</div>
+                    {t.comment ? <div style={font.small}>{t.comment}</div> : null}
+                  </div>
+                  <button onClick={async () => { await aPost("/api/crm/tasks/done", { account_id: thread.account_id, task_id: t.id });
+                                                 loadThread(thread.account_id, thread.avito_chat_id); }}
+                          style={{ border: "1px solid " + color.line, background: "#fff", borderRadius: 8,
+                                   padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>Готово</button>
+                  <button onClick={async () => { const d = new Date(); d.setDate(d.getDate() + 1);
+                                                 await aPost("/api/crm/tasks/update", { account_id: thread.account_id, task_id: t.id, due_date: d.toISOString().slice(0, 10) });
+                                                 loadThread(thread.account_id, thread.avito_chat_id); }}
+                          style={{ border: "1px solid " + color.line, background: "#fff", borderRadius: 8,
+                                   padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>+1 день</button>
+                </div>
+              ))}
+
+              {!crmForm ? (
+                <button onClick={() => { setCrmForm(true); setCrmDate(new Date().toISOString().slice(0, 10)); }}
+                        style={{ marginTop: 10, border: "1px solid " + color.line, background: "#fff",
+                                 borderRadius: 8, padding: "6px 12px", fontSize: 13, cursor: "pointer" }}>
+                  + Добавить напоминание
+                </button>
+              ) : (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 7 }}>
+                  <input value={crmTitle} onChange={(e) => setCrmTitle(e.target.value)} placeholder="Что нужно сделать"
+                         style={{ border: "1px solid " + color.line, borderRadius: 8, padding: "7px 10px", fontSize: 13 }} />
+                  <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+                    <input type="date" value={crmDate} onChange={(e) => setCrmDate(e.target.value)}
+                           style={{ border: "1px solid " + color.line, borderRadius: 8, padding: "6px 8px", fontSize: 13 }} />
+                    <input type="time" value={crmTime} onChange={(e) => setCrmTime(e.target.value)}
+                           style={{ border: "1px solid " + color.line, borderRadius: 8, padding: "6px 8px", fontSize: 13 }} />
+                    <select value={crmType} onChange={(e) => setCrmType(e.target.value)}
+                            style={{ border: "1px solid " + color.line, borderRadius: 8, padding: "6px 8px", fontSize: 13 }}>
+                      {["позвонить", "написать", "отправить фото", "отправить КП", "запросить оплату", "уточнить доставку", "другое"]
+                        .map((x) => <option key={x} value={x}>{x}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ display: "flex", gap: 7 }}>
+                    <button onClick={async () => {
+                              if (!crmTitle.trim()) return;
+                              await aPost("/api/crm/tasks", { account_id: thread.account_id, chat_id: thread.avito_chat_id,
+                                                              due_date: crmDate, due_time: crmTime, type: crmType, title: crmTitle });
+                              setCrmTitle(""); setCrmTime(""); setCrmForm(false);
+                              loadThread(thread.account_id, thread.avito_chat_id); }}
+                            style={{ border: "none", background: color.blue, color: "#fff", borderRadius: 8,
+                                     padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Сохранить</button>
+                    <button onClick={() => setCrmForm(false)}
+                            style={{ border: "1px solid " + color.line, background: "#fff", borderRadius: 8,
+                                     padding: "7px 14px", fontSize: 13, cursor: "pointer" }}>Отмена</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
+
+      {mopDraft && (
+        <div style={{ margin: "0 16px 12px", border: "1px solid #A6F4C5", background: "#F6FEF9", borderRadius: radius.sm, padding: "12px 14px" }}>
+          <div style={{ ...font.small, fontWeight: 700, color: "#027A48", marginBottom: 8 }}>Борис подготовил ответ — проверьте перед отправкой</div>
+          {mopEdit
+            ? <textarea value={mopText} onChange={(e) => setMopText(e.target.value)} style={{ width: "100%", minHeight: 120, border: "1px solid " + color.line, borderRadius: 8, padding: "9px 11px", fontSize: 14, resize: "vertical" }} />
+            : <div style={{ fontSize: 14, color: color.heading, whiteSpace: "pre-wrap" }}>{mopText}</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+            <button disabled={sending} onClick={async () => { setSending(true); await aPost("/api/messenger/draft/approve", { draft_id: mopDraft.draft_id, text: mopText }); setMopDraft(null); setSending(false); if (thread) loadThread(thread.account_id, thread.avito_chat_id); }} style={{ border: "none", background: "#12B76A", color: "#fff", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Отправить клиенту</button>
+            <button onClick={() => setMopEdit(!mopEdit)} style={{ border: "1px solid " + color.line, background: "#fff", borderRadius: 8, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>{mopEdit ? "Готово" : "Изменить"}</button>
+            <button onClick={async () => { await aPost("/api/messenger/draft/discard", { draft_id: mopDraft.draft_id }); setMopDraft(null); }} style={{ border: "1px solid #FDA29B", color: "#B42318", background: "#fff", borderRadius: 8, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Отклонить</button>
+          </div>
+        </div>
+      )}
 
       <div ref={streamRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: space.lg }}>
         {messages.map((m, i) => {
