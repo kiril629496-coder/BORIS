@@ -934,6 +934,75 @@ def due_posts_all(dry=False):
             finally:
                 db.close()
 
+def warn_stale_drafts(dry=False):
+    """Одна сводка в сутки: какие проекты ждут утверждения дольше суток.
+
+    Именно молчание, а не механизм автопубликации, привело к лавине 06.08:
+    черновики копились две недели, и об этом никто не знал. Сообщение одно
+    на все проекты — иначе получится вторая лавина, только в уведомлениях.
+    """
+    import json as _json
+    stale = []
+    for acc in _all_user_buckets():
+        db = SessionLocal()
+        try:
+            prow = db.query(Storage).filter(Storage.account_id == acc,
+                                            Storage.key == "posting_projects").first()
+            projects = _json.loads(prow.value) if prow else []
+            drow = db.query(Storage).filter(Storage.account_id == acc,
+                                            Storage.key == "posting_posts").first()
+            posts = _json.loads(drow.value) if drow else []
+        finally:
+            db.close()
+        projmap = {p.get("id"): p for p in projects}
+        by_proj = {}
+        for rec in posts:
+            if rec.get("status") != "draft":
+                continue
+            proj = projmap.get(rec.get("project_id"))
+            if not proj:
+                continue
+            created = (rec.get("created_at") or "")[:16]
+            try:
+                dt = datetime.strptime(created, "%Y-%m-%d %H:%M")
+            except Exception:
+                continue
+            if datetime.now() < dt + timedelta(hours=STALE_AFTER_HOURS):
+                continue
+            name = proj.get("name") or str(rec.get("project_id"))
+            cur = by_proj.setdefault(name, {"count": 0, "oldest": created})
+            cur["count"] += 1
+            if created < cur["oldest"]:
+                cur["oldest"] = created
+        for name, info in by_proj.items():
+            stale.append((name, info["count"], info["oldest"]))
+
+    if not stale:
+        print("[stale] зависших черновиков нет", flush=True)
+        return
+
+    lines = ["\u26a0\ufe0f <b>Черновики ждут вашего утверждения</b>", ""]
+    for name, count, oldest in sorted(stale, key=lambda x: x[2]):
+        lines.append("\u2022 " + str(name) + " — " + str(count) +
+                     ", самый старый от " + str(oldest))
+    lines.append("")
+    lines.append("Старше суток BORIS их публиковать не станет.")
+    text = "\n".join(lines)
+
+    if dry:
+        print("[stale DRY]\n" + text, flush=True)
+        return
+
+    try:
+        from app.telegram_bot import send_telegram_message
+        for _acc, cfg in _POST_NOTIFY.items():
+            send_telegram_message(str(cfg["chat_id"]), text, thread_id=cfg.get("thread_id"))
+            print("[stale] сводка отправлена:", len(stale), "проектов", flush=True)
+            break
+    except Exception as _e:
+        print("[stale] ошибка отправки:", str(_e)[:150], flush=True)
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "demo":
         _demo(sys.argv[2])
@@ -941,6 +1010,8 @@ if __name__ == "__main__":
         autopost(sys.argv[2])
     elif len(sys.argv) >= 2 and sys.argv[1] == "due_posts":
         due_posts_all(dry=("dry" in sys.argv[2:]))
+    elif len(sys.argv) >= 2 and sys.argv[1] == "warn_stale":
+        warn_stale_drafts(dry=("dry" in sys.argv[2:]))
     elif len(sys.argv) >= 2 and sys.argv[1] == "autopost_all":
         autopost_all(respect_time=("time" in sys.argv[2:]))
     elif len(sys.argv) >= 3 and sys.argv[1] == "autopost_projects":
