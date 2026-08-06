@@ -60,6 +60,8 @@ export default function MessagesPage() {
   const [crmTasks, setCrmTasks] = useState<any[]>([]);
   const [crmBadges, setCrmBadges] = useState<Record<string, any>>({});
   const [crmOpen, setCrmOpen] = useState(false);
+  const [tgChat, setTgChat] = useState("");
+  const [tgSaved, setTgSaved] = useState(false);
   const [mopDraft, setMopDraft] = useState<any>(null);
   const [mopText, setMopText] = useState("");
   const [mopEdit, setMopEdit] = useState(false);
@@ -135,14 +137,16 @@ export default function MessagesPage() {
 
   const loadSleep = useCallback(async () => {
     const q = await aGet("/api/reactivation/queues");
-    if (q && Array.isArray(q.queues)) {
-      setSleepQueues(q.queues);
-      const first = sleepQueue || (q.queues[0] && (q.queues[0].key || q.queues[0].name)) || "";
-      if (first) {
-        setSleepQueue(first);
-        const c = await aGet("/api/reactivation/candidates?queue=" + encodeURIComponent(first));
-        setSleepItems((c && (c.items || c.candidates)) || []);
-      }
+    if (q) {
+      // ручка отдаёт словарь: hot / late / reactivation, каждый с title и count
+      const list = ["hot", "late", "reactivation"]
+        .filter((k) => q[k])
+        .map((k) => ({ key: k, title: q[k].title, count: q[k].count }));
+      setSleepQueues(list);
+      const first = sleepQueue || (list[0] && list[0].key) || "reactivation";
+      setSleepQueue(first);
+      const c = await aGet("/api/reactivation/candidates?queue=" + encodeURIComponent(first));
+      setSleepItems((c && c.items) || []);
     }
   }, [aGet, sleepQueue]);
 
@@ -316,6 +320,26 @@ export default function MessagesPage() {
 
           {crmOpen && (
             <div style={{ padding: "10px 12px" }}>
+              <div style={{ display: "flex", gap: space.sm, alignItems: "center",
+                            paddingBottom: "9px", marginBottom: "4px",
+                            borderBottom: "1px solid " + color.line, flexWrap: "wrap" }}>
+                <span style={font.small}>Напоминания в Telegram:</span>
+                <input value={tgChat} onChange={(e) => setTgChat(e.target.value)}
+                       placeholder="номер чата, например -1001234567890"
+                       style={{ flex: 1, minWidth: 170, border: "1px solid " + color.line,
+                                borderRadius: radius.sm, padding: "6px 9px", fontSize: 13 }} />
+                <button onClick={async () => {
+                  if (!tgChat.trim()) return;
+                  await aPost("/api/accounts/" + encodeURIComponent(thread.account_id) + "/update",
+                              { telegram_chat_id: tgChat.trim() });
+                  setTgSaved(true);
+                }} style={{ background: "#2F6FED", color: "#FFFFFF", border: "none",
+                            borderRadius: radius.sm, padding: "6px 14px", fontSize: 13,
+                            fontWeight: 600, cursor: "pointer" }}>Сохранить</button>
+                <span style={font.small}>
+                  {tgSaved ? "Сохранено" : "узнать номер: перешлите сообщение боту @userinfobot"}
+                </span>
+              </div>
               {crmTasks.filter((t: any) => t.status !== "done").map((t: any) => (
                 <div key={t.id} style={{ display: "flex", alignItems: "flex-start", gap: space.sm,
                                          padding: "7px 0", borderBottom: "1px solid " + color.line }}>
