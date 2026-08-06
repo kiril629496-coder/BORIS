@@ -200,7 +200,10 @@ def agency_overview(user: User = Depends(get_current_user)):
         bill_tier = tier if tier in ("tariff_1", "tariff_2") else "tariff_1"
 
         items = []
-        for a in auto:
+        # Показываем ВСЕ аккаунты владельца, а не только с автосписанием:
+        # режим у каждого виден в своей колонке. Раньше клиент с ручным
+        # режимом видел счётчик «2 аккаунта» и пустую таблицу под ним.
+        for a in accs:
             b = _load_billing(a.account_id) or {}
             u = b.get("usage") or {}
             lim = TARIFFS.get(b.get("tier") or tier, TARIFFS["none"])["limits"]
