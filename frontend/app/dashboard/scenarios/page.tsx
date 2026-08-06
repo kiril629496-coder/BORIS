@@ -83,7 +83,7 @@ export default function ScenariosPage() {
             <div className={styles.title}>Сначала подключите аккаунт Avito</div>
             <div className={styles.text}>Без аккаунта сценарии запускать не на чем.</div>
             <div className={styles.foot}>
-              <button className={styles.btnFill} onClick={() => openRoute("/agency")}>
+              <button className={styles.btnFill} onClick={() => openRoute("/dashboard?connect=avito")}>
                 Добавить аккаунт
               </button>
             </div>

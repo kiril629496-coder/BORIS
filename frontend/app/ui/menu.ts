@@ -13,6 +13,7 @@ export const MENU: MenuGroup[] = [
     group: "Работа",
     items: [
       { key: "home", label: "Главная", icon: "home", href: "/dashboard/home" },
+      { key: "scenarios", label: "Бизнес-сценарии", icon: "star", href: "/dashboard/scenarios" },
       { key: "messages", label: "Сообщения", icon: "messages", href: "/messages" },
       { key: "reactivation", label: "Возврат клиентов", icon: "clients", href: "/reactivation" },
       { key: "listings", label: "Объявления", icon: "list" },
