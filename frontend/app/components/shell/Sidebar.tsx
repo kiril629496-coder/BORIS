@@ -7,7 +7,8 @@ import { apiGet, getAccount, setAccount, navigateToOld, openRoute, OldMode } fro
 
 /* Пункт меню: либо маршрут нового интерфейса, либо вкладка старого кабинета
    (при необходимости с булевым режимом — их открывает мост навигации). */
-type Item = { key: string; icon: string; label: string; route?: string; tab?: string; mode?: OldMode };
+type Item = { key: string; icon: string; label: string; route?: string; tab?: string;
+              mode?: OldMode; testid?: string };
 
 const GROUPS: { title: string; items: Item[] }[] = [
   {
@@ -26,7 +27,11 @@ const GROUPS: { title: string; items: Item[] }[] = [
     items: [
       { key: "home",     icon: "🏠", label: "Главная",       route: "/dashboard/home" },
       { key: "scenarios", icon: "⭐", label: "Бизнес-сценарии", route: "/dashboard/scenarios" },
-      { key: "listings", icon: "📋", label: "Объявления",    tab: "listings" },
+      // nav-cabinet: любой пункт с tab уходит через navigateToOld на /dashboard,
+      // и «Объявления» — первый рабочий раздел кабинета. Этот идентификатор
+      // ждёт QA как доказательство, что переход в кабинет живой.
+      { key: "listings", icon: "📋", label: "Объявления",    tab: "listings",
+        testid: "nav-cabinet" },
       { key: "plan",     icon: "✅", label: "Задачи и план", tab: "plan" },
       { key: "settings", icon: "🛡", label: "Режим работы",  tab: "settings" },
     ],
@@ -89,6 +94,24 @@ export default function Sidebar({ active, open, onClose }: Props) {
           aria-label={min ? "Развернуть меню" : "Свернуть меню"}>{min ? "»" : "«"}</button>
       </div>
 
+      {!min && accounts.length === 0 && (
+        <div data-testid="no-account-banner"
+             style={{ margin: "10px 12px", padding: "12px 14px", borderRadius: "12px",
+                      background: "#FEF6E7", border: "1px solid #F5D9A8" }}>
+          <div style={{ fontSize: "13px", fontWeight: 700, color: "#B54708", marginBottom: "4px" }}>
+            Аккаунт Авито не подключён
+          </div>
+          <div style={{ fontSize: "12px", color: "#7A5A20", lineHeight: 1.45, marginBottom: "10px" }}>
+            Пока он не подключён, большинство разделов будут пустыми — это не ошибка.
+          </div>
+          <button onClick={() => openRoute("/dashboard?connect=avito")}
+                  style={{ background: "#B54708", color: "#FFFFFF", border: "none",
+                           borderRadius: "8px", padding: "7px 12px", fontSize: "12px",
+                           fontWeight: 700, cursor: "pointer", width: "100%" }}>
+            Подключить аккаунт
+          </button>
+        </div>
+      )}
       {!min && (
         <div className={css.company}>
           <div className={css.companyBox}>
@@ -114,6 +137,7 @@ export default function Sidebar({ active, open, onClose }: Props) {
             {g.items.map((it) => (
               <button key={it.key} title={min ? it.label : undefined}
                 className={css.item + " " + (active === it.key ? css.itemActive : "")}
+                data-testid={it.testid || ("nav-" + it.key)}
                 onClick={() => go(it)}>
                 <span className={css.ico}>{it.icon}</span>
                 {!min && <span className={css.label}>{it.label}</span>}
