@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from app.db.session import SessionLocal, engine
@@ -115,6 +116,7 @@ def avito_keys_status(account_id: str):
 
 
 class UpdateAccountRequest(BaseModel):
+    telegram_chat_id: Optional[str] = None
     name: str = None
     avito_login: str = None
     avito_password: str = None
@@ -264,7 +266,9 @@ def update_account(account_id: str, req: UpdateAccountRequest):
         for field in ("name", "avito_login", "avito_password", "comment",
                       "avito_client_id", "avito_client_secret",
                       "company_website", "company_niche", "company_tone", "client_goal", "client_goal_text",
-                      "company_description", "company_advantages"):
+                      "company_description", "company_advantages",
+                      # чат для напоминаний мини-CRM: у каждого клиента свой
+                      "telegram_chat_id"):
             new_value = getattr(req, field)
             if new_value is not None:
                 if field in ("avito_client_id", "avito_client_secret") and new_value:

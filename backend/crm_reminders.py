@@ -118,6 +118,7 @@ def run(dry=False):
                     try:
                         _send_tg(tg_chat, head, acc_name, comment or "")
                         _mark_manager(db, tid)
+                        print("[crm] telegram ->", tg_chat, "|", head, flush=True)
                     except Exception as e:
                         print("[crm] telegram не ушёл:", str(e)[:120], flush=True)
 
@@ -143,5 +144,69 @@ def run(dry=False):
         db.close()
 
 
+def digest(dry=False):
+    """Одна сводка утром: что запланировано на сегодня и что просрочено.
+
+    Отдельно от поштучных напоминаний: сигнал ко времени нужен, чтобы не
+    пропустить встречу, а сводка — чтобы утром увидеть весь день целиком.
+    """
+    db = SessionLocal()
+    try:
+        rows = db.execute(sql("""
+            SELECT a.owner_user_id, a.name, a.telegram_chat_id,
+                   t.due_date, t.due_time, t.task_type, t.title
+              FROM crm_tasks t
+              JOIN accounts a ON a.account_id = t.account_id
+             WHERE t.status = 'planned'
+               AND t.due_date <= CURRENT_DATE
+             ORDER BY a.owner_user_id, t.due_date, COALESCE(t.due_time, '99:99')
+        """)).fetchall()
+
+        from datetime import date as _d
+        today = _d.today()
+        by_owner = {}
+        for r in rows:
+            by_owner.setdefault(r[0], {"chat": r[2], "lines": []})
+            if r[2] and not by_owner[r[0]]["chat"]:
+                by_owner[r[0]]["chat"] = r[2]
+            late = " (просрочено)" if r[3] < today else ""
+            when = (r[4] or "").strip()
+            by_owner[r[0]]["lines"].append(
+                "\u2022 " + (when + " — " if when else "") + str(r[6] or "задача") +
+                " · " + str(r[1] or "") + late)
+
+        for owner, info in by_owner.items():
+            if not info["lines"]:
+                continue
+            text = ("\U0001F4C5 <b>Задачи на сегодня</b>\n\n" +
+                    "\n".join(info["lines"][:20]) +
+                    "\n\nhttps://boris-ai.pro/messages")
+            if dry:
+                print("[dry digest] владелец", owner, "|", len(info["lines"]), "задач", flush=True)
+                continue
+            row = db.execute(sql("SELECT email FROM users WHERE id = :i"),
+                             {"i": owner}).fetchone()
+            if row and row[0]:
+                from app.services.email_queue import enqueue_email
+                plain = text.replace("<b>", "").replace("</b>", "")
+                enqueue_email(row[0], "BORIS: задачи на сегодня", plain)
+            if info["chat"]:
+                try:
+                    from app.telegram_bot import send_telegram_message
+                    send_telegram_message(str(info["chat"]), text)
+                except Exception as e:
+                    print("[digest] telegram не ушёл:", str(e)[:120], flush=True)
+            print("[digest] владельцу", owner, "отправлено задач:",
+                  len(info["lines"]), flush=True)
+
+        if not by_owner:
+            print("[digest] задач на сегодня нет", flush=True)
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
-    run(dry=("dry" in sys.argv[1:]))
+    if "digest" in sys.argv[1:]:
+        digest(dry=("dry" in sys.argv[1:]))
+    else:
+        run(dry=("dry" in sys.argv[1:]))
