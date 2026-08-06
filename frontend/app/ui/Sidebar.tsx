@@ -7,6 +7,7 @@
  *   пункт без href -> onSelect(key) (переключение вкладки внутри кабинета);
  *   guideKey       -> подсветка пункта обучалкой.
  */
+import AccountPicker from "../components/AccountPicker";
 import React from "react";
 import { useBackTarget } from "../lib/useBackTarget";
 import { Icon } from "./index";
@@ -119,6 +120,7 @@ export function Shell({ activeKey, children }:
                            fontWeight: 600, cursor: "pointer" }}>
             {back.label}
           </button>
+          <AccountPicker />
         </div>
         {children}
       </div>

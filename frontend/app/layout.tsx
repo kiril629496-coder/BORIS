@@ -1,3 +1,4 @@
+import { AccountProvider } from "./lib/AccountContext";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Manrope, Inter } from "next/font/google";
 import "./globals.css";
@@ -48,7 +49,7 @@ export default function RootLayout({
       lang="ru"
       className={`${geistSans.variable} ${geistMono.variable} ${manrope.variable} ${inter.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}        <BorisWidget />
+      <body className="min-h-full flex flex-col"><AccountProvider>{children}</AccountProvider>        <BorisWidget />
         <Metrika />
       </body>
     </html>

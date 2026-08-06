@@ -1,4 +1,5 @@
 "use client";
+import { useAccounts } from "../lib/AccountContext";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -13,6 +14,7 @@ type Project = any;
 export default function SocialPage() {
   const router = useRouter();
   const [account, setAccount] = useState("");
+  const accCtx = useAccounts();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selId, setSelId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -79,7 +81,8 @@ export default function SocialPage() {
 
   const load = async (keepId?: string) => {
     const h = auth(); if (!h) return;
-    const acc = (typeof window !== "undefined" && localStorage.getItem("boris_currentAccount")) || "";
+    // аккаунт берём из общего контекста, а не читаем localStorage сами
+    const acc = accCtx.selectedAccountId || "";
     setAccount(acc);
     try {
       const r = await fetch("/api/posting/projects?account_id=" + encodeURIComponent(acc), { headers: h });
@@ -97,6 +100,17 @@ export default function SocialPage() {
       else { setSelId(null); }
     } catch (e: any) { setErr(String(e)); }
   };
+
+  // При смене аккаунта сбрасываем данные прошлого и тянем новые:
+  // на экране не должен оставаться чужой проект.
+  useEffect(function () {
+    const next = accCtx.selectedAccountId || "";
+    if (!next || next === account) return;
+    setAccount(next);
+    setProjects([]);
+    setSelId(null);
+    load();
+  }, [accCtx.selectedAccountId]);
 
   useEffect(() => { load(); }, []);
 
@@ -164,7 +178,8 @@ export default function SocialPage() {
 
   const loadPosts = async (projId: string) => {
     const h = auth(); if (!h) return;
-    const acc = account || (typeof window !== "undefined" && localStorage.getItem("boris_currentAccount")) || "";
+    // аккаунт берём из общего контекста, а не читаем localStorage сами
+    const acc = account || accCtx.selectedAccountId || "";
     try {
       const r = await fetch("/api/posting/posts?account_id=" + encodeURIComponent(acc) + "&project_id=" + encodeURIComponent(projId), { headers: h });
       const j = await r.json();
@@ -606,7 +621,9 @@ export default function SocialPage() {
                           <button className="soc-btn" disabled={busy} onClick={() => { setSchedId(schedId === p.id ? "" : p.id); setSchedWhen((p.publish_at || "").replace(" ", "T")); setEditId(""); }} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>🕒 Когда разместить</button>
                           <button className="soc-btn" disabled={busy} onClick={() => removePost(p.id)} style={{ border:"1px solid #FDA29B", color:"#B42318", background:"#fff", borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>🗑 Удалить</button>
                         </div>
-                        {p.publish_at && <div style={{ fontSize:"13px", color:T.green2, marginTop:"8px" }}>🕒 Запланировано на {p.publish_at}</div>}
+                        {p.publish_at
+                          ? <div style={{ fontSize:"13px", color:T.green2, marginTop:"8px" }}>🕒 Запланировано на {p.publish_at}</div>
+                          : <div style={{ fontSize:"13px", color:T.muted, marginTop:"8px" }}>⏳ Если не изменить, пост выйдет автоматически. Можно отредактировать текст или задать своё время.</div>}
                         {editId === p.id && (
                           <div style={{ marginTop:"10px" }}>
                             <textarea className="soc-in" style={{ ...inp, minHeight:"170px", resize:"vertical" }} value={editText} onChange={(e) => setEditText(e.target.value)} />
@@ -628,6 +645,35 @@ export default function SocialPage() {
                 </div>
               </div>
             )}
+            {sel && published.filter((x: any) => x.stats && x.stats.er != null && x.stats.reactions > 0).length > 0 && (
+              <div style={card}>
+                <div style={{ fontSize:"16px", fontWeight:800, marginBottom:"6px" }}>🏆 Лучшие посты</div>
+                <div style={{ fontSize:"13px", color:T.muted, marginBottom:"14px" }}>
+                  Посты, на которые читатели откликались чаще всего. Борис учитывает именно их, когда пишет новые.
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:"10px" }}>
+                  {published
+                    .filter((x: any) => x.stats && x.stats.er != null && x.stats.reactions > 0)
+                    .sort((a: any, b: any) => (b.stats.er || 0) - (a.stats.er || 0))
+                    .slice(0, 3)
+                    .map((p: any, i: number) => (
+                      <div key={p.id} style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"12px 14px", display:"flex", gap:"12px", alignItems:"flex-start" }}>
+                        <div style={{ fontSize:"20px", flexShrink:0 }}>{["🥇","🥈","🥉"][i]}</div>
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <div style={{ fontSize:"14px", color:T.ink, maxHeight:"44px", overflow:"hidden" }}>{p.text}</div>
+                          <div style={{ display:"flex", gap:"14px", marginTop:"8px", fontSize:"13px", color:T.muted, flexWrap:"wrap" }}>
+                            <span>👁 {p.stats.views ?? 0}</span>
+                            <span>❤️ {p.stats.likes ?? 0}</span>
+                            <span>💬 {p.stats.comments ?? 0}</span>
+                            <span style={{ fontWeight:700, color:T.green2 }}>вовлечение {p.stats.er}%</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
             {sel && published.length > 0 && (
               <div style={card}>
                 <div style={{ fontSize:"16px", fontWeight:800, marginBottom:"14px" }}>📤 Опубликованные ({published.length})</div>
@@ -643,6 +689,19 @@ export default function SocialPage() {
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontSize:"12px", color:T.muted, marginBottom:"4px" }}>{p.created_at}</div>
                         <div style={{ fontSize:"14px", color:T.ink, whiteSpace:"pre-wrap", maxHeight:"90px", overflow:"hidden" }}>{p.text}</div>
+                        {p.stats && (
+                          <div style={{ display:"flex", gap:"14px", marginTop:"10px", flexWrap:"wrap", fontSize:"13px", color:T.muted, alignItems:"center" }}>
+                            <span title="Просмотры">👁 {p.stats.views ?? 0}</span>
+                            <span title="Лайки">❤️ {p.stats.likes ?? 0}</span>
+                            <span title="Комментарии">💬 {p.stats.comments ?? 0}</span>
+                            <span title="Репосты">🔁 {p.stats.reposts ?? 0}</span>
+                            {p.stats.er != null && (
+                              <span title="Доля читателей, которые отреагировали" style={{ fontWeight:700, color: p.stats.er >= 5 ? T.green2 : T.ink }}>
+                                вовлечение {p.stats.er}%
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <div style={{ display:"flex", gap:"10px", marginTop:"10px", flexWrap:"wrap" }}>
                           <button className="soc-btn" disabled={busy} onClick={() => unpublishPost(p.id)} style={{ border:"1px solid #FDA29B", color:"#B42318", background:"#fff", borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>🗑 Удалить из канала</button>
                         </div>

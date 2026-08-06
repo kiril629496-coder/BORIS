@@ -1,5 +1,6 @@
 "use client";
 
+import { useAccounts } from "../lib/AccountContext";
 import { useEffect, useState, useCallback } from "react";
 import {
   Page, PageHeader, Card, Button, Input, Badge, Alert, EmptyState, Kpi, KpiRow, Icon, Table,
@@ -49,6 +50,7 @@ function api(path: string, init?: RequestInit) {
 
 export default function TrainingPage() {
   const [acc, setAcc] = useState("");
+  const accCtx = useAccounts();
   const [srcs, setSrcs] = useState<Src[]>([]);
   const [queue, setQueue] = useState<QItem[]>([]);
   const [hint, setHint] = useState("");
@@ -109,16 +111,25 @@ export default function TrainingPage() {
     ? Math.round((100 * sum.covered_strong) / sum.questions) : 0;
   const failed = srcs.filter((s) => s.status === "failed" || s.error);
 
+  // Аккаунт приходит из общей панели, а не вводится руками:
+  // клиент не должен знать технический идентификатор.
+  useEffect(function () {
+    const next = accCtx.selectedAccountId || "";
+    if (next && next !== acc) {
+      setAcc(next);
+      load(next);
+    }
+  }, [accCtx.selectedAccountId]);
+
   return (
     <Page>
       <PageHeader
         title="Центр обучения BORIS"
-        subtitle={acc ? "Аккаунт: " + acc
-                     : "Укажите аккаунт — BORIS покажет, что он о нём знает"}
+        subtitle={accCtx.selectedAccount
+          ? accCtx.selectedAccount.name + " · " + acc
+          : "Выберите аккаунт в панели сверху — BORIS покажет, что он о нём знает"}
         actions={
           <>
-            <Input value={acc} onChange={(e) => setAcc(e.target.value)}
-                   placeholder="account_id" style={{ width: 260 }} />
             <Button kind="ghost" onClick={() => load(acc)} disabled={busy || !acc}>
               Показать
             </Button>
