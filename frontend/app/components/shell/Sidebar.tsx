@@ -25,6 +25,7 @@ const GROUPS: { title: string; items: Item[] }[] = [
     title: "Работа",
     items: [
       { key: "home",     icon: "🏠", label: "Главная",       route: "/dashboard/home" },
+      { key: "scenarios", icon: "⭐", label: "Бизнес-сценарии", route: "/dashboard/scenarios" },
       { key: "listings", icon: "📋", label: "Объявления",    tab: "listings" },
       { key: "plan",     icon: "✅", label: "Задачи и план", tab: "plan" },
       { key: "settings", icon: "🛡", label: "Режим работы",  tab: "settings" },

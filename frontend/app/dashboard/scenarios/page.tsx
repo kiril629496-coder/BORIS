@@ -19,12 +19,10 @@ export default function ScenariosPage() {
   }, []);
 
   const load = useCallback((acc: string) => {
-    if (!acc) {
-      setLoading(false);
-      return;
-    }
+    // Каталог грузим и без аккаунта: «Запустить Авито с нуля» доступен новичку,
+    // остальные приходят с available:false и понятной причиной.
     setLoading(true);
-    apiGet("/api/home/scenarios?account_id=" + encodeURIComponent(acc))
+    apiGet("/api/home/scenarios?account_id=" + encodeURIComponent(acc || ""))
       .then((d: any) => {
         if (d && d.status === "ok") setData(d);
       })
@@ -32,7 +30,7 @@ export default function ScenariosPage() {
   }, []);
 
   useEffect(() => {
-    if (account) load(account);
+    load(account);
   }, [account, load]);
 
   const openWizard = (s: any) => {
@@ -80,8 +78,8 @@ export default function ScenariosPage() {
 
         {!loading && !account && (
           <div className={styles.card}>
-            <div className={styles.title}>Сначала подключите аккаунт Avito</div>
-            <div className={styles.text}>Без аккаунта сценарии запускать не на чем.</div>
+            <div className={styles.title}>Подключите аккаунт Авито</div>
+            <div className={styles.text}>Первый сценарий можно запустить уже сейчас — он и проведёт вас через подключение.</div>
             <div className={styles.foot}>
               <button className={styles.btnFill} onClick={() => openRoute("/dashboard?connect=avito")}>
                 Добавить аккаунт
@@ -115,6 +113,11 @@ export default function ScenariosPage() {
                           Изменить данные
                         </button>
                       </>
+                    ) : s.available === false ? (
+                      <span className={styles.btnDisabled}
+                            data-testid={"blocked-" + s.scenario_type}>
+                        {s.blocked_reason || "Пока недоступно"}
+                      </span>
                     ) : (
                       <button
                         className={styles.btnFill}

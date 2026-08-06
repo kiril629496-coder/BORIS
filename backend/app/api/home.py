@@ -169,16 +169,47 @@ def stage(account_id: str):
         db.close()
 
 
+def _scen_needs_avito(scenario_type: str) -> bool:
+    """Требует ли сценарий подключённого Авито. Источник истины — База знаний."""
+    try:
+        from app import niches as _nz
+        sc = _nz.common("scenarios", scenario_type) or {}
+        needs = sc.get("needs") or {}
+        return "avito" in (needs.get("all") or []) or "avito" in (needs.get("any") or [])
+    except Exception:
+        # База знаний недоступна — не блокируем ничего, поведение как раньше
+        return False
+
+
+def _scen_available(scenario_type: str, account_id: str) -> bool:
+    if account_id:
+        return True
+    return not _scen_needs_avito(scenario_type)
+
+
+def _scen_blocked_reason(scenario_type: str, account_id: str):
+    if _scen_available(scenario_type, account_id):
+        return None
+    return "Нужно подключить аккаунт Авито"
+
+
+
 # --------------------------------------------------------------- каталог
 
 @router.get("/scenarios")
-def list_scenarios(account_id: str):
+def list_scenarios(account_id: str = ""):
+    """Каталог виден и без аккаунта: сценарий «Запустить Авито с нуля» как раз
+    и ведёт человека к подключению, блокировать его от новичка нельзя.
+    Без аккаунта не ходим в базу за запущенными — считать нечего."""
     db = SessionLocal()
     try:
-        f = S.collect_facts(account_id, db=db)
-        rows = db.query(BusinessScenario).filter(
-            BusinessScenario.account_id == account_id).order_by(
-            BusinessScenario.updated_at.desc()).all()
+        f = None
+        rows = []
+        if account_id:
+            f = S.collect_facts(account_id, db=db)
+            rows = db.query(BusinessScenario).filter(
+                BusinessScenario.account_id == account_id).order_by(
+                BusinessScenario.updated_at.desc()).all()
         by_type = {}
         for r in rows:
             by_type.setdefault(r.scenario_type, r)
@@ -192,7 +223,8 @@ def list_scenarios(account_id: str):
                 "modules": meta["modules"],
                 "plan": meta.get("plan") or [],
                 "fields": meta["fields"],
-                "available": True,
+                "available": _scen_available(stype, account_id),
+                "blocked_reason": _scen_blocked_reason(stype, account_id),
                 "existing_id": existing.id if existing and existing.status == "active" else None,
             })
         soon = [{"scenario_type": k, "title": t, "available": False} for k, t in S.SOON]
