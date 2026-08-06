@@ -185,3 +185,45 @@ def delete_task(body: TaskAction, _cur=Depends(get_current_user)):
         return {"status": "ok"}
     finally:
         db.close()
+
+
+@router.get("/today")
+def today_tasks(_cur=Depends(get_current_user)):
+    """Сводка для колокольчика: задачи на сегодня и просроченные по ВСЕМ
+    аккаунтам пользователя. Отдельная ручка, потому что /tasks и /badges
+    работают в рамках одного аккаунта, а шапка кабинета — общая."""
+    uid = getattr(_cur, "id", None) or (_cur.get("id") if isinstance(_cur, dict) else None)
+    db = SessionLocal()
+    try:
+        rows = db.execute(text("""
+            select t.id, t.account_id, t.avito_chat_id, t.due_date, t.due_time,
+                   t.task_type, t.title, a.name
+              from crm_tasks t
+              join accounts a on a.account_id = t.account_id
+             where a.owner_user_id = :u
+               and t.status = 'planned'
+               and t.due_date <= CURRENT_DATE
+             order by t.due_date asc, coalesce(t.due_time, '99:99') asc
+             limit 50
+        """), {"u": uid}).fetchall()
+
+        from datetime import date as _d
+        today = _d.today()
+        items, n_today, n_late = [], 0, 0
+        for r in rows:
+            late = r.due_date < today
+            if late:
+                n_late += 1
+            else:
+                n_today += 1
+            items.append({
+                "id": r.id, "account_id": r.account_id, "avito_chat_id": r.avito_chat_id,
+                "дата": r.due_date.isoformat(), "время": r.due_time or "",
+                "тип": r.task_type, "заголовок": r.title,
+                "аккаунт": r.name or r.account_id,
+                "просрочено": late,
+            })
+        return {"status": "ok", "всего": len(items),
+                "сегодня": n_today, "просрочено": n_late, "задачи": items}
+    finally:
+        db.close()
