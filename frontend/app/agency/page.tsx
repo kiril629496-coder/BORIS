@@ -87,14 +87,22 @@ const HOVER = `
         <div className="b-ag-card" style={card}>
           <div style={{ position: "absolute", top: -30, right: -30, width: 90, height: 90, borderRadius: "50%", background: "linear-gradient(135deg,#9B87F5,#7C5CFC)", opacity: 0.08 }} />
           <div style={{ width: 44, height: 44, borderRadius: "50%", background: "linear-gradient(135deg,#9B87F5,#7C5CFC)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 12 }}>💳</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: "#1D2939", letterSpacing: "-0.02em" }}>{money(data["цена_за_аккаунт"])}</div>
-          <div style={{ fontSize: 14, color: "#667085", marginTop: 2 }}>за аккаунт · Тариф 1</div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: "#1D2939", letterSpacing: "-0.02em" }}>
+            {data["из_них_платных"] ? money(data["цена_за_аккаунт"]) : "По договору"}
+          </div>
+          <div style={{ fontSize: 14, color: "#667085", marginTop: 2 }}>
+            {data["из_них_платных"] ? "за аккаунт · Тариф 1" : "тариф и оплата"}
+          </div>
         </div>
         <div className="b-ag-card" style={card}>
           <div style={{ position: "absolute", top: -30, right: -30, width: 90, height: 90, borderRadius: "50%", background: "linear-gradient(135deg,#32D583,#12805C)", opacity: 0.08 }} />
           <div style={{ width: 44, height: 44, borderRadius: "50%", background: "linear-gradient(135deg,#32D583,#12805C)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 12 }}>💰</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: "#1D2939", letterSpacing: "-0.02em" }}>{money(data["к_оплате_за_период"])}</div>
-          <div style={{ fontSize: 14, color: "#667085", marginTop: 2 }}>к оплате за период</div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: "#1D2939", letterSpacing: "-0.02em" }}>
+            {data["из_них_платных"] ? money(data["к_оплате_за_период"]) : "\u2014"}
+          </div>
+          <div style={{ fontSize: 14, color: "#667085", marginTop: 2 }}>
+            {data["из_них_платных"] ? "к оплате за период" : "счёт выставляется вручную"}
+          </div>
         </div>
         <div className="b-ag-card" style={card}>
           <div style={{ position: "absolute", top: -30, right: -30, width: 90, height: 90, borderRadius: "50%", background: "linear-gradient(135deg,#FDB022,#F79009)", opacity: 0.08 }} />
