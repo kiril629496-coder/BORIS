@@ -35,8 +35,13 @@ export default function BorisWidget() {
   const [result, setResult] = useState("");
   const [gen, setGen] = useState(false);
 
-  const hidden = pathname === "/" || pathname.startsWith("/dashboard") || pathname.startsWith("/login") || pathname.startsWith("/oferta") || pathname.startsWith("/privacy");
-  if (hidden) return null;
+  // P0 05.08: помощник по промтам — НЕ основной ассистент BORIS.
+  // Из клиентского пути убран целиком: ни в кабинете, ни в мастере
+  // первого запуска, ни на экране анализа он висеть не должен —
+  // человек принимает синий кружок за диалог и получает конструктор.
+  // Остаётся только на своей странице до переосмысления.
+  const allowed = pathname.startsWith("/ai");
+  if (!allowed) return null;
 
   const ask = async () => {
     if (!input.trim()) return;
