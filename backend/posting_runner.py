@@ -7,6 +7,8 @@ from app.db.session import SessionLocal
 from app.models.storage import Storage
 
 DEFAULT_TIMES = ["09:00", "19:00"]
+# Предел давности черновика: старше этого срока автопубликация не трогает.
+STALE_AFTER_HOURS = 24
 BANNER_DIR = "/root/BORIS/backend/posting_banners"
 
 def _openai_text(account_id, prompt, operation="текст постинга"):
@@ -95,6 +97,31 @@ def _holiday_in_window(days=7):
     d,name=hits[0]
     return name+" ("+d.strftime("%d.%m")+")"
 
+def _best_examples(account_id, project_id, limit=3):
+    """Лучшие посты этого проекта по вовлечению — как образец для копирайтера.
+    Берём только те, где есть просмотры и хоть одна реакция."""
+    import json as _j
+    from app.models.storage import Storage as _St
+    db = SessionLocal()
+    try:
+        row = db.query(_St).filter(_St.account_id == account_id, _St.key == "posting_posts").first()
+        posts = _j.loads(row.value) if row and row.value else []
+    except Exception:
+        return []
+    finally:
+        db.close()
+    ranked = []
+    for p in posts:
+        if p.get("project_id") != project_id:
+            continue
+        st = p.get("stats") or {}
+        if not st.get("views") or not st.get("reactions"):
+            continue
+        ranked.append((st.get("er") or 0, p.get("text") or ""))
+    ranked.sort(reverse=True)
+    return [t for _, t in ranked[:limit] if t]
+
+
 def _build_text_prompt(theme, client_prompt="", occasion="", examples=None):
     parts = [f"Напиши пост для соцсетей (ВКонтакте и Telegram) на тему: {theme}.",
              "Живой, цепляющий, короткий — 3-6 предложений. Без канцелярита. Эмодзи уместно."]
@@ -104,7 +131,8 @@ def _build_text_prompt(theme, client_prompt="", occasion="", examples=None):
         sample = "\n\n---\n\n".join(examples[:5])
         parts.append("Вот примеры уже опубликованных постов этого канала — пиши в ТАКОМ ЖЕ стиле, тоне и формате, но НЕ копируй их дословно:\n\n" + sample)
     parts.append("ВАЖНО: НЕ добавляй в текст никаких ссылок, адресов, @упоминаний и контактов — они подставляются автоматически отдельно. Призыв к действию можно, но БЕЗ конкретной ссылки.")
-    parts.append("НЕ заканчивай пост призывом писать в комментарии или ставить реакции. Финальный призыв со ссылкой на контакт добавляется автоматически системой — просто заверши мысль, вопрос читателю допустим.")
+    parts.append("ВОВЛЕЧЕНИЕ: задача не только привести заявки, но и разговорить подписчиков. Заверши пост живым вопросом читателю, на который легко ответить одной фразой из своего опыта: «а у вас как было?», «сталкивались с таким?», «что выбрали бы вы?». Можно предложить поделиться своим случаем в комментариях. Не проси лайки и репосты прямым текстом — это выглядит навязчиво, но вопрос в конце обязателен.")
+    parts.append("Ссылку на контакт система добавит сама — в тексте её быть не должно.")
     parts.append("РАЗМЕТКА: разрешён ТОЛЬКО HTML-тег <b>жирный</b> — оберни в него заголовок первой строки и одну-две ключевые фразы по смыслу. Больше никаких тегов. Markdown запрещён полностью: никаких **, ##, __, backticks — они будут видны читателю как мусор.")
     _t0 = date.today()
     _win = ", ".join((_t0 + timedelta(days=_i)).strftime("%d.%m.%Y") for _i in range(8))
@@ -226,7 +254,7 @@ def _airify(text):
     return "\n\n".join(out)
 
 
-def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion="", channel="", image_source="ai"):
+def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion="", channel="", image_source="ai", project_id=""):
     result = {"account_id": account_id, "theme": theme}
     examples = None
     if channel:
@@ -235,6 +263,16 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
             if _r.get("ok"): examples = _r.get("posts")
         except Exception:
             examples = None
+    # Свои лучшие посты по вовлечению приоритетнее чужого канала-образца:
+    # копирайтер учится на том, что реально сработало у этого клиента.
+    if project_id:
+        try:
+            best = _best_examples(account_id, project_id)
+            if best:
+                examples = best + [e for e in (examples or []) if e not in best]
+                print("[autopost] в примеры добавлено своих лучших постов:", len(best), flush=True)
+        except Exception as _e:
+            print("[autopost] лучшие посты не подобрались:", str(_e)[:80], flush=True)
     _txt = _openai_text(account_id, _build_text_prompt(theme, text_prompt, occasion, examples))
     import re as _re
     _txt = _re.sub(r"\*\*(.+?)\*\*", r"\1", _txt, flags=_re.S)
@@ -579,7 +617,7 @@ def autopost(account_id):
         db.close()
     theme = random.choice(cfg.get("themes") or ["поздравление"])
     print("[autopost] тема:", theme, flush=True)
-    post = generate_post(account_id, theme, text_prompt=cfg.get("text_prompt", ""), channel=cfg.get("style_source", ""), image_source=cfg.get("image_source", "ai"))
+    post = generate_post(account_id, theme, text_prompt=cfg.get("text_prompt", ""), channel=cfg.get("style_source", ""), image_source=cfg.get("image_source", "ai"), project_id=cfg.get("id", ""))
     results = {}
     if cfg.get("channel_tg"):
         results["tg"] = _send_telegram(cfg["channel_tg"], _with_contact(post["text"], cfg.get("contact_tg", "")), post.get("banner"))
@@ -817,12 +855,17 @@ def due_posts_all(dry=False):
             db.close()
         projmap = {p.get("id"): p for p in projects}
         changed = False
+        # За один прогон публикуем НЕ БОЛЬШЕ ОДНОГО поста на проект (правило 05.08):
+        # иначе накопившиеся просроченные черновики уходят пачкой в одну минуту.
+        _sent_projects = set()
         for rec in posts:
             if rec.get("status") != "draft":
                 continue
             proj = projmap.get(rec.get("project_id"))
             if not proj:
                 continue
+            if rec.get("project_id") in _sent_projects:
+                continue  # по этому проекту в текущем прогоне уже публиковали
             now_local = datetime.now() + timedelta(hours=int(proj.get("tz_offset", 3)))  # время по поясу проекта
             due = False
             reason = ""
@@ -838,6 +881,14 @@ def due_posts_all(dry=False):
                 if aph > 0:
                     try:
                         created = datetime.strptime((rec.get("created_at") or "")[:16], "%Y-%m-%d %H:%M")
+                        if now_local >= created + timedelta(hours=STALE_AFTER_HOURS):
+                            # Черновик протух: он писался под другой повод и другую неделю.
+                            # Публиковать его сегодня — хуже, чем не публиковать вовсе.
+                            rec["status"] = "expired"
+                            changed = True
+                            print("[due] ПРОСРОЧЕН, не публикуем:", proj.get("name"),
+                                  "| создан", rec.get("created_at",""), flush=True)
+                            continue
                         if now_local >= created + timedelta(hours=aph):
                             due = True; reason = "auto_publish_hours " + str(aph) + "ч от " + rec.get("created_at","")
                     except Exception:
@@ -868,6 +919,7 @@ def due_posts_all(dry=False):
                 if _vk.get("post_id"):
                     _ids["vk"] = {"owner_id": proj.get("vk_owner_id"), "post_id": _vk.get("post_id")}
                 rec["status"] = "published"; rec["ids"] = _ids
+                _sent_projects.add(rec.get("project_id"))
                 changed = True
                 _notify_posted(acc, proj.get("name") or rec.get("project_name"), rec.get("text","")[:60], proj, results, bname)
                 print("[due] опубликован:", proj.get("name"), "|", reason, flush=True)
