@@ -46,6 +46,22 @@ def _due_moment(due_date, due_time, before_min):
     return at - timedelta(minutes=int(before_min or 0))
 
 
+def _mark_manager(db, tid):
+    db.execute(sql("UPDATE crm_tasks SET notified_manager_at = now() WHERE id = :i"),
+               {"i": tid})
+    db.commit()
+
+
+def _send_tg(chat, head, acc_name, comment):
+    """Telegram-канал напоминания. Адрес берём из настроек АККАУНТА,
+    а не из захардкоженного реестра — у каждого клиента он свой."""
+    from app.telegram_bot import send_telegram_message
+    text = ("\u23f0 <b>" + head + "</b>\n" + (acc_name or "") +
+            (("\n" + comment.strip()) if comment else "") +
+            "\n\nhttps://boris-ai.pro/messages")
+    send_telegram_message(str(chat), text)
+
+
 def run(dry=False):
     db = SessionLocal()
     sent_mail = sent_client = 0
@@ -54,7 +70,7 @@ def run(dry=False):
             SELECT t.id, t.account_id, t.avito_chat_id, t.due_date, t.due_time,
                    t.task_type, t.title, t.comment, t.notify_before_min,
                    t.notify_client, t.notified_manager_at, t.notified_client_at,
-                   a.name, a.owner_user_id
+                   a.name, a.owner_user_id, a.telegram_chat_id
               FROM crm_tasks t
               JOIN accounts a ON a.account_id = t.account_id
              WHERE t.status = 'planned'
@@ -65,7 +81,8 @@ def run(dry=False):
         now = datetime.now()
         for r in rows:
             (tid, acc_id, chat_id, due_date, due_time, ttype, title, comment,
-             before, notify_client, done_mgr, done_cli, acc_name, owner_id) = r
+             before, notify_client, done_mgr, done_cli, acc_name, owner_id,
+             tg_chat) = r
 
             moment = _due_moment(due_date, due_time, before)
             if not moment or now < moment:
@@ -89,12 +106,20 @@ def run(dry=False):
                     else:
                         from app.services.email_queue import enqueue_email
                         enqueue_email(to, "BORIS: " + head, body)
-                        db.execute(sql("UPDATE crm_tasks SET notified_manager_at = now() "
-                                       "WHERE id = :i"), {"i": tid})
-                        db.commit()
+                        _mark_manager(db, tid)
                     sent_mail += 1
                 else:
                     print("[crm] у задачи", tid, "некому слать: нет почты владельца", flush=True)
+
+            if tg_chat and not done_mgr:
+                if dry:
+                    print("[dry] telegram ->", tg_chat, "|", head, flush=True)
+                else:
+                    try:
+                        _send_tg(tg_chat, head, acc_name, comment or "")
+                        _mark_manager(db, tid)
+                    except Exception as e:
+                        print("[crm] telegram не ушёл:", str(e)[:120], flush=True)
 
             if notify_client and not done_cli and chat_id:
                 text = ("Напоминаем: %s в %s. Если планы изменились — "
