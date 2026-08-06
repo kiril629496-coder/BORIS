@@ -379,7 +379,7 @@ export default function MessagesPage() {
                            style={{ border: "1px solid " + color.line, borderRadius: 8, padding: "6px 8px", fontSize: 13 }} />
                     <select value={crmType} onChange={(e) => setCrmType(e.target.value)}
                             style={{ border: "1px solid " + color.line, borderRadius: 8, padding: "6px 8px", fontSize: 13 }}>
-                      {["позвонить", "написать", "отправить фото", "отправить КП", "запросить оплату", "уточнить доставку", "другое"]
+                      {["позвонить", "написать", "замер", "отправить фото", "отправить КП", "запросить оплату", "уточнить доставку", "другое"]
                         .map((x) => <option key={x} value={x}>{x}</option>)}
                     </select>
                   </div>
