@@ -8,6 +8,7 @@
  *   guideKey       -> подсветка пункта обучалкой.
  */
 import React from "react";
+import { useBackTarget } from "../lib/useBackTarget";
 import { Icon } from "./index";
 import { color, radius, space, font, layout } from "./tokens";
 import { MENU } from "./menu";
@@ -77,6 +78,9 @@ export function Shell({ activeKey, children }:
   const [open, setOpen] = React.useState(false);
   const [narrow, setNarrow] = React.useState(false);
   const gate = useOnboardingGuard({ mode: "protect" });
+  // Единая кнопка возврата для старых разделов: своей шапки у Shell нет,
+  // поэтому добавляем тонкую панель над содержимым.
+  const back = useBackTarget("/dashboard/home", "← Назад");
 
   React.useEffect(() => {
     const check = () => setNarrow(window.innerWidth < 900);
@@ -105,7 +109,19 @@ export function Shell({ activeKey, children }:
       ) : (
         <Sidebar activeKey={activeKey} />
       )}
-      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px",
+                      padding: "10px 16px", borderBottom: "1px solid " + color.line,
+                      background: color.surface }}>
+          <button onClick={back.go} data-testid="nav-back" aria-label={back.label}
+                  style={{ background: "#F2F4F7", color: "#475467", border: "none",
+                           borderRadius: "8px", padding: "7px 14px", fontSize: "14px",
+                           fontWeight: 600, cursor: "pointer" }}>
+            {back.label}
+          </button>
+        </div>
+        {children}
+      </div>
     </div>
   );
 }

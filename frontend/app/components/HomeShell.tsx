@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import styles from "./HomeShell.module.css";
 import { apiGet, getAccount, setAccount, getToken, openTab, openRoute } from "../lib/api";
+import { usePathname } from "next/navigation";
+import { useBackTarget } from "../lib/useBackTarget";
 
 /* Меню повторяет разделы старого кабинета ОДИН В ОДИН - те же ключи activeTab,
    те же названия и иконки. Ничего не переименовано и ничего не потеряно.
@@ -100,10 +102,24 @@ export default function HomeShell({ active, account, onAccountChange, children }
     else openTab(it.key);
   };
 
+  // Карточка сценария — это деталь, из неё «закрывают»; каталог — страница,
+  // из неё «возвращаются». Цель перехода считает общий хук.
+  const backPath = usePathname() || "";
+  const isCard = /^\/dashboard\/scenarios\/[^/]+$/.test(backPath);
+  const back = useBackTarget(
+    isCard ? "/dashboard/scenarios" : "/dashboard/home",
+    isCard ? "× Закрыть" : "← Назад");
+
   return (
     <div className={styles.wrap} data-testid="home-shell">
       <div className={styles.top} ref={box}>
         <span className={styles.brand}>БОРИС</span>
+        <button onClick={back.go} data-testid="nav-back" aria-label={back.label}
+                style={{background:"#F2F4F7", color:"#475467", border:"none",
+                        borderRadius:"8px", padding:"7px 14px", fontSize:"14px",
+                        fontWeight:600, cursor:"pointer", marginLeft:"12px"}}>
+          {back.label}
+        </button>
 
         <button className={styles.burger} onClick={() => setNavOpen(!navOpen)}>☰ Меню</button>
 

@@ -1,4 +1,5 @@
 "use client";
+import { useBackTarget } from "../lib/useBackTarget";
 import { fetchOnboardingStatus } from "../lib/onboardingClient";
 import { useState, useEffect, useRef } from "react";
 import { Sidebar } from "../ui/Sidebar";
@@ -448,6 +449,9 @@ export default function Home() {
   });
   const [accounts, setAccounts] = useState<any[]>([]);
   const [accountsError, setAccountsError] = useState("");
+  // Кнопка «В кабинет» теперь возвращает туда, откуда пришли,
+  // а не всегда на Главную. Подпись остаётся прежней.
+  const back = useBackTarget("/dashboard/home", "← В кабинет");
   const [prefillDone, setPrefillDone] = useState(false);
   const navRouter = useRouter();
   const [userRole, setUserRole] = useState<string>("");
@@ -4543,7 +4547,7 @@ export default function Home() {
         {accounts.length > 1 && userRole !== "owner" && (
           <button onClick={() => router.push("/agency")} className="boris-btn-hover" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", marginRight:"10px", fontWeight:600}}>🏢 Мои аккаунты</button>
         )}
-        <button onClick={() => router.push("/dashboard/home")} className="boris-btn-hover" style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", marginRight:"10px", fontWeight:600}}>← В кабинет</button>
+        <button onClick={back.go} className="boris-btn-hover" style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", marginRight:"10px", fontWeight:600}}>← В кабинет</button>
         <button onClick={() => { localStorage.removeItem("boris_token"); localStorage.removeItem("boris_user_email"); localStorage.removeItem("boris_user_role"); localStorage.removeItem("boris_currentAccount"); router.push("/login"); }} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 16px", cursor:"pointer"}}>Выйти</button>
       </div>
 
