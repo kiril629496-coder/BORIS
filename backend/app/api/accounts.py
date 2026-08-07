@@ -65,13 +65,33 @@ def list_accounts(user: User = Depends(get_current_user)):
             accs = db.query(Account).order_by(Account.created_at.asc()).all()
         else:
             # агентство: все аккаунты владельца + свой (на случай старой привязки)
+            # + выданные через user_account_access (сотрудники клиента)
+            from sqlalchemy import text as _uaa_text
+            _access_ids = [r[0] for r in db.execute(_uaa_text(
+                "SELECT account_id FROM user_account_access"
+                " WHERE user_id = :u AND can_view = TRUE"),
+                {"u": user.id}).fetchall()]
             accs = db.query(Account).filter(
                 (Account.owner_user_id == user.id) |
-                (Account.account_id == user.account_id)
+                (Account.account_id == user.account_id) |
+                (Account.account_id.in_(_access_ids))
             ).order_by(Account.created_at.asc()).all()
+
+        # Роль пользователя В КАЖДОМ аккаунте: от неё зависят подпись в шапке
+        # и состав меню. Сотруднику незачем видеть кошелёк и реквизиты владельца.
+        from sqlalchemy import text as _role_text
+        _roles = {r[0]: r[1] for r in db.execute(_role_text(
+            "SELECT account_id, role FROM user_account_access WHERE user_id = :u"),
+            {"u": user.id}).fetchall()}
+
+        def _role_in(a):
+            if user.role == "owner" or a.owner_user_id == user.id:
+                return "owner"
+            return _roles.get(a.account_id) or "employee"
 
         return {"status": "ok", "accounts": [{
             "account_id": a.account_id, "name": a.name,
+            "role": _role_in(a),
             "company_website": a.company_website or "",
             "client_goal": a.client_goal or "",
             "client_goal_text": a.client_goal_text or "",

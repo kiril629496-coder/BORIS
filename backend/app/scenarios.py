@@ -225,8 +225,18 @@ def _humanize(entry):
         return e
 
 
-def journal(account_id, db=None, limit=10, only_today=False):
-    """Записи журнала. Формат записи: {ts, actor, action, details}."""
+# Записи про деньги и администрирование сотруднику не показываем:
+# он видит рабочие действия, но не суммы оплат своего руководителя.
+OWNER_ONLY_ACTIONS = {"set_payment", "admin_provision", "admin_create_client",
+                      "set_tier", "billing", "payment", "upgrade_due"}
+
+
+def journal(account_id, db=None, limit=10, only_today=False, role="owner"):
+    """Записи журнала. Формат записи: {ts, actor, action, details}.
+
+    role — роль смотрящего в этом аккаунте. Всё, кроме owner, получает
+    журнал без денежных и административных записей.
+    """
     own_db = db is None
     if own_db:
         db = SessionLocal()
@@ -237,6 +247,23 @@ def journal(account_id, db=None, limit=10, only_today=False):
         if only_today:
             today = datetime.now().date().isoformat()
             log = [e for e in log if str(e.get("ts", "")).startswith(today)]
+        if role != "owner":
+            log = [e for e in log
+                   if str(e.get("action") or "") not in OWNER_ONLY_ACTIONS]
+
+        # Одинаковые подряд идущие записи схлопываем: повтор одной и той же
+        # операции каждые несколько минут забивает экран.
+        dedup, prev = [], None
+        for e in log:
+            if not isinstance(e, dict):
+                continue
+            sign = (str(e.get("action") or ""), str(e.get("details") or "")[:200])
+            if sign == prev:
+                continue
+            prev = sign
+            dedup.append(e)
+        log = dedup
+
         out = [_humanize(e) for e in reversed(log) if isinstance(e, dict)]
         return out[:limit] if limit else out
     finally:

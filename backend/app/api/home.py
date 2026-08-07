@@ -10,7 +10,8 @@ account_id обязателен везде - дефолтов быть не до
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from app.api.auth import get_current_user
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 
@@ -111,8 +112,25 @@ def _parse_validator_report(raw_text):
         return items[:50]
     except Exception:
         return []
+def _viewer_role(db, user, account_id: str) -> str:
+    """Роль смотрящего в этом аккаунте. Нужна журналу: сотруднику не показываем
+    записи про оплаты и администрирование."""
+    from sqlalchemy import text as _t
+    if getattr(user, "role", "") == "owner":
+        return "owner"
+    own = db.execute(_t(
+        "SELECT 1 FROM accounts WHERE account_id = :a AND owner_user_id = :u"),
+        {"a": account_id, "u": getattr(user, "id", 0)}).fetchone()
+    if own:
+        return "owner"
+    r = db.execute(_t(
+        "SELECT role FROM user_account_access WHERE user_id = :u AND account_id = :a"),
+        {"u": getattr(user, "id", 0), "a": account_id}).fetchone()
+    return (r[0] if r else "employee") or "employee"
+
+
 @router.get("/overview")
-def overview(account_id: str):
+def overview(account_id: str, user=Depends(get_current_user)):
     """Всё для рабочего стола одним запросом."""
     db = SessionLocal()
     try:
@@ -149,7 +167,8 @@ def overview(account_id: str):
             },
             "attention": S.attention(f),
             "today": S.today_summary(account_id, db=db),
-            "journal": S.journal(account_id, db=db, limit=10),
+            "journal": S.journal(account_id, db=db, limit=10,
+                                 role=_viewer_role(db, user, account_id)),
             "recommendations": S.recommendations(f, db=db),
             "active_scenario": _scen_public(row, f) if row else None,
         }

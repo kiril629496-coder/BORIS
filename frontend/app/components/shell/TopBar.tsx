@@ -22,6 +22,16 @@ export default function TopBar({ title, subtitle, onBurger, onSwitch }: Props) {
   // поэтому берём отдельную сводку, а не метки одного диалога.
   const [crm, setCrm] = useState<any>(null);
   const [bellOpen, setBellOpen] = useState(false);
+  // Роль показываем ту, что у человека в ТЕКУЩЕМ аккаунте,
+  // а не общую из учётной записи — иначе сотрудница видит «Клиент».
+  const [accRole, setAccRole] = useState("");
+  useEffect(() => {
+    apiGet("/api/accounts/list").then((d: any) => {
+      const list = (d && d.accounts) || [];
+      const mine = list.find((a: any) => a.account_id === getAccount());
+      if (mine && mine.role) setAccRole(mine.role);
+    }).catch(() => {});
+  }, []);
   useEffect(() => {
     apiGet("/api/crm/today").then((d: any) => {
       if (d && d.status === "ok") setCrm(d);
@@ -41,7 +51,10 @@ export default function TopBar({ title, subtitle, onBurger, onSwitch }: Props) {
     });
   }, []);
 
-  const roleRu = role === "owner" ? "Владелец" : role === "manager" ? "Менеджер" : "Клиент";
+  const roleRu = accRole === "employee" ? "Сотрудник"
+    : accRole === "owner" ? "Руководитель"
+    : role === "owner" ? "Владелец"
+    : role === "manager" ? "Менеджер" : "Клиент";
 
   return (
     <header className={css.top}>

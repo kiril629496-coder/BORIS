@@ -79,6 +79,14 @@ export default function Sidebar({ active, open, onClose }: Props) {
   };
 
   const cur = accounts.find((a: any) => (a.account_id || a.id) === acc);
+  // Роль в ТЕКУЩЕМ аккаунте: сотруднику незачем видеть кошелёк,
+  // тарифы, реквизиты и список аккаунтов владельца.
+  const myRole = (cur && (cur as any).role) || "owner";
+  const OWNER_ONLY = ["billing", "wallet", "requisites", "accounts"];
+  const groups = GROUPS
+    .map((g) => ({ ...g, items: g.items.filter(
+      (it) => myRole === "owner" || OWNER_ONLY.indexOf(it.key) === -1) }))
+    .filter((g) => g.items.length > 0);
 
   return (
     <aside className={css.side + " " + (min ? css.sideMin : "") + " " + (open ? css.sideOpen : "")}>
@@ -131,7 +139,7 @@ export default function Sidebar({ active, open, onClose }: Props) {
       )}
 
       <nav className={css.nav}>
-        {GROUPS.map((g) => (
+        {groups.map((g) => (
           <div className={css.group} key={g.title}>
             {!min && <div className={css.groupTitle}>{g.title}</div>}
             {g.items.map((it) => (

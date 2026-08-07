@@ -267,7 +267,8 @@ def _is_existing_user(db, user) -> bool:
 
     1) роль менеджера или админа;
     2) регистрация раньше даты запуска мастера;
-    3) страховка — уже есть аккаунт с ключами Avito.
+    3) страховка — уже есть аккаунт с ключами Avito;
+    4) сотрудник, которому владелец выдал доступ к своему аккаунту.
     """
     role = (getattr(user, "role", "") or "").lower()
     if role in SKIP_ROLES:
@@ -278,6 +279,16 @@ def _is_existing_user(db, user) -> bool:
         launch = datetime.strptime(LAUNCH_TS, "%Y-%m-%d %H:%M:%S")
         if created < launch:
             return True
+
+    # Сотрудник присоединяется к уже описанной компании — мастер ему не нужен.
+    # Роль owner исключаем: у владельца связь тоже есть, но для него
+    # решают пункты 2 и 3, иначе новый владелец проскочит мастер.
+    emp = db.execute(_sql(
+        "SELECT 1 FROM user_account_access"
+        " WHERE user_id = :u AND role <> 'owner' LIMIT 1"),
+        {"u": getattr(user, "id", 0)}).fetchone()
+    if emp:
+        return True
 
     r = db.execute(_sql(
         "SELECT 1 FROM accounts WHERE owner_user_id = :u"
