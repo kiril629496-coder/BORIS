@@ -43,6 +43,9 @@ function api(path: string, init?: RequestInit) {
 
 export default function AiSetupPage() {
   const [product, setProduct] = useState("rop");
+  // Режим ответов МОПа по каждому аккаунту: аренда и продажа
+  // могут работать по-разному.
+  const [mopModes, setMopModes] = useState<any>({});
   const [accs, setAccs] = useState<Acc[]>([]);
   const [sum, setSum] = useState<Sum | null>(null);
   const [lic, setLic] = useState<Record<string, Lic>>({});
@@ -55,6 +58,17 @@ export default function AiSetupPage() {
   const [err, setErr] = useState(false);
 
   useEffect(() => { load(product); }, [product]);
+  useEffect(() => {
+    if (product !== "mop" || !sum || !sum.accounts) { setMopModes({}); return; }
+    Promise.all(sum.accounts.map((a: any) =>
+      api("/api/ai/mop_mode?account_id=" + encodeURIComponent(a.account_id))
+        .then((d: any) => [a.account_id, d]).catch(() => [a.account_id, null])))
+      .then((pairs: any[]) => {
+        const m: any = {};
+        pairs.forEach(([k, v]) => { if (v && v.status === "ok") m[k] = v; });
+        setMopModes(m);
+      });
+  }, [product, sum]);
 
   async function load(p: string) {
     try {
@@ -174,11 +188,42 @@ export default function AiSetupPage() {
             <Card>
               <div style={font.h3 as React.CSSProperties}>{sum.product_title}</div>
               <div style={{ marginTop: space.md }}>
-                {sum.accounts.map((a) => (
-                  <div key={a.account_id} style={{ ...font.body, color: color.heading }}>
-                    ☑ {a.name}
+                {sum.accounts.map((a) => {
+                  const m = mopModes[a.account_id];
+                  return (
+                  <div key={a.account_id} style={{ marginBottom: space.sm }}>
+                    <div style={{ ...font.body, color: color.heading }}>☑ {a.name}</div>
+                    {product === "mop" && m ? (
+                      <div style={{ ...font.small, marginTop: 4 }}>
+                        {m.can_change ? (
+                          <span>
+                            <button onClick={async () => {
+                              await api("/api/ai/mop_mode", { method: "POST",
+                                body: JSON.stringify({ account_id: a.account_id, contour: "legacy" }) });
+                              setMopModes({ ...mopModes, [a.account_id]: { ...m, contour: "legacy" } });
+                            }} style={{ border: "none", cursor: "pointer", marginRight: 6,
+                                        borderRadius: 6, padding: "3px 9px", fontSize: 12,
+                                        background: m.contour === "legacy" ? "#2F6FED" : "#EEF1F6",
+                                        color: m.contour === "legacy" ? "#fff" : "#475467" }}>
+                              Отвечать сразу
+                            </button>
+                            <button onClick={async () => {
+                              await api("/api/ai/mop_mode", { method: "POST",
+                                body: JSON.stringify({ account_id: a.account_id, contour: "new" }) });
+                              setMopModes({ ...mopModes, [a.account_id]: { ...m, contour: "new" } });
+                            }} style={{ border: "none", cursor: "pointer",
+                                        borderRadius: 6, padding: "3px 9px", fontSize: 12,
+                                        background: m.contour === "new" ? "#2F6FED" : "#EEF1F6",
+                                        color: m.contour === "new" ? "#fff" : "#475467" }}>
+                              Показывать перед отправкой
+                            </button>
+                          </span>
+                        ) : (<span>{m.title}</span>)}
+                      </div>
+                    ) : null}
                   </div>
-                ))}
+                  );
+                })}
               </div>
               <div style={{ marginTop: space.sm }}>
                 <Badge kind={sum.memory_shared ? "success" : "neutral"}>
