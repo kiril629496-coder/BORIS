@@ -123,3 +123,31 @@ def log_usage(account_id, provider, model=None, operation=None,
     except Exception as e:
         _log.warning("[usage] не записал: %s", str(e)[:150])
         return 0
+
+
+# Категории поверх операций: имена операций копились стихийно (часть по-русски,
+# часть по-английски, баннеры разбиты на четыре имени), и свести расходы
+# по смыслу без такой карты нельзя.
+CATEGORIES = (
+    ("\u041e\u0442\u0432\u0435\u0442\u044b \u041c\u041e\u041f\u0430",
+     ("\u043e\u0442\u0432\u0435\u0442 \u0432 \u043c\u0435\u0441\u0441\u0435\u043d\u0434\u0436\u0435\u0440\u0435", "mop_", "messenger")),
+    ("\u0420\u0430\u0437\u0431\u043e\u0440\u044b \u0420\u041e\u041f\u0430",
+     ("\u0440\u0430\u0437\u0431\u043e\u0440 \u0437\u0432\u043e\u043d\u043a\u0430", "call_", "rop_", "whisper")),
+    ("\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0438 \u0438 \u0431\u0430\u043d\u043d\u0435\u0440\u044b",
+     ("banner", "image", "reference_style")),
+    ("\u0422\u0435\u043a\u0441\u0442\u044b \u0434\u043b\u044f \u0441\u043e\u0446\u0441\u0435\u0442\u0435\u0439",
+     ("\u0442\u0435\u043a\u0441\u0442 \u043f\u043e\u0441\u0442\u0438\u043d\u0433\u0430", "posting")),
+    ("\u0412\u043e\u0437\u0432\u0440\u0430\u0442 \u043a\u043b\u0438\u0435\u043d\u0442\u043e\u0432", ("reactivation",)),
+    ("\u0411\u0430\u0437\u0430 \u0437\u043d\u0430\u043d\u0438\u0439", ("memory", "fact", "extract")),
+    ("\u041e\u0431\u044a\u044f\u0432\u043b\u0435\u043d\u0438\u044f", ("listing", "feed", "field_extract", "\u043e\u0431\u044a\u044f\u0432\u043b")),
+)
+
+
+def category_of(operation):
+    """Понятная категория расхода по имени операции."""
+    op = str(operation or "").lower()
+    for title, keys in CATEGORIES:
+        for k in keys:
+            if k.lower() in op:
+                return title
+    return "\u041f\u0440\u043e\u0447\u0435\u0435"

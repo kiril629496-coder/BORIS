@@ -85,6 +85,23 @@ CHECKLIST = [
 ]
 
 
+def _talk_minutes(token: str, call_id, days: int = 90) -> float:
+    """Минуты разговора по call_id — из getCalls, того же источника, что и
+    статистика в кабинете. Так остаток пакета сходится с цифрами Avito."""
+    import datetime as _dt
+    now = _dt.datetime.utcnow()
+    d_from = (now - _dt.timedelta(days=int(days))).strftime("%Y-%m-%dT00:00:00Z")
+    d_to = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    code, data = _get_calls(token, d_from, d_to)
+    if code != 200 or not isinstance(data, dict):
+        return 0.0
+    for c in data.get("calls", []):
+        _c = c.get("call") or c
+        if str(_c.get("callId")) == str(call_id):
+            return round(float(_c.get("talkDuration", 0) or 0) / 60, 1)
+    return 0.0
+
+
 def _get_record(token: str, call_id):
     """GET /calltracking/v1/getRecordByCallId/?callId=N → байты аудио."""
     r = requests.get(
@@ -95,7 +112,43 @@ def _get_record(token: str, call_id):
     return r.status_code, r.content, r.headers.get("content-type", "")
 
 
-def _transcribe(audio_bytes: bytes, filename: str = "call.mp3") -> str:
+def _asr_hint(account_id: str) -> str:
+    """Подсказка whisper: ниша клиента + названия фактов из его базы знаний.
+    Так отраслевые слова распознаются правильно у КАЖДОГО клиента, а не только
+    у того, под кого зашили список."""
+    words = []
+    try:
+        import psycopg2, json as _jj
+        u = _db_url()
+        if u:
+            c = psycopg2.connect(u); cur = c.cursor()
+            # Ручной словарь важнее автоматического: названия фактов не содержат
+            # само отраслевое слово («бытовка» не встречается в «Пол и покрытия»),
+            # а именно оно и слышится неверно.
+            cur.execute("SELECT value FROM storage WHERE account_id=%s"
+                        " AND key='rop_asr_hint'", (account_id,))
+            _mrow = cur.fetchone()
+            if _mrow and _mrow[0]:
+                _mv = _mrow[0] if isinstance(_mrow[0], list) else _jj.loads(_mrow[0])
+                words.extend([str(x) for x in _mv if str(x).strip()])
+            cur.execute("SELECT company_niche FROM accounts WHERE account_id=%s", (account_id,))
+            row = cur.fetchone()
+            if row and row[0]:
+                words.append(str(row[0]))
+            cur.execute("""SELECT DISTINCT name FROM client_facts
+                           WHERE account_id=%s AND status <> 'rejected'
+                           ORDER BY name LIMIT 60""", (account_id,))
+            for r in cur.fetchall():
+                if r[0]:
+                    words.append(str(r[0]))
+            c.close()
+    except Exception:
+        pass
+    txt = ", ".join(w.strip() for w in words if w and len(str(w).strip()) > 2)
+    return txt[:900]
+
+
+def _transcribe(audio_bytes: bytes, filename: str = "call.mp3", hint: str = "") -> str:
     """OpenAI whisper: аудио → текст. Тот же ключ/прокси что GPT."""
     api_key = os.environ.get("OPENAI_API_KEY")
     proxies = get_intl_requests_proxies()
@@ -103,12 +156,64 @@ def _transcribe(audio_bytes: bytes, filename: str = "call.mp3") -> str:
         "https://api.openai.com/v1/audio/transcriptions",
         headers={"Authorization": "Bearer " + api_key},
         files={"file": (filename, audio_bytes)},
-        data={"model": "whisper-1", "language": "ru"},
+        data={"model": "whisper-1", "language": "ru",
+              **({"prompt": hint} if hint else {})},
         proxies=proxies, timeout=300,
     )
     if r.status_code != 200:
         raise RuntimeError(f"whisper {r.status_code}: {r.text[:200]}")
     return r.json().get("text", "")
+
+
+def _checklist_for(account_id: str):
+    """Чек-лист звонка под нишу клиента. Хранится в storage под ключом
+    rop_checklist — так его можно править по каждому клиенту без правки кода.
+    Нет своего — берётся общий (он написан под поздравления и подходит не всем)."""
+    try:
+        import psycopg2, json as _jj
+        u = _db_url()
+        if u:
+            c = psycopg2.connect(u); cur = c.cursor()
+            cur.execute("SELECT value FROM storage WHERE account_id=%s"
+                        " AND key='rop_checklist'", (account_id,))
+            row = cur.fetchone(); c.close()
+            if row and row[0]:
+                v = row[0] if isinstance(row[0], list) else _jj.loads(row[0])
+                items = [str(x).strip() for x in v if str(x).strip()]
+                if items:
+                    return items
+    except Exception:
+        pass
+    return CHECKLIST
+
+
+def _asr_fix(account_id: str, text_in: str) -> str:
+    """Правка расшифровки по списку замен клиента (storage rop_asr_fix).
+    Нужна потому, что подсказка whisper-1 на отраслевые слова почти не влияет:
+    на бытовках модель устойчиво слышит «бутылки». Список свой у каждого
+    аккаунта, поэтому чужие ниши не задеваются."""
+    if not text_in:
+        return text_in
+    try:
+        import psycopg2, json as _jj, re as _re
+        u = _db_url()
+        if not u:
+            return text_in
+        c = psycopg2.connect(u); cur = c.cursor()
+        cur.execute("SELECT value FROM storage WHERE account_id=%s"
+                    " AND key='rop_asr_fix'", (account_id,))
+        row = cur.fetchone(); c.close()
+        if not row or not row[0]:
+            return text_in
+        pairs = row[0] if isinstance(row[0], list) else _jj.loads(row[0])
+        out = text_in
+        for pair in pairs:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            out = _re.sub(pair[0], pair[1], out, flags=_re.IGNORECASE)
+        return out
+    except Exception:
+        return text_in
 
 
 def _account_context(account_id: str) -> str:
@@ -137,7 +242,8 @@ def _account_context(account_id: str) -> str:
 
 def _analyze_call(transcript: str, account_id: str) -> dict:
     """GPT-5.4 разбор звонка по чек-листу: имя, ЛПР/ЛВР, галочки, балл, где провалился."""
-    checklist_txt = "\n".join(f"{i+1}. {item}" for i, item in enumerate(CHECKLIST))
+    _cl = _checklist_for(account_id)
+    checklist_txt = "\n".join(f"{i+1}. {item}" for i, item in enumerate(_cl))
     prompt = (
         "Ты — опытный, доброжелательный наставник по продажам. Разбери разговор менеджера с клиентом РАЗВИВАЮЩЕ и МЯГКО: "
         "хвали за конкретику, а зоны роста подавай как возможности ('стоит попробовать…', 'можно усилить…'), НЕ ругай, "
@@ -222,12 +328,20 @@ def analyze_call(account_id: str, body: dict = Body(...)):
         return {"status": "error", "code": code, "message": "запись недоступна"}
     ext = "mp3" if "mpeg" in ctype or "mp3" in ctype else "wav"
     try:
-        transcript = _transcribe(audio, f"call_{call_id}.{ext}")
+        transcript = _asr_fix(account_id, _transcribe(audio, f"call_{call_id}.{ext}", _asr_hint(account_id)))
     except Exception as e:
         return {"status": "error", "message": str(e)[:150]}
     if not transcript.strip():
         return {"status": "error", "message": "пустая расшифровка"}
     analysis = _analyze_call(transcript, account_id)
+    # Минуты для списания из пакета: из тела запроса, иначе спрашиваем у Avito
+    # длительность разговора. Источник тот же, что в статистике клиента.
+    _mins_final = float(_mins or 0)
+    if _mins_final <= 0:
+        try:
+            _mins_final = _talk_minutes(token, call_id)
+        except Exception:
+            _mins_final = 0.0
     # СОХРАНЯЕМ в кэш — чтобы повторный разбор/отчёт брал готовое
     try:
         import psycopg2, json as _json, os as _os
@@ -235,10 +349,10 @@ def analyze_call(account_id: str, body: dict = Body(...)):
         _url = _url[0] if _url else None
         if _url:
             _cc = psycopg2.connect(_url); _ccur = _cc.cursor()
-            _ccur.execute("""INSERT INTO call_analysis (account_id, call_id, transcript, analysis)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (account_id, call_id) DO UPDATE SET transcript=EXCLUDED.transcript, analysis=EXCLUDED.analysis""",
-                (account_id, int(call_id), transcript, _json.dumps(analysis)))
+            _ccur.execute("""INSERT INTO call_analysis (account_id, call_id, transcript, analysis, minutes)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (account_id, call_id) DO UPDATE SET transcript=EXCLUDED.transcript, analysis=EXCLUDED.analysis, minutes=EXCLUDED.minutes""",
+                (account_id, int(call_id), transcript, _json.dumps(analysis), float(_mins_final)))
             _cc.commit(); _cc.close()
     except Exception:
         pass
@@ -255,7 +369,9 @@ def analyze_call(account_id: str, body: dict = Body(...)):
 # ============ PDF-ОТЧЁТ ПО ЗВОНКАМ ============
 _WHISPER_MIN_USD = 0.006      # whisper за минуту аудио
 _USD_RUB = 95
-_GPT_CALL_RUB = 0.74         # ср. стоимость GPT-разбора одного звонка (из логов api_usage)
+_GPT_CALL_RUB = 1.28         # ср. стоимость GPT-разбора одного звонка.
+                             # Замер api_usage 07.08: 1,276 руб (946 промпт / 737 ответ).
+                             # Прежние 0.74 занижали цену отчёта клиенту почти вдвое.
 _GPT_REPORT_RUB = 0.26       # ср. стоимость GPT-рекомендаций отчёта (из логов)
 
 
@@ -472,7 +588,7 @@ def calltracking_report(account_id: str, date_from: str = None, date_to: str = N
             if rc != 200 or not audio:
                 continue
             ext = "mp3" if ("mpeg" in ctype or "mp3" in ctype) else "wav"
-            tr = _transcribe(audio, f"call_{cid}.{ext}")
+            tr = _asr_fix(account_id, _transcribe(audio, f"call_{cid}.{ext}", _asr_hint(account_id)))
             if not tr.strip():
                 continue
             an = _analyze_call(tr, account_id)
@@ -1775,3 +1891,46 @@ def train_manager(account_id: str, body: dict = Body(default=None)):
         pass
     return {"status": "ok", "applied": True, "rules": rules,
             "based_on": {"calls": len(calls), "chats": len(chats), "avg_score": avg}}
+
+
+@router.get("/analyzed")
+def analyzed_calls(account_id: str, days: int = 7, limit: int = 50):
+    """Разобранные звонки с чек-листом — чтобы руководитель видел работу
+    менеджеров в кабинете, а не только внутри ответа модели."""
+    import json as _j
+    import psycopg2
+    u = _db_url()
+    if not u:
+        return {"status": "error", "message": "Нет доступа к базе"}
+    c = psycopg2.connect(u)
+    cur = c.cursor()
+    try:
+        cur.execute(
+            "SELECT call_id, created_at, minutes, analysis FROM call_analysis"
+            " WHERE account_id=%s AND created_at > now() - (%s || ' days')::interval"
+            " ORDER BY created_at DESC LIMIT %s",
+            (account_id, str(int(days)), int(limit)))
+        rows = cur.fetchall()
+    finally:
+        c.close()
+
+    out = []
+    for call_id, created, minutes, analysis in rows:
+        a = analysis if isinstance(analysis, dict) else (_j.loads(analysis or "{}") or {})
+        checklist = a.get("checklist") or []
+        done = sum(1 for x in checklist if x.get("done"))
+        out.append({
+            "call_id": call_id,
+            "когда": created.isoformat() if created else None,
+            "минут": round(float(minutes or 0), 1),
+            "клиент": a.get("client_name") or "",
+            "роль": a.get("role") or "",
+            "балл": a.get("score"),
+            "чеклист": checklist,
+            "выполнено": done,
+            "всего_пунктов": len(checklist),
+            "совет": a.get("recommendation") or "",
+            "сильные": a.get("strong_moments") or [],
+            "зоны_роста": a.get("growth_points") or [],
+        })
+    return {"status": "ok", "звонки": out, "всего": len(out)}
