@@ -44,6 +44,40 @@ _ACTION_RU = {
 }
 
 
+def _short_details(details: str) -> str:
+    """Технические подробности — в человеческий вид.
+
+    В журнал часто попадает сырой JSON со списком ссылок; в кабинете это
+    занимает несколько экранов и ничего не объясняет.
+    """
+    d = (details or "").strip()
+    if not d or d[0] not in "{[":
+        return d[:300]
+    try:
+        import json as _j
+        obj = _j.loads(d)
+    except Exception:
+        return d[:160] + "\u2026"
+
+    if isinstance(obj, dict):
+        parts = []
+        for key, word in (("broken", "\u0441 \u0431\u0438\u0442\u044b\u043c\u0438 \u0444\u043e\u0442\u043e"),
+                          ("errors", "\u0441 \u043e\u0448\u0438\u0431\u043a\u0430\u043c\u0438"),
+                          ("missing", "\u0431\u0435\u0437 \u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u044b\u0445 \u043f\u043e\u043b\u0435\u0439")):
+            val = obj.get(key)
+            if isinstance(val, list) and val:
+                parts.append("%d %s" % (len(val), word))
+            elif isinstance(val, int) and val:
+                parts.append("%d %s" % (val, word))
+        if parts:
+            return "\u043e\u0431\u044a\u044f\u0432\u043b\u0435\u043d\u0438\u0439 " + ", ".join(parts)
+        keys = [k for k in obj if obj.get(k) not in (None, "", [], {})]
+        return ("\u043f\u043e\u0434\u0440\u043e\u0431\u043d\u043e\u0441\u0442\u0438: " + ", ".join(keys[:5])) if keys else ""
+    if isinstance(obj, list):
+        return "\u0437\u0430\u0442\u0440\u043e\u043d\u0443\u0442\u043e \u043f\u043e\u0437\u0438\u0446\u0438\u0439: %d" % len(obj)
+    return d[:160]
+
+
 def _humanize_entry(e):
     """Переводит запись журнала в человекочитаемый вид: кто и что сделал."""
     if not isinstance(e, dict):
@@ -53,7 +87,7 @@ def _humanize_entry(e):
     who = "🤖 Борис" if is_boris else "👤 Вы"
     action = str(e.get("action", ""))
     phrase = _ACTION_RU.get(action)
-    details = str(e.get("details") or e.get("text") or "")
+    details = _short_details(str(e.get("details") or e.get("text") or ""))
     if phrase:
         # для Бориса — "Борис снял продвижение...", для клиента — "Вы задали цель..."
         verb = phrase if is_boris else phrase.replace("(а)", "")
@@ -418,7 +452,16 @@ def rewrite_text(req: RewriteTextRequest):
             )
             if resp.status_code != 200:
                 return {"status": "error", "message": f"Ошибка ChatGPT: {resp.status_code} {resp.text[:200]}"}
-            raw = resp.json()["choices"][0]["message"]["content"]
+            _oa = resp.json()
+            raw = _oa["choices"][0]["message"]["content"]
+            try:  # учёт расхода: прямой вызов идёт мимо пула
+                from app.usage import log_usage as _lu
+                _u = _oa.get("usage") or {}
+                _lu(req.account_id or None, "openai", _oa.get("model") or "gpt-5.4",
+                    "переписать текст", int(_u.get("prompt_tokens") or 0),
+                    int(_u.get("completion_tokens") or 0))
+            except Exception as _e:
+                print("[usage]", str(_e)[:100], flush=True)
         except Exception as e:
             return {"status": "error", "message": f"Ошибка ChatGPT: {e}"}
     else:
@@ -542,8 +585,12 @@ def spin(text: str) -> str:
     # чистим мусор от спинтакса: висячие | и двойные пробелы
     result = result.replace("|", " ")
     import re as _re
-    result = _re.sub(r"\s+", " ", result).strip()
-    return result
+    # Схлопываем только пробелы и табуляции. Переносы строк НЕ трогаем:
+    # разбивка описания на строки обязательна для всех фидов (правило 05.08).
+    result = _re.sub(r"[ \t]+", " ", result)
+    result = _re.sub(r"[ \t]*\n[ \t]*", "\n", result)
+    result = _re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 class FeedItem(BaseModel):
     id: str
@@ -2094,8 +2141,6 @@ def apply_banner_to_batch_endpoint(req: ApplyBannerToBatchRequest):
     return apply_banner_to_batch_impl(req.account_id, req.batch_label, req.banner_count, req.photos_per_ad, req.folder)
 
 
-@router.post("/generate_feed")
-
 def _normalize_category(raw_category, niche=None, template_id=None):
     """Возвращает валидное для Avito имя категории <Category> — 2-й сегмент пути из дерева.
     Avito <Category> = подкатегория уровня "Ремонт и строительство" (как у боевых объявлений).
@@ -2135,6 +2180,7 @@ def _normalize_category(raw_category, niche=None, template_id=None):
         _db.close()
 
 
+@router.post("/generate_feed")
 def generate_feed(req: GenerateFeedRequest):
     """Сохраняет items фида в БД. НЕ строит сам XML здесь - это делает отдельный
     GET /feed/{account_id}.xml, вызываемый только когда Avito реально запрашивает файл.
@@ -2207,7 +2253,8 @@ def _build_xml(items: list) -> str:
             xml_parts.append(f'    <ContactPhone>{html.escape(item.phone)}</ContactPhone>')
         if item.manager:
             xml_parts.append(f'    <ManagerName>{html.escape(item.manager)}</ManagerName>')
-        xml_parts.append('    <ListingFee>PackageSingle</ListingFee>')
+        if "ListingFee" not in item.params:
+            xml_parts.append('    <ListingFee>PackageSingle</ListingFee>')
         for k, v in item.params.items():
             xml_parts.append(f'    <{k}>{html.escape(str(v))}</{k}>')
         if item.images:
@@ -2867,25 +2914,13 @@ def generate_banner(req: GenerateBannerRequest):
         while _attempts < 3:
             _attempts += 1
             try:
-                with GigaChat(credentials=os.getenv("GIGACHAT_KEY"), scope=_os_gc.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"), model=_GC_MODEL, verify_ssl_certs=False, timeout=120) as client:
-                    response = client.chat(Chat(
-                        messages=[
-                            Messages(role=MessagesRole.SYSTEM, content="Ты — художник Kandinsky, создаёшь качественные изображения для рекламы."),
-                            Messages(role=MessagesRole.USER, content=full_prompt)
-                        ],
-                        function_call="auto"
-                    ))
-                    content = response.choices[0].message.content
-                    m = _re_img.search(r'src="([^"]+)"', content)
-                    if not m:
-                        return (i, None, f"Вариант {i+1}: не нарисовал")
-                    file_id = m.group(1)
-                    image = client.get_image(file_id)
-                    img_b64 = image.content
                 fname = f"gen_{int(_time.time())}_{random.randint(1000,9999)}.jpg"
                 fpath = f"{folder_path}/{fname}"
-                with open(fpath, "wb") as imgf:
-                    imgf.write(_b64.b64decode(img_b64))
+                from banner_generator import generate_ai_image
+                if not generate_ai_image(full_prompt, fpath, size="1024x1024", quality="medium",
+                                         model="gpt-image-2", account_id=req.account_id,
+                                         operation="generate_banner"):
+                    return (i, None, f"Вариант {i+1}: OpenAI не вернул изображение")
                 return (i, _folder_url(req.account_id, folder, fname), None)
             except Exception as e:
                 if "429" in str(e) and _attempts < 3:
@@ -2896,7 +2931,7 @@ def generate_banner(req: GenerateBannerRequest):
 
     results_by_index = {}
     errors = []
-    with ThreadPoolExecutor(max_workers=1) as executor:  # тариф Freemium GigaChat = 1 поток одновременных запросов; поднять до 10 при переходе на Business
+    with ThreadPoolExecutor(max_workers=4) as executor:  # OpenAI: 4 параллельных запроса
         futures = [executor.submit(_generate_one, i) for i in range(count)]
         for future in as_completed(futures):
             i, url, err = future.result()
