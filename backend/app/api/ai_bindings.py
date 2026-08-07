@@ -25,8 +25,15 @@ MODES = ("one", "selected", "all")
 def _visible_accounts(db, user):
     q = db.query(Account)
     if getattr(user, "role", "") != "owner":
+        # Сотрудники клиента видят аккаунты, выданные им через связь:
+        # без этого раздел «AI-сотрудники» у них пустой.
+        access_ids = [r[0] for r in db.execute(text(
+            "SELECT account_id FROM user_account_access"
+            " WHERE user_id = :u AND can_view = TRUE"),
+            {"u": getattr(user, "id", 0)}).fetchall()]
         q = q.filter((Account.owner_user_id == user.id) |
-                     (Account.account_id == getattr(user, "account_id", None)))
+                     (Account.account_id == getattr(user, "account_id", None)) |
+                     (Account.account_id.in_(access_ids)))
     return [a for a in q.order_by(Account.created_at.asc()).all()]
 
 
@@ -244,5 +251,72 @@ def summary(product: str = "rop", user=Depends(get_current_user)):
                 "memory_shared": bool(rows[0][2]) if rows else False,
                 "facts": stat[0] or 0, "confirmed": stat[1] or 0,
                 "conflicts": stat[2] or 0, "usable": stat[3] or 0}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------- режим МОПа
+class MopModeBody(BaseModel):
+    account_id: str
+    contour: str
+
+
+def _owns_account(db, user, account_id: str) -> bool:
+    """Право менять режим. Системная роль owner — это BORIS; для клиента
+    владение определяется по accounts.owner_user_id или роли в связи."""
+    from sqlalchemy import text as _t
+    if _is_owner(user):
+        return True
+    uid = getattr(user, "id", 0)
+    if db.execute(_t("SELECT 1 FROM accounts WHERE account_id = :a"
+                     " AND owner_user_id = :u"), {"a": account_id, "u": uid}).fetchone():
+        return True
+    r = db.execute(_t("SELECT role FROM user_account_access"
+                      " WHERE user_id = :u AND account_id = :a"),
+                   {"u": uid, "a": account_id}).fetchone()
+    return bool(r and r[0] == "owner")
+
+
+@router.get("/mop_mode")
+def get_mop_mode(account_id: str, user=Depends(get_current_user)):
+    """Как AI-МОП отвечает по этому аккаунту: сразу или через подтверждение."""
+    from app.mop_core import contour_of
+    db = SessionLocal()
+    try:
+        visible = {a.account_id for a in _visible_accounts(db, user)}
+        if account_id not in visible:
+            raise HTTPException(status_code=403, detail="Аккаунт недоступен")
+        c = contour_of(db, account_id)
+        return {
+            "status": "ok",
+            "account_id": account_id,
+            "contour": c,
+            "title": "Показывать ответ перед отправкой" if c == "new"
+                     else "Отвечать покупателю сразу",
+            "can_change": _owns_account(db, user, account_id),
+        }
+    finally:
+        db.close()
+
+
+@router.post("/mop_mode")
+def set_mop_mode(body: MopModeBody, user=Depends(get_current_user)):
+    """Сменить режим. Решение о том, как работает продажа, принимает владелец."""
+    from app.mop_core import set_contour, contour_of, CONTOURS
+    if body.contour not in CONTOURS:
+        raise HTTPException(status_code=400,
+                            detail="Режим: %s" % ", ".join(CONTOURS))
+    db = SessionLocal()
+    try:
+        visible = {a.account_id for a in _visible_accounts(db, user)}
+        if body.account_id not in visible:
+            raise HTTPException(status_code=403, detail="Аккаунт недоступен")
+        if not _owns_account(db, user, body.account_id):
+            raise HTTPException(status_code=403,
+                                detail="Режим ответов меняет руководитель")
+        was = contour_of(db, body.account_id)
+        set_contour(db, body.account_id, body.contour)
+        return {"status": "ok", "account_id": body.account_id,
+                "was": was, "now": body.contour}
     finally:
         db.close()
