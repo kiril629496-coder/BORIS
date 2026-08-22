@@ -71,3 +71,18 @@ email_probe.txt
 frontend/patch_landing_vid.py
 tasks_worker.txt
 baseline/
+
+# создано app.ext_api.gitdeploy — не выкладываем лишнее
+.env.local
+.env.prod
+backend/.env
+id_rsa
+id_ed25519
+.ext_notify.env
+.ext_deploy.env
+uploads/
+media/
+logs/
+updates/
+BORIS_AGENT_PATCHES/
+.ext_inbox_offset
