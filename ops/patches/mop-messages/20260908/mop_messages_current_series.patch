@@ -1,0 +1,770 @@
+--- a/backend/app/mop_core.py
++++ b/backend/app/mop_core.py
+@@ -5,6 +5,7 @@
+ На этом этапе модуль ниоткуда не импортируется рабочим кодом.
+ """
+ import hashlib
++import json
+ import re
+ 
+ from sqlalchemy import bindparam, text
+@@ -112,6 +113,12 @@
+     )
+     if any(re.fullmatch(p,soft) for p in gratitude_patterns):
+         return "gratitude_ack"
++    simple_ack_patterns=(
++        r"хорошо", r"ок", r"окей", r"понял", r"поняла", r"ясно",
++        r"договорились", r"ладно", r"принято", r"отлично", r"супер",
++    )
++    if any(re.fullmatch(p,soft) for p in simple_ack_patterns):
++        return "simple_ack"
+     return None
+ 
+ 
+@@ -1218,10 +1225,53 @@
+             channel="avito",actor_type="human",actor_id="avito",
+             payload="manager/outside-MOP reply exists after the original incoming",
+             meta={"reason":"answered_externally","policy_version":"MOP_HUMAN_REQUIRED_EXTERNAL_CLOSE_V1","external_action":False},
++            extra_sql=", send_error=NULL, locked_at=NULL, locked_by=NULL",
+         )
+         if got is not None:
+             answered_externally+=1
+ 
++    # MOP_HUMAN_REQUIRED_TOPIC_RESOLVED_V1: if the acknowledgement was already
++    # sent by MOP and a later real outgoing explicitly answers that same handoff
++    # topic, the red manager task is no longer work. Keep this intentionally
++    # narrow: availability/price/delivery only; callbacks and channel handoffs stay.
++    topic_rows=db.execute(text("""
++      SELECT d.id,d.ai_summary,d.sent_at,
++             (SELECT string_agg(coalesce(m.text,''),'\n' ORDER BY m.avito_created_at)
++                FROM messenger_messages m
++               WHERE m.account_id=d.account_id AND m.avito_chat_id=d.avito_chat_id
++                 AND lower(m.direction) LIKE 'out%'
++                 AND coalesce(m.msg_type,'') <> 'system'
++                 AND d.sent_at IS NOT NULL
++                 AND to_timestamp(m.avito_created_at) > d.sent_at) AS later_outgoing
++        FROM mop_drafts d
++       WHERE d.status='human_required' AND d.sent_at IS NOT NULL
++       ORDER BY d.updated_at,d.id
++       LIMIT :lim
++    """),{"lim":int(limit)}).mappings().all()
++    topic_resolved=0
++    for d in topic_rows:
++        later=str(d.get("later_outgoing") or "").lower().replace("ё","е")
++        if not later:
++            continue
++        summary={}
++        try:
++            summary=json.loads(str(d.get("ai_summary") or "{}"))
++            if not isinstance(summary,dict): summary={}
++        except Exception:
++            summary={}
++        reason=str(summary.get("handoff_reason") or "")
++        if not _handoff_topic_resolved(reason, later):
++            continue
++        got,_=set_status(
++            db,int(d["id"]),"no_reply_required",("human_required",),"answered_externally",
++            channel="mop_recovery",actor_type="system",actor_id="human_topic_resolved",
++            payload="later outgoing message explicitly resolved the handoff topic",
++            meta={"reason":"handoff_topic_resolved","policy_version":"MOP_HUMAN_REQUIRED_TOPIC_RESOLVED_V1","external_action":False},
++            extra_sql=", send_error=NULL, locked_at=NULL, locked_by=NULL",
++        )
++        if got is not None:
++            topic_resolved+=1
++
+     rows=db.execute(text("""
+       SELECT d.id,d.account_id,d.avito_chat_id,d.avito_message_id,d.incoming_text,d.reply_text,d.sent_at
+         FROM mop_drafts d
+@@ -1271,6 +1321,7 @@
+             channel="web",actor_type="system",
+             payload="legacy human escalation deterministically reconciled",
+             meta={"reason":reason,"policy_version":"MOP_DETERMINISTIC_NO_REPLY_V1","external_action":False},
++            extra_sql=", send_error=NULL, locked_at=NULL, locked_by=NULL",
+         )
+         if got is not None:
+             out["closed"]+=1
+@@ -1278,6 +1329,91 @@
+     return out
+ 
+ 
++def waiting_external_local_decision(draft_mid, latest_mid, latest_direction):
++    """Pure local-history decision used before any external provider retry."""
++    draft_mid=str(draft_mid or "")
++    latest_mid=str(latest_mid or "")
++    direction=str(latest_direction or "").lower()
++    if not latest_mid or latest_mid==draft_mid:
++        return "unchanged"
++    if direction.startswith("out"):
++        return "answered_externally"
++    if direction.startswith("in"):
++        return "superseded"
++    return "unchanged"
++
++
++def _handoff_topic_resolved(reason, later_outgoing):
++    """High-precision business-topic completion check for an existing handoff."""
++    reason=str(reason or "").lower().replace("ё","е")
++    later=str(later_outgoing or "").lower().replace("ё","е")
++    if not later:
++        return False
++    if ("availability" in reason or "налич" in reason):
++        return bool(re.search(r"(?:есть|в наличии|доступн|вариант)",later))
++    if ("price" in reason or "цен" in reason or "стоим" in reason):
++        return bool(re.search(r"(?:\d[\d\s]{2,}\s*(?:руб|₽)|стоим|цен)",later))
++    if ("delivery" in reason or "достав" in reason or "вывоз" in reason):
++        return bool(re.search(r"(?:достав|вывоз).{0,100}(?:\d[\d\s]{2,}|руб|₽|расчет|рассчит)",later))
++    return False
++
++
++def reconcile_waiting_external_local_activity(db, limit=200):
++    """MOP_WAITING_EXTERNAL_LOCAL_FIRST_V1: close stale external waits from local truth.
++
++    Before any provider reprobe/retry, inspect already-synced non-system chat
++    history. A newer outgoing means the customer was answered elsewhere; a newer
++    incoming supersedes the old draft. This removes false work and avoids API use.
++    """
++    rows=db.execute(text("""
++      SELECT d.id,d.account_id,d.avito_chat_id,d.avito_message_id,
++             latest.avito_message_id AS latest_mid,latest.direction AS latest_direction
++        FROM mop_drafts d
++        LEFT JOIN LATERAL (
++          SELECT m.avito_message_id,m.direction
++            FROM messenger_messages m
++           WHERE m.account_id=d.account_id AND m.avito_chat_id=d.avito_chat_id
++             AND coalesce(m.msg_type,'') <> 'system'
++           ORDER BY m.avito_created_at DESC NULLS LAST,m.id DESC
++           LIMIT 1
++        ) latest ON true
++       WHERE d.status='waiting_external'
++       ORDER BY d.updated_at,d.id
++       LIMIT :lim
++    """),{"lim":max(1,min(int(limit or 200),500))}).mappings().all()
++    out={"checked":len(rows),"answered_externally":0,"superseded":0,"unchanged":0}
++    for d in rows:
++        latest_mid=str(d.get("latest_mid") or "")
++        draft_mid=str(d.get("avito_message_id") or "")
++        decision=waiting_external_local_decision(draft_mid, latest_mid, d.get("latest_direction"))
++        if decision=="unchanged":
++            out["unchanged"]+=1
++            continue
++        if decision=="answered_externally":
++            got,_=set_status(
++                db,int(d["id"]),"no_reply_required",("waiting_external",),"answered_externally",
++                channel="mop_recovery",actor_type="system",actor_id="waiting_external_local_first",
++                payload="local chat history already contains a newer outgoing message",
++                meta={"policy_version":"MOP_WAITING_EXTERNAL_LOCAL_FIRST_V1","external_action":False},
++                extra_sql=", send_error=NULL, locked_at=NULL, locked_by=NULL",
++            )
++            if got is not None:
++                out["answered_externally"]+=1
++        elif decision=="superseded":
++            got,_=set_status(
++                db,int(d["id"]),"no_reply_required",("waiting_external",),"closed_no_reply",
++                channel="mop_recovery",actor_type="system",actor_id="waiting_external_local_first",
++                payload="local chat history contains a newer incoming message; old draft superseded",
++                meta={"policy_version":"MOP_WAITING_EXTERNAL_LOCAL_FIRST_V1","external_action":False},
++                extra_sql=", send_error=NULL, locked_at=NULL, locked_by=NULL",
++            )
++            if got is not None:
++                out["superseded"]+=1
++        else:
++            out["unchanged"]+=1
++    return out
++
++
+ def recover_waiting_external_provider(db, active_accounts=None, limit=50, fresh_hours=24):
+     """MOP_PROVIDER_WAIT_AUTORETRY_V1: safely requeue AI-provider waits.
+ 
+--- a/backend/app/api/messenger.py
++++ b/backend/app/api/messenger.py
+@@ -740,6 +740,43 @@
+     return "Понял, вас интересует %s. Подскажите, пожалуйста, что именно хотите уточнить?" % subject
+ 
+ 
++def _history_role_messages(history_text: str, role: str) -> list[str]:
++    """Parse multiline `Клиент:` / `Мы:` blocks without losing continuation lines."""
++    wanted = "client" if str(role or "").lower().startswith("client") else "ours"
++    messages = []
++    current_role = None
++    buf = []
++
++    def flush():
++        nonlocal buf, current_role
++        if current_role == wanted and buf:
++            text_value = "\n".join(x for x in buf if x).strip()
++            if text_value:
++                messages.append(text_value)
++        buf = []
++
++    for raw_line in str(history_text or "").splitlines():
++        line = raw_line.strip()
++        low = line.lower()
++        marker = None
++        content = ""
++        if low.startswith("клиент:") and ":" in line:
++            marker = "client"
++            content = line.split(":", 1)[1].strip()
++        elif low.startswith("мы:") and ":" in line:
++            marker = "ours"
++            content = line.split(":", 1)[1].strip()
++        if marker is not None:
++            flush()
++            current_role = marker
++            buf = [content] if content else []
++            continue
++        if current_role is not None and line:
++            buf.append(line)
++    flush()
++    return messages
++
++
+ def _deterministic_mop_qualification(history_text: str, reply_text: str, analysis: dict | None = None) -> dict:
+     """Derive factual lead state without a second AI call.
+ 
+@@ -749,12 +786,57 @@
+     import re as _dq_re
+     base = dict(analysis or {})
+     history = str(history_text or "")
+-    client_lines = [
+-        line.split(":", 1)[1].strip()
+-        for line in history.splitlines()
+-        if line.strip().lower().startswith("клиент:") and ":" in line
+-    ]
++    client_lines = _history_role_messages(history, "client")
+     client_text = "\n".join(client_lines)
++
++    # Deterministic structured fields from explicit client text. This is not AI:
++    # it only records literal evidence already present in the conversation and
++    # never overwrites a previously known non-empty value.
++    fields = dict(base.get("qualification_fields") or {}) if isinstance(base.get("qualification_fields"), dict) else {}
++    def _set_field(key, value):
++        value = str(value or "").strip()
++        if value and not str(fields.get(key) or "").strip():
++            fields[key] = value
++
++    _size = _dq_re.search(
++        r"(?<!\d)(\d{1,2}(?:[.,]\d+)?)\s*[xх×]\s*(\d{1,2}(?:[.,]\d+)?)(?!\d)",
++        client_text,
++        _dq_re.I,
++    )
++    if _size:
++        _set_field("нужный размер бытовки", "%s×%s м" % (_size.group(1).replace(".", ","), _size.group(2).replace(".", ",")))
++
++    _term = _dq_re.search(
++        r"\bна\s+((?:(?:\d+)|один|одну|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|несколько)\s+"
++        r"(?:месяц(?:а|ев)?|недел(?:ю|и|ь)?|дн(?:я|ей|ь)?|сут(?:ки|ок)?))\b",
++        client_text.lower().replace("ё", "е"),
++        _dq_re.I,
++    )
++    if _term:
++        _set_field("на какой срок нужна бытовка", _term.group(1))
++    else:
++        _term_one = _dq_re.search(r"\bна\s+(месяц|неделю|день|сутки)\b", client_text.lower().replace("ё", "е"), _dq_re.I)
++        if _term_one:
++            _one_map = {"месяц":"1 месяц", "неделю":"1 неделю", "день":"1 день", "сутки":"1 сутки"}
++            _set_field("на какой срок нужна бытовка", _one_map.get(_term_one.group(1), _term_one.group(1)))
++
++    _low_client = client_text.lower().replace("ё", "е")
++    if _dq_re.search(r"\b(?:в\s+аренду|аренд(?:а|у|овать|оваться)?|снять)\b", _low_client):
++        _set_field("аренда или покупка", "аренда")
++    elif _dq_re.search(r"\b(?:купить|покупк(?:а|у)|приобрести|приобретение)\b", _low_client):
++        _set_field("аренда или покупка", "покупка")
++
++    _addr = _dq_re.search(
++        r"(?:^|\n)\s*(?:адрес(?:\s+(?:объекта|доставки))?|территориально)\s*[:—-]?\s*([^\n]{4,140})",
++        client_text,
++        _dq_re.I,
++    )
++    if _addr:
++        _set_field("адрес объекта/доставки", _addr.group(1).strip(" .;,-"))
++
++    if _dq_re.search(r"\bюр(?:идическ(?:ое|ого))?\.?\s*лиц", _low_client):
++        _set_field("оформление", "юридическое лицо")
++
+     phone_received = bool(
+         _dq_re.search(
+             r"(?<!\d)(?:\+?7|8)[\s()\-]*\d{3}[\s()\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}(?!\d)",
+@@ -788,7 +870,7 @@
+     base.setdefault("reactivation_candidate", None)
+     base.setdefault("human_handoff", None)
+     base.setdefault("handoff_reason", None)
+-    base.setdefault("qualification_fields", {})
++    base["qualification_fields"] = fields
+     return base
+ 
+ 
+@@ -801,19 +883,12 @@
+     """
+     import re as _fg_re
+     history = str(history_text or "")
+-    client_lines = [
+-        line.split(":", 1)[1].strip()
+-        for line in history.splitlines()
+-        if line.strip().lower().startswith("клиент:") and ":" in line
+-    ]
++    client_lines = _history_role_messages(history, "client")
+     if not client_lines:
+         return None
+     question = client_lines[-1].lower().replace("ё", "е")
+     previous_client = "\n".join(client_lines[-3:-1]).lower().replace("ё", "е")
+-    outgoing = "\n".join(
+-        line for line in history.splitlines()
+-        if line.strip().lower().startswith("мы:")
+-    )
++    outgoing = "\n".join(_history_role_messages(history, "ours"))
+     trusted = (str(trusted_context or "") + "\n" + outgoing).lower().replace("ё", "е")
+ 
+     # MOP_CHANNEL_CONTINUITY_GUARD_V1: a short follow-up like "не могу
+@@ -917,11 +992,7 @@
+         problems.append("internal_or_invented_identity")
+ 
+     # Never ask for a phone again after the client has already supplied one.
+-    _client_history_lines = [
+-        line.split(":", 1)[1].strip()
+-        for line in history.splitlines()
+-        if line.strip().lower().startswith("клиент:") and ":" in line
+-    ]
++    _client_history_lines = _history_role_messages(history, "client")
+     client_lines = "\n".join("Клиент: " + line for line in _client_history_lines)
+     last_client_text = (_client_history_lines[-1] if _client_history_lines else "").lower().replace("ё", "е")
+     has_client_phone = bool(
+@@ -1242,22 +1313,26 @@
+             return _wrap(_memory_reply(_mem), _mu, return_meta)
+ 
+         # Deterministic clarification must not spend tokens or create manager work.
++        _clarify_codes = {"price_context_required", "rent_or_buy_context_required"}
+         if (_mem.get("use_memory") and _mem.get("mode") == "hybrid"
+-                and not _mem.get("found") and _mem.get("reason_code") == "price_context_required"):
+-            _analysis = {
+-                "human_handoff": False,
+-                "qualification_fields": {"аренда или покупка": None},
+-                "next_action": "уточнить у клиента аренда или покупка",
+-            }
++                and not _mem.get("found") and _mem.get("reason_code") in _clarify_codes):
++            _reason_code = str(_mem.get("reason_code") or "price_context_required")
++            _reply = str(_mem.get("reply") or "Уточните, пожалуйста: вас интересует аренда или покупка?")
++            _analysis = _deterministic_mop_qualification(
++                "Клиент: " + str(_question or ""),
++                _reply,
++                {"human_handoff": False, "handoff_reason": None,
++                 "qualification_fields": {"аренда или покупка": None},
++                 "next_action": "уточнить у клиента аренда или покупка"},
++            )
+             _mu = dict(_MEM_USAGE)
+             _mu.update({
+                 "memory_fast_path": True,
+                 "policy_version": "MOP_HYBRID_MEMORY_CLARIFY_V1",
+-                "reason_code": "price_context_required",
++                "reason_code": _reason_code,
+             })
+-            print("[memory] hybrid deterministic clarification: price_context_required", flush=True)
+-            return _wrap(str(_mem.get("reply") or "Уточните, пожалуйста: вас интересует аренда или покупка?"),
+-                         _mu, return_meta, analysis=_analysis)
++            print("[memory] hybrid deterministic clarification: %s" % _reason_code, flush=True)
++            return _wrap(_reply, _mu, return_meta, analysis=_analysis)
+ 
+         # HYBRID_MEMORY_HANDOFF_V1: deterministic cases should not spend tokens
+         # just to decide that a manager is required.
+@@ -3558,6 +3633,7 @@
+                     try:
+                         rr = _mc_recover.recover_stale_analyzing(dbr, stale_minutes=30, limit=100)
+                         nr = _mc_recover.reconcile_trivial_human_required(dbr, limit=100)
++                        wr = _mc_recover.reconcile_waiting_external_local_activity(dbr, limit=200)
+                         pr = _mc_recover.recover_waiting_external_provider(
+                             dbr, active_accounts=active_mop_accounts, limit=20, fresh_hours=24
+                         )
+@@ -3566,10 +3642,10 @@
+                     finally:
+                         dbr.close()
+                     xr = _recover_waiting_external_403(limit=20)
+-                    if rr.get("checked") or nr.get("closed") or xr.get("checked") or pr.get("checked"):
+-                        print("MOP_STALE_RECOVERY checked=%s answered_externally=%s human_required=%s no_reply_closed=%s reasons=%s provider_wait=%s 403_recovery=%s" %
++                    if rr.get("checked") or nr.get("closed") or wr.get("checked") or xr.get("checked") or pr.get("checked"):
++                        print("MOP_STALE_RECOVERY checked=%s answered_externally=%s human_required=%s no_reply_closed=%s reasons=%s local_wait=%s provider_wait=%s 403_recovery=%s" %
+                               (rr.get("checked"), rr.get("answered_externally"), rr.get("human_required"),
+-                               nr.get("closed"), nr.get("reasons"), pr, xr),
++                               nr.get("closed"), nr.get("reasons"), wr, pr, xr),
+                               flush=True)
+                 except Exception as exc:
+                     print("MOP_STALE_RECOVERY_ERROR: %s" % repr(exc)[:200], flush=True)
+--- a/backend/app/api/client_memory.py
++++ b/backend/app/api/client_memory.py
+@@ -606,9 +606,16 @@
+         "вагонк", "новая бытов", "новую бытов", "новой бытов", "производств"
+     )))
+     _used_sale_price_q = bool(_price_q and _sale_q and any(x in _q_low for x in ("б/у", "бу бытов", "бывш")))
+-    _rent_price_q = bool(_price_q and any(x in _q_low for x in ("аренд", "сда")))
++    _explicit_rent_q = any(x in _q_low for x in ("аренд", "снять", "сда"))
++    _rent_price_q = bool(_price_q and _explicit_rent_q)
++    import re as _intent_re
++    _temporary_term_q = bool(_intent_re.search(
++        r"\bна\s+(?:(?:\d+)|один|одну|два|две|три|четыре|несколько)\s*"
++        r"(?:месяц(?:а|ев)?|недел(?:ю|и|ь)?|дн(?:я|ей|ь)?|сут(?:ки|ок)?)\b",
++        _q_low,
++    ) or _intent_re.search(r"\bна\s+месяц\b", _q_low))
+     _mixed_rent_sale_account = False
+-    if _price_q:
++    if _price_q or _temporary_term_q or _explicit_rent_q or _sale_q:
+         _has_rent = bool(db.execute(text("""
+             SELECT 1 FROM client_facts
+              WHERE account_id=:a AND status='confirmed' AND category='tovar'
+@@ -629,6 +636,10 @@
+         _price_q and _mixed_rent_sale_account
+         and not _rent_price_q and not _sale_q and not _sale_product_price_q and not _used_sale_price_q
+     )
++    _rent_or_buy_context_required = bool(
++        _mixed_rent_sale_account and _temporary_term_q
++        and not _explicit_rent_q and not _sale_q
++    )
+     _capability_q = (
+         any(x in _q_low for x in ("сдаете", "продаете", "есть аренда", "есть продажа", "занимаетесь аренд", "занимаетесь продаж"))
+         or ("какие бытов" in _q_low and any(x in _q_low for x in ("сда", "аренд", "прода", "продаж")))
+@@ -651,6 +662,16 @@
+                      "title": "Уточнить формат: аренда или покупка",
+                      "reason": "в аккаунте есть и аренда, и продажа; без уточнения цена двусмысленна"},
+         }
++    if _rent_or_buy_context_required:
++        return {
++            "found": False,
++            "accounts": accs,
++            "reason_code": "rent_or_buy_context_required",
++            "reply": "Уточните, пожалуйста: речь об аренде на указанный срок или о покупке?",
++            "task": {"account_id": account_id,
++                     "title": "Уточнить формат: аренда или покупка",
++                     "reason": "клиент указал временный срок, а аккаунт работает и с арендой, и с продажей"},
++        }
+ 
+     # If this price subject previously had an authoritative repeated outgoing
+     # consensus, expiration must fail closed. Never fall back to an older ad or
+@@ -688,6 +709,13 @@
+         _name_fw = stems(r[3])
+         _name_alias_fw = stems("%s %s" % (r[3], r[9]))
+         _name_alias_low = (str(r[3] or "") + " " + str(r[9] or "")).lower().replace("ё", "е")
++        # Rental intent must not be hijacked by a sale-only Avito listing that
++        # happens to share the same product/size words.
++        if _explicit_rent_q and r[5] == "avito_item":
++            _sale_item = any(x in _name_alias_low for x in ("продам", "прода", "продаж", "купить", "покуп"))
++            _rent_item = any(x in _name_alias_low for x in ("аренд", "сдам", "сдаю"))
++            if _sale_item and not _rent_item:
++                continue
+         if (r[5] == "dialog_promo_consensus" and "минималь" in str(r[3] or "").lower()
+                 and _nv_hits == 0):
+             continue
+--- a/backend/app/crm/bridge.py
++++ b/backend/app/crm/bridge.py
+@@ -552,7 +552,7 @@
+             object_place.append(value)
+         elif any(x in key for x in ("срок", "период", "до какого", "на сколько")):
+             rent_term.append(value)
+-        elif any(x in key for x in ("размер", "тип", "новая", "б/у", "аренда или", "покупка", "комплект", "состояние", "что нужно")):
++        elif any(x in key for x in ("размер", "тип", "новая", "б/у", "аренда или", "покупка", "комплект", "состояние", "что нужно", "оформлен", "юрлиц")):
+             need_type.append(value)
+     def joined(vals, limit=240):
+         out=[]
+--- a/backend/app/api/inbox_slots.py
++++ b/backend/app/api/inbox_slots.py
+@@ -823,6 +823,7 @@
+         q_drafts = text(
+             "SELECT DISTINCT ON (account_id,avito_chat_id) account_id,avito_chat_id,status,"
+             " coalesce(send_error,''),coalesce(ai_summary,'') FROM mop_drafts WHERE account_id IN :ids"
++            " AND account_id NOT LIKE '__qa_%' AND avito_chat_id NOT LIKE 'qa_%'"
+             " AND status NOT IN ('sent','deleted','no_reply_required')"
+             " ORDER BY account_id,avito_chat_id,coalesce(updated_at,created_at) DESC,id DESC"
+         ).bindparams(bindparam("ids", expanding=True))
+@@ -845,6 +846,7 @@
+                         "availability_requires_human": "Нужно подтвердить актуальное наличие",
+                         "individual_delivery_price": "Нужен индивидуальный расчёт доставки/вывоза",
+                         "previous_reply_needs_correction": "Нужно исправить предыдущий ответ МОПа и продолжить диалог",
++                        "stale_unanswered_client_inquiry": "Просроченный вопрос клиента — нужен ответ менеджера",
+                     }
+                     handoff_reason = _reason_labels.get(handoff_reason, handoff_reason)
+                     details = [x for x in (handoff_reason, str(err or "").strip()) if x]
+--- a/backend/app/telegram_bot.py
++++ b/backend/app/telegram_bot.py
+@@ -15,6 +15,21 @@
+ BOT_TOKEN = os.environ.get("BORIS_TELEGRAM_BOT_TOKEN")
+ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+ 
++# Telegram must not inherit the process-wide HTTP(S)_PROXY used for external
++# browser/AI traffic. The host has direct Telegram connectivity; inheriting the
++# global proxy caused ProxyError -> circuit-open even while api.telegram.org was
++# reachable directly.
++_TELEGRAM_SESSION = requests.Session()
++_TELEGRAM_SESSION.trust_env = False
++
++
++def _safe_telegram_error(exc) -> str:
++    """Redact bot credentials from request exceptions before they reach logs."""
++    msg = repr(exc)
++    msg = re.sub(r"https://api\.telegram\.org/bot[^/\s'\"]+", "https://api.telegram.org/bot<redacted>", msg)
++    msg = re.sub(r"/bot[^/\s'\"]+", "/bot<redacted>", msg)
++    return msg[:300]
++
+ 
+ def _telegram_proxies():
+     """
+@@ -87,7 +102,7 @@
+     for attempt in range(3):
+         try:
+             return dependency_call(
+-                "telegram", requests.post, url,
++                "telegram", _TELEGRAM_SESSION.post, url,
+                 json=json_payload,
+                 timeout=(4, timeout),
+             )
+@@ -113,7 +128,7 @@
+     for attempt in range(3):
+         try:
+             return dependency_call(
+-                "telegram", requests.get, url,
++                "telegram", _TELEGRAM_SESSION.get, url,
+                 params=params,
+                 timeout=(4, timeout),
+             )
+@@ -581,4 +596,4 @@
+                             "(вкладка «Задачи и план» → «Подключить Telegram»)."
+                         )
+         except Exception as e:
+-            print(f"TELEGRAM_POLL_ERROR: {repr(e)[:200]}", flush=True)
++            print(f"TELEGRAM_POLL_ERROR: {_safe_telegram_error(e)}", flush=True)
+--- a/backend/production_contract_runner.py
++++ b/backend/production_contract_runner.py
+@@ -882,6 +882,19 @@
+     ROOT/'backend/boris_background_worker.py',
+     ROOT/'backend/app/worker_runtime.py',
+     ROOT/'backend/app/services/jobs.py',
++    # Direct import roots of boris_background_worker.py. These long-lived
++    # modules must invalidate the worker generation when their bytes change;
++    # otherwise Telegram/MOP/background loops can keep stale code until an
++    # owner notices and restarts the worker manually.
++    ROOT/'backend/app/telegram_bot.py',
++    ROOT/'backend/app/api/messenger.py',
++    ROOT/'backend/app/mop_core.py',
++    ROOT/'backend/app/api/client_memory.py',
++    ROOT/'backend/app/crm/bridge.py',
++    ROOT/'backend/app/api/mass_editor.py',
++    ROOT/'backend/app/api/cpx_advisor.py',
++    ROOT/'backend/app/services/reliability.py',
++    ROOT/'backend/app/main.py',
+     # Feed Factory jobs dynamically import these modules. They are part of the
+     # worker runtime generation even though they are not direct top-level imports.
+     ROOT/'backend/app/api/campaigns.py',
+--- a/backend/tests/test_mop_deterministic_no_reply.py
++++ b/backend/tests/test_mop_deterministic_no_reply.py
+@@ -16,6 +16,12 @@
+             "gratitude_ack",
+         )
+ 
++    def test_simple_ack_is_zero_ai_no_reply_but_scheduling_detail_is_not(self):
++        for text in ("Хорошо", "ОК", "Окей", "Понял", "Договорились", "Принято"):
++            self.assertEqual(mop_core.deterministic_no_reply_reason(text), "simple_ack")
++        self.assertIsNone(mop_core.deterministic_no_reply_reason("Хорошо, завтра в 15:00"))
++        self.assertIsNone(mop_core.deterministic_no_reply_reason("Хорошо?"))
++
+     def test_vendor_solicitation_needs_multiple_strong_signals(self):
+         text = (
+             "Просто вижу что вы можете больше клиентов принимать. "
+--- a/backend/tests/test_mop_qualification_fields.py
++++ b/backend/tests/test_mop_qualification_fields.py
+@@ -1,7 +1,14 @@
+ import json
+ import unittest
+ 
+-from app.api.messenger import _normalize_mop_structured, _repair_meta_client_reply, _initial_short_subject_clarification
++from app.api.messenger import (
++    _normalize_mop_structured,
++    _repair_meta_client_reply,
++    _initial_short_subject_clarification,
++    _deterministic_mop_qualification,
++    _history_role_messages,
++)
++from app.crm.bridge import _qualification_to_lead_fields
+ 
+ 
+ class MopQualificationFieldsTests(unittest.TestCase):
+@@ -115,6 +122,70 @@
+     def test_greeting_is_not_treated_as_subject(self):
+         self.assertIsNone(_initial_short_subject_clarification("Здравствуйте", "Клиент: Здравствуйте"))
+ 
++    def test_multiline_client_block_is_preserved_as_one_message(self):
++        history = (
++            "Клиент: Нужна бытовка 6 х2,4\n"
++            "Для строителей\n"
++            "Территориально ул. Шостаковича 1\n"
++            "На месяц с оформлением на юр. лицо\n"
++            "Мы: Уточню формат."
++        )
++        self.assertEqual(
++            _history_role_messages(history, "client"),
++            ["Нужна бытовка 6 х2,4\nДля строителей\nТерриториально ул. Шостаковича 1\nНа месяц с оформлением на юр. лицо"],
++        )
++        self.assertEqual(_history_role_messages(history, "ours"), ["Уточню формат."])
++
++    def test_multiline_explicit_fields_are_extracted_without_ai(self):
++        history = (
++            "Клиент: Нужна бытовка 6 х2,4\n"
++            "Для строителей\n"
++            "Территориально ул. Шостаковича 1\n"
++            "На месяц с оформлением на юр. лицо"
++        )
++        analysis = _deterministic_mop_qualification(
++            history,
++            "Уточните, пожалуйста: речь об аренде на указанный срок или о покупке?",
++            {"human_handoff": False, "qualification_fields": {"аренда или покупка": None}},
++        )
++        fields = analysis["qualification_fields"]
++        self.assertEqual(fields["нужный размер бытовки"], "6×2,4 м")
++        self.assertEqual(fields["на какой срок нужна бытовка"], "1 месяц")
++        self.assertEqual(fields["адрес объекта/доставки"], "ул. Шостаковича 1")
++        self.assertEqual(fields["оформление"], "юридическое лицо")
++        self.assertIsNone(fields["аренда или покупка"])
++
++    def test_explicit_rent_fills_format_but_temporary_term_alone_does_not(self):
++        rent = _deterministic_mop_qualification(
++            "Клиент: Нужна бытовка в аренду на 2 месяца",
++            "Принял.",
++            {"qualification_fields": {}},
++        )["qualification_fields"]
++        ambiguous = _deterministic_mop_qualification(
++            "Клиент: Нужна бытовка на 2 месяца",
++            "Уточните формат.",
++            {"qualification_fields": {}},
++        )["qualification_fields"]
++        self.assertEqual(rent["аренда или покупка"], "аренда")
++        self.assertEqual(rent["на какой срок нужна бытовка"], "2 месяца")
++        self.assertNotIn("аренда или покупка", ambiguous)
++
++    def test_structured_fields_reach_existing_crm_lead_columns(self):
++        vals = _qualification_to_lead_fields({
++            "qualification_fields": {
++                "нужный размер бытовки": "6×2,4 м",
++                "аренда или покупка": "аренда",
++                "на какой срок нужна бытовка": "1 месяц",
++                "адрес объекта/доставки": "ул. Шостаковича 1",
++                "оформление": "юридическое лицо",
++            }
++        })
++        self.assertEqual(vals["object_place"], "ул. Шостаковича 1")
++        self.assertEqual(vals["rent_term"], "1 месяц")
++        self.assertIn("6×2,4 м", vals["need_type"])
++        self.assertIn("аренда", vals["need_type"])
++        self.assertIn("юридическое лицо", vals["need_type"])
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+--- a/backend/tests/test_mop_waiting_external_recovery.py
++++ b/backend/tests/test_mop_waiting_external_recovery.py
+@@ -5,6 +5,7 @@
+ from app.api import mop_training
+ from app.api import messenger as messenger_api
+ from app.api.messenger import _waiting_external_403_decision
++from app.mop_core import waiting_external_local_decision, _handoff_topic_resolved
+ 
+ 
+ class WaitingExternal403RecoveryTests(unittest.TestCase):
+@@ -50,6 +51,34 @@
+         self.assertTrue(mop_core.can_go("waiting_external","draft_ready"))
+         self.assertTrue(mop_core.can_go("sent","human_required"))
+ 
++    def test_local_waiting_external_decision_is_provider_free_and_deterministic(self):
++        self.assertEqual(waiting_external_local_decision("m1", "m1", "in"), "unchanged")
++        self.assertEqual(waiting_external_local_decision("m1", "o2", "out"), "answered_externally")
++        self.assertEqual(waiting_external_local_decision("m1", "m2", "in"), "superseded")
++        self.assertEqual(waiting_external_local_decision("m1", "x2", "unknown"), "unchanged")
++
++    def test_handoff_topic_resolution_is_narrow(self):
++        self.assertTrue(_handoff_topic_resolved(
++            "availability_requires_human",
++            "Коллега уточнил, сейчас есть несколько вариантов, включая Toyota Camry.",
++        ))
++        self.assertTrue(_handoff_topic_resolved(
++            "нужно подтвердить актуальную цену",
++            "Стоимость составит 85 000 руб.",
++        ))
++        self.assertTrue(_handoff_topic_resolved(
++            "индивидуальный расчет доставки",
++            "Доставка рассчитана: 12 000 ₽.",
++        ))
++        self.assertFalse(_handoff_topic_resolved(
++            "messenger_channel_unconfirmed",
++            "Продолжим здесь в Авито.",
++        ))
++        self.assertFalse(_handoff_topic_resolved(
++            "client_requested_human",
++            "Уточню и вернусь к вам.",
++        ))
++
+     def test_local_provider_retry_has_bounded_backoff_and_no_provider_call(self):
+         src=inspect.getsource(mop_core.recover_waiting_external_provider)
+         self.assertIn("MOP_LOCAL_PROVIDER_RETRY_BACKOFF_V1", src)
+--- a/backend/tests/test_mop_attention_qa_isolation.py
++++ b/backend/tests/test_mop_attention_qa_isolation.py
+@@ -0,0 +1,17 @@
++import inspect
++import unittest
++
++from app.api import inbox_slots
++
++
++class MopAttentionQaIsolationTests(unittest.TestCase):
++    def test_owner_attention_excludes_synthetic_qa_drafts(self):
++        src = inspect.getsource(inbox_slots.inbox_attention)
++        self.assertIn("account_id NOT LIKE '__qa_%'", src)
++        self.assertIn("avito_chat_id NOT LIKE 'qa_%'", src)
++        self.assertIn("stale_unanswered_client_inquiry", src)
++        self.assertIn("Просроченный вопрос клиента", src)
++
++
++if __name__ == '__main__':
++    unittest.main()
+--- a/backend/tests/test_telegram_direct_transport.py
++++ b/backend/tests/test_telegram_direct_transport.py
+@@ -0,0 +1,20 @@
++import os
++import unittest
++
++from app import telegram_bot
++
++
++class TelegramDirectTransportTests(unittest.TestCase):
++    def test_session_does_not_inherit_process_proxy(self):
++        self.assertIs(telegram_bot._TELEGRAM_SESSION.trust_env, False)
++
++    def test_error_redacts_bot_token(self):
++        exc = RuntimeError("GET https://api.telegram.org/bot123456:SECRET_TOKEN/getUpdates failed")
++        safe = telegram_bot._safe_telegram_error(exc)
++        self.assertIn("bot<redacted>/getUpdates", safe)
++        self.assertNotIn("SECRET_TOKEN", safe)
++        self.assertNotIn("123456:", safe)
++
++
++if __name__ == '__main__':
++    unittest.main()
+--- a/backend/tests/test_background_runtime_generation_scope.py
++++ b/backend/tests/test_background_runtime_generation_scope.py
+@@ -0,0 +1,24 @@
++import pathlib
++import unittest
++
++
++class BackgroundRuntimeGenerationScopeTests(unittest.TestCase):
++    def test_worker_direct_import_roots_are_generation_tracked(self):
++        src = (pathlib.Path(__file__).resolve().parents[1] / 'production_contract_runner.py').read_text(encoding='utf-8')
++        required = (
++            "ROOT/'backend/app/telegram_bot.py'",
++            "ROOT/'backend/app/api/messenger.py'",
++            "ROOT/'backend/app/mop_core.py'",
++            "ROOT/'backend/app/api/client_memory.py'",
++            "ROOT/'backend/app/crm/bridge.py'",
++            "ROOT/'backend/app/api/mass_editor.py'",
++            "ROOT/'backend/app/api/cpx_advisor.py'",
++            "ROOT/'backend/app/services/reliability.py'",
++            "ROOT/'backend/app/main.py'",
++        )
++        for item in required:
++            self.assertIn(item, src)
++
++
++if __name__ == '__main__':
++    unittest.main()

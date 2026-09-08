@@ -1,0 +1,7 @@
+scope=MOP messages/memory/CRM/self-heal final series v2
+created_utc=2026-09-08T09:38:22Z
+repo_head=9eef80f269e7ce435bee20f426a64beabeed6901
+origin=https://github.com/kiril629496-coder/BORIS.git
+patch_sha256=6797f7b5c74ea7dd36e1ec4a27823630597ed3f5c7e6adfe92555d8eb74f0a0c
+patch_lines=770
+files=backend/app/mop_core.py,backend/app/api/messenger.py,backend/app/api/client_memory.py,backend/app/crm/bridge.py,backend/app/api/inbox_slots.py,backend/app/telegram_bot.py,backend/production_contract_runner.py,backend/tests/test_mop_deterministic_no_reply.py,backend/tests/test_mop_qualification_fields.py,backend/tests/test_mop_waiting_external_recovery.py,backend/tests/test_mop_attention_qa_isolation.py,backend/tests/test_telegram_direct_transport.py,backend/tests/test_background_runtime_generation_scope.py
