@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.api.auth import get_current_user, require_owner
 from pydantic import BaseModel
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
@@ -23,6 +23,13 @@ def _require_account_view(account_id: str, user):
             raise HTTPException(status_code=403, detail="forbidden_account")
     finally:
         db.close()
+
+
+def _require_private_platform_owner(user=Depends(get_current_user)):
+    from app.services.platform_roles import is_private_platform_owner
+    if not is_private_platform_owner(user):
+        raise HTTPException(status_code=403, detail="private_platform_owner_required")
+    return user
 
 
 # Пороги напоминаний (дней до конца оплаты)
@@ -151,11 +158,44 @@ PACKAGES = {
 }
 
 
-def _configured_phone_monthly_package():
-    """Expose BORIS Phone for sale only when the real commercial price is configured."""
-    raw = str(os.getenv("BORIS_PHONE_MONTHLY_PRICE_RUB", "") or "").strip()
-    if not raw:
+_PHONE_PRICE_STORAGE_ACCOUNT = "__platform_pricing__"
+_PHONE_PRICE_STORAGE_KEY = "phone_monthly"
+
+
+def _stored_phone_monthly_setting():
+    """Durable platform-owner override. Any stored row wins over environment fallback."""
+    from app.db.session import SessionLocal
+    from sqlalchemy import text as _phone_price_text
+    db = SessionLocal()
+    try:
+        raw = db.execute(_phone_price_text("""
+            SELECT value FROM storage
+            WHERE account_id=:a AND key=:k
+            ORDER BY id DESC LIMIT 1
+        """), {"a": _PHONE_PRICE_STORAGE_ACCOUNT, "k": _PHONE_PRICE_STORAGE_KEY}).scalar()
+    except Exception:
+        # Commercial pricing fails closed if the settings store is unavailable.
         return None
+    finally:
+        db.close()
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except Exception:
+        return {"enabled": False, "invalid": True}
+    return data if isinstance(data, dict) else {"enabled": False, "invalid": True}
+
+
+def _configured_phone_monthly_package():
+    """Expose BORIS Phone only when a real positive commercial price is configured."""
+    stored = _stored_phone_monthly_setting()
+    if stored is not None:
+        if not bool(stored.get("enabled")):
+            return None
+        raw = stored.get("price_rub")
+    else:
+        raw = str(os.getenv("BORIS_PHONE_MONTHLY_PRICE_RUB", "") or "").strip()
     try:
         price = int(raw)
     except (TypeError, ValueError):
@@ -171,9 +211,112 @@ def _configured_phone_monthly_package():
     }
 
 
-_PHONE_MONTHLY_PACKAGE = _configured_phone_monthly_package()
-if _PHONE_MONTHLY_PACKAGE:
-    PACKAGES["phone_monthly"] = _PHONE_MONTHLY_PACKAGE
+def _package_catalog() -> dict:
+    """Single live catalog for UI, Robokassa and wallet; no import-time Phone price cache."""
+    out = dict(PACKAGES)
+    phone = _configured_phone_monthly_package()
+    if phone:
+        out["phone_monthly"] = phone
+    else:
+        out.pop("phone_monthly", None)
+    return out
+
+
+def _phone_commercial_settings_status() -> dict:
+    stored = _stored_phone_monthly_setting()
+    package = _configured_phone_monthly_package()
+    env_present = bool(str(os.getenv("BORIS_PHONE_MONTHLY_PRICE_RUB", "") or "").strip())
+    source = "platform_storage" if stored is not None else ("environment" if env_present else "not_configured")
+    return {
+        "status": "ok",
+        "enabled": bool(package),
+        "price_rub": int(package["sum"]) if package else None,
+        "source": source,
+        "stored_override_present": stored is not None,
+        "environment_fallback_present": env_present,
+        "truth": "Phone is saleable only when one positive real commercial price is configured.",
+    }
+
+
+class PhoneCommercialSettingsBody(BaseModel):
+    enabled: bool
+    price_rub: int | None = None
+    confirm: bool = False
+
+
+@router.get("/phone-commercial-settings")
+def phone_commercial_settings(_owner=Depends(_require_private_platform_owner)):
+    """Private platform-owner view. Never invents a price."""
+    return _phone_commercial_settings_status()
+
+
+@router.post("/phone-commercial-settings")
+def set_phone_commercial_settings(
+    body: PhoneCommercialSettingsBody,
+    _owner=Depends(_require_private_platform_owner),
+):
+    """Persist the one global BORIS Phone monthly sale price without editing .env."""
+    if not body.confirm:
+        raise HTTPException(status_code=409, detail="explicit_confirmation_required")
+    if body.enabled:
+        try:
+            price = int(body.price_rub)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="positive_price_required")
+        if price <= 0 or price > 10_000_000:
+            raise HTTPException(status_code=400, detail="positive_price_required")
+    else:
+        price = None
+
+    from app.db.session import SessionLocal
+    from sqlalchemy import text as _phone_price_text
+    payload = json.dumps({
+        "enabled": bool(body.enabled),
+        "price_rub": price,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }, ensure_ascii=False)
+    db = SessionLocal()
+    try:
+        db.execute(_phone_price_text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {
+            "k": "platform|phone_monthly_price"
+        })
+        rows = db.execute(_phone_price_text("""
+            SELECT id FROM storage
+            WHERE account_id=:a AND key=:k
+            ORDER BY id DESC
+            FOR UPDATE
+        """), {"a": _PHONE_PRICE_STORAGE_ACCOUNT, "k": _PHONE_PRICE_STORAGE_KEY}).fetchall()
+        if rows:
+            keep_id = int(rows[0][0])
+            db.execute(_phone_price_text("UPDATE storage SET value=:v WHERE id=:i"), {
+                "v": payload, "i": keep_id
+            })
+            if len(rows) > 1:
+                db.execute(_phone_price_text("""
+                    DELETE FROM storage
+                    WHERE account_id=:a AND key=:k AND id<>:i
+                """), {
+                    "a": _PHONE_PRICE_STORAGE_ACCOUNT,
+                    "k": _PHONE_PRICE_STORAGE_KEY,
+                    "i": keep_id,
+                })
+        else:
+            db.execute(_phone_price_text("""
+                INSERT INTO storage(account_id,key,value)
+                VALUES(:a,:k,:v)
+            """), {
+                "a": _PHONE_PRICE_STORAGE_ACCOUNT,
+                "k": _PHONE_PRICE_STORAGE_KEY,
+                "v": payload,
+            })
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    return _phone_commercial_settings_status()
+
 
 # Single authoritative tariff catalog for cabinet/payment UI.  Product packs
 # above remain the source for add-ons; tariff prices/limits come from billing.
@@ -262,7 +405,7 @@ def prices(account_id: str, user=Depends(get_current_user)):
     """Цены под конкретного клиента: частник или агентство — решает planned_accounts."""
     ag = _is_agency(account_id) or _n_accounts(account_id) > 1
     out = {}
-    for code, pack in PACKAGES.items():
+    for code, pack in _package_catalog().items():
         out[code] = {
             "sum": _price(pack, account_id),
             "title": pack.get("title"),
@@ -330,9 +473,10 @@ def robokassa_link(account_id: str, pack: str, user=Depends(get_current_user)):
         finally:
             db.close()
     else:
-        if pack not in PACKAGES:
+        catalog = _package_catalog()
+        if pack not in catalog:
             return {"status": "error", "message": f"Неизвестный пакет: {pack}"}
-        p = PACKAGES[pack]
+        p = catalog[pack]
 
     final_sum = int(p["sum"]) if pack in ("tariff_1", "tariff_2", "acc_upgrade") else _price(p, account_id)
     out_sum = f'{final_sum}.00'
@@ -359,7 +503,8 @@ async def robokassa_result(request: Request):
     expect = _rk_sign([out_sum, inv_id, RK_PASS2] + _shp_tail(acc, pack))
     if got != expect:
         return "bad sign"
-    if pack not in PACKAGES and pack not in ("acc_upgrade", "tariff_1", "tariff_2"):
+    catalog = _package_catalog()
+    if pack not in catalog and pack not in ("acc_upgrade", "tariff_1", "tariff_2"):
         return "bad pack"
 
     from app.db.session import SessionLocal
@@ -369,7 +514,7 @@ async def robokassa_result(request: Request):
         p = _tariff_products(acc).get(pack) or {"title": pack, "sum": float(out_sum or 0), "tier": pack}
         p = {**p, "tier": pack}
     else:
-        p = PACKAGES.get(pack) or {"title": "Подключение аккаунта", "sum": float(out_sum or 0), "is_account": True}
+        p = catalog.get(pack) or {"title": "Подключение аккаунта", "sum": float(out_sum or 0), "is_account": True}
     db = SessionLocal()
     try:
         grant_package(acc, pack, p, db, amount=out_sum, source="robokassa", inv_id=inv_id)

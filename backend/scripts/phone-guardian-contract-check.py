@@ -235,12 +235,25 @@ def main() -> int:
         "p.get(\"unit\") == \"phone_subscription\"",
         "phone_payment_ledger_missing",
         "BORIS_PHONE_MONTHLY_PRICE_RUB",
+        "_stored_phone_monthly_setting",
         "_configured_phone_monthly_package",
+        "def _package_catalog()",
+        '@router.get("/phone-commercial-settings")',
+        '@router.post("/phone-commercial-settings")',
+        "explicit_confirmation_required",
+        "_require_private_platform_owner",
+        "platform|phone_monthly_price",
     ):
         if required not in payments_src:
             failures.append(f"phone_payment_entitlement_bridge_missing:{required}")
-    if 'PACKAGES["phone_monthly"]' in payments_src and "if _PHONE_MONTHLY_PACKAGE:" not in payments_src:
-        failures.append("phone_monthly_price_must_not_be_invented")
+    if 'PACKAGES["phone_monthly"]' in payments_src:
+        failures.append("phone_monthly_import_time_price_cache_forbidden")
+
+    wallet_src = (ROOT / "app" / "api" / "wallet.py").read_text(encoding="utf-8")
+    if "_package_catalog" not in wallet_src:
+        failures.append("wallet_phone_dynamic_catalog_missing")
+    if "from app.api.payments import PACKAGES" in wallet_src:
+        failures.append("wallet_static_phone_catalog_forbidden")
 
     sig = inspect.signature(guardian.real_mcn_acceptance_watch_once)
     param = sig.parameters.get("include_synthetic")

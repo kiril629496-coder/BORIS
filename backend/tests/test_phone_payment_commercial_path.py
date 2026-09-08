@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import text
+from fastapi import HTTPException
 
 from app.api import payments as PAY
 from app.api import wallet as WALLET
@@ -20,6 +21,7 @@ class PhonePaymentCommercialPathTests(unittest.TestCase):
         ensure_schema()
         suffix = uuid.uuid4().hex
         self.account_id = "__qa_phone_pay_" + suffix
+        self.price_account = "__qa_platform_pricing_" + suffix
         self.email = f"qa-phone-pay-{suffix}@example.test"
         with SessionLocal() as db:
             self.user_id = int(db.execute(text("""
@@ -45,7 +47,9 @@ class PhonePaymentCommercialPathTests(unittest.TestCase):
             db.execute(text("DELETE FROM telephony_audit WHERE account_id=:a"), {"a": self.account_id})
             db.execute(text("DELETE FROM telephony_entitlements WHERE account_id=:a"), {"a": self.account_id})
             db.execute(text("DELETE FROM payments WHERE account_id=:a"), {"a": self.account_id})
-            db.execute(text("DELETE FROM storage WHERE account_id=:w"), {"w": self.wallet_key})
+            db.execute(text("DELETE FROM storage WHERE account_id IN (:w,:p)"), {
+                "w": self.wallet_key, "p": self.price_account
+            })
             db.execute(text("DELETE FROM accounts WHERE account_id=:a"), {"a": self.account_id})
             db.execute(text("DELETE FROM users WHERE id=:u"), {"u": self.user_id})
             db.commit()
@@ -109,6 +113,86 @@ class PhonePaymentCommercialPathTests(unittest.TestCase):
                 )
         grant_limits.assert_not_called()
         self.assertTrue(phone_entitlement_status(self.account_id)["active"])
+
+    def test_private_platform_owner_gate_rejects_regular_owner(self):
+        with self.assertRaises(HTTPException) as ctx:
+            PAY._require_private_platform_owner(
+                SimpleNamespace(id=self.user_id, role="owner", email=self.email)
+            )
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_dynamic_phone_price_setting_is_live_without_restart(self):
+        from app.services.platform_roles import (
+            PLATFORM_OWNER_EMAIL, PLATFORM_OWNER_ID, PLATFORM_OWNER_ROLE,
+        )
+        private_owner = SimpleNamespace(
+            id=PLATFORM_OWNER_ID, role=PLATFORM_OWNER_ROLE, email=PLATFORM_OWNER_EMAIL
+        )
+        self.assertIs(PAY._require_private_platform_owner(private_owner), private_owner)
+
+        with patch.object(PAY, "_PHONE_PRICE_STORAGE_ACCOUNT", self.price_account), \
+             patch.dict(PAY.os.environ, {"BORIS_PHONE_MONTHLY_PRICE_RUB": ""}, clear=False):
+            self.assertNotIn("phone_monthly", PAY._package_catalog())
+            body = PAY.PhoneCommercialSettingsBody(
+                enabled=True, price_rub=1777, confirm=True
+            )
+            saved = PAY.set_phone_commercial_settings(body, _owner=private_owner)
+            self.assertTrue(saved["enabled"])
+            self.assertEqual(saved["price_rub"], 1777)
+            self.assertEqual(saved["source"], "platform_storage")
+            self.assertEqual(PAY._package_catalog()["phone_monthly"]["sum"], 1777)
+
+    def test_stored_disable_overrides_environment_fallback(self):
+        from app.services.platform_roles import (
+            PLATFORM_OWNER_EMAIL, PLATFORM_OWNER_ID, PLATFORM_OWNER_ROLE,
+        )
+        private_owner = SimpleNamespace(
+            id=PLATFORM_OWNER_ID, role=PLATFORM_OWNER_ROLE, email=PLATFORM_OWNER_EMAIL
+        )
+        with patch.object(PAY, "_PHONE_PRICE_STORAGE_ACCOUNT", self.price_account), \
+             patch.dict(PAY.os.environ, {"BORIS_PHONE_MONTHLY_PRICE_RUB": "9999"}, clear=False):
+            self.assertEqual(PAY._package_catalog()["phone_monthly"]["sum"], 9999)
+            disabled = PAY.set_phone_commercial_settings(
+                PAY.PhoneCommercialSettingsBody(enabled=False, confirm=True),
+                _owner=private_owner,
+            )
+            self.assertFalse(disabled["enabled"])
+            self.assertNotIn("phone_monthly", PAY._package_catalog())
+
+    def test_dynamic_phone_price_wallet_purchase_uses_same_catalog(self):
+        from app.services.platform_roles import (
+            PLATFORM_OWNER_EMAIL, PLATFORM_OWNER_ID, PLATFORM_OWNER_ROLE,
+        )
+        private_owner = SimpleNamespace(
+            id=PLATFORM_OWNER_ID, role=PLATFORM_OWNER_ROLE, email=PLATFORM_OWNER_EMAIL
+        )
+        user = SimpleNamespace(id=self.user_id, role="client", email=self.email)
+        pid = "web:" + uuid.uuid4().hex
+        with patch.object(PAY, "_PHONE_PRICE_STORAGE_ACCOUNT", self.price_account), \
+             patch.dict(PAY.os.environ, {"BORIS_PHONE_MONTHLY_PRICE_RUB": ""}, clear=False):
+            PAY.set_phone_commercial_settings(
+                PAY.PhoneCommercialSettingsBody(
+                    enabled=True, price_rub=1777, confirm=True
+                ),
+                _owner=private_owner,
+            )
+            with patch("telephony_guardian_runner.mcn_mailbox_autoonboard_once", return_value={"status": "ok"}):
+                out = WALLET._purchase_pack_from_wallet(
+                    self.account_id, "phone_monthly", pid, user
+                )
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["charged"], 1777.0)
+        self.assertTrue(phone_entitlement_status(self.account_id)["active"])
+
+    def test_phone_price_change_requires_explicit_confirmation(self):
+        with self.assertRaises(HTTPException) as ctx:
+            PAY.set_phone_commercial_settings(
+                PAY.PhoneCommercialSettingsBody(
+                    enabled=True, price_rub=1777, confirm=False
+                ),
+                _owner=object(),
+            )
+        self.assertEqual(ctx.exception.status_code, 409)
 
     def test_wallet_purchase_charges_once_and_uses_account_owner_wallet(self):
         PAY.PACKAGES["__qa_phone_wallet"] = {
