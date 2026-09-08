@@ -1,0 +1,652 @@
+--- a/backend/posting_runner.py
++++ b/backend/posting_runner.py
+@@ -1835,8 +1835,10 @@
+                 gaps.append({
+                     "account_id":acc,
+                     "reason":"active_subscription_without_posting_project",
+-                    "dependency_state":"waiting_owner",
+-                    "owner_action_required":True,
++                    "dependency_state":"waiting_external",
++                    "owner_action_required":False,
++                    "required_external_fields":_paid_social_required_destinations(sub),
++                    "self_heal":"posting_onboarding_scaffold_v1_then_auto_materialize",
+                 })
+                 continue
+             for project in projects:
+@@ -2253,17 +2255,207 @@
+         x for x in blocked
+         if x.get("kind") == "delivery"
+     ]
++    waiting_external = [
++        x for x in blocked
++        if str(x.get("dependency_state") or "") == "waiting_external"
++    ]
++    runtime_blockers = [
++        x for x in blocked
++        if str(x.get("dependency_state") or "") != "waiting_external"
++    ]
+     return {
+-        "ok": not blocked,
++        # A deliberate external wait remains visible and delivery stays gated,
++        # but it is not a scheduler failure and must not turn the owner into
++        # an operator. Internal drift still fails closed.
++        "ok": not runtime_blockers,
+         "generation_ready": not (generation_blockers or delivery_blockers),
+         "delivery_ready": not delivery_blockers,
+         "blocked_count": len(blocked),
++        "runtime_blocked_count": len(runtime_blockers),
++        "waiting_external_count": len(waiting_external),
+         "blocked": blocked[:50],
++        "waiting_external": waiting_external[:50],
+         "generation_blockers": generation_blockers[:50],
+         "delivery_blockers": delivery_blockers[:50],
+         "projects": reports,
+-        "owner_action_required": bool(blocked),
++        "owner_action_required": bool(runtime_blockers),
++    }
++
++
++def _paid_social_required_destinations(subscription):
++    platforms=str((subscription or {}).get("platforms") or "both").lower()
++    required=[]
++    if platforms in {"tg","both"}:
++        required.append("channel_tg")
++    if platforms in {"vk","both"}:
++        required.append("vk_owner_id")
++    return required
++
++
++def _paid_social_onboarding_scaffold(db, account_id, subscription):
++    """Prepare deterministic paid Social onboarding without network/AI calls.
++
++    External publication destinations are never invented. If legacy
++    posting_settings already contains every destination required by the paid
++    plan, return a safe auto-project that the caller may materialize.
++    """
++    import hashlib as _hashlib
++    from sqlalchemy import text as _sql_text
++
++    acc=str(account_id or "")
++    settings_row=db.query(Storage).filter(
++        Storage.account_id==acc,Storage.key=="posting_settings"
++    ).first()
++    try:
++        settings=json.loads(settings_row.value or "{}") if settings_row else {}
++    except Exception:
++        settings={}
++    if not isinstance(settings,dict):
++        settings={}
++
++    platforms=str((subscription or {}).get("platforms") or "both").lower()
++    if platforms not in {"tg","vk","both"}:
++        platforms="both"
++
++    channel_tg=str(settings.get("channel_tg") or "").strip()
++    vk_owner_id=settings.get("vk_owner_id")
++    try:
++        vk_owner_id=int(vk_owner_id) if vk_owner_id not in (None,"") else None
++    except Exception:
++        vk_owner_id=None
++
++    required=_paid_social_required_destinations({"platforms":platforms})
++    missing=[]
++    if "channel_tg" in required and not channel_tg:
++        missing.append("channel_tg")
++    if "vk_owner_id" in required and vk_owner_id is None:
++        missing.append("vk_owner_id")
++
++    themes=[
++        str(x).strip() for x in (settings.get("themes") or [])
++        if str(x).strip()
++    ]
++    if not themes:
++        direction_rows=db.query(Storage).filter(
++            Storage.account_id==acc,
++            Storage.key.like("feed_direction_profile:%"),
++        ).limit(8).all()
++        for row in direction_rows:
++            try:
++                value=json.loads(row.value or "{}")
++            except Exception:
++                value={}
++            direction=str((value or {}).get("direction") or "").strip()
++            if direction and direction not in themes:
++                themes.append(direction)
++    account_name=""
++    company_context=""
++    try:
++        account_row=db.execute(_sql_text(
++            "SELECT name,company_website FROM accounts WHERE account_id=:a"
++        ),{"a":acc}).mappings().first()
++        if account_row:
++            account_name=str(account_row.get("name") or "").strip()
++            company_context=str(account_row.get("company_website") or "").strip()
++    except Exception:
++        pass
++    if not themes:
++        themes=[
++            "полезный совет по основной услуге",
++            "частый вопрос клиента перед обращением",
++            "как выбрать подходящее решение",
++        ]
++
++    times=[
++        str(x).strip() for x in (settings.get("times") or [])
++        if str(x).strip()
++    ]
++    if not times:
++        try:
++            posts_per_day=max(1,min(4,int((subscription or {}).get("posts_per_day") or 3)))
++        except Exception:
++            posts_per_day=3
++        times={
++            1:["12"],
++            2:["9","18"],
++            3:["9","14","19"],
++            4:["9","12","16","20"],
++        }[posts_per_day]
++
++    text_prompt=str(settings.get("text_prompt") or "").strip()
++    if not text_prompt and (account_name or company_context):
++        text_prompt=(
++            "Пиши экспертно и по делу для реального бизнеса клиента. "
++            "Не выдумывай цены, гарантии, адреса или факты, которых нет в контексте. "
++            "Контекст бизнеса: "
++            + " · ".join(x for x in (account_name,company_context[:500]) if x)
++        )
++
++    project_id=_hashlib.sha1(
++        ("paid-social-onboarding:"+acc).encode("utf-8","ignore")
++    ).hexdigest()[:12]
++    project={
++        "id":project_id,
++        "name":account_name or "Social",
++        "channel_tg":channel_tg,
++        "vk_owner_id":vk_owner_id,
++        "style_source":str(settings.get("style_source") or ""),
++        "themes":themes[:12],
++        "times":times,
++        "text_prompt":text_prompt,
++        "banner_prompt":str(settings.get("banner_prompt") or ""),
++        "image_source":str(settings.get("image_source") or "ai"),
++        "platforms":platforms,
++        "contact_tg":str(settings.get("contact_tg") or ""),
++        "contact_vk":str(settings.get("contact_vk") or ""),
++        "mode":"moderate",
++        "auto_publish_hours":3,
++        "tz_offset":3,
++        "paid_auto_generation":True,
++        "expected_auto_generation":True,
++        "public_quality_guard":True,
++        "allow_hashtags":True,
++        "subscription":dict(subscription or {}),
++        "onboarding_source":"paid_subscription_self_heal_v1",
++    }
++    scaffold={
++        "schema":1,
++        "account_id":acc,
++        "status":"waiting_external_destinations" if missing else "ready_to_materialize",
++        "dependency_state":"waiting_external" if missing else "self_heal_ready",
++        "owner_action_required":False,
++        "subscription":dict(subscription or {}),
++        "platforms":platforms,
++        "required_external_fields":required,
++        "missing_external_fields":missing,
++        "project_id":project_id,
++        "project_name":project["name"],
++        "themes":themes[:12],
++        "times":times,
++        "self_heal":"auto_materialize_when_destinations_present",
+     }
++    return scaffold,(None if missing else project)
++
++
++def _persist_paid_social_onboarding_scaffold(db, account_id, scaffold):
++    row=(db.query(Storage)
++         .filter(
++             Storage.account_id==str(account_id or ""),
++             Storage.key=="posting_onboarding_scaffold_v1",
++         )
++         .with_for_update().first())
++    payload=json.dumps(scaffold,ensure_ascii=False)
++    if row:
++        changed=str(row.value or "")!=payload
++        if changed:
++            row.value=payload
++        return changed
++    db.add(Storage(
++        account_id=str(account_id or ""),
++        key="posting_onboarding_scaffold_v1",
++        value=payload,
++    ))
++    return True
+ 
+ 
+ def social_active_paid_pre_slot_self_heal():
+@@ -2300,14 +2492,68 @@
+             prow=(db.query(Storage)
+                   .filter(Storage.account_id==acc,Storage.key=="posting_projects")
+                   .with_for_update().first())
+-            if not prow:
+-                continue
+-            try:
+-                projects=json.loads(prow.value or "[]")
+-            except Exception:
+-                continue
+-            if not isinstance(projects,list):
+-                continue
++            if prow:
++                try:
++                    projects=json.loads(prow.value or "[]")
++                except Exception:
++                    continue
++                if not isinstance(projects,list):
++                    continue
++            else:
++                projects=[]
++
++            if not projects:
++                scaffold, auto_project = _paid_social_onboarding_scaffold(
++                    db, acc, sub
++                )
++                scaffold_changed = _persist_paid_social_onboarding_scaffold(
++                    db, acc, scaffold
++                )
++                if auto_project is None:
++                    if scaffold_changed:
++                        changed.append({
++                            "account_id":acc,
++                            "project_id":str(scaffold.get("project_id") or ""),
++                            "project":str(scaffold.get("project_name") or "paid_social_onboarding"),
++                            "fields":{
++                                "posting_onboarding_scaffold_v1":{
++                                    "status":scaffold.get("status"),
++                                    "missing_external_fields":list(
++                                        scaffold.get("missing_external_fields") or []
++                                    ),
++                                }
++                            },
++                        })
++                    continue
++
++                projects=[auto_project]
++                materialized_scaffold=dict(scaffold)
++                materialized_scaffold["status"]="materialized"
++                materialized_scaffold["dependency_state"]="resolved"
++                materialized_scaffold["missing_external_fields"]=[]
++                _persist_paid_social_onboarding_scaffold(
++                    db, acc, materialized_scaffold
++                )
++                payload=json.dumps(projects,ensure_ascii=False)
++                if prow:
++                    prow.value=payload
++                else:
++                    prow=Storage(
++                        account_id=acc,key="posting_projects",value=payload
++                    )
++                    db.add(prow)
++                changed.append({
++                    "account_id":acc,
++                    "project_id":str(auto_project.get("id") or ""),
++                    "project":str(auto_project.get("name") or "Social"),
++                    "fields":{
++                        "posting_projects":{
++                            "before":"missing_or_empty",
++                            "after":"materialized_from_paid_subscription_and_saved_destinations",
++                        }
++                    },
++                })
++
+             accounts_checked+=1
+             account_changed=False
+             for project in projects:
+@@ -2444,8 +2690,10 @@
+                 gap={
+                     "account_id":acc,
+                     "reason":"active_subscription_without_posting_project",
+-                    "dependency_state":"waiting_owner",
+-                    "owner_action_required":True,
++                    "dependency_state":"waiting_external",
++                    "owner_action_required":False,
++                    "required_external_fields":_paid_social_required_destinations(sub),
++                    "self_heal":"posting_onboarding_scaffold_v1_then_auto_materialize",
+                 }
+                 account_gaps.append(gap)
+                 blocked.append({**gap,"kind":"configuration"})
+@@ -2800,7 +3048,21 @@
+                                     "post_id": str(latest.get("id") or ""),
+                                     "pending": latest.get("external_edit_pending")})
+ 
+-        return {"ok": not blocked, "blocked_projects": blocked[:50], "blocked_count": len(blocked)}
++        waiting_external=[
++            x for x in blocked
++            if str(x.get("dependency_state") or "")=="waiting_external"
++        ]
++        runtime_blockers=[
++            x for x in blocked
++            if str(x.get("dependency_state") or "")!="waiting_external"
++        ]
++        return {
++            "ok":not runtime_blockers,
++            "blocked_projects":runtime_blockers[:50],
++            "blocked_count":len(runtime_blockers),
++            "waiting_external":waiting_external[:50],
++            "waiting_external_count":len(waiting_external),
++        }
+     finally:
+         db.close()
+ 
+--- a/backend/app/services/incident_reconciler.py
++++ b/backend/app/services/incident_reconciler.py
+@@ -352,14 +352,19 @@
+                 ),
+                 details={
+                     "subscription_gap":gap,
+-                    "dependency_state":"waiting_owner",
+-                    "owner_action_required":True,
+-                    "required_fields":["channel_tg","vk_owner_id"],
++                    "dependency_state":"waiting_external",
++                    "owner_action_required":False,
++                    "required_fields":list(
++                        gap.get("required_external_fields")
++                        or ["channel_tg","vk_owner_id"]
++                    ),
+                     "self_heal_after_configuration":True,
++                    "onboarding_scaffold":"posting_onboarding_scaffold_v1",
++                    "auto_resume":"materialize_project_when_destinations_present",
+                 },
+-                # Missing external publication destinations cannot be safely
+-                # invented by BORIS. Keep the paid contour visible as an owner
+-                # configuration dependency, not as an internal production P1.
++                # External publication destinations cannot be safely invented.
++                # BORIS prepares the paid contour itself and waits only for the
++                # real client/platform destinations, then auto-materializes it.
+                 priority="P2",
+             )
+ 
+--- a/backend/app/services/brain_world_state.py
++++ b/backend/app/services/brain_world_state.py
+@@ -135,10 +135,10 @@
+     if not active_names:
+         if project_count>0:
+             return {"classification":"SOCIAL_CONFIGURED_BUT_DISABLED","health":"pass","confidence":1.0,"evidence_for":[{"projects":project_count}],"safe_action":None,"owner_action_required":False}
+-        # SOCIAL_PAID_PROJECT_GAP_OWNER_ACTION_V1: paid Social must stay visible
+-        # before channel/project onboarding is complete. Missing destinations
+-        # cannot be invented safely, but once the owner supplies them BORIS
+-        # resumes automatically on its real scheduler.
++        # SOCIAL_PAID_PROJECT_GAP_EXTERNAL_WAIT_V2: paid Social stays visible
++        # before destination onboarding is complete, but the owner is not a
++        # runtime operator. BORIS prepares a durable scaffold and auto-resumes
++        # when real client/platform destinations appear.
+         subrow=(db.query(Storage).filter(Storage.account_id==str(account_id),Storage.key=="posting_subscription")
+                 .order_by(Storage.id.desc()).first())
+         try: subscription=json.loads(subrow.value or "{}") if subrow else {}
+@@ -146,17 +146,35 @@
+         from app.services.social_entitlement import normalize_posting_subscription, posting_subscription_active
+         subscription,_=normalize_posting_subscription(subscription)
+         if posting_subscription_active(subscription):
++            scaffold_row=(db.query(Storage).filter(
++                Storage.account_id==str(account_id),
++                Storage.key=="posting_onboarding_scaffold_v1",
++            ).order_by(Storage.id.desc()).first())
++            try: scaffold=json.loads(scaffold_row.value or "{}") if scaffold_row else {}
++            except Exception: scaffold={}
+             platforms=str(subscription.get("platforms") or "both").lower()
+-            if platforms=="tg":
+-                owner_text="Укажите Telegram-канал для публикаций. После сохранения BORIS сам проверит доступ и продолжит публикации по расписанию."
+-            elif platforms=="vk":
+-                owner_text="Укажите VK-сообщество для публикаций. После сохранения BORIS сам проверит доступ и продолжит публикации по расписанию."
+-            else:
+-                owner_text="Укажите Telegram-канал и VK-сообщество для публикаций. После сохранения BORIS сам проверит доступ и продолжит публикации по расписанию."
++            required=list((scaffold or {}).get("required_external_fields") or [])
++            if not required:
++                if platforms in {"tg","both"}: required.append("channel_tg")
++                if platforms in {"vk","both"}: required.append("vk_owner_id")
++            missing=list((scaffold or {}).get("missing_external_fields") or required)
+             return {
+-                "classification":"SOCIAL_SUBSCRIPTION_PROJECT_MISSING","health":"waiting_human","confidence":1.0,
+-                "evidence_for":[{"plan":subscription.get("plan"),"platforms":subscription.get("platforms"),"paid_at":subscription.get("paid_at"),"period_days":subscription.get("period_days")}],
+-                "safe_action":None,"owner_action_required":True,"owner_action_text":owner_text,
++                "classification":"SOCIAL_SUBSCRIPTION_PROJECT_MISSING",
++                "health":"waiting_external",
++                "dependency_state":"waiting_external",
++                "confidence":1.0,
++                "evidence_for":[{
++                    "plan":subscription.get("plan"),
++                    "platforms":subscription.get("platforms"),
++                    "paid_at":subscription.get("paid_at"),
++                    "period_days":subscription.get("period_days"),
++                    "required_external_fields":required,
++                    "missing_external_fields":missing,
++                    "onboarding_scaffold":"posting_onboarding_scaffold_v1",
++                    "auto_resume":"materialize_project_when_destinations_present",
++                }],
++                "safe_action":"wait_for_external_destinations_then_auto_resume",
++                "owner_action_required":False,
+             }
+         return {"classification":"SOCIAL_NOT_CONFIGURED_FOR_ACCOUNT","health":"pass","confidence":1.0,"evidence_for":[],"safe_action":None,"owner_action_required":False}
+     if str(diagnosis.get("classification") or "")=="SOCIAL_DELIVERY_SLA_BREACH":
+--- a/backend/app/services/client_supervisor.py
++++ b/backend/app/services/client_supervisor.py
+@@ -264,11 +264,17 @@
+         # generic Messages adapter when this client did not purchase/enable MOP.
+         _class=str(d.get('classification') or '')
+         _safe=str(d.get('safe_action') or '')
++        _dep=str(d.get('dependency_state') or '')
+         _owner=owner
+         if name=='messages' and _class=='UNANSWERED_MOP_ENTITLEMENT_WAIT' and 'mop' not in expected:
+             _owner=False
+         if _owner:
+             needs_owner.append({'module':name,'reason':d.get('classification')})
++        elif _dep=='waiting_external':
++            # CLIENT_SUPERVISOR_EXTERNAL_DEPENDENCY_V1: a client/platform input
++            # that BORIS cannot safely invent is not an internal runtime failure.
++            # Keep it visible in module health, but do not create a self-heal loop.
++            pass
+         elif h=='critical' or (h in {'degraded','blocked'} and _safe not in {'','observe_existing_plan','wait','none','surface_overdue_tasks'}):
+             internal_bad.append({'module':name,'reason':d.get('classification'),'safe_action':d.get('safe_action')})
+ 
+--- a/backend/tests/test_social_active_paid_daily_delivery.py
++++ b/backend/tests/test_social_active_paid_daily_delivery.py
+@@ -92,17 +92,93 @@
+         try:
+             self._seed_paid(acc,with_project=False)
+             h=pr.social_active_paid_daily_delivery_health()
+-            self.assertTrue(any(
+-                x.get("account_id")==acc
++            gaps=[
++                x for x in h["configuration_gaps"]
++                if x.get("account_id")==acc
+                 and x.get("reason")=="active_subscription_without_posting_project"
+-                for x in h["configuration_gaps"]
+-            ))
++            ]
++            self.assertEqual(len(gaps),1,h)
++            self.assertEqual(gaps[0].get("dependency_state"),"waiting_external")
++            self.assertFalse(gaps[0].get("owner_action_required"))
++            self.assertEqual(
++                set(gaps[0].get("required_external_fields") or []),
++                {"channel_tg","vk_owner_id"},
++            )
+             self.assertFalse(any(
+                 x.get("account_id")==acc
+                 for x in h["projects"]
+             ))
+         finally:self._cleanup(acc)
+ 
++
++    def test_paid_onboarding_scaffold_waits_for_real_destinations(self):
++        import json,uuid
++        from app.models.storage import Storage
++        acc="qa_paid_scaffold_"+uuid.uuid4().hex[:8]
++        try:
++            self._seed_paid(acc,with_project=False)
++            s=pr.SessionLocal()
++            try:
++                row=s.query(Storage).filter(
++                    Storage.account_id==acc,
++                    Storage.key=="posting_subscription",
++                ).first()
++                sub=json.loads(row.value or "{}")
++                scaffold,project=pr._paid_social_onboarding_scaffold(s,acc,sub)
++            finally:
++                s.close()
++            self.assertIsNone(project)
++            self.assertEqual(scaffold["status"],"waiting_external_destinations")
++            self.assertEqual(scaffold["dependency_state"],"waiting_external")
++            self.assertFalse(scaffold["owner_action_required"])
++            self.assertEqual(
++                set(scaffold["missing_external_fields"]),
++                {"channel_tg","vk_owner_id"},
++            )
++            self.assertTrue(scaffold["themes"])
++            self.assertTrue(scaffold["times"])
++        finally:
++            self._cleanup(acc)
++
++    def test_paid_onboarding_scaffold_materializes_from_saved_destinations(self):
++        import json,uuid
++        from app.models.storage import Storage
++        acc="qa_paid_autoproject_"+uuid.uuid4().hex[:8]
++        try:
++            self._seed_paid(acc,with_project=False)
++            s=pr.SessionLocal()
++            try:
++                s.add(Storage(
++                    account_id=acc,
++                    key="posting_settings",
++                    value=json.dumps({
++                        "channel_tg":"@qa_channel",
++                        "vk_owner_id":-123456,
++                        "themes":["ипотека","подбор квартиры"],
++                        "times":["10","17"],
++                    },ensure_ascii=False),
++                ))
++                s.commit()
++                row=s.query(Storage).filter(
++                    Storage.account_id==acc,
++                    Storage.key=="posting_subscription",
++                ).first()
++                sub=json.loads(row.value or "{}")
++                scaffold,project=pr._paid_social_onboarding_scaffold(s,acc,sub)
++            finally:
++                s.close()
++            self.assertIsNotNone(project)
++            self.assertEqual(scaffold["status"],"ready_to_materialize")
++            self.assertEqual(scaffold["missing_external_fields"],[])
++            self.assertEqual(project["channel_tg"],"@qa_channel")
++            self.assertEqual(project["vk_owner_id"],-123456)
++            self.assertEqual(project["platforms"],"both")
++            self.assertEqual(project["mode"],"moderate")
++            self.assertTrue(project["paid_auto_generation"])
++            self.assertTrue(project["expected_auto_generation"])
++        finally:
++            self._cleanup(acc)
++
+     def test_project_health_accepts_project_id(self):
+         import uuid
+         acc="qa_paid_id_"+uuid.uuid4().hex[:8]
+--- a/backend/tests/test_social_subscription_gap_classification.py
++++ b/backend/tests/test_social_subscription_gap_classification.py
+@@ -6,7 +6,56 @@
+   anchor=s.index('incident_type="SOCIAL_SUBSCRIPTION_PROJECT_MISSING"')
+   block=s[anchor:anchor+1400]
+   self.assertIn('priority="P2"',block)
+-  self.assertIn('"dependency_state":"waiting_owner"',block)
+-  self.assertIn('"required_fields":["channel_tg","vk_owner_id"]',block)
++  self.assertIn('"dependency_state":"waiting_external"',block)
++  self.assertIn('"owner_action_required":False',block)
++  self.assertIn('"required_fields":list(',block)
+   self.assertIn('"self_heal_after_configuration":True',block)
++  self.assertIn('"onboarding_scaffold":"posting_onboarding_scaffold_v1"',block)
++  self.assertIn('"auto_resume":"materialize_project_when_destinations_present"',block)
+ if __name__=='__main__': unittest.main()
++
++
++def test_paid_social_gap_is_external_wait_not_owner_operation():
++    import json,uuid
++    from app.models.storage import Storage
++    from app.db.session import SessionLocal
++    from app.services.brain_world_state import _scope_social_diagnosis
++
++    acc="qa_social_gap_scope_"+uuid.uuid4().hex[:8]
++    db=SessionLocal()
++    try:
++        db.add(Storage(
++            account_id=acc,
++            key="posting_subscription",
++            value=json.dumps({
++                "plan":"post_both","platforms":"both",
++                "paid_at":"2026-09-01","period_days":30,"posts_per_day":3,
++            }),
++        ))
++        db.add(Storage(
++            account_id=acc,
++            key="posting_onboarding_scaffold_v1",
++            value=json.dumps({
++                "required_external_fields":["channel_tg","vk_owner_id"],
++                "missing_external_fields":["channel_tg","vk_owner_id"],
++            }),
++        ))
++        db.commit()
++        out=_scope_social_diagnosis(
++            db,acc,{"projects":0,"active_projects":0},
++            {"classification":"SOCIAL_FLOW_OK","health":"pass"},
++        )
++        assert out["classification"]=="SOCIAL_SUBSCRIPTION_PROJECT_MISSING"
++        assert out["health"]=="waiting_external"
++        assert out["dependency_state"]=="waiting_external"
++        assert out["owner_action_required"] is False
++        assert out["safe_action"]=="wait_for_external_destinations_then_auto_resume"
++        evidence=out["evidence_for"][0]
++        assert set(evidence["missing_external_fields"])=={"channel_tg","vk_owner_id"}
++        assert evidence["auto_resume"]=="materialize_project_when_destinations_present"
++    finally:
++        db.query(Storage).filter(Storage.account_id==acc).delete(
++            synchronize_session=False
++        )
++        db.commit()
++        db.close()
+--- a/backend/tests/test_social_pre_slot_readiness.py
++++ b/backend/tests/test_social_pre_slot_readiness.py
+@@ -65,7 +65,19 @@
+             "VK_PUBLIC_WALL_POST_NO_NATIVE_MESSAGE_BUTTON_AND_NO_AUTHORIZED_BROWSER_SESSION",
+         )
+         self.assertFalse(h["delivery_ready"])
+-        self.assertTrue(h["owner_action_required"])
++        self.assertTrue(h["ok"])
++        self.assertEqual(h["runtime_blocked_count"],0)
++        self.assertEqual(h["waiting_external_count"],1)
++        self.assertFalse(h["owner_action_required"])
++
++        contract=pr.social_scheduler_contract_health()
++        self.assertTrue(contract["ok"],contract)
++        self.assertEqual(contract["blocked_count"],0,contract)
++        external=[
++            x for x in contract.get("waiting_external") or []
++            if x.get("project_id")=="270dbf472f7f"
++        ]
++        self.assertEqual(len(external),1,contract)
+ 
+     def test_vk_required_action_is_blocked_before_generation(self):
+         acc="qa_pre_slot_"+uuid.uuid4().hex[:10]
+--- a/backend/tests/test_client_supervisor_human_work.py
++++ b/backend/tests/test_client_supervisor_human_work.py
+@@ -32,6 +32,17 @@
+         self.assertIn("'internal_problems':internal_bad,'human_work':human_work",src)
+         self.assertIn("elif internal_bad: overall='needs_self_heal'",src)
+ 
++    def test_waiting_external_dependency_is_not_internal_self_heal(self):
++        src=inspect.getsource(client_supervisor.build_client_state)
++        self.assertIn("CLIENT_SUPERVISOR_EXTERNAL_DEPENDENCY_V1",src)
++        self.assertIn("_dep=str(d.get('dependency_state') or '')",src)
++        self.assertIn("elif _dep=='waiting_external':",src)
++        block=src.split("CLIENT_SUPERVISOR_EXTERNAL_DEPENDENCY_V1",1)[1].split(
++            "elif h=='critical'",1
++        )[0]
++        self.assertNotIn("internal_bad.append",block)
++        self.assertNotIn("needs_owner.append",block)
++
+ 
+ if __name__=="__main__":
+     unittest.main()

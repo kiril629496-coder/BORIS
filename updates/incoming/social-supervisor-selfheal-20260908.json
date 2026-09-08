@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "change_id": "social-supervisor-selfheal-20260908",
+  "production_applied": true,
+  "auto_deploy": false,
+  "purpose": "Paid Social onboarding self-heal; waiting_external classification; supervisor false-alarm removal.",
+  "patch_sha256": "628138dacc0c6c5edd0e47676cb90f687dc201eaea11bfeadc807a022bfef11d",
+  "files": [
+    "backend/posting_runner.py",
+    "backend/app/services/incident_reconciler.py",
+    "backend/app/services/brain_world_state.py",
+    "backend/app/services/client_supervisor.py",
+    "backend/tests/test_social_active_paid_daily_delivery.py",
+    "backend/tests/test_social_subscription_gap_classification.py",
+    "backend/tests/test_social_pre_slot_readiness.py",
+    "backend/tests/test_client_supervisor_human_work.py"
+  ],
+  "qa": {
+    "social_and_client_supervisor_tests": "217 passed",
+    "patch_dry_run": "PASS",
+    "patch_reproduces_current": "PASS",
+    "secret_scan": "PASS",
+    "social_runtime_heartbeat": "ok",
+    "social_contract_ok": true,
+    "social_owner_action_required": false
+  },
+  "external_dependencies": [
+    "mbroker_27859 requires real Telegram/VK publication destinations before Social can auto-materialize",
+    "Marketing spend requires an explicitly confirmed daily budget"
+  ]
+}
