@@ -1,6 +1,6 @@
 import os as _os_gc
 _GC_MODEL = _os_gc.environ.get("GIGACHAT_MODEL", "GigaChat" + "-Pro")
-from fastapi import UploadFile, File, Form, APIRouter
+from fastapi import UploadFile, File, Form, APIRouter, Depends
 from fastapi.responses import Response
 from pydantic import BaseModel
 import httpx
@@ -24,6 +24,31 @@ AVITO_CLIENT_SECRET = os.getenv("AVITO_CLIENT_SECRET")
 
 FEEDS = {}
 
+# Avito access tokens are account-scoped and reusable until expiry. Re-requesting
+# a token for every chats/messages/statistics call created a self-inflicted token
+# storm: busy accounts could hit BORIS' own per-tenant guard and appear "offline"
+# for minutes even while Avito itself was healthy. Keep a conservative in-process
+# cache and one refresh lock per account; credentials are fingerprinted so a key
+# rotation can never reuse the previous token.
+_AVITO_TOKEN_CACHE = {}
+_AVITO_TOKEN_LOCKS = {}
+_AVITO_TOKEN_CACHE_GUARD = __import__("threading").RLock()
+# Messenger/token traffic must not depend on the host-wide outbound proxy.
+# Direct TLS to api.avito.ru is available from production and avoids intermittent
+# proxy handshake stalls that previously looked like a dead MOP. One shared
+# thread-safe client also reuses keep-alive connections across fast polling ticks.
+_AVITO_HTTP = httpx.Client(
+    trust_env=False,
+    timeout=httpx.Timeout(20.0, connect=8.0),
+    limits=httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=45.0),
+)
+
+def _avito_http_get(url: str, **kwargs):
+    return _AVITO_HTTP.get(url, **kwargs)
+
+def _avito_http_post(url: str, **kwargs):
+    return _AVITO_HTTP.post(url, **kwargs)
+
 _ACTION_RU = {
     "set_autopilot": "изменил(а) режим работы Бориса",
     "set_kpi_settings": "задал(а) цель по лидам",
@@ -41,6 +66,7 @@ _ACTION_RU = {
     "feed_blocked": "приостановил(а) выгрузку — часть объявлений с ошибками",
     "accept_terms": "принял(а) условия использования",
     "set_payment": "отметил(а) оплату",
+    "scenario_step": "продолжил(а) работу по бизнес-сценарию",
 }
 
 
@@ -51,8 +77,26 @@ def _short_details(details: str) -> str:
     занимает несколько экранов и ничего не объясняет.
     """
     d = (details or "").strip()
-    if not d or d[0] not in "{[":
-        return d[:300]
+    if not d:
+        return ""
+    if d[0] not in "{[":
+        import re as _re
+        replacements = (
+            (r"business\s+outcome", "подтверждённого результата"),
+            (r"sales[- ]?окн[а-я]*", "периода продаж"),
+            (r"статистическ(?:ого|ое|ий)\s+окн[а-я]*", "периода статистики"),
+            (r"\bbaseline\b", "исходных показателей"),
+            (r"Avito[- ]?статистик[а-я]*", "статистику Авито"),
+            (r"\bAvito\b", "Авито"),
+            (r"\(raise\)", ""),
+            (r"\(lower\)", ""),
+        )
+        for pattern, replacement in replacements:
+            d = _re.sub(pattern, replacement, d, flags=_re.I)
+        d = d.replace("без ручного перезапуска", "автоматически")
+        d = d.replace("без участия владельца", "самостоятельно")
+        d = d.replace("действий владельца", "ваших действий")
+        return _re.sub(r"\s+", " ", d).strip()[:300]
     try:
         import json as _j
         obj = _j.loads(d)
@@ -89,11 +133,14 @@ def _humanize_entry(e):
     phrase = _ACTION_RU.get(action)
     details = _short_details(str(e.get("details") or e.get("text") or ""))
     if phrase:
-        # для Бориса — "Борис снял продвижение...", для клиента — "Вы задали цель..."
-        verb = phrase if is_boris else phrase.replace("(а)", "")
-        human = who + " " + verb
-        if details:
-            human += " — " + details
+        # Клиентский журнал: без технических кодов и без грамматических заглушек «(а)».
+        verb = phrase.replace("(а)", "")
+        if action == "scenario_step" and details:
+            human = who + " — " + details
+        else:
+            human = who + " " + verb
+            if details:
+                human += " — " + details
     else:
         # незнакомый код: показываем понятные details, без сырого имени
         human = (who + " — " + details) if details else (who + " · " + action)
@@ -161,7 +208,7 @@ def _autopilot_allows(account_id: str) -> bool:
             return False  # по умолчанию всегда спрашиваем
         cfg = _json.loads(row.value)
         mode = cfg.get("mode", "always_ask")
-        if mode == "always_auto":
+        if mode in ("always_auto", "goal_auto"):
             return True
         if mode == "always_ask":
             return False
@@ -195,19 +242,69 @@ def _get_avito_credentials(account_id: str):
         return AVITO_CLIENT_ID, AVITO_CLIENT_SECRET, None
     return None, None, None
 
-def get_avito_token(account_id: str = "otdushi"):
+def _invalidate_avito_token(account_id: str):
+    """Drop only one tenant token cache entry (used after downstream 401)."""
+    with _AVITO_TOKEN_CACHE_GUARD:
+        _AVITO_TOKEN_CACHE.pop(str(account_id or "otdushi"), None)
+
+
+def get_avito_token(account_id: str = "otdushi", force_refresh: bool = False):
+    account_id = str(account_id or "otdushi")
     client_id, client_secret, _ = _get_avito_credentials(account_id)
     if not client_id or not client_secret:
         return {"error": f"У клиента {account_id} не настроен Avito API-ключ"}
-    response = httpx.post(
-        "https://api.avito.ru/token",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret
-        }
-    )
-    return response.json()
+
+    import time as _time
+    import hashlib as _hashlib
+    cred_sig = _hashlib.sha256((str(client_id) + "\0" + str(client_secret)).encode("utf-8")).hexdigest()
+
+    with _AVITO_TOKEN_CACHE_GUARD:
+        cached = _AVITO_TOKEN_CACHE.get(account_id)
+        if (not force_refresh and cached and cached.get("cred_sig") == cred_sig
+                and float(cached.get("expires_at") or 0) > _time.monotonic()):
+            return dict(cached.get("token_data") or {})
+        refresh_lock = _AVITO_TOKEN_LOCKS.setdefault(account_id, __import__("threading").Lock())
+
+    # Only one thread may refresh a given tenant. Other accounts remain fully
+    # parallel, so a slow token endpoint for one client cannot serialize BORIS.
+    with refresh_lock:
+        with _AVITO_TOKEN_CACHE_GUARD:
+            cached = _AVITO_TOKEN_CACHE.get(account_id)
+            if (not force_refresh and cached and cached.get("cred_sig") == cred_sig
+                    and float(cached.get("expires_at") or 0) > _time.monotonic()):
+                return dict(cached.get("token_data") or {})
+
+        from app.services.reliability import dependency_call
+        response = dependency_call(
+            "avito.token", _avito_http_post,
+            "https://api.avito.ru/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret
+            }, timeout=20, threshold=5, cooldown_seconds=120,
+            account_id=account_id, tenant_limit_per_minute=30
+        )
+        try:
+            token_data = response.json()
+        except Exception:
+            token_data = {"error": f"Avito token HTTP {getattr(response, 'status_code', 'unknown')}"}
+
+        # Cache only a proven access token. Avito normally supplies expires_in;
+        # refresh at least 120 seconds early. If absent, use a short 5-minute TTL.
+        if isinstance(token_data, dict) and token_data.get("access_token"):
+            try:
+                expires_in = int(token_data.get("expires_in") or 300)
+            except Exception:
+                expires_in = 300
+            ttl = max(30, expires_in - 120)
+            with _AVITO_TOKEN_CACHE_GUARD:
+                _AVITO_TOKEN_CACHE[account_id] = {
+                    "token_data": dict(token_data),
+                    "expires_at": _time.monotonic() + ttl,
+                    "cred_sig": cred_sig,
+                }
+        return token_data
 
 
 def _extract_token(token_data):
@@ -232,12 +329,55 @@ def check_avito(account_id: str = "otdushi"):
 
 @router.get("/me")
 def get_me(account_id: str = "otdushi"):
+    # AVITO_ME_SHARED_ACCOUNT_THROTTLE_V1: even an identity read consumes the
+    # same tenant quota. Honor a shared Retry-After before token/provider I/O and
+    # publish a confirmed local 429 so sibling workers stop pressuring the tenant.
+    from app.services.avito_account_throttle import (
+        account_throttle_remaining as _me_throttle_remaining,
+        record_account_throttle as _me_record_throttle,
+    )
+
+    def _me_retry_after(resp) -> int:
+        try:
+            raw = str((getattr(resp, "headers", {}) or {}).get("Retry-After") or "").strip()
+            if raw:
+                try:
+                    return max(0, int(float(raw)))
+                except Exception:
+                    from email.utils import parsedate_to_datetime
+                    from datetime import datetime, timezone
+                    when = parsedate_to_datetime(raw)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    return max(0, int((when.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
+        except Exception:
+            pass
+        return 30
+
+    _shared_retry = int(_me_throttle_remaining(account_id) or 0)
+    if _shared_retry > 0:
+        return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                "retry_after_seconds": _shared_retry,
+                "message": "Avito временно ограничил запросы по аккаунту"}
+
     token_data = get_avito_token(account_id)
     token = _extract_token(token_data)
-    response = httpx.get(
+    _shared_retry = int(_me_throttle_remaining(account_id) or 0)
+    if _shared_retry > 0:
+        return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                "retry_after_seconds": _shared_retry,
+                "message": "Avito временно ограничил запросы по аккаунту"}
+    response = _avito_http_get(
         "https://api.avito.ru/core/v1/accounts/self",
         headers={"Authorization": f"Bearer {token}"}
     )
+    if response.status_code == 429:
+        _retry = int(_me_record_throttle(
+            account_id, _me_retry_after(response), source="avito_me_429"
+        ) or 30)
+        return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                "retry_after_seconds": _retry,
+                "message": "Avito временно ограничил запросы по аккаунту"}
     return response.json()
 
 class DuplicateItemRequest(BaseModel):
@@ -354,6 +494,7 @@ class RewriteTextRequest(BaseModel):
     description: str = ""
     include_variants: bool = None
     engine: str = "gigachat"
+    idempotency_key: str = ""
 
 @router.post("/rewrite_text")
 def rewrite_text(req: RewriteTextRequest):
@@ -425,6 +566,13 @@ def rewrite_text(req: RewriteTextRequest):
    ХАРАКТЕРИСТИКИ: {{значение_вариант1|значение_вариант2|...до 10 вариантов}} (например для размеров товара — слегка отличающиеся числа, как реальные близкие вариации, а не грубо разные товары)
    ЦВЕТ: {{RAL 1015|RAL 3020|...до 10 реальных кодов RAL Classic, подходящих по смыслу этому товару}}
 
+ГЛОБАЛЬНЫЙ СТАНДАРТ BORIS ДЛЯ ЛЮБОЙ НИШИ И ЛЮБОГО АККАУНТА:
+- Финальный текст должен выглядеть как сильный продающий текст, а не как сухой шаблон: мощный первый заход, короткие смысловые блоки, уместные иконки, конкретная выгода, процесс/доказательства только из фактов, снятие возражений, предметный пример и сильный CTA.
+- Разводи объявления по разным маркетинговым моделям: AIDA, PAS, экспертный заход, срочность, результат, сопровождение, сценарий клиента, сравнение/выбор. Не делай десять версий одного шаблона.
+- Каждое обычное предложение должно иметь корректный знак препинания.
+- Если товар, объект, материал или визуальный результат услуги можно увидеть глазами и у него есть цвет, ЦВЕТ ОБЯЗАТЕЛЬНО должен участвовать в уникализации. Используй только фактический/подтверждённый цвет или разрешённые клиентом варианты. Никогда не выдумывай цвет. Если цвет применим, но неизвестен, считай это недостающей фактурой, а не придумывай значение.
+- Для географически размножаемых объявлений используй разные подтверждённые районы/населённые пункты/улицы, когда они заданы клиентом, и явно отражай локацию в тексте/метаданных.
+
 Формулировки и порядок подачи должны полностью отличаться от исходника (нужно для уникализации, не косметическая правка).
 
 Ответь СТРОГО в формате (ОПИСАНИЕ может занимать много строк — это нормально, включай туда всё, включая блоки ХАРАКТЕРИСТИКИ/ЦВЕТ если они есть):
@@ -435,35 +583,29 @@ def rewrite_text(req: RewriteTextRequest):
     raw = None
     if req.engine == "chatgpt":
         try:
-            import requests as _requests_local
-            from proxy_pool import get_intl_requests_proxies
-            api_key = os.environ.get("OPENAI_API_KEY")
-            proxies = get_intl_requests_proxies()
-            resp = _requests_local.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-                json={
-                    "model": "gpt-5.4",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_completion_tokens": 1536,
-                },
-                proxies=proxies,
+            import hashlib as _hashlib_paid
+            from app.api.campaigns import _ff_guarded_openai_response
+            _aid = str(req.account_id or "").strip()
+            if not _aid:
+                return {"status": "error", "message": "Для платной генерации нужен аккаунт"}
+            _rewrite_business_key = str(getattr(req, "idempotency_key", "") or "").strip()
+            _intent = "rewrite-text:" + _hashlib_paid.sha256(
+                (_aid + "\n" + _rewrite_business_key + "\n" + prompt).encode("utf-8", "ignore")
+            ).hexdigest()
+            _paid = _ff_guarded_openai_response(
+                account_id=_aid,
+                operation="переписать текст",
+                model="gpt-5.4",
+                input_payload=[{"role": "user", "content": prompt}],
+                max_output_tokens=1536,
+                idempotency_key=_intent,
                 timeout=60,
             )
-            if resp.status_code != 200:
-                return {"status": "error", "message": f"Ошибка ChatGPT: {resp.status_code} {resp.text[:200]}"}
-            _oa = resp.json()
-            raw = _oa["choices"][0]["message"]["content"]
-            try:  # учёт расхода: прямой вызов идёт мимо пула
-                from app.usage import log_usage as _lu
-                _u = _oa.get("usage") or {}
-                _lu(req.account_id or None, "openai", _oa.get("model") or "gpt-5.4",
-                    "переписать текст", int(_u.get("prompt_tokens") or 0),
-                    int(_u.get("completion_tokens") or 0))
-            except Exception as _e:
-                print("[usage]", str(_e)[:100], flush=True)
+            raw = str((_paid or {}).get("text") or "").strip()
+            if not raw:
+                return {"status": "error", "message": "ChatGPT не вернул текст"}
         except Exception as e:
-            return {"status": "error", "message": f"Ошибка ChatGPT: {e}"}
+            return {"status": "error", "message": f"Ошибка ChatGPT: {str(e)[:200]}"}
     else:
         try:
             raw = chat_with_fallback(
@@ -508,21 +650,90 @@ def rewrite_text(req: RewriteTextRequest):
 
 @router.get("/items2")
 def get_items2(account_id: str = "otdushi"):
+    """Live Avito inventory + 30d stats with tenant-wide fail-closed throttling.
+
+    ITEMS2_SHARED_ACCOUNT_THROTTLE_V1: a Retry-After observed by any trusted
+    BORIS worker is binding for this account. Never turn a confirmed 429 into
+    more token/inventory/stats pressure and never expose a partial page/stat
+    sample as a complete fresh snapshot.
+    """
+    from app.services.avito_account_throttle import (
+        account_throttle_remaining as _items2_throttle_remaining,
+        record_account_throttle as _items2_record_throttle,
+    )
+
+    def _items2_retry_after(resp) -> int:
+        try:
+            raw = str((getattr(resp, "headers", {}) or {}).get("Retry-After") or "").strip()
+            if raw:
+                try:
+                    return max(0, int(float(raw)))
+                except Exception:
+                    from email.utils import parsedate_to_datetime
+                    from datetime import datetime, timezone
+                    when = parsedate_to_datetime(raw)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    return max(0, int((when.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
+        except Exception:
+            pass
+        return 30
+
+    def _items2_deferred(retry_after: int, stage: str, *, resources=None):
+        payload = {
+            "status": "deferred",
+            "degraded": True,
+            "fresh_provider_proof": False,
+            "provider_stage": stage,
+            "retry_after_seconds": int(max(1, retry_after or 1)),
+            "message": "Avito временно ограничил запросы по аккаунту; BORIS повторит после Retry-After",
+        }
+        if resources is None:
+            payload.update({"resources": [], "items": [], "total": 0})
+        else:
+            payload.update({"resources": resources, "total": len(resources), "stats_complete": False})
+        return payload
+
+    _shared_retry = _items2_throttle_remaining(account_id)
+    if _shared_retry > 0:
+        return _items2_deferred(_shared_retry, "pre_token")
+
     token_data = get_avito_token(account_id)
     if not isinstance(token_data, dict) or "access_token" not in token_data:
-        # у аккаунта нет/невалидны ключи Avito - отдаём пусто, а не 500
         return {"resources": [], "items": [], "avito_connected": False,
                 "message": "Avito не подключён к этому аккаунту"}
     token = _extract_token(token_data)
     all_items = []
     page = 1
-    while page <= 20:  # защита от бесконечного цикла (до 2000 объявлений)
-        response = httpx.get(
+    while page <= 20:
+        _shared_retry = _items2_throttle_remaining(account_id)
+        if _shared_retry > 0:
+            return _items2_deferred(_shared_retry, "inventory_pre_page")
+        response = _avito_http_get(
             "https://api.avito.ru/core/v1/items",
             headers={"Authorization": f"Bearer {token}"},
             params={"per_page": 100, "page": page}
         )
-        data = response.json()
+        if response.status_code == 429:
+            _retry = _items2_record_throttle(
+                account_id, _items2_retry_after(response), source="items2_inventory_429"
+            )
+            return _items2_deferred(_retry, "inventory_429")
+        if response.status_code != 200:
+            return {
+                "status": "degraded", "degraded": True, "fresh_provider_proof": False,
+                "provider_stage": "inventory_http_error", "http_status": int(response.status_code),
+                "resources": [], "items": [], "total": 0,
+                "message": "Avito временно не отдал полный список объявлений",
+            }
+        try:
+            data = response.json()
+        except Exception:
+            return {
+                "status": "degraded", "degraded": True, "fresh_provider_proof": False,
+                "provider_stage": "inventory_invalid_json", "resources": [], "items": [], "total": 0,
+                "message": "Avito вернул некорректный ответ по списку объявлений",
+            }
         items = data.get("resources", [])
         if not items:
             break
@@ -531,12 +742,29 @@ def get_items2(account_id: str = "otdushi"):
             break
         page += 1
 
-    # Обогащаем метриками (просмотры/контакты/избранное/конверсия) с Avito Statistics API
     stats_by_id = {}
     try:
         _, _, avito_user_id = _get_avito_credentials(account_id)
         if not avito_user_id:
-            me_resp = httpx.get("https://api.avito.ru/core/v1/accounts/self", headers={"Authorization": f"Bearer {token}"})
+            _shared_retry = _items2_throttle_remaining(account_id)
+            if _shared_retry > 0:
+                return _items2_deferred(_shared_retry, "identity_preflight", resources=all_items)
+            me_resp = _avito_http_get(
+                "https://api.avito.ru/core/v1/accounts/self",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            if me_resp.status_code == 429:
+                _retry = _items2_record_throttle(
+                    account_id, _items2_retry_after(me_resp), source="items2_identity_429"
+                )
+                return _items2_deferred(_retry, "identity_429", resources=all_items)
+            if me_resp.status_code != 200:
+                return {
+                    "status": "degraded", "degraded": True, "fresh_provider_proof": False,
+                    "provider_stage": "identity_http_error", "http_status": int(me_resp.status_code),
+                    "resources": all_items, "total": len(all_items), "stats_complete": False,
+                    "message": "Не удалось подтвердить Avito user id для статистики",
+                }
             avito_user_id = str(me_resp.json().get("id", ""))
         if avito_user_id:
             from datetime import date as _date, timedelta as _timedelta
@@ -544,22 +772,40 @@ def get_items2(account_id: str = "otdushi"):
             date_from = (_date.today() - _timedelta(days=30)).isoformat()
             all_ids = [it["id"] for it in all_items]
             for i in range(0, len(all_ids), 200):
+                _shared_retry = _items2_throttle_remaining(account_id)
+                if _shared_retry > 0:
+                    return _items2_deferred(_shared_retry, "stats_pre_batch", resources=all_items)
                 batch = all_ids[i:i+200]
-                stats_resp = httpx.post(
+                stats_resp = _avito_http_post(
                     f"https://api.avito.ru/stats/v1/accounts/{avito_user_id}/items",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"dateFrom": date_from, "dateTo": date_to, "fields": ["uniqViews", "uniqContacts", "uniqFavorites"], "itemIds": batch}
                 )
-                if stats_resp.status_code == 200:
-                    for it in stats_resp.json().get("result", {}).get("items", []):
-                        views = contacts = favorites = 0
-                        for s in it.get("stats", []):
-                            views += s.get("uniqViews", 0)
-                            contacts += s.get("uniqContacts", 0)
-                            favorites += s.get("uniqFavorites", 0)
-                        stats_by_id[it["itemId"]] = {"views": views, "contacts": contacts, "favorites": favorites}
-    except Exception:
-        pass
+                if stats_resp.status_code == 429:
+                    _retry = _items2_record_throttle(
+                        account_id, _items2_retry_after(stats_resp), source="items2_stats_429"
+                    )
+                    return _items2_deferred(_retry, "stats_429", resources=all_items)
+                if stats_resp.status_code != 200:
+                    return {
+                        "status": "degraded", "degraded": True, "fresh_provider_proof": False,
+                        "provider_stage": "stats_http_error", "http_status": int(stats_resp.status_code),
+                        "resources": all_items, "total": len(all_items), "stats_complete": False,
+                        "message": "Avito временно не отдал полную статистику объявлений",
+                    }
+                for it in stats_resp.json().get("result", {}).get("items", []):
+                    views = contacts = favorites = 0
+                    for s in it.get("stats", []):
+                        views += s.get("uniqViews", 0)
+                        contacts += s.get("uniqContacts", 0)
+                        favorites += s.get("uniqFavorites", 0)
+                    stats_by_id[it["itemId"]] = {"views": views, "contacts": contacts, "favorites": favorites}
+    except Exception as exc:
+        return {
+            "status": "degraded", "degraded": True, "fresh_provider_proof": False,
+            "provider_stage": "stats_exception", "resources": all_items, "total": len(all_items),
+            "stats_complete": False, "message": f"Статистика Avito временно недоступна: {type(exc).__name__}",
+        }
 
     for it in all_items:
         s = stats_by_id.get(it["id"], {"views": 0, "contacts": 0, "favorites": 0})
@@ -568,7 +814,8 @@ def get_items2(account_id: str = "otdushi"):
         it["favorites"] = s["favorites"]
         it["conversion"] = round(s["contacts"] / s["views"] * 100, 1) if s["views"] > 0 else 0
 
-    return {"resources": all_items, "total": len(all_items)}
+    return {"status": "ok", "degraded": False, "fresh_provider_proof": True,
+            "stats_complete": True, "resources": all_items, "total": len(all_items)}
 
 def spin(text: str) -> str:
     if not text:
@@ -812,17 +1059,60 @@ def detect_category_endpoint(payload: dict):
         detected_category_name = None
         source = None
 
-        # Метод 1: реальные объявления через API (если ключи уже есть)
+        # Метод 1: реальные объявления через API (если ключи уже есть).
+        # DETECT_CATEGORY_SHARED_ACCOUNT_THROTTLE_V1: category discovery is
+        # inventory pressure too. A tenant Retry-After is terminal for this
+        # cycle; never turn a confirmed 429 into another Avito/fallback probe.
         try:
+            from app.services.avito_account_throttle import (
+                account_throttle_remaining as _detect_throttle_remaining,
+                record_account_throttle as _detect_record_throttle,
+            )
+
+            def _detect_retry_after(resp) -> int:
+                try:
+                    raw = str((getattr(resp, "headers", {}) or {}).get("Retry-After") or "").strip()
+                    if raw:
+                        try:
+                            return max(0, int(float(raw)))
+                        except Exception:
+                            from email.utils import parsedate_to_datetime
+                            from datetime import datetime, timezone
+                            when = parsedate_to_datetime(raw)
+                            if when.tzinfo is None:
+                                when = when.replace(tzinfo=timezone.utc)
+                            return max(0, int((when.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
+                except Exception:
+                    pass
+                return 30
+
+            _shared_retry = _detect_throttle_remaining(account_id)
+            if _shared_retry > 0:
+                return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                        "retry_after_seconds": int(_shared_retry),
+                        "message": "Avito временно ограничил запросы по аккаунту"}
+
             token_data = get_avito_token(account_id)
             token = token_data.get("access_token")
             if token:
+                _shared_retry = _detect_throttle_remaining(account_id)
+                if _shared_retry > 0:
+                    return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                            "retry_after_seconds": int(_shared_retry),
+                            "message": "Avito временно ограничил запросы по аккаунту"}
                 r = httpx.get(
                     "https://api.avito.ru/core/v1/items",
                     headers={"Authorization": f"Bearer {token}"},
                     params={"per_page": 5, "page": 1, "status": "active"},
                     timeout=10
                 )
+                if r.status_code == 429:
+                    _retry = _detect_record_throttle(
+                        account_id, _detect_retry_after(r), source="detect_category_inventory_429"
+                    )
+                    return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                            "retry_after_seconds": int(_retry),
+                            "message": "Avito временно ограничил запросы по аккаунту"}
                 if r.status_code == 200:
                     items = r.json().get("resources", [])
                     if items:
@@ -885,33 +1175,24 @@ class FeedItemUpdateRequest(BaseModel):
 
 @router.post("/feed_item/update")
 def update_feed_item(req: FeedItemUpdateRequest):
-    """Правит одно объявление в фиде (title/price/description). Категорийные поля не трогает."""
-    from app.db.session import SessionLocal
-    from app.models.storage import Storage
-    import json as _json
-    db = SessionLocal()
-    try:
-        row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "feed_items").first()
-        if not row:
-            return {"status": "error", "message": "фид не найден"}
-        items = _json.loads(row.value)
-        found = False
+    """Правит одно объявление атомарно; параллельные feed changes не теряются."""
+    state = {"found": False}
+    def _edit(items):
         for it in items:
-            if str(it.get("id")) == str(req.item_id):
-                if req.title is not None: it["title"] = req.title
-                if req.price is not None: it["price"] = req.price
-                if req.description is not None: it["description"] = req.description
-                if req.images is not None: it["images"] = req.images
-                if req.template_id is not None: it["template_id"] = req.template_id
-                found = True
-                break
-        if not found:
-            return {"status": "error", "message": "объявление не найдено в фиде"}
-        row.value = _json.dumps(items, ensure_ascii=False)
-        db.commit()
-        return {"status": "ok"}
-    finally:
-        db.close()
+            if str(it.id) != str(req.item_id):
+                continue
+            if req.title is not None: it.title = req.title
+            if req.price is not None: it.price = req.price
+            if req.description is not None: it.description = req.description
+            if req.images is not None: it.images = list(req.images or [])
+            if req.template_id is not None: it.template_id = req.template_id
+            state["found"] = True
+            break
+        return items
+    _mutate_feed_items(req.account_id, _edit)
+    if not state["found"]:
+        return {"status": "error", "message": "объявление не найдено в фиде"}
+    return {"status": "ok"}
 
 
 class AutoDuplicateRequest(BaseModel):
@@ -919,83 +1200,92 @@ class AutoDuplicateRequest(BaseModel):
     item_id: str
     match_title: str = ""      # запасной ключ связи, когда id из статистики не совпадает с id фида
     dry_run: bool = True
+    idempotency_key: str = ""  # обязателен для реального дубля; preview всегда бесплатный
 
 
 @router.post("/auto_duplicate")
 def auto_duplicate(req: AutoDuplicateRequest):
-    """Конвейер размножения: берёт объявление из фида, уникализирует текст (спинтакс размеров/цветов),
-    создаёт НОВЫЙ item в фиде с уникальным id. Копирует категорию и фото 1:1.
-    dry_run=True — только показать результат, в фид НЕ пишет. Публикация — через фид при следующей выгрузке."""
-    from app.db.session import SessionLocal
-    from app.models.storage import Storage
-    import json as _json, time as _time
-    db = SessionLocal()
-    try:
-        row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "feed_items").first()
-        if not row:
-            return {"status": "error", "message": "фид не найден"}
-        items = _json.loads(row.value)
-        src = None
+    """Создаёт один детерминированный дубль безопасно и exactly-once.
+
+    dry_run никогда не вызывает платный ИИ. Реальная мутация требует business
+    idempotency key, переписывает текст через canonical paid guard, фиксирует
+    listing tariff intent и только затем атомарно upsert-ит item в текущий feed.
+    """
+    import hashlib as _hashlib, re as _re
+    items = _load_feed_items(req.account_id)
+    src = None
+    for it in items:
+        if str(it.id) == str(req.item_id):
+            src = it
+            break
+    if not src and req.match_title:
+        want = str(req.match_title).strip().lower()
+        def _spin_variants(t):
+            t = str(t or "")
+            m = _re.search(r"\{([^{}]*)\}", t)
+            if m:
+                head = t[:m.start()].strip()
+                return [(head + " " + v.strip()).strip().lower() if head else v.strip().lower()
+                        for v in m.group(1).split("|")]
+            return [t.strip().lower()]
         for it in items:
-            if str(it.get("id")) == str(req.item_id):
+            variants = _spin_variants(it.title)
+            if want in variants or any(want == v or want in v for v in variants):
                 src = it
                 break
-        # мост статистика↔фид: в daily_stats Avito-id + РАСКРЫТЫЙ заголовок,
-        # в фиде наш id + заголовок-СПИНТАКС "{вар1|вар2|...}". Связываем: раскрытый title
-        # статистики должен быть одним из вариантов внутри спинтакса фида.
-        if not src and req.match_title:
-            import re as _re
-            want = str(req.match_title).strip().lower()
-            def _spin_variants(t):
-                t = str(t or "")
-                m = _re.search(r"\{([^{}]*)\}", t)
-                if m:
-                    head = t[:m.start()].strip()
-                    return [(head + " " + v.strip()).strip().lower() if head else v.strip().lower()
-                            for v in m.group(1).split("|")]
-                return [t.strip().lower()]
-            for it in items:
-                vars_ = _spin_variants(it.get("title", ""))
-                if want in vars_ or any(want == v or want in v for v in vars_):
-                    src = it
-                    break
-        if not src:
-            return {"status": "error", "message": "объявление не найдено в фиде"}
+    if not src:
+        return {"status":"error","message":"объявление не найдено в фиде"}
 
-        # уникализация текста через готовый rewrite_text (спинтакс вариантов включён)
-        rw = rewrite_text(RewriteTextRequest(
-            account_id=req.account_id,
-            title=src.get("title", ""),
-            description=src.get("description", ""),
-            include_variants=True,
-        ))
-        new_title = rw.get("title") or src.get("title", "")
-        new_desc = rw.get("description") or src.get("description", "")
+    # AUTO_DUPLICATE_FREE_PREVIEW_V1: preview contains only existing facts and
+    # therefore cannot spend on text generation or mutate tariff/feed state.
+    if req.dry_run:
+        return {"status":"ok","dry_run":True,"preview":{
+            "source_id":str(src.id),"title":str(src.title),
+            "images_count":len(src.images or []),
+            "note":"Это бесплатный предпросмотр. После подтверждения BORIS создаст уникальный текст и дубль exactly-once."}}
 
-        # новый item: копия оригинала (категория, фото, все поля) + уникализированный текст + новый id
-        dup = dict(src)
-        dup["id"] = f"{src.get('id')}-d{int(_time.time())}"
-        dup["title"] = new_title
-        dup["description"] = new_desc
-        dup["_dup_of"] = str(src.get("id"))
+    idem = str(req.idempotency_key or "").strip()
+    if not idem:
+        return {"status":"idempotency_required","code":"paid_idempotency_required",
+                "message":"Для создания дубля нужен ключ безопасного повтора."}
+    digest = _hashlib.sha256((str(req.account_id)+"|"+str(src.id)+"|"+idem).encode("utf-8")).hexdigest()[:24]
+    new_id = f"{src.id}-d{digest}"
 
-        if req.dry_run:
-            return {"status": "ok", "dry_run": True, "preview": {
-                "new_id": dup["id"], "title": new_title,
-                "description": new_desc[:600], "images_count": len(src.get("images") or []),
-                "note": "Это предпросмотр. В фид НЕ добавлено. Повторите с dry_run=false для публикации через фид."}}
+    # Canonical guarded rewrite uses a prompt-derived durable provider intent.
+    rw = rewrite_text(RewriteTextRequest(
+        account_id=req.account_id,
+        title=src.title,
+        description=src.description,
+        include_variants=True,
+        engine="chatgpt",
+        idempotency_key=idem,
+    ))
+    if rw.get("status") != "ok":
+        return {"status":"error","code":"duplicate_rewrite_failed","message":rw.get("message") or "Не удалось подготовить уникальный текст"}
 
-        items.append(dup)
-        row.value = _json.dumps(items, ensure_ascii=False)
-        db.commit()
-        try:
-            _audit_log(req.account_id, "auto_duplicate",
-                       f"создал дубль объявления «{src.get('title','')[:40]}» (новый id {dup['id']}) — попадёт в выдачу при следующей выгрузке", "boris")
-        except Exception:
-            pass
-        return {"status": "ok", "dry_run": False, "new_id": dup["id"], "feed_size": len(items)}
-    finally:
-        db.close()
+    dup = src.model_copy(deep=True)
+    dup.id = new_id
+    dup.title = rw.get("title") or src.title
+    dup.description = rw.get("description") or src.description
+
+    # AUTO_DUPLICATE_LISTING_TARIFF_EXACTLY_ONCE_V1: a lost HTTP response can
+    # replay both text and listing charge without creating/paying a second copy.
+    from app.api.billing import check_and_consume as _dup_bill_consume
+    charge = _dup_bill_consume(req.account_id, "listings", 1,
+                               idempotency_key=f"auto-duplicate-listing:{req.account_id}:{digest}")
+    if not charge.get("allowed", False):
+        return {"status":"billing_limit","code":"billing_limit","unit":"listings",
+                "message":charge.get("message") or "Тарифный лимит не подтвердил создание дубля."}
+
+    saved = _upsert_feed_items(req.account_id, [dup])
+    manifest = _dup_manifest_record(req.account_id, str(src.id), new_id, idem)
+    try:
+        _audit_log(req.account_id, "auto_duplicate",
+                   f"создал дубль объявления «{src.title[:40]}» (новый id {new_id}) — попадёт в выдачу при следующей выгрузке", "boris")
+    except Exception:
+        pass
+    return {"status":"ok","dry_run":False,"new_id":new_id,"feed_size":len(saved),
+            "idempotency_replay":bool(charge.get("idempotency_replay"))}
 
 
 class AutoDuplicateRunRequest(BaseModel):
@@ -1004,106 +1294,158 @@ class AutoDuplicateRunRequest(BaseModel):
     daily_limit: int = 5        # сколько новых дублей в день на аккаунт (защита от спам-бана Avito)
     min_contacts: int = 1       # дублируем только ХОДОВЫЕ (контактов не меньше)
     dry_run: bool = True
+    idempotency_key: str = ""   # обязателен для confirmed mutation run
 
 
-def _dup_count(db, account_id, item_id):
+def _dup_manifest_lock_key(account_id: str) -> int:
+    import hashlib as _hashlib
+    raw = int.from_bytes(_hashlib.blake2b(("auto_duplicate_manifest|" + str(account_id or "")).encode("utf-8"), digest_size=8).digest(), "big", signed=False)
+    return raw if raw < (1 << 63) else raw - (1 << 64)
+
+
+def _dup_manifest_snapshot(account_id: str) -> list:
+    from app.db.session import SessionLocal
     from app.models.storage import Storage
     import json as _j
-    row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == f"dup_count:{item_id}").first()
-    if not row:
-        return 0
+    db = SessionLocal()
     try:
-        return int(_j.loads(row.value).get("n", 0))
+        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "auto_duplicate_manifest").first()
+        data = _j.loads(row.value) if row and row.value else []
+        return data if isinstance(data, list) else []
     except Exception:
-        return 0
+        return []
+    finally:
+        db.close()
 
 
-def _dup_count_inc(db, account_id, item_id):
+def _dup_manifest_record(account_id: str, source_id: str, duplicate_id: str, run_key: str) -> dict:
+    """AUTO_DUPLICATE_MANIFEST_EXACTLY_ONCE_V1: one immutable row per duplicate id."""
+    from app.db.session import SessionLocal
     from app.models.storage import Storage
-    import json as _j
-    k = f"dup_count:{item_id}"
-    row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == k).first()
-    n = _dup_count(db, account_id, item_id) + 1
-    val = _j.dumps({"n": n}, ensure_ascii=False)
-    if row:
-        row.value = val
-    else:
-        db.add(Storage(account_id=account_id, key=k, value=val))
-    db.commit()
+    from sqlalchemy import text as _sql_text
+    import datetime as _dt, json as _j
+    db = SessionLocal()
+    try:
+        db.execute(_sql_text("select pg_advisory_xact_lock(:k)"), {"k": _dup_manifest_lock_key(account_id)})
+        row = (db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "auto_duplicate_manifest")
+               .with_for_update().first())
+        data = _j.loads(row.value) if row and row.value else []
+        if not isinstance(data, list): data = []
+        for entry in data:
+            if str((entry or {}).get("duplicate_id") or "") == str(duplicate_id):
+                db.commit()
+                return {"created":False,"entry":entry,"total":len(data)}
+        now = _dt.datetime.now(_dt.timezone.utc)
+        entry = {"source_id":str(source_id),"duplicate_id":str(duplicate_id),"run_key":str(run_key),
+                 "created_at":now.isoformat(),"date":now.date().isoformat()}
+        data.append(entry)
+        payload = _j.dumps(data[-5000:], ensure_ascii=False)
+        if row: row.value = payload
+        else: db.add(Storage(account_id=account_id, key="auto_duplicate_manifest", value=payload))
+        db.commit()
+        return {"created":True,"entry":entry,"total":len(data)}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 @router.post("/auto_duplicate_run")
 def auto_duplicate_run(req: AutoDuplicateRunRequest):
-    """Автопилот размножения: выбирает ХОДОВЫЕ объявления (contacts >= min_contacts),
-    делает дубли с потолком max_per_item на объявление и daily_limit в день на аккаунт.
-    Публикация через фид. dry_run=True — только план, ничего не пишет."""
+    """Bounded duplicate run with durable replay derived from manifest evidence."""
     from app.db.session import SessionLocal
     from app.models.storage import Storage
-    import json as _json, datetime as _dt
+    import datetime as _dt, json as _json, hashlib as _hashlib
+
+    run_key = str(req.idempotency_key or "").strip()
+    if not req.dry_run and not run_key:
+        return {"status":"idempotency_required","code":"paid_idempotency_required",
+                "message":"Для подтверждённого размножения нужен ключ безопасного повтора."}
+
+    today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+    manifest = _dup_manifest_snapshot(req.account_id)
+    run_prefix = (run_key + ":source:") if run_key else ""
+    run_entries = [e for e in manifest if run_prefix and str((e or {}).get("run_key") or "").startswith(run_prefix)]
+    other_today = [e for e in manifest if str((e or {}).get("date") or "") == today and not (run_prefix and str((e or {}).get("run_key") or "").startswith(run_prefix))]
+    target_this_run = max(0, int(req.daily_limit) - len(other_today))
+    if not req.dry_run and len(run_entries) >= target_this_run:
+        return {"status":"ok","dry_run":False,"idempotency_replay":True,
+                "done_today":len(other_today)+len(run_entries),"created":len(run_entries),
+                "candidates":len(run_entries),"plan":[{"item_id":e.get("source_id"),"new_id":e.get("duplicate_id")} for e in run_entries[:20]]}
+    if target_this_run <= 0:
+        return {"status":"ok","dry_run":req.dry_run,"done_today":len(other_today),"created":0,
+                "reason":"дневной лимит дублей исчерпан","plan":[]}
+
     db = SessionLocal()
     try:
-        today = _dt.date.today().isoformat()
-        # дневной счётчик
-        drow = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == f"dup_today:{today}").first()
-        done_today = 0
-        if drow:
-            try:
-                done_today = int(_json.loads(drow.value).get("n", 0))
-            except Exception:
-                done_today = 0
-        room = max(0, req.daily_limit - done_today)
-        if room <= 0:
-            return {"status": "ok", "done_today": done_today, "created": 0, "reason": "дневной лимит дублей исчерпан"}
-
-        # ходовые объявления из свежей статистики; если за сегодня нет — берём последнюю доступную
         srow = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == f"daily_stats:{today}").first()
         if not srow:
             srows = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key.like("daily_stats:%")).all()
             srow = max(srows, key=lambda r: r.key, default=None)
         if not srow:
-            return {"status": "ok", "created": 0, "reason": "нет статистики (daily_stats) ни за один день"}
+            return {"status":"ok","created":0,"reason":"нет статистики (daily_stats) ни за один день","plan":[]}
         items_stats = (_json.loads(srow.value) or {}).get("items", [])
-        hot = [it for it in items_stats
-               if it.get("status") == "active" and it.get("contacts", 0) >= req.min_contacts]
-        hot.sort(key=lambda it: it.get("contacts", 0), reverse=True)
-
-        plan, created = [], 0
-        for it in hot:
-            if created >= room:
-                break
-            iid = str(it.get("id"))
-            if _dup_count(db, req.account_id, iid) >= req.max_per_item:
-                continue
-            entry = {"item_id": iid, "title": it.get("title", "")[:50], "contacts": it.get("contacts", 0)}
-            if req.dry_run:
-                entry["will"] = "будет создан дубль"
-                plan.append(entry)
-                created += 1
-                continue
-            res = auto_duplicate(AutoDuplicateRequest(account_id=req.account_id, item_id=iid, match_title=it.get("title", ""), dry_run=False))
-            if res.get("status") == "ok":
-                _dup_count_inc(db, req.account_id, iid)
-                entry["new_id"] = res.get("new_id")
-                plan.append(entry)
-                created += 1
-
-        if not req.dry_run and created > 0:
-            val = _json.dumps({"n": done_today + created}, ensure_ascii=False)
-            if drow:
-                drow.value = val
-            else:
-                db.add(Storage(account_id=req.account_id, key=f"dup_today:{today}", value=val))
-            db.commit()
-            try:
-                _audit_log(req.account_id, "auto_duplicate_run",
-                           f"размножил ходовые объявления: создано дублей {created} (дневной лимit {req.daily_limit})", "boris")
-            except Exception:
-                pass
-
-        return {"status": "ok", "dry_run": req.dry_run, "done_today": done_today,
-                "created": created, "candidates": len(hot), "plan": plan[:20]}
     finally:
         db.close()
+
+    hot = [it for it in items_stats if it.get("status") == "active" and it.get("contacts", 0) >= req.min_contacts]
+    hot.sort(key=lambda it: it.get("contacts", 0), reverse=True)
+    plan = []
+    progress = len(run_entries)
+    manifest_now = list(manifest)
+
+    for it in hot:
+        if progress >= target_this_run:
+            break
+        iid = str(it.get("id") or "")
+        title = str(it.get("title") or "")
+        preview = auto_duplicate(AutoDuplicateRequest(account_id=req.account_id, item_id=iid,
+                                                       match_title=title, dry_run=True))
+        if preview.get("status") != "ok":
+            continue
+        source_id = str((preview.get("preview") or {}).get("source_id") or iid)
+        source_count = sum(1 for e in manifest_now if str((e or {}).get("source_id") or "") == source_id)
+        if source_count >= int(req.max_per_item):
+            continue
+        entry = {"item_id":source_id,"title":title[:50],"contacts":it.get("contacts",0)}
+        if req.dry_run:
+            entry["will"] = "будет создан дубль"
+            plan.append(entry); progress += 1
+            continue
+
+        child_key = run_key + ":source:" + _hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:20]
+        res = auto_duplicate(AutoDuplicateRequest(account_id=req.account_id, item_id=source_id,
+                                                   match_title=title, dry_run=False,
+                                                   idempotency_key=child_key))
+        if res.get("status") != "ok":
+            entry["error"] = res.get("message") or res.get("code") or "duplicate_failed"
+            plan.append(entry)
+            continue
+        entry["new_id"] = res.get("new_id")
+        entry["idempotency_replay"] = bool(res.get("idempotency_replay"))
+        plan.append(entry)
+        manifest_now = _dup_manifest_snapshot(req.account_id)
+        run_entries = [e for e in manifest_now if str((e or {}).get("run_key") or "") == child_key]
+        # Child manifest stores child_key. Count this run by stable prefix.
+        prefix = run_key + ":source:"
+        progress = sum(1 for e in manifest_now if str((e or {}).get("run_key") or "").startswith(prefix))
+
+    if req.dry_run:
+        return {"status":"ok","dry_run":True,"done_today":len(other_today),"created":len(plan),
+                "candidates":len(hot),"plan":plan[:20]}
+
+    prefix = run_key + ":source:"
+    final_manifest = _dup_manifest_snapshot(req.account_id)
+    final_run = [e for e in final_manifest if str((e or {}).get("run_key") or "").startswith(prefix)]
+    try:
+        _audit_log(req.account_id, "auto_duplicate_run",
+                   f"размножил ходовые объявления: в подтверждённом запуске дублей {len(final_run)} (дневной лимит {req.daily_limit})", "boris")
+    except Exception:
+        pass
+    return {"status":"ok","dry_run":False,"done_today":len(other_today)+len(final_run),
+            "created":len(final_run),"candidates":len(hot),"plan":plan[:20],
+            "idempotency_replay":bool(final_run and not plan)}
 
 
 class FeedItemDeleteRequest(BaseModel):
@@ -1113,23 +1455,15 @@ class FeedItemDeleteRequest(BaseModel):
 
 @router.post("/feed_item/delete")
 def delete_feed_item(req: FeedItemDeleteRequest):
-    """Удаляет объявление из фида по id."""
-    from app.db.session import SessionLocal
-    from app.models.storage import Storage
-    import json as _json
-    db = SessionLocal()
-    try:
-        row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "feed_items").first()
-        if not row:
-            return {"status": "error", "message": "фид не найден"}
-        items = _json.loads(row.value)
-        before = len(items)
-        items = [it for it in items if str(it.get("id")) != str(req.item_id)]
-        row.value = _json.dumps(items, ensure_ascii=False)
-        db.commit()
-        return {"status": "ok", "removed": before - len(items), "remaining": len(items)}
-    finally:
-        db.close()
+    """Удаляет один feed item атомарно по аккаунту."""
+    state = {"before": 0, "after": 0}
+    def _delete(items):
+        state["before"] = len(items)
+        out = [it for it in items if str(it.id) != str(req.item_id)]
+        state["after"] = len(out)
+        return out
+    _mutate_feed_items(req.account_id, _delete)
+    return {"status": "ok", "removed": state["before"] - state["after"], "remaining": state["after"]}
 
 
 @router.get("/feed_export_xlsx")
@@ -1173,40 +1507,36 @@ def feed_export_xlsx(account_id: str):
 
 @router.post("/feed_import_xlsx")
 async def feed_import_xlsx(account_id: str = Form(...), file: UploadFile = File(...)):
-    """Загружает исправленный Excel обратно в фид. Обновляет title/price/description по ID.
-    Категорийные поля и фото не трогает - остаются как были."""
-    from app.db.session import SessionLocal
-    from app.models.storage import Storage
-    import json as _json, io
+    """Импортирует правки Excel по ID атомарно, не затирая параллельные изменения фида."""
+    import io
     import openpyxl
-    db = SessionLocal()
-    try:
-        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "feed_items").first()
-        if not row:
-            return {"status": "error", "message": "фид не найден"}
-        items = _json.loads(row.value)
-        by_id = {str(it.get("id")): it for it in items}
-        content = await file.read()
-        wb = openpyxl.load_workbook(io.BytesIO(content))
-        ws = wb.active
-        updated = 0
-        for r in ws.iter_rows(min_row=2, values_only=True):
-            if not r or not r[0]:
-                continue
-            iid = str(r[0]).strip()
-            if iid in by_id:
-                it = by_id[iid]
-                if r[1] is not None: it["title"] = str(r[1])
-                if r[2] is not None:
-                    try: it["price"] = int(r[2])
-                    except: pass
-                if len(r) > 4 and r[4] is not None: it["description"] = str(r[4])
-                updated += 1
-        row.value = _json.dumps(items, ensure_ascii=False)
-        db.commit()
-        return {"status": "ok", "updated": updated}
-    finally:
-        db.close()
+    content = await file.read()
+    wb = openpyxl.load_workbook(io.BytesIO(content))
+    ws = wb.active
+    updates = {}
+    for r in ws.iter_rows(min_row=2, values_only=True):
+        if not r or not r[0]:
+            continue
+        iid = str(r[0]).strip()
+        patch = {}
+        if len(r) > 1 and r[1] is not None: patch["title"] = str(r[1])
+        if len(r) > 2 and r[2] is not None:
+            try: patch["price"] = int(r[2])
+            except Exception: pass
+        if len(r) > 4 and r[4] is not None: patch["description"] = str(r[4])
+        if patch: updates[iid] = patch
+    state = {"updated": 0}
+    def _apply(items):
+        for it in items:
+            patch = updates.get(str(it.id))
+            if not patch: continue
+            if "title" in patch: it.title = patch["title"]
+            if "price" in patch: it.price = patch["price"]
+            if "description" in patch: it.description = patch["description"]
+            state["updated"] += 1
+        return items
+    _mutate_feed_items(account_id, _apply)
+    return {"status": "ok", "updated": state["updated"]}
 
 
 @router.get("/active_items_full")
@@ -1249,32 +1579,848 @@ def get_feed_items_full(account_id: str):
         db.close()
 
 
+def _autoload_stats_counts(stats: dict) -> dict:
+    """Normalize Avito v4 nested stats without assuming a fixed section depth."""
+    out={"total":int((stats or {}).get("count") or 0),"successful":0,"error":0,"blocked":0}
+    def walk(node):
+        if not isinstance(node,dict): return
+        slug=str(node.get("slug") or "")
+        try: count=int(node.get("count") or 0)
+        except Exception: count=0
+        if slug=="successful": out["successful"]=max(out["successful"],count)
+        elif slug=="error": out["error"]=max(out["error"],count)
+        elif slug=="error_blocked": out["blocked"]=max(out["blocked"],count)
+        for child in node.get("sections") or []: walk(child)
+    walk(stats or {})
+    return out
+
+
+def _autoload_scope_delivery_effect(scoped: list[dict], *, expected_total: int,
+                                    full_success: bool, partial: bool) -> dict:
+    """AUTOLOAD_DELIVERY_TRUTH_V2
+
+    Distinguish provider delivery from an actual change in the Avito listing.
+    success_skipped means Avito saw the item and kept it active without applying
+    a change in this upload. That is valid live-state evidence, but it must never
+    be presented as published/updated now.
+    """
+    section_counts: dict[str, int] = {}
+    unchanged = 0
+    changed_or_created = 0
+    active = 0
+    for raw in list(scoped or []):
+        item = dict(raw or {})
+        slug = str((item.get("section") or {}).get("slug") or "").strip().lower()
+        avs = str(item.get("avito_status") or "").strip().lower()
+        section_counts[slug or "unknown"] = section_counts.get(slug or "unknown", 0) + 1
+        if avs == "active":
+            active += 1
+            if slug == "success_skipped":
+                unchanged += 1
+            else:
+                changed_or_created += 1
+    if full_success:
+        if int(expected_total or 0) > 0 and unchanged == int(expected_total or 0):
+            state = "unchanged"
+        elif changed_or_created > 0 and unchanged > 0:
+            state = "changed_or_created_mixed"
+        elif changed_or_created > 0:
+            state = "changed_or_created"
+        else:
+            state = "active_unclassified"
+    elif partial:
+        state = "partial"
+    else:
+        state = "processing_or_unresolved"
+    return {
+        "policy_version": "AUTOLOAD_DELIVERY_TRUTH_V2",
+        "state": state,
+        "expected_total": int(expected_total or 0),
+        "active_items": active,
+        "unchanged_items": unchanged,
+        "changed_or_created_items": changed_or_created,
+        "section_counts": section_counts,
+        "proves_current_upload_changed_content": state in {"changed_or_created", "changed_or_created_mixed"},
+    }
+
+
+def _autoload_upload_snapshot(account_id: str, upload_id: int|None=None, expected_ad_ids=None) -> dict:
+    """Read authoritative Avito v4 upload state. No mutation and no guessing."""
+    from app.db.session import SessionLocal
+    from app.models.account import Account
+    from app.crypto_utils import decrypt_secret
+    from app.services.avito_account_throttle import account_throttle_remaining as _autoload_throttle_remaining, record_account_throttle as _autoload_record_throttle
+    import httpx as _httpx
+    def _autoload_retry_after(resp) -> int:
+        try:
+            raw = str((resp.headers or {}).get("Retry-After") or "").strip()
+            if raw:
+                try:
+                    return max(0, int(float(raw)))
+                except Exception:
+                    from email.utils import parsedate_to_datetime
+                    from datetime import datetime, timezone
+                    when = parsedate_to_datetime(raw)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    return max(0, int((when.astimezone(timezone.utc)-datetime.now(timezone.utc)).total_seconds()))
+        except Exception:
+            pass
+        return 30
+    # AUTOLOAD_SNAPSHOT_INTERCALL_THROTTLE_V1: a sibling worker may publish
+    # Retry-After after this function's initial precheck. Re-check immediately
+    # before every subsequent provider read so one report request cannot keep
+    # pressuring the tenant after a confirmed throttle elsewhere.
+    def _autoload_shared_block():
+        _remaining = _autoload_throttle_remaining(account_id)
+        if _remaining > 0:
+            return {"status":"error","code":"report_http_error","http_status":429,
+                    "retry_after_seconds":int(_remaining),"terminal":False,
+                    "message":"Avito временно ограничил запросы по аккаунту"}
+        return None
+    db=SessionLocal()
+    try:
+        acc=db.query(Account).filter(Account.account_id==account_id).first()
+        if not acc or not acc.avito_client_id or not acc.avito_client_secret:
+            return {"status":"error","code":"not_connected","message":"Avito не подключён"}
+        client_id_enc=str(acc.avito_client_id); client_secret_enc=str(acc.avito_client_secret)
+    finally:
+        db.close()
+    try:
+        # AUTOLOAD_SHARED_ACCOUNT_THROTTLE_V1: upload/report verification consumes
+        # the same Avito tenant quota. Honor a Retry-After observed by any trusted
+        # worker before token/provider I/O and publish every confirmed 429.
+        _shared_retry = _autoload_throttle_remaining(account_id)
+        if _shared_retry > 0:
+            return {"status":"error","code":"report_http_error","http_status":429,
+                    "retry_after_seconds":int(_shared_retry),"terminal":False,
+                    "message":"Avito временно ограничил запросы по аккаунту"}
+        tr=_httpx.post("https://api.avito.ru/token/",data={"grant_type":"client_credentials","client_id":decrypt_secret(client_id_enc),"client_secret":decrypt_secret(client_secret_enc)},timeout=20)
+        if tr.status_code == 429:
+            _retry = _autoload_record_throttle(account_id, _autoload_retry_after(tr), source="autoload_token_429")
+            return {"status":"error","code":"report_http_error","http_status":429,"retry_after_seconds":int(_retry),"terminal":False,"message":"Avito временно ограничил запросы по аккаунту"}
+        tok=(tr.json() or {}).get("access_token") if tr.status_code==200 else None
+        if not tok:
+            return {"status":"error","code":"token_error","message":"Avito не выдал токен"}
+        head={"Authorization":"Bearer "+tok}
+        selected=None
+        if upload_id:
+            _block = _autoload_shared_block()
+            if _block:
+                return _block
+            rr=_httpx.get("https://api.avito.ru/autoload/v4/uploads",headers=head,params={"per_page":100},timeout=20)
+            if rr.status_code!=200 and rr.status_code!=429:
+                # Be tolerant to pagination-contract changes only for non-throttle
+                # failures. AUTOLOAD_REPORT_CONFIRMED_429_NO_RETRY_V1: a confirmed
+                # provider throttle is terminal for this read cycle; never turn a
+                # Retry-After into an immediate alternate-form request.
+                _block = _autoload_shared_block()
+                if _block:
+                    return _block
+                rr=_httpx.get("https://api.avito.ru/autoload/v4/uploads",headers=head,timeout=20)
+            if rr.status_code!=200:
+                _retry = _autoload_record_throttle(account_id, _autoload_retry_after(rr), source="autoload_uploads_429") if rr.status_code==429 else 0
+                return {"status":"error","code":"report_http_error","http_status":rr.status_code,"upload_id":int(upload_id),"terminal":False,"retry_after_seconds":int(_retry) if _retry else None,"message":"Avito временно не отдал список загрузок"}
+            for x in (rr.json() or {}).get("uploads") or []:
+                if int(x.get("upload_id") or 0)==int(upload_id): selected=x; break
+            if selected is None:
+                # Avito keeps only a bounded upload history. A durable BORIS watcher
+                # may outlive that window; with exact campaign ad_ids reconcile the
+                # current upload instead of waiting forever for an evicted receipt.
+                # Scope logic below remains fail-closed on those exact identities.
+                if expected_ad_ids:
+                    _block = _autoload_shared_block()
+                    if _block:
+                        return _block
+                    cr=_httpx.get("https://api.avito.ru/autoload/v4/uploads/current",headers=head,timeout=20)
+                    if cr.status_code == 429:
+                        _retry=_autoload_record_throttle(account_id,_autoload_retry_after(cr),source="autoload_missing_upload_current_429")
+                        return {"status":"error","code":"report_http_error","http_status":429,"retry_after_seconds":int(_retry),"terminal":False,"message":"Avito временно ограничил запросы по аккаунту"}
+                    current_candidate=cr.json() if cr.status_code==200 else {}
+                    if current_candidate and int(current_candidate.get("upload_id") or 0):
+                        selected=current_candidate
+                    else:
+                        return {"status":"pending","upload_id":int(upload_id),"terminal":False,"message":"Avito ещё не вернул итог этой загрузки"}
+                else:
+                    return {"status":"pending","upload_id":int(upload_id),"terminal":False,"message":"Avito ещё не вернул итог этой загрузки"}
+        else:
+            _block = _autoload_shared_block()
+            if _block:
+                return _block
+            rr=_httpx.get("https://api.avito.ru/autoload/v4/uploads/current",headers=head,timeout=20)
+            if rr.status_code!=200:
+                _retry = _autoload_record_throttle(account_id, _autoload_retry_after(rr), source="autoload_current_429") if rr.status_code==429 else 0
+                return {"status":"error","code":"report_http_error","http_status":rr.status_code,"retry_after_seconds":int(_retry) if _retry else None,"message":"Не удалось получить состояние загрузки Avito"}
+            selected=rr.json() or {}
+        followed_from=None
+        # A campaign may need several scheduled Avito passes before every requested
+        # update is accepted (for example temporary edit-rate limit 3015). When the
+        # caller supplied the exact campaign identities, a newer account-feed upload
+        # is valid evidence for the same desired canonical XML and must supersede the
+        # original receipt instead of leaving the durable watcher stuck on old stats.
+        if expected_ad_ids:
+            try:
+                _block = _autoload_shared_block()
+                if _block:
+                    return _block
+                _latest_r=_httpx.get("https://api.avito.ru/autoload/v4/uploads/current",headers=head,timeout=20)
+                if _latest_r.status_code == 429:
+                    _autoload_record_throttle(account_id, _autoload_retry_after(_latest_r), source="autoload_latest_429")
+                    return {"status":"error","code":"report_http_error","http_status":429,"terminal":False,"message":"Avito временно ограничил запросы по аккаунту"}
+                _latest=_latest_r.json() if _latest_r.status_code==200 else {}
+                _latest_id=int((_latest or {}).get("upload_id") or 0)
+                _selected_id=int((selected or {}).get("upload_id") or upload_id or 0)
+                if _latest_id and _latest_id>_selected_id:
+                    followed_from=_selected_id or None; selected=_latest
+            except Exception:
+                pass
+        uid=int(selected.get("upload_id") or upload_id or 0)
+        avito_status=str(selected.get("status") or "").lower()
+        counts=_autoload_stats_counts(selected.get("stats") or {})
+        terminal=avito_status not in {"","processing","queued","waiting","new"}
+        full_success=bool(terminal and counts["total"]>0 and counts["successful"]==counts["total"] and counts["error"]==0)
+        partial=bool(terminal and counts["successful"]>0 and counts["error"]>0)
+        failed=bool(terminal and not full_success and counts["successful"]==0 and counts["error"]>0)
+        errors=[]; current_items=[]
+        # v4 exposes item details for the current upload. Capture human-readable
+        # reasons when the requested upload is still current; summary remains valid otherwise.
+        try:
+            # AUTOLOAD_DETAIL_SHARED_THROTTLE_V1: item-level report enrichment is
+            # optional reporting I/O. Skip it during a shared cooldown and publish
+            # any 429 instead of continuing through report pages.
+            if _autoload_throttle_remaining(account_id) > 0:
+                cr=None; current={}
+            else:
+                cr=_httpx.get("https://api.avito.ru/autoload/v4/uploads/current",headers=head,timeout=20)
+                if cr.status_code == 429:
+                    _autoload_record_throttle(account_id, _autoload_retry_after(cr), source="autoload_detail_current_429")
+                current=cr.json() if cr.status_code==200 else {}
+            if int((current or {}).get("upload_id") or 0)==uid:
+                # Avito defaults this endpoint to 20 rows. Publication truth must
+                # cover the whole feed, otherwise campaigns with >20 ads are falsely
+                # left "processing" forever. Fetch bounded pages using Avito's actual
+                # camelCase perPage parameter.
+                current_items=[]; _page=1
+                while _page<=20:
+                    if _autoload_throttle_remaining(account_id) > 0:
+                        break
+                    ir=_httpx.get("https://api.avito.ru/autoload/v4/uploads/current/items",headers=head,
+                                  params={"perPage":100,"page":_page},timeout=20)
+                    if ir.status_code == 429:
+                        _autoload_record_throttle(account_id, _autoload_retry_after(ir), source="autoload_detail_items_429")
+                        break
+                    if ir.status_code!=200: break
+                    _body=ir.json() or {}; _batch=_body.get("items") or []; current_items.extend(_batch)
+                    _meta=_body.get("meta") or {}; _pages=int(_meta.get("pages") or 1)
+                    if _page>=_pages or not _batch: break
+                    _page+=1
+                if current_items:
+                    for item in current_items:
+                        if str(item.get("avito_status") or "").lower() in {"blocked","rejected","error"}:
+                            msgs=item.get("messages") or []
+                            # Avito can return several messages and does not promise
+                            # that index 0 is the blocking reason. Prefer an actual
+                            # error/rejection explanation over informational phone
+                            # normalization so the cabinet never replaces a useful
+                            # terminal diagnosis with a benign side note.
+                            def _msg_rank(_m):
+                                _t=str((_m or {}).get("title") or "").casefold(); _code=int((_m or {}).get("code") or 0) if str((_m or {}).get("code") or "").isdigit() else 0
+                                return (3 if any(x in _t for x in ("отклон","заблок","ошиб","повторн","лимит","не будет опублик")) else (0 if "автоподстанов" in _t or "номер телефона" in _t else 1), 1 if _code else 0)
+                            _best=max(msgs,key=_msg_rank) if msgs else {}
+                            errors.append({"ad_id":item.get("ad_id"),"avito_id":item.get("avito_id"),"status":item.get("avito_status"),
+                                           "message":str((_best or {}).get("title") or "")[:500] if msgs else "Объявление не опубликовано",
+                                           # AUTOLOAD_ERROR_DETAIL_EVIDENCE_V1: preserve provider code and
+                                           # description. The title alone can say only "rejected", hiding
+                                           # the actionable distinction between description policy, quota,
+                                           # duplicate and parameter errors. Read-only evidence only.
+                                           "message_code":(_best or {}).get("code") if msgs else None,
+                                           "message_description":str((_best or {}).get("description") or "")[:1200] if msgs else ""})
+                            if len(errors)>=50: break
+        except Exception:
+            errors=[]; current_items=[]
+
+        # A campaign delivery is scoped even though Avito processes the account's
+        # entire XML feed. Old unrelated ads may fail without making the new campaign fail.
+        scope=None
+        delivery_effect=None
+        wanted={str(x).strip() for x in (expected_ad_ids or []) if str(x).strip()}
+        if wanted and current_items:
+            scoped=[x for x in current_items if str(x.get("ad_id") or "").strip() in wanted]
+            active=[]; scope_errors=[]; unresolved=[]; unresolved_details=[]
+            for item in scoped:
+                ad_id=str(item.get("ad_id") or "").strip()
+                avs=str(item.get("avito_status") or "").lower()
+                slug=str((item.get("section") or {}).get("slug") or "").lower()
+                msgs=item.get("messages") or []
+                # `active` only proves that the old listing is visible. Avito may
+                # simultaneously reject the requested update (notably code 3015:
+                # edit-rate limit). Such a row is transient/unresolved until a later
+                # scheduled feed pass applies the new payload; otherwise BORIS would
+                # falsely report new banners/text as delivered while Avito kept old data.
+                msg_codes={int(m.get("code") or 0) for m in msgs if str(m.get("code") or "").isdigit() or isinstance(m.get("code"),int)}
+                if avs=="active" and not (slug.startswith("problem") and 3015 in msg_codes):
+                    active.append(ad_id); continue
+                # AUTOLOAD_DUPLICATE_2010_TERMINAL_V1: Avito section=duplicate /
+                # message code 2010 is already an actionable provider rejection for
+                # this feed cycle even while the top-level upload can still say
+                # processing. Treat it as scoped failure so recovery can cut over
+                # old->new identities instead of waiting forever or retrying blindly.
+                if avs in {"blocked","rejected","error"} or slug.startswith("error") or slug=="duplicate" or 2010 in msg_codes:
+                    def _scope_msg_rank(_m):
+                        _t=str((_m or {}).get("title") or "").casefold(); _code=int((_m or {}).get("code") or 0) if str((_m or {}).get("code") or "").isdigit() else 0
+                        return (3 if any(x in _t for x in ("отклон","заблок","ошиб","повторн","лимит","не будет опублик")) else (0 if "автоподстанов" in _t or "номер телефона" in _t else 1), 1 if _code else 0)
+                    _best=max(msgs,key=_scope_msg_rank) if msgs else {}
+                    scope_errors.append({"ad_id":ad_id,"avito_id":item.get("avito_id"),"status":avs or slug,
+                                         "section":slug,"message":str((_best or {}).get("title") or "")[:500] if msgs else "Объявление не опубликовано",
+                                         "message_code":(_best or {}).get("code") if msgs else None,
+                                         "message_description":str((_best or {}).get("description") or "")[:1200] if msgs else ""})
+                else:
+                    unresolved.append(ad_id)
+                    # AUTOLOAD_UNRESOLVED_DETAIL_V1: provider can expose a useful
+                    # section/message before the row becomes terminal (for example
+                    # duplicate/moderation). Preserve bounded read-only evidence so
+                    # BORIS can diagnose and self-heal instead of forcing the owner
+                    # to inspect Avito manually.
+                    _detail_messages=[]
+                    for _m in msgs[:5]:
+                        _detail_messages.append({
+                            "code":(_m or {}).get("code"),
+                            "type":str((_m or {}).get("type") or "")[:80],
+                            "title":str((_m or {}).get("title") or "")[:500],
+                            "description":str((_m or {}).get("description") or "")[:1200],
+                        })
+                    unresolved_details.append({
+                        "ad_id":ad_id,
+                        "avito_id":item.get("avito_id"),
+                        "status":avs,
+                        "section":slug,
+                        "messages":_detail_messages,
+                    })
+            # AUTOLOAD_SCOPE_IDENTITY_EVIDENCE_V1: every scoped report row carries
+            # the authoritative Avito ad_id -> avito_id pair. Persist that exact
+            # mapping here so CampaignItem identity cannot remain stale while the
+            # same official report already proves publication. This is local DB
+            # reconciliation only; it never writes to Avito and never uses title
+            # or fuzzy matching.
+            identity_bindings=[]
+            try:
+                from app.db.session import SessionLocal as _IdentitySession
+                from app.services.campaign_identity import bind_from_autoload_evidence as _bind_autoload
+                _idb=_IdentitySession()
+                try:
+                    # AUTOLOAD_PARTIAL_IDENTITY_TRUTH_V1: classified scoped
+                    # errors are authoritative publication state. A numeric Avito id
+                    # proves identity, never successful moderation by itself.
+                    _failed_scope_fids={str((x or {}).get("ad_id") or "").strip() for x in scope_errors}
+                    for _item in scoped:
+                        _fid=str(_item.get("ad_id") or "").strip(); _aid=str(_item.get("avito_id") or "").strip()
+                        if not _fid or not _aid:
+                            continue
+                        _raw_section=str((_item.get("section") or {}).get("slug") or "")
+                        _raw_status=str(_item.get("avito_status") or "")
+                        _bind_section="error_rejected" if _fid in _failed_scope_fids else _raw_section
+                        _bind_status="rejected" if _fid in _failed_scope_fids else _raw_status
+                        _br=_bind_autoload(_idb, account_id, _fid, _aid, upload_id=uid,
+                                           report_section=_bind_section,
+                                           avito_status=_bind_status)
+                        _identity_public=dict(_br.get("identity") or {})
+                        identity_bindings.append({"ad_id":_fid,"avito_id":_aid,"status":_br.get("status"),"reason":_br.get("reason"),
+                                                  "identity_status":_identity_public.get("identity_status")})
+                    _idb.commit()
+                except Exception:
+                    _idb.rollback(); raise
+                finally:
+                    _idb.close()
+            except Exception as _identity_exc:
+                identity_bindings.append({"status":"error","reason":str(_identity_exc)[:500]})
+            # AUTOLOAD_SCOPE_CANONICAL_REJECTION_V1: an active old listing with
+            # success_skipped is not successful delivery when canonical identity
+            # still carries a proven rejected revision. Project that exact binding
+            # back into scope truth so a campaign cannot become false 5/5.
+            _canon_rejected={str(x.get("ad_id") or "").strip() for x in identity_bindings
+                             if str(x.get("identity_status") or "") == "publication_rejected_bound"}
+            if _canon_rejected:
+                active=[x for x in active if str(x) not in _canon_rejected]
+                _existing_err={str((x or {}).get("ad_id") or "").strip() for x in scope_errors}
+                for _rfid in sorted(_canon_rejected-_existing_err):
+                    _src=next((x for x in scoped if str(x.get("ad_id") or "").strip()==_rfid),{})
+                    scope_errors.append({"ad_id":_rfid,"avito_id":_src.get("avito_id"),
+                                         "status":"rejected_revision_not_proven_applied",
+                                         "section":str((_src.get("section") or {}).get("slug") or ""),
+                                         "message":"Активно старое объявление; применение отклонённой ревизии не подтверждено",
+                                         "message_code":None,"message_description":"success_skipped/unchanged не снимает доказанный reject без подтверждения применения новой ревизии"})
+            found={str(x.get("ad_id") or "").strip() for x in scoped}
+            missing=sorted(wanted-found)
+            scope_terminal=(len(active)+len(scope_errors)==len(wanted) and not missing and not unresolved)
+            scope_full=scope_terminal and len(active)==len(wanted)
+            scope_partial=scope_terminal and bool(active) and bool(scope_errors)
+            scope_failed=scope_terminal and not active and bool(scope_errors)
+            delivery_effect=_autoload_scope_delivery_effect(
+                scoped, expected_total=len(wanted), full_success=scope_full, partial=scope_partial
+            )
+            # AUTOLOAD_RAW_PROVIDER_ROWS_V1: keep the exact provider row before
+            # canonical identity overlay.  Scope errors can be synthesized from durable
+            # BORIS publication truth; consumers such as KPI retry suppression still
+            # need the raw Avito status/section/message codes (notably 2214).
+            _provider_rows = []
+            for _raw in scoped:
+                _provider_rows.append({
+                    "ad_id": _raw.get("ad_id"),
+                    "avito_id": _raw.get("avito_id"),
+                    "avito_status": _raw.get("avito_status"),
+                    "section": _raw.get("section") or {},
+                    "messages": [
+                        {
+                            "code": (_m or {}).get("code"),
+                            "type": str((_m or {}).get("type") or "")[:80],
+                            "title": str((_m or {}).get("title") or "")[:500],
+                            "description": str((_m or {}).get("description") or "")[:1200],
+                        }
+                        for _m in ((_raw or {}).get("messages") or [])[:8]
+                    ],
+                })
+            scope={"expected_total":len(wanted),"found":len(scoped),"active":len(active),"errors":len(scope_errors),
+                   "missing":missing,"unresolved":unresolved,"unresolved_details":unresolved_details,
+                   "terminal":scope_terminal,"full_success":scope_full,
+                   "partial":scope_partial,"failed":scope_failed,"item_errors":scope_errors,"identity_bindings":identity_bindings,
+                   "provider_rows":_provider_rows,
+                   "delivery_effect":delivery_effect}
+            terminal=scope_terminal; full_success=scope_full; partial=scope_partial; failed=scope_failed
+            counts={"total":len(wanted),"successful":len(active),"error":len(scope_errors),"blocked":sum(1 for x in scope_errors if 'blocked' in str(x.get('status') or ''))}
+            errors=scope_errors
+
+        _effect_state=str((delivery_effect or {}).get("state") or "")
+        if full_success and _effect_state=="unchanged":
+            _message=f"{counts['successful']} объявлений активны; текущая загрузка Avito — без изменений"
+        elif full_success and _effect_state in {"changed_or_created","changed_or_created_mixed"}:
+            _message=f"Avito подтвердил изменения/публикацию для {counts['successful']} объявлений"
+        elif full_success:
+            _message=f"{counts['successful']} объявлений активны"
+        elif terminal:
+            _message=f"Опубликовано {counts['successful']} из {counts['total']}; с ошибками {counts['error']}"
+        else:
+            _message=f"Avito обрабатывает загрузку: {counts['successful']} из {counts['total']} уже успешно"
+        return {"status":"ok","upload_id":uid,"avito_status":avito_status,"terminal":terminal,
+                "full_success":full_success,"partial":partial,"failed":failed,**counts,
+                "started_at":selected.get("started_at"),"events":selected.get("events") or [],"item_errors":errors,"scope":scope,
+                "delivery_effect":delivery_effect,
+                "followed_latest_from":followed_from,
+                "account_total":_autoload_stats_counts(selected.get("stats") or {}).get("total"),
+                "message":_message}
+    finally:
+        pass
+
+
+def _ensure_autoload_feed_configured(account_id: str, *, token: str|None=None) -> dict:
+    """Attach the canonical BORIS XML feed to the existing Avito Autoload profile.
+
+    Safety: never invent/overwrite schedule or report email. We first read the
+    existing profile, preserve all its settings, then only add/replace the BORIS
+    feed entry. If Avito forbids profile read/write, no profile mutation happens.
+    """
+    from app.db.session import SessionLocal
+    from app.models.account import Account
+    from app.crypto_utils import decrypt_secret
+    import httpx as _httpx
+    from app.services.avito_account_throttle import account_throttle_remaining as _profile_throttle_remaining, record_account_throttle as _profile_record_throttle
+    _autoload_throttle_remaining = _profile_throttle_remaining
+    from email.utils import parsedate_to_datetime as _profile_parsedate
+    def _profile_retry_after(resp) -> int:
+        raw=str((getattr(resp,"headers",{}) or {}).get("Retry-After") or "").strip()
+        if not raw:
+            return 30
+        try:
+            return max(1,int(float(raw)))
+        except Exception:
+            try:
+                dt=_profile_parsedate(raw)
+                if dt.tzinfo is None:
+                    dt=dt.replace(tzinfo=timezone.utc)
+                return max(1,int((dt-datetime.now(timezone.utc)).total_seconds()))
+            except Exception:
+                return 30
+    # AUTOLOAD_PROFILE_SHARED_ACCOUNT_THROTTLE_V1: profile attach/read/write shares
+    # the same Avito tenant quota as stats/inventory. A confirmed Retry-After must
+    # stop this whole helper before provider I/O; any local 429 is published back
+    # to the tenant-wide ledger so sibling workers also fail closed.
+    _profile_retry = _profile_throttle_remaining(account_id)
+    if _profile_retry > 0:
+        return {"status":"error","code":"avito_account_throttled","http_status":429,
+                "retry_after_seconds":int(_profile_retry),
+                "message":"Avito временно ограничил запросы по аккаунту"}
+    db=SessionLocal()
+    try:
+        acc=db.query(Account).filter(Account.account_id==account_id).first()
+        if not acc or not acc.avito_client_id or not acc.avito_client_secret:
+            return {"status":"error","code":"not_connected","message":"Avito не подключён"}
+        client_id_enc=str(acc.avito_client_id); client_secret_enc=str(acc.avito_client_secret)
+    finally:
+        db.close()
+    try:
+        tok=token
+        if not tok:
+            _profile_retry = _profile_throttle_remaining(account_id)
+            if _profile_retry > 0:
+                return {"status":"error","code":"avito_account_throttled","http_status":429,"retry_after_seconds":int(_profile_retry),"message":"Avito временно ограничил запросы по аккаунту"}
+            tr=_httpx.post("https://api.avito.ru/token/",data={"grant_type":"client_credentials","client_id":decrypt_secret(client_id_enc),"client_secret":decrypt_secret(client_secret_enc)},timeout=20)
+            if tr.status_code == 429:
+                _retry=_profile_record_throttle(account_id,_profile_retry_after(tr),source="autoload_profile_token_429")
+                return {"status":"error","code":"avito_account_throttled","http_status":429,"retry_after_seconds":int(_retry),"message":"Avito временно ограничил запросы по аккаунту"}
+            tok=(tr.json() or {}).get("access_token") if tr.status_code==200 else None
+        if not tok:
+            return {"status":"error","code":"token_error","message":"Avito не выдал токен"}
+        head={"Authorization":"Bearer "+tok}
+        feed_url=f"https://boris-ai.pro/api/avito/feed/{account_id}.xml"
+        _profile_retry = _autoload_throttle_remaining(account_id)
+        if _profile_retry > 0:
+            return {"status":"error","code":"avito_account_throttled","http_status":429,"retry_after_seconds":int(_profile_retry),"feed_url":feed_url,"message":"Avito временно ограничил запросы по аккаунту"}
+        pr=_httpx.get("https://api.avito.ru/autoload/v2/profile",headers=head,timeout=20)
+        if pr.status_code == 429:
+            _retry=_profile_record_throttle(account_id,_profile_retry_after(pr),source="autoload_profile_read_429")
+            return {"status":"error","code":"avito_account_throttled","http_status":429,"retry_after_seconds":int(_retry),"feed_url":feed_url,"message":"Avito временно ограничил запросы по аккаунту"}
+        if pr.status_code!=200:
+            return {"status":"error","code":"autoload_profile_forbidden" if pr.status_code in (401,403) else "autoload_profile_unavailable",
+                    "http_status":pr.status_code,"feed_url":feed_url,
+                    "message":"Avito не разрешил BORIS прочитать настройки Автозагрузки по действующим API-ключам."}
+        profile=pr.json() or {}
+        feeds=[dict(x) for x in (profile.get("feeds_data") or []) if isinstance(x,dict)]
+        if any(str(x.get("feed_url") or "").strip()==feed_url for x in feeds):
+            return {"status":"ok","attached":True,"already_attached":True,"feed_url":feed_url,"profile":profile}
+        # AUTOLOAD_EXISTING_ACCOUNT_FEED_ALIAS_V1: some long-lived accounts were
+        # configured before boris-ai.pro and still fetch this exact account from
+        # the legacy BORIS host. Avito may allow reading/starting Autoload while
+        # forbidding profile mutation (403). Treat only an exact /api/avito/feed/
+        # <account>.xml path as already configured; never accept another account
+        # or an arbitrary URL. This avoids turning a harmless host migration into
+        # a P0 zero-inventory outage.
+        from urllib.parse import urlparse as _urlparse_feed
+        _expected_path=f"/api/avito/feed/{account_id}.xml"
+        _aliases=[str(x.get("feed_url") or "").strip() for x in feeds if isinstance(x,dict)]
+        _existing_alias=next((_u for _u in _aliases if _u and _urlparse_feed(_u).path==_expected_path),None)
+        if _existing_alias:
+            return {"status":"ok","attached":True,"already_attached":True,"feed_url":_existing_alias,
+                    "canonical_feed_url":feed_url,"legacy_host_alias":_existing_alias!=feed_url,"profile":profile}
+        # Preserve every existing feed; replace only a stale BORIS entry for this account.
+        feeds=[x for x in feeds if not (str(x.get("feed_name") or "").startswith("BORIS ·") and account_id in str(x.get("feed_name") or ""))]
+        feeds.append({"feed_name":f"BORIS · {account_id}","feed_url":feed_url})
+        body={"autoload_enabled":bool(profile.get("autoload_enabled")),"feeds_data":feeds,
+              "report_email":profile.get("report_email") or "","schedule":profile.get("schedule") or []}
+        _profile_retry = _autoload_throttle_remaining(account_id)
+        if _profile_retry > 0:
+            return {"status":"error","code":"avito_account_throttled","http_status":429,"retry_after_seconds":int(_profile_retry),"feed_url":feed_url,"message":"Avito временно ограничил запросы по аккаунту"}
+        wr=_httpx.post("https://api.avito.ru/autoload/v2/profile",headers={**head,"Content-Type":"application/json"},json=body,timeout=20)
+        if wr.status_code == 429:
+            _retry=_profile_record_throttle(account_id,_profile_retry_after(wr),source="autoload_profile_write_429")
+            return {"status":"error","code":"avito_account_throttled","http_status":429,"retry_after_seconds":int(_retry),"feed_url":feed_url,"message":"Avito временно ограничил запросы по аккаунту"}
+        if wr.status_code!=200:
+            return {"status":"error","code":"autoload_profile_update_forbidden" if wr.status_code in (401,403) else "autoload_profile_update_failed",
+                    "http_status":wr.status_code,"feed_url":feed_url,"message":"Avito не разрешил BORIS прикрепить XML-фид к Автозагрузке."}
+        # Verify attachment; never report success just because POST returned 200.
+        _profile_retry = _autoload_throttle_remaining(account_id)
+        if _profile_retry > 0:
+            return {"status":"error","code":"avito_account_throttled","http_status":429,"retry_after_seconds":int(_profile_retry),"feed_url":feed_url,"message":"Avito profile update accepted; verification deferred by shared Retry-After"}
+        vr=_httpx.get("https://api.avito.ru/autoload/v2/profile",headers=head,timeout=20)
+        if vr.status_code == 429:
+            _retry=_profile_record_throttle(account_id,_profile_retry_after(vr),source="autoload_profile_verify_429")
+            return {"status":"error","code":"avito_account_throttled","http_status":429,"retry_after_seconds":int(_retry),"feed_url":feed_url,"message":"Avito profile update accepted; verification deferred by Retry-After"}
+        vp=(vr.json() or {}) if vr.status_code==200 else {}
+        vurls=[str(x.get("feed_url") or "").strip() for x in (vp.get("feeds_data") or []) if isinstance(x,dict)]
+        ok=feed_url in vurls
+        return {"status":"ok" if ok else "error","attached":ok,"already_attached":False,"feed_url":feed_url,
+                "code":None if ok else "autoload_attach_not_verified","http_status":vr.status_code,
+                "message":"XML-фид BORIS прикреплён к Автозагрузке Avito." if ok else "Avito принял настройку, но BORIS не смог подтвердить прикрепление фида."}
+    finally:
+        pass
+
+
 @router.post("/feed_send_to_avito")
-def feed_send_to_avito(account_id: str = Form(...)):
+def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
     """Запускает автозагрузку на Avito немедленно (не ждёт часового расписания)."""
     from app.db.session import SessionLocal
     from app.models.account import Account
     import httpx as _httpx
+    from app.services.avito_account_throttle import account_throttle_remaining as _feed_send_throttle_remaining, record_account_throttle as _feed_send_record_throttle
+
+    # FEED_SEND_SHARED_ACCOUNT_THROTTLE_V1: manual upload is a provider mutation.
+    # A tenant Retry-After observed by any trusted worker must stop this route
+    # before token/read/upload I/O, and every confirmed 429 must be shared back.
+    def _feed_send_retry_after(resp) -> int:
+        try:
+            raw = str((resp.headers or {}).get("Retry-After") or "").strip()
+            if raw:
+                try:
+                    return max(0, int(float(raw)))
+                except Exception:
+                    from email.utils import parsedate_to_datetime as _parse_feed_send_ra
+                    from datetime import datetime as _feed_send_dt, timezone as _feed_send_tz
+                    when = _parse_feed_send_ra(raw)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=_feed_send_tz.utc)
+                    return max(0, int((when.astimezone(_feed_send_tz.utc)-_feed_send_dt.now(_feed_send_tz.utc)).total_seconds()))
+        except Exception:
+            pass
+        return 30
+
+    def _feed_send_throttle_block():
+        _remaining = _feed_send_throttle_remaining(account_id)
+        if _remaining > 0:
+            return {"status":"error","code":"avito_account_throttled","http_status":429,
+                    "retry_after_seconds":int(_remaining),"changed_avito":False,
+                    "message":"Avito временно ограничил запросы по аккаунту"}
+        return None
+
     db = SessionLocal()
     try:
         acc = db.query(Account).filter(Account.account_id == account_id).first()
-        if not acc or not acc.avito_client_id:
+        if not acc or not acc.avito_client_id or not acc.avito_client_secret:
             return {"status": "error", "message": "У аккаунта нет ключей Avito"}
-        from app.crypto_utils import decrypt_secret
-        tok = _httpx.post("https://api.avito.ru/token/", data={
-            "grant_type": "client_credentials",
-            "client_id": decrypt_secret(acc.avito_client_id),
-            "client_secret": decrypt_secret(acc.avito_client_secret),
-        }, timeout=20).json().get("access_token")
-        if not tok:
-            return {"status": "error", "message": "Не удалось получить токен Avito"}
-        r = _httpx.post("https://api.avito.ru/autoload/v1/upload",
-                        headers={"Authorization": f"Bearer {tok}"}, timeout=25)
-        if r.status_code == 200:
-            return {"status": "ok", "message": "Выгрузка на Avito запущена. Объявления обновятся в ближайшее время."}
-        return {"status": "error", "message": f"Avito ответил {r.status_code}: {r.text[:150]}"}
+        # ACCOUNT_MASTER_OFF_V1: block before token acquisition or any external
+        # Avito request. This protects every caller of feed_send_to_avito,
+        # including old UI/routes and future automation paths.
+        from app.services.reliability import module_blocked as _module_blocked
+        _blocked, _blocked_reason = _module_blocked(db, "feed", account_id)
+        if _blocked:
+            return {"status":"blocked","code":"account_disabled","message":_blocked_reason or "Действия BORIS для аккаунта отключены","changed_avito":False}
+        client_id_enc=str(acc.avito_client_id); client_secret_enc=str(acc.avito_client_secret)
     finally:
         db.close()
+    try:
+        from app.crypto_utils import decrypt_secret
+        _block = _feed_send_throttle_block()
+        if _block:
+            return _block
+        _tok_resp = _httpx.post("https://api.avito.ru/token/", data={
+            "grant_type": "client_credentials",
+            "client_id": decrypt_secret(client_id_enc),
+            "client_secret": decrypt_secret(client_secret_enc),
+        }, timeout=20)
+        if _tok_resp.status_code == 429:
+            _retry = _feed_send_record_throttle(account_id, _feed_send_retry_after(_tok_resp), source="feed_send_token_429")
+            return {"status":"error","code":"avito_account_throttled","http_status":429,
+                    "retry_after_seconds":int(_retry),"changed_avito":False,
+                    "message":"Avito временно ограничил запросы по аккаунту"}
+        tok = (_tok_resp.json() or {}).get("access_token") if _tok_resp.status_code == 200 else None
+        if not tok:
+            return {"status": "error", "message": "Не удалось получить токен Avito"}
+
+        # GLOBAL PUBLICATION GUARD: OAuth keys alone are not enough. Avito can
+        # accept credentials while autoload is disabled for the tariff/account.
+        # Block before any upload request and verify the exact public feed that
+        # Avito is about to fetch. This protects every caller, not only Campaign.
+        _head={"Authorization": f"Bearer {tok}"}
+        try:
+            import asyncio as _asyncio
+            from app.api.parser import validate_feed_xmlcheck as _validate_feed_xmlcheck
+            _feed_url=f"https://boris-ai.pro/api/avito/feed/{account_id}.xml"
+            _vr=_asyncio.run(_validate_feed_xmlcheck(_feed_url)) or {}
+            _validation_status=str(_vr.get("status") or "").lower()
+            # FEED_VALIDATION_PENDING_NOT_FAILURE_V1: Avito can keep an otherwise
+            # valid XML check in HTTP-202/report-building state for minutes. This is
+            # an external wait, not a failed feed. Preserve the publication lifecycle
+            # and retry later without regenerating content or asking the owner.
+            if _validation_status == "pending":
+                return {"status":"waiting","code":"feed_validation_pending","message":"Официальная проверка Avito ещё формируется; BORIS повторит проверку автоматически.",
+                        "validation_status":"pending","issues":[],"errors":[],"check_id":_vr.get("check_id")}
+            if _validation_status != "ok":
+                return {"status":"error","code":"feed_validation_failed","message":"Отправка заблокирована: текущий фид не прошёл официальную проверку Avito.",
+                        "validation_status":_vr.get("status"),"issues":_vr.get("issues") or [],"errors":_vr.get("errors") or []}
+        except Exception as _ve:
+            return {"status":"error","code":"feed_validation_unavailable","message":"Отправка заблокирована: не удалось выполнить обязательную проверку фида Avito.","error":str(_ve)[:200]}
+
+        # VALIDATOR -> ATTACH TO AVITO AUTOLOAD PROFILE -> START UPLOAD.
+        # The profile update preserves existing schedule/email/other feeds.
+        _attach=_ensure_autoload_feed_configured(account_id,token=tok)
+        if _attach.get("status")!="ok" or not _attach.get("attached"):
+            return {"status":"error","code":_attach.get("code") or "autoload_attach_failed",
+                    "http_status":_attach.get("http_status"),"feed_url":_attach.get("feed_url"),
+                    "message":_attach.get("message") or "BORIS не смог прикрепить XML-фид к Автозагрузке Avito."}
+
+        _before_ids=set()
+        try:
+            _block = _feed_send_throttle_block()
+            if _block:
+                return _block
+            _before=_httpx.get("https://api.avito.ru/autoload/v4/uploads",headers=_head,params={"perPage":20},timeout=20)
+            if _before.status_code == 429:
+                _retry = _feed_send_record_throttle(account_id, _feed_send_retry_after(_before), source="feed_send_before_history_429")
+                return {"status":"error","code":"avito_account_throttled","http_status":429,
+                        "retry_after_seconds":int(_retry),"changed_avito":False,
+                        "message":"Avito временно ограничил запросы по аккаунту"}
+            if _before.status_code==200:
+                _before_ids={int(x.get("upload_id") or 0) for x in ((_before.json() or {}).get("uploads") or []) if x.get("upload_id")}
+        except Exception:
+            _before_ids=set()
+        # Upload start is an external side effect. A transport timeout after the
+        # POST may mean Avito accepted it even though BORIS missed the response.
+        # Never classify that as a safe failure or blindly submit again.
+        _upload_transport_error = None
+        try:
+            _block = _feed_send_throttle_block()
+            if _block:
+                return _block
+            r = _httpx.post("https://api.avito.ru/autoload/v1/upload",
+                            headers=_head, timeout=25)
+        except Exception as _ue:
+            r = None
+            _upload_transport_error = _ue
+        if r is not None and r.status_code == 200:
+            _upload_id=0
+            try:
+                _body=r.json() if r.content else {}
+                _upload_id=int((_body or {}).get("upload_id") or 0)
+            except Exception:
+                _upload_id=0
+            if not _upload_id:
+                # v1/upload frequently returns 200 before v4 history becomes
+                # consistent. Never fall back to an arbitrary older OpenAPI row:
+                # that produced a false upload_id and broke external verification.
+                # Poll only for an id that did not exist before this POST.
+                import time as _time_upload
+                try:
+                    for _attempt in range(8):
+                        if _feed_send_throttle_remaining(account_id) > 0:
+                            break
+                        _candidates=[]
+                        _after=_httpx.get("https://api.avito.ru/autoload/v4/uploads",headers=_head,params={"perPage":20},timeout=20)
+                        if _after.status_code == 429:
+                            _feed_send_record_throttle(account_id, _feed_send_retry_after(_after), source="feed_send_post_history_429")
+                            break
+                        if _after.status_code==200:
+                            for _x in ((_after.json() or {}).get("uploads") or []):
+                                _id=int(_x.get("upload_id") or 0)
+                                if _id and _id not in _before_ids and str(_x.get("source") or "").lower()=="openapi":
+                                    _candidates.append(_x)
+                        if _feed_send_throttle_remaining(account_id) > 0:
+                            break
+                        _cur=_httpx.get("https://api.avito.ru/autoload/v4/uploads/current",headers=_head,timeout=20)
+                        if _cur.status_code == 429:
+                            _feed_send_record_throttle(account_id, _feed_send_retry_after(_cur), source="feed_send_post_current_429")
+                            break
+                        if _cur.status_code==200:
+                            _c=_cur.json() or {}; _cid=int(_c.get("upload_id") or 0)
+                            if _cid and _cid not in _before_ids and str(_c.get("source") or "").lower()=="openapi":
+                                _candidates.append(_c)
+                        if _candidates:
+                            # Highest id is the newest launch among post-request rows.
+                            _upload_id=max(int(_x.get("upload_id") or 0) for _x in _candidates)
+                            break
+                        if _attempt < 7:
+                            _time_upload.sleep(0.75)
+                except Exception:
+                    _upload_id=0
+            try:
+                from app.services.action_log import log_action, ACTOR_USER
+                log_action(account_id=account_id, action="Запустил выгрузку объявлений",
+                           object_kind="объявления", object_name="фид аккаунта",
+                           after_val=("запуск принят Avito, итоговый отчёт ожидается"+(f" · upload_id={_upload_id}" if _upload_id else "")),
+                           reason="обновление объявлений на площадке",
+                           actor=ACTOR_USER, source="avito.upload_feed")
+            except Exception:
+                pass
+            return {"status":"ok","delivery_state":"submitted","upload_id":(_upload_id or None),
+                    "message":"Avito принял запуск. BORIS ждёт итоговый отчёт публикации."}
+
+        # Read-only reconciliation after ambiguous transport/5xx. A newly
+        # observed OpenAPI upload proves that Avito accepted the launch. If no
+        # proof exists yet, preserve delivery_unknown; callers must keep the
+        # submitted feed snapshot and verify later rather than restore/retry.
+        _ambiguous = (_upload_transport_error is not None) or (r is not None and int(r.status_code) >= 500)
+        if _ambiguous:
+            import time as _time_reconcile_upload
+            _reconciled_id = 0
+            try:
+                for _attempt in range(4):
+                    if _feed_send_throttle_remaining(account_id) > 0:
+                        break
+                    _cand=[]
+                    _after=_httpx.get("https://api.avito.ru/autoload/v4/uploads",headers=_head,params={"perPage":20},timeout=20)
+                    if _after.status_code == 429:
+                        _feed_send_record_throttle(account_id, _feed_send_retry_after(_after), source="feed_send_ambiguous_history_429")
+                        break
+                    if _after.status_code==200:
+                        for _x in ((_after.json() or {}).get("uploads") or []):
+                            _id=int(_x.get("upload_id") or 0)
+                            if _id and _id not in _before_ids and str(_x.get("source") or "").lower()=="openapi": _cand.append(_id)
+                    if _feed_send_throttle_remaining(account_id) > 0:
+                        break
+                    _cur=_httpx.get("https://api.avito.ru/autoload/v4/uploads/current",headers=_head,timeout=20)
+                    if _cur.status_code == 429:
+                        _feed_send_record_throttle(account_id, _feed_send_retry_after(_cur), source="feed_send_ambiguous_current_429")
+                        break
+                    if _cur.status_code==200:
+                        _x=_cur.json() or {}; _id=int(_x.get("upload_id") or 0)
+                        if _id and _id not in _before_ids and str(_x.get("source") or "").lower()=="openapi": _cand.append(_id)
+                    if _cand:
+                        _reconciled_id=max(_cand); break
+                    if _attempt < 3: _time_reconcile_upload.sleep(0.75)
+            except Exception:
+                _reconciled_id=0
+            if _reconciled_id:
+                return {"status":"ok","delivery_state":"submitted_reconciled","upload_id":_reconciled_id,
+                        "message":"BORIS восстановил подтверждение запуска из отчёта Avito после неоднозначного сетевого ответа."}
+            return {"status":"delivery_unknown","delivery_state":"delivery_unknown","upload_id":None,
+                    "code":"autoload_submit_delivery_unknown",
+                    "message":"Результат запуска Автозагрузки пока не доказан. Повторная отправка запрещена до read-only проверки Avito.",
+                    "error_type":type(_upload_transport_error).__name__ if _upload_transport_error is not None else f"http_{getattr(r,'status_code',None)}"}
+        # AUTOLOAD_MANUAL_HOURLY_LIMIT_SCHEDULED_FALLBACK_V1:
+        # A 429 here can be Avito's business rule "one manual autoload per hour",
+        # not tenant API exhaustion. If the exact BORIS URL feed is already enabled
+        # on an hourly/scheduled profile, fall back to the durable scheduled watcher
+        # instead of returning an owner-facing error or retrying the mutation.
+        _r_text=str(r.text or "")
+        _scheduled_fallback_reason=None
+        if r.status_code == 403 and "Запуск выгрузки недоступен" in _r_text:
+            _scheduled_fallback_reason="manual_api_forbidden"
+        elif r.status_code == 429 and ("В пределах одного часа" in _r_text or "можно запустить только одну автозагрузку" in _r_text):
+            _scheduled_fallback_reason="manual_hourly_limit"
+        if _scheduled_fallback_reason:
+            try:
+                _block = _feed_send_throttle_block()
+                if _block:
+                    return _block
+                _pr=_httpx.get("https://api.avito.ru/autoload/v2/profile",headers=_head,timeout=20)
+                if _pr.status_code == 429:
+                    _retry = _feed_send_record_throttle(account_id, _feed_send_retry_after(_pr), source="feed_send_schedule_profile_429")
+                    return {"status":"error","code":"avito_account_throttled","http_status":429,
+                            "retry_after_seconds":int(_retry),"changed_avito":False,
+                            "message":"Avito временно ограничил запросы по аккаунту"}
+                _profile=_pr.json() if _pr.status_code==200 else {}
+                _feed_url=f"https://boris-ai.pro/api/avito/feed/{account_id}.xml"
+                from urllib.parse import urlparse as _urlparse_sched
+                _expected_path=f"/api/avito/feed/{account_id}.xml"
+                _attached_url=next((str(x.get("feed_url") or "").strip() for x in (_profile.get("feeds_data") or []) if isinstance(x,dict)
+                                    and _urlparse_sched(str(x.get("feed_url") or "").strip()).path==_expected_path),None)
+                _attached=bool(_attached_url)
+                _schedule=_profile.get("schedule") or []
+                _retry_seconds=None
+                if _scheduled_fallback_reason=="manual_hourly_limit":
+                    try:
+                        import re as _re_hourly
+                        _mm=_re_hourly.search(r"через\s+(\d+)\s+мин",_r_text,flags=_re_hourly.I)
+                        if _mm:
+                            _retry_seconds=int(_mm.group(1))*60
+                    except Exception:
+                        _retry_seconds=None
+                if bool(_profile.get("autoload_enabled")) and _attached and _schedule:
+                    return {"status":"ok","delivery_state":"scheduled_url","upload_id":None,
+                            "baseline_upload_id":(max(_before_ids) if _before_ids else None),
+                            "schedule":_schedule,"feed_url":_attached_url,"canonical_feed_url":_feed_url,
+                            "legacy_host_alias":_attached_url!=_feed_url,
+                            "fallback_reason":_scheduled_fallback_reason,
+                            "retry_after_seconds":_retry_seconds,
+                            "message":("Ручной запуск временно ограничен Avito; BORIS автоматически ждёт ближайший плановый забор URL-фида."
+                                       if _scheduled_fallback_reason=="manual_hourly_limit" else
+                                       "Фид обновлён и прикреплён. Для этого аккаунта Avito запрещает ручной API-запуск и заберёт URL-фид по своему расписанию.")}
+            except Exception:
+                pass
+        if r.status_code == 429:
+            _retry = _feed_send_record_throttle(account_id, _feed_send_retry_after(r), source="feed_send_upload_429")
+            return {"status":"error","code":"avito_account_throttled","http_status":429,
+                    "retry_after_seconds":int(_retry),"changed_avito":False,
+                    "message":"Avito временно ограничил запросы по аккаунту"}
+        return {"status": "error", "message": f"Avito ответил {r.status_code}: {r.text[:150]}"}
+    finally:
+        pass
 
 
 @router.post("/feed_import_active")
@@ -1291,20 +2437,81 @@ def feed_import_active(account_id: str = Form(...)):
         if not acc or not acc.avito_client_id:
             return {"status": "error", "message": "У аккаунта нет ключей Avito"}
         from app.crypto_utils import decrypt_secret
-        tok = _httpx.post("https://api.avito.ru/token/", data={
+        # FEED_IMPORT_SHARED_ACCOUNT_THROTTLE_V1: an owner-triggered inventory
+        # import must not bypass a Retry-After observed by the marketer/stats lane.
+        # Check before token/provider I/O so a throttled tenant creates no new pressure.
+        from app.services.avito_account_throttle import account_throttle_remaining as _feed_throttle_remaining, record_account_throttle as _feed_record_throttle
+        _feed_retry = _feed_throttle_remaining(account_id)
+        if _feed_retry > 0:
+            return {"status":"blocked","reason_code":"avito_account_throttled",
+                    "retry_after_seconds":int(_feed_retry),"added":0}
+        tok_resp = _httpx.post("https://api.avito.ru/token/", data={
             "grant_type": "client_credentials",
             "client_id": decrypt_secret(acc.avito_client_id),
             "client_secret": decrypt_secret(acc.avito_client_secret),
-        }, timeout=20).json().get("access_token")
+        }, timeout=20)
+        if tok_resp.status_code == 429:
+            # FEED_IMPORT_TOKEN_RETRY_AFTER_V1: token quota is part of the same
+            # Avito tenant pressure. Publish provider Retry-After before any
+            # inventory request so sibling workers stop as well.
+            retry = 30
+            try:
+                raw = str(tok_resp.headers.get("Retry-After") or "").strip()
+                if raw:
+                    try:
+                        retry = max(0, int(float(raw)))
+                    except Exception:
+                        from email.utils import parsedate_to_datetime
+                        from datetime import datetime, timezone
+                        when = parsedate_to_datetime(raw)
+                        if when.tzinfo is None:
+                            when = when.replace(tzinfo=timezone.utc)
+                        retry = max(0, int((when.astimezone(timezone.utc)-datetime.now(timezone.utc)).total_seconds()))
+            except Exception:
+                retry = 30
+            retry = _feed_record_throttle(account_id, retry or 30, source="feed_import_token_429")
+            return {"status":"blocked","reason_code":"avito_account_throttled",
+                    "retry_after_seconds":int(retry),"added":0}
+        tok = (tok_resp.json() or {}).get("access_token") if tok_resp.status_code == 200 else None
         if not tok:
             return {"status": "error", "message": "Не удалось получить токен"}
         # собираем все активные объявления постранично
         active = []
         page = 1
         while page <= 20:
+            # FEED_IMPORT_INTERCALL_THROTTLE_V1: honor a Retry-After published by
+            # any sibling worker between inventory pages; never continue a
+            # paginated scan after tenant backpressure is already confirmed.
+            _feed_retry = _feed_throttle_remaining(account_id)
+            if _feed_retry > 0:
+                return {"status":"blocked","reason_code":"avito_account_throttled",
+                        "retry_after_seconds":int(_feed_retry),"added":0}
             r = _httpx.get("https://api.avito.ru/core/v1/items",
                            headers={"Authorization": f"Bearer {tok}"},
                            params={"per_page": 100, "page": page, "status": "active"}, timeout=25)
+            if r.status_code == 429:
+                retry = 30
+                try:
+                    raw = str(r.headers.get("Retry-After") or "").strip()
+                    if raw:
+                        try:
+                            retry = max(0, int(float(raw)))
+                        except Exception:
+                            from email.utils import parsedate_to_datetime
+                            from datetime import datetime, timezone
+                            when = parsedate_to_datetime(raw)
+                            if when.tzinfo is None:
+                                when = when.replace(tzinfo=timezone.utc)
+                            retry = max(0, int((when.astimezone(timezone.utc)-datetime.now(timezone.utc)).total_seconds()))
+                except Exception:
+                    retry = 30
+                retry = _feed_record_throttle(account_id, retry or 30, source="feed_import_items_429")
+                # FEED_IMPORT_NO_PARTIAL_INVENTORY_ON_THROTTLE_V1: do not persist
+                # a truncated inventory as if the provider scan were complete.
+                return {"status":"blocked","reason_code":"avito_account_throttled",
+                        "retry_after_seconds":int(retry),"added":0}
+            if r.status_code != 200:
+                return {"status":"error","code":r.status_code,"message":"Avito inventory unavailable","added":0}
             batch = r.json().get("resources", [])
             if not batch:
                 break
@@ -1450,7 +2657,36 @@ def get_template_effectiveness(account_id: str):
             {**t, "views": 0, "contacts": 0, "conversion": 0, "items_count": 0, "status": "no_data"} for t in templates
         ]}
 
-    import requests as _requests
+    # TEMPLATE_EFFECTIVENESS_SHARED_ACCOUNT_THROTTLE_V1: template analytics is
+    # read-only but consumes the same tenant quota. A throttled/partial statistics
+    # sample must never be converted into fake zero performance.
+    from app.services.avito_account_throttle import (
+        account_throttle_remaining as _tpl_throttle_remaining,
+        record_account_throttle as _tpl_record_throttle,
+    )
+
+    def _tpl_retry_after(resp) -> int:
+        try:
+            raw = str((getattr(resp, "headers", {}) or {}).get("Retry-After") or "").strip()
+            if raw:
+                try:
+                    return max(0, int(float(raw)))
+                except Exception:
+                    from email.utils import parsedate_to_datetime
+                    from datetime import datetime, timezone
+                    when = parsedate_to_datetime(raw)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    return max(0, int((when.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
+        except Exception:
+            pass
+        return 30
+
+    _shared_retry = int(_tpl_throttle_remaining(account_id) or 0)
+    if _shared_retry > 0:
+        return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                "retry_after_seconds": _shared_retry, "templates": templates}
+
     from app.db.session import SessionLocal as _SL
     from app.models.account import Account
     db2 = _SL()
@@ -1460,12 +2696,35 @@ def get_template_effectiveness(account_id: str):
             return {"status": "ok", "templates": [
                 {**t, "views": 0, "contacts": 0, "conversion": 0, "items_count": 0, "status": "no_data"} for t in templates
             ]}
-        from app.crypto_utils import decrypt_secret
-        tok = _requests.post("https://api.avito.ru/token/", data={
-            "grant_type": "client_credentials", "client_id": decrypt_secret(acc.avito_client_id), "client_secret": decrypt_secret(acc.avito_client_secret),
-        }, timeout=20).json().get("access_token")
+        avito_user_id = str(acc.avito_user_id or "").strip()
     finally:
         db2.close()
+
+    token_data = get_avito_token(account_id)
+    if not isinstance(token_data, dict) or not token_data.get("access_token"):
+        return {"status": "degraded", "degraded": True, "fresh_provider_proof": False,
+                "templates": templates, "message": "Статистика Avito временно недоступна"}
+    tok = _extract_token(token_data)
+
+    if not avito_user_id:
+        _shared_retry = int(_tpl_throttle_remaining(account_id) or 0)
+        if _shared_retry > 0:
+            return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                    "retry_after_seconds": _shared_retry, "templates": templates}
+        me_resp = _avito_http_get(
+            "https://api.avito.ru/core/v1/accounts/self",
+            headers={"Authorization": f"Bearer {tok}"}, timeout=20,
+        )
+        if me_resp.status_code == 429:
+            _retry = int(_tpl_record_throttle(
+                account_id, _tpl_retry_after(me_resp), source="template_effectiveness_identity_429"
+            ) or 30)
+            return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                    "retry_after_seconds": _retry, "templates": templates}
+        if me_resp.status_code != 200:
+            return {"status": "degraded", "degraded": True, "fresh_provider_proof": False,
+                    "templates": templates, "message": "Не удалось подтвердить Avito user id"}
+        avito_user_id = str((me_resp.json() or {}).get("id") or "").strip()
 
     from datetime import date as _date, timedelta as _timedelta
     date_to = _date.today().isoformat()
@@ -1473,23 +2732,37 @@ def get_template_effectiveness(account_id: str):
     stats_by_avito_id = {}
     avito_ids = list(template_by_avito_id.keys())
     for i in range(0, len(avito_ids), 200):
+        _shared_retry = int(_tpl_throttle_remaining(account_id) or 0)
+        if _shared_retry > 0:
+            return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                    "retry_after_seconds": _shared_retry, "templates": templates}
         batch = avito_ids[i:i+200]
         try:
-            r = _requests.post(
-                f"https://api.avito.ru/stats/v1/accounts/{acc.avito_user_id}/items",
+            r = _avito_http_post(
+                f"https://api.avito.ru/stats/v1/accounts/{avito_user_id}/items",
                 headers={"Authorization": f"Bearer {tok}"},
                 json={"dateFrom": date_from, "dateTo": date_to, "fields": ["uniqViews", "uniqContacts"], "itemIds": batch},
                 timeout=20,
             )
-            if r.status_code == 200:
-                for it in r.json().get("result", {}).get("items", []):
-                    v = c = 0
-                    for s in it.get("stats", []):
-                        v += s.get("uniqViews", 0)
-                        c += s.get("uniqContacts", 0)
-                    stats_by_avito_id[it["itemId"]] = {"views": v, "contacts": c}
-        except Exception:
-            pass
+        except Exception as exc:
+            return {"status": "degraded", "degraded": True, "fresh_provider_proof": False,
+                    "templates": templates, "message": f"Статистика Avito временно недоступна: {type(exc).__name__}"}
+        if r.status_code == 429:
+            _retry = int(_tpl_record_throttle(
+                account_id, _tpl_retry_after(r), source="template_effectiveness_stats_429"
+            ) or 30)
+            return {"status": "deferred", "degraded": True, "fresh_provider_proof": False,
+                    "retry_after_seconds": _retry, "templates": templates}
+        if r.status_code != 200:
+            return {"status": "degraded", "degraded": True, "fresh_provider_proof": False,
+                    "http_status": int(r.status_code), "templates": templates,
+                    "message": "Avito временно не отдал полную статистику шаблонов"}
+        for it in r.json().get("result", {}).get("items", []):
+            v = c = 0
+            for s in it.get("stats", []):
+                v += s.get("uniqViews", 0)
+                c += s.get("uniqContacts", 0)
+            stats_by_avito_id[it["itemId"]] = {"views": v, "contacts": c}
 
     tpl_agg = {t["id"]: {"views": 0, "contacts": 0, "items_count": 0} for t in templates}
     for avito_id, tpl_id in template_by_avito_id.items():
@@ -1570,23 +2843,225 @@ def get_feed_items_list(account_id: str = "otdushi"):
     return {"status": "ok", "count": len(items), "items": items}
 
 
-def _save_feed_items(account_id: str, items: list):
-    """Сохраняет items фида в постоянное хранилище."""
+def _assert_no_legacy_visual_urls(db, account_id: str, image_urls) -> None:
+    """Hard fail-closed Avito visual invariant.
+
+    Forbidden forever:
+    - media produced by boris_unique / boris_deterministic;
+    - legacy ``fullai_*`` banners where the image model rendered visible Russian
+      advertising copy directly.
+
+    Canonical feed_items/drafts were migrated to zero fullai refs on 2026-09-02,
+    therefore there is deliberately no grandfathering: rollback, recovery,
+    import and every future writer must obey the current visual policy.
+    """
+    from urllib.parse import unquote as _url_unquote
+    from app.models.media_asset import MediaAsset
+
+    legacy = {"boris_deterministic", "boris_unique"}
+    rels = []
+    legacy_fullai = []
+    for raw in image_urls or []:
+        url = str(raw or "").strip()
+        if not url:
+            continue
+        clean = url.split("?", 1)[0]
+        if "/images/" not in clean:
+            continue
+        rel = _url_unquote(clean.split("/images/", 1)[1])
+        rels.append(rel)
+        name = rel.rsplit("/", 1)[-1].lower()
+        # Catch original fullai_* plus trimmed_/uploaded_ copies from showcases.
+        if any(marker in name for marker in ("fullai_", "gptimg_")):
+            legacy_fullai.append(clean)
+
+    if legacy_fullai:
+        raise ValueError("forbidden legacy fullai banner in Avito media: " + sorted(set(legacy_fullai))[0][:240])
+
+    if not rels:
+        return
+    from sqlalchemy import or_ as _or_gate
+    # Deleted historical MediaAsset rows must not poison a currently approved
+    # image path. MediaLink/delivery already ignore deleted assets; apply the
+    # same lifecycle rule here so an obsolete legacy registration cannot block
+    # a new live asset that uses the same storage key.
+    bad = db.query(MediaAsset.storage_key, MediaAsset.source_provider, MediaAsset.source_ref).filter(
+        MediaAsset.account_id == account_id,
+        MediaAsset.deleted_at.is_(None),
+        MediaAsset.storage_key.in_(tuple(set(rels))),
+        _or_gate(
+            MediaAsset.source_provider.in_(tuple(legacy)),
+            MediaAsset.source_ref == "campaign_openai_gpt_image_2",
+        ),
+    ).all()
+    if bad:
+        reasons = sorted({
+            ("source_ref:" + str(ref)) if str(ref or "") == "campaign_openai_gpt_image_2"
+            else ("provider:" + str(provider or "").lower())
+            for _, provider, ref in bad
+        })
+        raise ValueError("forbidden legacy visual in Avito media: " + ",".join(reasons))
+
+
+# FEED_STORAGE_ATOMIC_MUTATION_V1: feed mutations share one account-scoped
+# PostgreSQL advisory transaction lock. Long validation/provider operations may
+# read outside the lock, but the final mutation is always reapplied to the latest
+# feed snapshot so unrelated concurrent listings are not lost.
+def _feed_items_lock_key(account_id: str) -> int:
+    import hashlib as _hashlib
+    raw = int.from_bytes(_hashlib.blake2b(("feed_items|" + str(account_id or "")).encode("utf-8"), digest_size=8).digest(), "big", signed=False)
+    return raw if raw < (1 << 63) else raw - (1 << 64)
+
+
+def _mutate_feed_items(account_id: str, mutator):
     from app.db.session import SessionLocal
     from app.models.storage import Storage
+    from app.services.feed_param_normalizer import normalize_feed_dicts
+    from sqlalchemy import text as _sql_text
     import json as _json
     db = SessionLocal()
     try:
-        raw = _json.dumps([it.model_dump() for it in items], ensure_ascii=False)
-        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "feed_items").first()
+        db.execute(_sql_text("select pg_advisory_xact_lock(:k)"), {"k": _feed_items_lock_key(account_id)})
+        row = (db.query(Storage)
+               .filter(Storage.account_id == account_id, Storage.key == "feed_items")
+               .with_for_update().first())
+        current = []
+        if row and row.value:
+            raw = _json.loads(row.value)
+            for it in raw if isinstance(raw, list) else []:
+                try:
+                    current.append(FeedItem(**it))
+                except Exception as exc:
+                    raise RuntimeError("FEED_STORAGE_INVALID_ITEM:" + str((it or {}).get("id") or "") + ":" + str(exc)[:120])
+        updated = mutator(list(current))
+        if not isinstance(updated, list):
+            raise RuntimeError("FEED_MUTATOR_INVALID")
+        models = [it if isinstance(it, FeedItem) else FeedItem(**it) for it in updated]
+        seen = set()
+        dicts = []
+        for it in models:
+            iid = str(it.id or "").strip()
+            if not iid:
+                raise RuntimeError("FEED_ITEM_ID_REQUIRED")
+            if iid in seen:
+                raise RuntimeError("FEED_ITEM_ID_DUPLICATE:" + iid)
+            seen.add(iid)
+            d = it.model_dump()
+            _assert_no_legacy_visual_urls(db, account_id, d.get("images") or [])
+            dicts.append(d)
+        dicts, _norm_report = normalize_feed_dicts(db, dicts)
+        normalized = [FeedItem(**d) for d in dicts]
+        payload = _json.dumps([x.model_dump() for x in normalized], ensure_ascii=False)
+        if row:
+            row.value = payload
+        else:
+            row = Storage(account_id=account_id, key="feed_items", value=payload)
+            db.add(row)
+        db.commit()
+        return normalized
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _upsert_feed_items(account_id: str, items: list):
+    incoming = [it if isinstance(it, FeedItem) else FeedItem(**it) for it in (items or [])]
+    def _merge(current):
+        by_id = {str(it.id): it for it in current}
+        order = [str(it.id) for it in current]
+        for it in incoming:
+            iid = str(it.id)
+            if iid not in by_id:
+                order.append(iid)
+            by_id[iid] = it
+        return [by_id[iid] for iid in order]
+    return _mutate_feed_items(account_id, _merge)
+
+
+def _save_feed_items(account_id: str, items: list):
+    """Явная полная замена фида под account-scoped lock."""
+    replacement = [it if isinstance(it, FeedItem) else FeedItem(**it) for it in (items or [])]
+    return _mutate_feed_items(account_id, lambda _current: replacement)
+
+# DRAFT_STORAGE_ATOMIC_MUTATION_V1: all server-side draft mutations use one
+# account-scoped PostgreSQL transaction/advisory lock. This prevents two workers
+# from doing stale read -> full overwrite and silently deleting each other's drafts.
+def _drafts_lock_key(account_id: str) -> int:
+    import hashlib as _hashlib
+    raw = int.from_bytes(_hashlib.blake2b(("drafts|" + str(account_id or "")).encode("utf-8"), digest_size=8).digest(), "big", signed=False)
+    return raw if raw < (1 << 63) else raw - (1 << 64)
+
+
+def _mutate_drafts(account_id: str, mutator):
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from sqlalchemy import text as _sql_text
+    import json as _json
+    db = SessionLocal()
+    try:
+        db.execute(_sql_text("select pg_advisory_xact_lock(:k)"), {"k": _drafts_lock_key(account_id)})
+        row = (db.query(Storage)
+               .filter(Storage.account_id == account_id, Storage.key == "drafts")
+               .with_for_update().first())
+        current = []
+        if row and row.value:
+            current = _json.loads(row.value)
+            if not isinstance(current, list):
+                raise RuntimeError("DRAFT_STORAGE_INVALID")
+        updated = mutator([dict(x) for x in current])
+        if not isinstance(updated, list):
+            raise RuntimeError("DRAFT_MUTATOR_INVALID")
+        seen = set()
+        normalized = []
+        for d in updated:
+            if not isinstance(d, dict):
+                raise RuntimeError("DRAFT_ITEM_INVALID")
+            did = str(d.get("id") or "").strip()
+            if not did:
+                raise RuntimeError("DRAFT_ID_REQUIRED")
+            if did in seen:
+                raise RuntimeError("DRAFT_ID_DUPLICATE:" + did)
+            seen.add(did)
+            _assert_no_legacy_visual_urls(db, account_id, d.get("images") or [])
+            normalized.append(d)
+        raw = _json.dumps(normalized, ensure_ascii=False)
         if row:
             row.value = raw
         else:
-            row = Storage(account_id=account_id, key="feed_items", value=raw)
+            row = Storage(account_id=account_id, key="drafts", value=raw)
             db.add(row)
         db.commit()
+        return normalized
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
+
+
+def _drafts_revision(drafts: list) -> str:
+    import hashlib as _hashlib, json as _json
+    raw = _json.dumps(drafts or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return _hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _append_drafts(account_id: str, drafts: list):
+    incoming = [dict(x) for x in (drafts or [])]
+    def _append(current):
+        by_id = {str(d.get("id")): d for d in current if str(d.get("id") or "").strip()}
+        order = [str(d.get("id")) for d in current if str(d.get("id") or "").strip()]
+        for d in incoming:
+            did = str(d.get("id") or "").strip()
+            if not did:
+                raise RuntimeError("DRAFT_ID_REQUIRED")
+            if did not in by_id:
+                order.append(did)
+            by_id[did] = d
+        return [by_id[x] for x in order]
+    return _mutate_drafts(account_id, _append)
+
 
 def _load_drafts(account_id: str) -> list:
     """Читает черновики объявлений (созданные, но ещё не опубликованные) из хранилища."""
@@ -1605,42 +3080,59 @@ def _load_drafts(account_id: str) -> list:
     return []
 
 def _save_drafts(account_id: str, drafts: list):
-    """Сохраняет черновики объявлений в хранилище."""
-    from app.db.session import SessionLocal
-    from app.models.storage import Storage
-    import json as _json
-    db = SessionLocal()
-    try:
-        raw = _json.dumps(drafts, ensure_ascii=False)
-        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "drafts").first()
-        if row:
-            row.value = raw
-        else:
-            row = Storage(account_id=account_id, key="drafts", value=raw)
-            db.add(row)
-        db.commit()
-    finally:
-        db.close()
+    """Полная замена списка под тем же account-scoped lock.
+
+    Внутренние read/modify/write пути этой функцией не пользуются. Она остаётся
+    низкоуровневой совместимой примитивой; HTTP replace-all защищён revision CAS.
+    """
+    replacement = [dict(x) for x in (drafts or [])]
+    return _mutate_drafts(account_id, lambda _current: replacement)
+
+
+def _replace_drafts_if_revision(account_id: str, drafts: list, expected_revision: str):
+    expected = str(expected_revision or "").strip()
+    if not expected:
+        raise ValueError("DRAFT_REVISION_REQUIRED")
+    state = {"conflict": False, "actual": ""}
+    replacement = [dict(x) for x in (drafts or [])]
+    def _replace(current):
+        actual = _drafts_revision(current)
+        state["actual"] = actual
+        if actual != expected:
+            state["conflict"] = True
+            return current
+        return replacement
+    result = _mutate_drafts(account_id, _replace)
+    if state["conflict"]:
+        return None, state["actual"]
+    return result, _drafts_revision(result)
+
 
 class SaveDraftsRequest(BaseModel):
     account_id: str
     drafts: list
+    expected_revision: str = ""
 
 @router.post("/drafts")
 def save_drafts_endpoint(req: SaveDraftsRequest):
-    """Сохраняет (перезаписывает) весь список черновиков аккаунта — используется оркестратором
-    после генерации новой партии черновиков."""
-    _save_drafts(req.account_id, req.drafts)
-    return {"status": "ok", "total": len(req.drafts)}
+    """Явная replace-all операция с optimistic CAS, чтобы stale UI не затёр новые строки."""
+    from fastapi import HTTPException as _HTTPException
+    if not str(req.expected_revision or "").strip():
+        raise _HTTPException(status_code=409, detail={"code":"draft_revision_required","message":"Обновите список черновиков и повторите сохранение."})
+    saved, revision = _replace_drafts_if_revision(req.account_id, req.drafts, req.expected_revision)
+    if saved is None:
+        raise _HTTPException(status_code=409, detail={"code":"draft_revision_conflict","revision":revision,"message":"Черновики изменились параллельно. BORIS не затёр новые изменения."})
+    return {"status": "ok", "total": len(saved), "revision": revision}
 
 @router.get("/drafts")
 def get_drafts(account_id: str, batch_id: str = None):
     """Список черновиков объявлений. Если указан batch_id — только из этой партии
     (например, все 70 черновиков одной задачи «Книга жизни»)."""
     drafts = _load_drafts(account_id)
+    revision = _drafts_revision(drafts)
     if batch_id:
         drafts = [d for d in drafts if d.get("batch_id") == batch_id]
-    return {"status": "ok", "drafts": drafts, "total": len(drafts)}
+    return {"status": "ok", "drafts": drafts, "total": len(drafts), "revision": revision}
 
 class DraftUpdateRequest(BaseModel):
     account_id: str
@@ -1650,31 +3142,34 @@ class DraftUpdateRequest(BaseModel):
 
 @router.put("/drafts/{draft_id}")
 def update_draft(draft_id: str, req: DraftUpdateRequest):
-    """Редактирование черновика перед публикацией."""
-    drafts = _load_drafts(req.account_id)
-    found = False
-    for d in drafts:
-        if d.get("id") == draft_id:
-            if req.title is not None:
-                d["title"] = req.title
-            if req.description is not None:
-                d["description"] = req.description
-            if req.price is not None:
-                d["price"] = req.price
-            found = True
-            break
-    if not found:
+    """Редактирование черновика перед публикацией без stale-read overwrite."""
+    state={"found":False}
+    def _update(drafts):
+        for d in drafts:
+            if str(d.get("id") or "") == str(draft_id):
+                if req.title is not None: d["title"] = req.title
+                if req.description is not None: d["description"] = req.description
+                if req.price is not None: d["price"] = req.price
+                state["found"] = True
+                break
+        return drafts
+    _mutate_drafts(req.account_id,_update)
+    if not state["found"]:
         raise HTTPException(status_code=404, detail="Черновик не найден")
-    _save_drafts(req.account_id, drafts)
     return {"status": "ok"}
 
 @router.delete("/drafts/{draft_id}")
 def delete_draft(draft_id: str, account_id: str):
-    """Удаление одного черновика."""
-    drafts = _load_drafts(account_id)
-    new_drafts = [d for d in drafts if d.get("id") != draft_id]
-    _save_drafts(account_id, new_drafts)
-    return {"status": "ok", "deleted": len(drafts) - len(new_drafts)}
+    """Удаление одного черновика атомарно по свежему состоянию."""
+    state={"deleted":0}
+    def _delete(drafts):
+        out=[]
+        for d in drafts:
+            if str(d.get("id") or "") == str(draft_id): state["deleted"] += 1
+            else: out.append(d)
+        return out
+    _mutate_drafts(account_id,_delete)
+    return {"status": "ok", "deleted": state["deleted"]}
 
 class PublishDraftsRequest(BaseModel):
     account_id: str
@@ -1692,17 +3187,18 @@ class UpdateDraftImagesRequest(BaseModel):
 
 @router.post("/drafts/update_images")
 def update_draft_images(req: UpdateDraftImagesRequest):
-    """Обновляет список фото у одного черновика (удаление/добавление/переупорядочивание)."""
-    drafts = _load_drafts(req.account_id)
-    found = False
-    for d in drafts:
-        if d.get("id") == req.draft_id:
-            d["images"] = req.images
-            found = True
-            break
-    if not found:
+    """Обновляет фото одного черновика атомарно по свежему состоянию."""
+    state={"found":False}
+    def _update_images(drafts):
+        for d in drafts:
+            if str(d.get("id") or "") == str(req.draft_id):
+                d["images"] = list(req.images or [])
+                state["found"] = True
+                break
+        return drafts
+    _mutate_drafts(req.account_id,_update_images)
+    if not state["found"]:
         return {"status": "error", "message": "Черновик не найден"}
-    _save_drafts(req.account_id, drafts)
     return {"status": "ok", "images_count": len(req.images)}
 
 @router.post("/drafts/publish")
@@ -1748,33 +3244,15 @@ def _draft_to_feed_item(d: dict) -> "FeedItem":
 
 
 def _push_notification(account_id: str, text: str):
-    """Кладёт запись в Storage 'notifications' - тот же формат, что и _run_report_back
-    (tasks.py), чтобы существующий бейдж/карточка в чате Бориса на фронте подхватили её
-    без каких-либо изменений на фронте (там уже общий поллинг GET /api/chat/notifications)."""
+    """Атомарно кладёт уведомление BORIS в общий notification store."""
     from app.db.session import SessionLocal as _SL
-    from app.models.storage import Storage as _StorageModel
-    import json as _json_notif
+    from app.services.notification_store import append_notification
     from datetime import datetime as _dt_notif
-
-    db = _SL()
+    db=_SL()
     try:
-        row = db.query(_StorageModel).filter(_StorageModel.account_id == account_id, _StorageModel.key == "notifications").first()
-        notifications = _json_notif.loads(row.value) if row else []
-        notifications.append({
-            "ts": _dt_notif.now().isoformat(timespec="seconds"),
-            "text": text,
-            "related_results": [],
-            "read": False,
-        })
-        notifications = notifications[-50:]
-        raw = _json_notif.dumps(notifications, ensure_ascii=False)
-        if row:
-            row.value = raw
-        else:
-            db.add(_StorageModel(account_id=account_id, key="notifications", value=raw))
-        db.commit()
+        append_notification(db,account_id,{"ts":_dt_notif.now().isoformat(timespec="seconds"),"text":text,"related_results":[],"read":False},commit=True)
     except Exception:
-        pass  # уведомление необязательно для успешной публикации, не должно её ломать
+        db.rollback()
     finally:
         db.close()
 
@@ -1847,6 +3325,25 @@ def _publish_drafts_impl(req: PublishDraftsRequest, db):
 
     if not to_publish:
         return {"status": "ok", "published": 0}
+
+    # ПРАВИЛО 3 КОНСТИТУЦИИ: массовая операция свыше 10 объектов идёт только
+    # с подтверждения, и человек обязан видеть последствия. Порог считается по
+    # числу НОВЫХ публикаций в этой партии, а не по размеру аккаунта: 150 старых
+    # плюс 3 новых подтверждения не требуют, 40 новых — требуют.
+    MASS_PUBLISH_LIMIT = 10
+    if not req.confirmed and len(to_publish) > MASS_PUBLISH_LIMIT:
+        _names = [d.get("title") or "без названия" for d in to_publish[:10]]
+        _more = len(to_publish) - len(_names)
+        return {
+            "status": "needs_confirmation",
+            "reason": "mass_publish",
+            "count": len(to_publish),
+            "message": ("Будет опубликовано %s объявлений. После публикации они станут "
+                        "доступны покупателям на Avito. Автоматический откат невозможен — "
+                        "снимать придётся вручную. Продолжить?" % len(to_publish)),
+            "titles": _names,
+            "more": ("...ещё %s" % _more) if _more > 0 else "",
+        }
 
     # МЯГКАЯ ПРОВЕРКА СООТВЕТСТВИЯ КАТЕГОРИИ СОДЕРЖАНИЮ - до xmlcheck. Не критическая ошибка
     # формата (xmlcheck такое не ловит - категория технически валидна, просто не та по смыслу),
@@ -1957,8 +3454,34 @@ def _publish_drafts_impl(req: PublishDraftsRequest, db):
                 ],
             }
 
-    _save_feed_items(req.account_id, existing_feed + new_feed_items)
-    _save_drafts(req.account_id, remaining)
+    # FEED_PUBLISH_UPSERT_ATOMIC_V1: official validation may take long enough for
+    # another worker to change the feed. Upsert only the just-published ids against
+    # the latest locked snapshot instead of overwriting with stale existing_feed.
+    _upsert_feed_items(req.account_id, new_feed_items)
+    # DRAFT_PUBLISH_REMOVE_ATOMIC_V1: validation may take long enough for another
+    # worker to append/edit drafts. Remove only the ids actually published from the
+    # latest locked snapshot instead of overwriting with the stale pre-validation list.
+    _published_ids = {str(d.get("id") or "") for d in to_publish if str(d.get("id") or "").strip()}
+    _mutate_drafts(req.account_id, lambda rows: [d for d in rows if str(d.get("id") or "") not in _published_ids])
+    # Журнал: одна сводная запись на всю партию (правило 0 Конституции).
+    # Список id и названий нужен потому, что автоматического отката у публикации
+    # нет — по нему клиент поймёт, что именно снимать вручную, если ошибся.
+    try:
+        from app.services.action_log import log_action, ACTOR_USER
+        _pub = [(d.get("id") or "", d.get("title") or "без названия") for d in to_publish]
+        _lines = ["%s — %s" % (i, t) for i, t in _pub[:40]]
+        if len(_pub) > 40:
+            _lines.append("...ещё %s" % (len(_pub) - 40))
+        log_action(account_id=req.account_id,
+                   action="Опубликовал объявления",
+                   object_kind="объявления",
+                   object_name="партия из %s шт." % len(_pub),
+                   after_val="\n".join(_lines),
+                   reason="публикация подтверждённых черновиков после успешной "
+                          "проверки валидатором Avito; автоматический откат невозможен",
+                   actor=ACTOR_USER, source="avito.publish_drafts")
+    except Exception:
+        pass
 
     # Сохраняем связку item_id -> A/B-вариант отдельно от фида (в XML/params это
     # попадать не должно - там только официальные теги Avito-шаблона). Нужно,
@@ -2031,13 +3554,13 @@ def _client_money(account_id: str, db) -> dict:
             "last_at": (last or {}).get("at"), "last_title": (last or {}).get("title")}
 
 
-def apply_banner_to_batch_impl(account_id: str, batch_label: str, banner_count: int = 5, photos_per_ad: int = 10, folder: str = "", on_progress=None) -> dict:
+def apply_banner_to_batch_impl(account_id: str, batch_label: str, banner_count: int = 5, photos_per_ad: int = 10, folder: str = "", on_progress=None, idempotency_key: str = "") -> dict:
     """Генерирует N рекламных баннеров под партию черновиков (batch_label) и расставляет фото
     у каждого черновика партии: баннер первым, дальше обычные фото по кругу из указанной папки.
     Общая реализация - используется и прямым эндпоинтом /apply_banner_to_batch, и GPT-экшеном
     apply_banner_to_batch в plan_items.py, чтобы не дублировать логику в двух местах."""
     import random as _rnd_banner_batch
-    from app.api.banners import create_full_ai_banner, FullAiRequest, get_banner_showcase
+    from app.api.banners import create_avito_safe_banner, get_banner_showcase
 
     banner_count = max(int(banner_count), 1)
     photos_per_ad = max(int(photos_per_ad), 1)
@@ -2060,51 +3583,104 @@ def apply_banner_to_batch_impl(account_id: str, batch_label: str, banner_count: 
 
     accent_palette = ["#F79009", "#2F6FED", "#7C5CFC", "#F04438", "#12B76A", "#EE46BC", "#0EA5E9", "#EAB308"]
 
-    # БИЛЛИНГ: ограничиваем число баннеров остатком лимита тарифа
+    # Stable economic intent for each banner in the batch. Every child artifact
+    # has its own durable tariff intent too. This closes the crash window between
+    # provider success and a later aggregate quota charge: an already-created file
+    # is not linked into drafts until its exact child tariff consume is confirmed.
+    _batch_idem = str(idempotency_key or "").strip()
+    if not _batch_idem:
+        return {"status":"idempotency_required","code":"paid_idempotency_required",
+                "message":"Для платной генерации баннеров нужен ключ безопасного повтора."}
+    _requested_banner_count = banner_count
+    from app.api.banners import avito_safe_banner_replay_available
+    from app.api.billing import check_and_consume as _bill_consume_b
+    _directions = ("architecture", "result", "interior")
+    _replay_indices = set()
+    for _idx in range(_requested_banner_count):
+        _child_key = _batch_idem + ":banner:" + str(_idx)
+        if avito_safe_banner_replay_available(account_id, _child_key, _directions[_idx % 3]):
+            _replay_indices.add(_idx)
+
+    # Tariff preflight limits only NEW provider-capable child intents. Existing
+    # artifacts are still revisited because an earlier worker may have crashed
+    # after image persistence but before the child tariff ledger commit.
     banner_notice = None
+    _new_candidates = [i for i in range(_requested_banner_count) if i not in _replay_indices]
+    _allowed_new = len(_new_candidates)
     try:
         from app.api.billing import get_status as _bill_status_b
         stb = _bill_status_b(account_id)
         if not stb.get("unlimited"):
-            rem_banners = stb["usage"].get("banners", {}).get("remaining", 0)
-            if banner_count > rem_banners:
-                if rem_banners <= 0:
-                    banner_notice = "Лимит баннеров на тарифе исчерпан (0 осталось) — баннеры не создавались."
-                    banner_count = 0
-                else:
-                    banner_notice = f"Лимит баннеров почти исчерпан: создаём {rem_banners} из {banner_count} запрошенных."
-                    banner_count = rem_banners
+            rem_banners = max(0, int(stb["usage"].get("banners", {}).get("remaining", 0) or 0))
+            _allowed_new = min(_allowed_new, rem_banners)
+            if _allowed_new < len(_new_candidates):
+                banner_notice = (
+                    f"Лимит баннеров: готовых безопасных повторов {len(_replay_indices)}; "
+                    f"новых можно создать {_allowed_new} из {len(_new_candidates)}."
+                )
     except Exception as e:
-        print(f"[billing] banners check failed (пропускаем): {e}", flush=True)
+        print(f"[billing] banners preflight failed closed: {e}", flush=True)
+        _allowed_new = 0
+        banner_notice = "BORIS временно не смог подтвердить тарифный лимит. Новые баннеры не создаются; уже сохранённые безопасно сверяются с тарифным журналом."
 
+    _selected_new = set(_new_candidates[:_allowed_new])
+    _selected_indices = sorted(_replay_indices | _selected_new)
     banner_urls = []
-    for bi in range(banner_count):
+    newly_generated = 0
+    replayed = 0
+    _billing_pending = []
+    for _progress_idx, bi in enumerate(_selected_indices):
         try:
-            refs = _rnd_banner_batch.sample(showcase_urls, min(3, len(showcase_urls))) if showcase_urls else []
             color = accent_palette[bi % len(accent_palette)]
-            b_data = create_full_ai_banner(FullAiRequest(
-                account_id=account_id, raw_description=raw_description, format="infographic",
-                accent_color=color, reference_image_urls=refs
-            ))
+            _artifact_key = _batch_idem + ":banner:" + str(bi)
+            b_data = create_avito_safe_banner(
+                account_id=account_id,
+                description=raw_description,
+                direction=_directions[bi % 3],
+                accent_color=color,
+                idempotency_key=_artifact_key,
+            )
             if b_data.get("status") == "ok" and b_data.get("url"):
+                # BILLING_CHILD_INTENT_EXACTLY_ONCE_V1: charge one child immediately
+                # after the durable artifact exists and before it can affect drafts.
+                # A crash/retry replays both the artifact and this tariff intent.
+                _charge_key = _batch_idem + ":billing:banner:" + str(bi)
+                try:
+                    _charge = _bill_consume_b(account_id, "banners", 1, idempotency_key=_charge_key)
+                except Exception as _bill_exc:
+                    _billing_pending.append({"index":bi,"reason":str(_bill_exc)[:160]})
+                    continue
+                if not _charge.get("allowed", False):
+                    _billing_pending.append({"index":bi,"reason":str(_charge.get("blocked_reason") or _charge.get("message") or "billing_pending")[:160]})
+                    continue
                 banner_urls.append(b_data.get("url"))
-        except Exception:
-            pass
+                if b_data.get("idempotency_replay"):
+                    replayed += 1
+                else:
+                    newly_generated += 1
+        except Exception as exc:
+            print(f"[banner-batch] child {bi} failed: {str(exc)[:180]}", flush=True)
         if on_progress:
             try:
-                on_progress(bi + 1, banner_count)
+                on_progress(_progress_idx + 1, len(_selected_indices))
             except Exception:
                 pass
 
-    if banner_urls:
-        try:
-            from app.api.billing import check_and_consume as _bill_consume_b
-            _bill_consume_b(account_id, "banners", len(banner_urls))
-        except Exception:
-            pass
+    if _billing_pending:
+        # Do not partially mutate a draft batch. Successfully settled child intents
+        # are durable and free on retry; unresolved children will be settled before
+        # linking on the next call, without another provider purchase.
+        return {"status":"billing_pending","code":"billing_pending",
+                "message":"Баннеры сохранены, но тарифный учёт части вариантов ещё не подтверждён. BORIS не изменил черновики; повтор безопасно продолжит с тех же файлов.",
+                "notice":banner_notice,"pending":_billing_pending,
+                "banners_generated":len(banner_urls),"banners_new":newly_generated,
+                "banners_replayed":replayed,"batch_label":batch_label}
 
     if not banner_urls:
-        return {"status": "error", "message": f"Не удалось сгенерировать ни одного баннера для партии '{batch_label}'", "notice": banner_notice}
+        if _new_candidates and _allowed_new == 0 and banner_notice:
+            return {"status":"billing_pending","code":"billing_pending","message":banner_notice,"notice":banner_notice,
+                    "banners_generated":0,"banners_new":0,"banners_replayed":0,"batch_label":batch_label}
+        return {"status": "error", "message": f"Не удалось подготовить ни одного оплаченного баннера для партии '{batch_label}'", "notice": banner_notice}
 
     photo_urls = []
     if folder:
@@ -2124,8 +3700,31 @@ def apply_banner_to_batch_impl(account_id: str, batch_label: str, banner_count: 
         d["images"] = [banner_url] + regulars
         updated.append(d)
 
-    _save_drafts(account_id, other + updated)
-    return {"status": "ok", "updated": len(updated), "banners_generated": len(banner_urls), "batch_label": batch_label, "notice": banner_notice}
+    # DRAFT_BATCH_BANNER_ATOMIC_MERGE_V1: banner generation can take minutes.
+    # Reapply only the target draft ids against the latest locked snapshot so a
+    # concurrent draft append/edit outside this batch is preserved.
+    _updated_by_id = {str(d.get("id") or ""): d for d in updated if str(d.get("id") or "").strip()}
+    def _merge_banner_batch(rows):
+        out = []
+        for row in rows:
+            rid = str(row.get("id") or "")
+            out.append(dict(_updated_by_id.get(rid, row)))
+        return out
+    _mutate_drafts(account_id, _merge_banner_batch)
+    try:
+        from app.services.action_log import log_action, ACTOR_USER
+        log_action(account_id=account_id, action="Сделал баннеры для объявлений",
+                   object_kind="объявления",
+                   object_name="партия «%s», %s черновиков" % (batch_label, len(updated)),
+                   after_val="создано баннеров: %s" % len(banner_urls),
+                   reason=(banner_notice or "баннер поставлен первым фото у каждого "
+                                            "объявления партии"),
+                   actor=ACTOR_USER, source="avito.apply_banner_to_batch")
+    except Exception:
+        pass
+    return {"status": "ok", "updated": len(updated), "banners_generated": len(banner_urls),
+            "banners_new": newly_generated, "banners_replayed": replayed,
+            "batch_label": batch_label, "notice": banner_notice}
 
 
 class ApplyBannerToBatchRequest(BaseModel):
@@ -2134,11 +3733,17 @@ class ApplyBannerToBatchRequest(BaseModel):
     banner_count: int = 5
     photos_per_ad: int = 10
     folder: str = ""
+    idempotency_key: str = ""
 
 @router.post("/apply_banner_to_batch")
 def apply_banner_to_batch_endpoint(req: ApplyBannerToBatchRequest):
-    """Прямой вызов - генерирует баннеры и расставляет фото по партии черновиков (см. apply_banner_to_batch_impl)."""
-    return apply_banner_to_batch_impl(req.account_id, req.batch_label, req.banner_count, req.photos_per_ad, req.folder)
+    """Прямой вызов - генерирует баннеры и расставляет фото по партии черновиков."""
+    idem = str(req.idempotency_key or "").strip()
+    if not idem:
+        return {"status":"idempotency_required","code":"paid_idempotency_required",
+                "message":"Для платной генерации баннеров нужен ключ безопасного повтора."}
+    return apply_banner_to_batch_impl(req.account_id, req.batch_label, req.banner_count,
+                                      req.photos_per_ad, req.folder, idempotency_key=idem)
 
 
 def _normalize_category(raw_category, niche=None, template_id=None):
@@ -2188,15 +3793,13 @@ def generate_feed(req: GenerateFeedRequest):
     объявления впустую (результат просто отбрасывался) - на аккаунтах с 1000+ объявлениями
     это занимало почти 2 минуты на каждое сохранение, вызывая ложные таймауты в publish_listings."""
     if getattr(req, "merge", False):
-        existing = _load_feed_items(req.account_id)
-        existing_ids = {it.id for it in existing}
-        combined = existing + [it for it in req.items if it.id not in existing_ids]
-        req = type(req)(account_id=req.account_id, items=combined, merge=False)
-    _save_feed_items(req.account_id, req.items)
+        saved = _upsert_feed_items(req.account_id, req.items)
+    else:
+        saved = _save_feed_items(req.account_id, req.items)
 
     return {
         "status": "ok",
-        "items_count": len(req.items),
+        "items_count": len(saved),
         "feed_url": f"https://boris-ai.pro/api/avito/feed/{req.account_id}.xml"
     }
 
@@ -2256,7 +3859,17 @@ def _build_xml(items: list) -> str:
         if "ListingFee" not in item.params:
             xml_parts.append('    <ListingFee>PackageSingle</ListingFee>')
         for k, v in item.params.items():
-            xml_parts.append(f'    <{k}>{html.escape(str(v))}</{k}>')
+            # Avito uses nested <Option> nodes for multi-select parameters
+            # (for example Place). Preserve scalar parameters unchanged.
+            if isinstance(v, (list, tuple, set)):
+                vals=[x for x in v if x not in (None, "")]
+                if vals:
+                    xml_parts.append(f'    <{k}>')
+                    for option in vals:
+                        xml_parts.append(f'      <Option>{html.escape(str(option))}</Option>')
+                    xml_parts.append(f'    </{k}>')
+            else:
+                xml_parts.append(f'    <{k}>{html.escape(str(v))}</{k}>')
         if item.images:
             xml_parts.append('    <Images>')
             for img in item.images:
@@ -2284,16 +3897,59 @@ def _check_feed_images(account_id: str) -> dict:
     items = _load_feed_items(account_id)
     total_images = 0
     broken = []
+    blocked_quality = []
+    # Final account-feed stop-circuit: even if an old workflow bypassed Feed Factory,
+    # legacy low-quality renderers can never reach Avito XML again.
+    _legacy_providers={"boris_deterministic","boris_unique"}
+    _blocked_by_key={}
+    try:
+        from app.db.session import SessionLocal as _MediaSession
+        from app.models.media_asset import MediaAsset as _MediaAsset
+        from sqlalchemy import or_ as _or_health
+        _mdb=_MediaSession()
+        try:
+            _rows=_mdb.query(_MediaAsset.storage_key,_MediaAsset.source_provider,_MediaAsset.source_ref).filter(
+                _MediaAsset.account_id==account_id,
+                _MediaAsset.deleted_at.is_(None),
+                _or_health(
+                    _MediaAsset.source_provider.in_(tuple(_legacy_providers)),
+                    _MediaAsset.source_ref=="campaign_openai_gpt_image_2",
+                ),
+            ).all()
+            for _k,_p,_r in _rows:
+                if not _k: continue
+                _blocked_by_key[str(_k)]=(
+                    "legacy_campaign_ai_text" if str(_r or "")=="campaign_openai_gpt_image_2"
+                    else str(_p or "").lower()
+                )
+        finally:
+            _mdb.close()
+    except Exception:
+        _blocked_by_key={}
     for item in items:
         for img in (item.images or []):
             if "/images/" not in img:
                 continue
             total_images += 1
-            rel = img.split("/images/")[-1]
+            # Public URLs may percent-encode Cyrillic/spaces while the filesystem
+            # stores the decoded UTF-8 path. Normalize before both disk lookup and
+            # MediaAsset storage_key lookup so a valid image is never marked broken.
+            from urllib.parse import unquote as _url_unquote
+            rel = _url_unquote(img.split("/images/")[-1].split("?",1)[0])
             local_path = os.path.join(IMAGES_DIR, rel)
             if not os.path.isfile(local_path):
                 broken.append(img)
-    return {"ok": len(broken) == 0, "total_images": total_images, "broken": broken}
+                continue
+            # Last-resort XML stop-circuit: even a direct DB write or an old
+            # imported showcase copy cannot leak legacy text-in-image artwork.
+            if any(marker in os.path.basename(rel).lower() for marker in ("fullai_", "gptimg_")):
+                blocked_quality.append({"url":img,"provider":"legacy_fullai_text_image"})
+                continue
+            _blocked_reason=_blocked_by_key.get(rel)
+            if _blocked_reason:
+                blocked_quality.append({"url":img,"provider":_blocked_reason})
+    return {"ok": len(broken) == 0 and len(blocked_quality) == 0, "total_images": total_images, "broken": broken,
+            "blocked_quality": blocked_quality, "quality_policy":"legacy_visual_providers_forbidden_for_avito"}
 
 
 @router.get("/feed_health/{account_id}")
@@ -2307,20 +3963,24 @@ def get_feed(account_id: str):
     health = _check_feed_images(account_id)
     if not health["ok"]:
         import json as _json_fh
-        broken = health["broken"]
+        broken = health.get("broken") or []
+        blocked_quality = health.get("blocked_quality") or []
         total_broken = len(broken)
-        _audit_log(account_id, "feed_blocked", _json_fh.dumps({"broken": broken[:20], "total_broken": total_broken}, ensure_ascii=False))
+        total_quality = len(blocked_quality)
+        _audit_log(account_id, "feed_blocked", _json_fh.dumps({"broken": broken[:20], "total_broken": total_broken,
+                    "blocked_quality": blocked_quality[:20], "total_quality_blocked": total_quality}, ensure_ascii=False))
         try:
             from app.telegram_bot import send_telegram_message
             chat_id = os.environ.get("DIRECTOR_CHAT_ID")
             if chat_id:
                 send_telegram_message(chat_id,
-                    f"⛔ Фид {account_id} заблокирован: {total_broken} битых фото. "
+                    f"⛔ Фид {account_id} заблокирован: битые фото {total_broken}, запрещённые по качеству {total_quality}. "
                     f"Объявления не пострадали, но выгрузка остановлена.")
         except Exception:
             pass
+        reason = (f"битых изображений: {total_broken}; запрещённых креативов низкого качества: {total_quality}")
         return Response(
-            content=f"Фид заблокирован: {total_broken} битых изображений на диске. Объявления не пострадали, выгрузка остановлена до починки.",
+            content=f"Фид заблокирован ({reason}). Объявления не пострадали, выгрузка остановлена до починки.",
             status_code=503, media_type="text/plain"
         )
     items = _load_feed_items(account_id)
@@ -2367,6 +4027,14 @@ class GenerateAdsRequest(BaseModel):
     authored_texts: list[str] = []
     bold_level: str = "medium"
     account_id: str = "otdushi"
+    # Optional durable key used by background workers. Identical retries of the
+    # same already-completed paid generation return the saved result instead of
+    # paying the model a second time. Interactive regenerate calls leave it blank.
+    idempotency_key: str = ""
+    # Campaign/Feed Factory sets this so one card can buy at most one provider
+    # response. Normal legacy callers retain GigaChat->OpenAI availability fallback.
+    single_paid_attempt: bool = False
+    paid_provenance: dict = {}
 
 # новый промпт-строитель по структуре Кирилла
 # промпт-строитель по структуре Кирилла (v2: жир, списки, чистые блоки)
@@ -2387,12 +4055,36 @@ def _fix_title_len(title: str, limit: int = 45) -> str:
     if not good:
         short = min(variants, key=len)
         good = [short[:limit].rsplit(" ", 1)[0] or short[:limit]]
-    return t[:m.start()] + "{" + "|".join(good) + "}" + t[m.end():]
+    result = t[:m.start()] + "{" + "|".join(good) + "}" + t[m.end():]
+    # Avito evaluates the rendered variant, but BORIS also keeps the stored spintax compact.
+    if len(result) > max(limit * 3, 140):
+        result = "{" + "|".join(good[:3]) + "}"
+    return result
 
 
 def build_prompt(req, price_hint, length_text, goal_text, my_ads_text):
     _smp = (getattr(req, "sample", "") or "").strip()
     sample_block = ""
+    memory_block = ""
+    _account_id = str(getattr(req, "account_id", "") or "").strip()
+    if _account_id:
+        try:
+            from app.db.session import SessionLocal as _MemorySession
+            from app.api.client_memory import confirmed_context
+            _mdb = _MemorySession()
+            try:
+                _mem = confirmed_context(_mdb, _account_id, limit=80, max_chars=12000)
+            finally:
+                _mdb.close()
+            if _mem:
+                memory_block = (
+                    "\nПОДТВЕРЖДЁННАЯ ПАМЯТЬ BORIS ПО ЭТОМУ АККАУНТУ. "
+                    "Это факты, которые владелец подтвердил кнопкой «Подтверждаю». "
+                    "Используй их в объявлениях, когда они относятся к теме. Неподтверждённые факты запрещено додумывать:\n"
+                    + _mem + "\n"
+                )
+        except Exception as _mem_e:
+            print(f"[generate_ads] confirmed memory unavailable: {type(_mem_e).__name__}", flush=True)
     if _smp:
         sample_block = (
             "ОБРАЗЕЦ ОТ КЛИЕНТА — бери отсюда ОБЩУЮ информацию о компании (условия, доставка, гарантии, "
@@ -2425,10 +4117,22 @@ def build_prompt(req, price_hint, length_text, goal_text, my_ads_text):
         mode_block = "РЕЖИМ: авторских текстов нет — напиши сам. В блок 📝 дай короткий убедительный пример под тему."
         count_line = f"Сгенерируй {req.count} объявлений."
 
-    prompt = f"""Ты — сильный копирайтер Авито. {count_line}
+    prompt = f"""Ты — сильный копирайтер Авито BORIS. {count_line}
+
+ГЛОБАЛЬНЫЙ ЭТАЛОН КОПИРАЙТИНГА BORIS ДЛЯ ЛЮБОЙ НИШИ, УСЛУГИ, ТОВАРА И АККАУНТА:
+1. Выход должен быть уровня утверждённых сильных примеров BORIS: не сухой шаблон, а полноценное продающее объявление с живым ритмом и конкретикой.
+2. Сильный первый заход: боль, желание, результат, срочность, экспертность, сопровождение, сравнение или конкретный сценарий клиента. Для соседних объявлений меняй сам маркетинговый угол, а не несколько слов.
+3. Структура: сильный вход → проблема/желание → решение → что входит/как работаем → выгоды и снятие возражений → конкретный предметный пример → география → сильный CTA.
+4. Смысловые заголовки выделяй <strong>, используй уместные иконки в начале блоков, короткие абзацы и нормальную пунктуацию. Каждое обычное предложение должно завершаться корректным знаком препинания.
+5. Не сокращай полезную подтверждённую фактуру ради шаблона. Не повторяй одинаковый каркас во всех вариантах.
+6. УНИКАЛИЗАЦИЯ должна быть предметной: параметры услуги/товара, сценарий, география, конфигурация и маркетинговый угол. Никаких выдуманных характеристик.
+7. ЦВЕТ — ОБЯЗАТЕЛЬНЫЙ параметр уникализации для всего, что можно физически увидеть глазами и у чего есть цвет: товар, материал, объект, поверхность, визуальный результат услуги. Используй ТОЛЬКО подтверждённый цвет или разрешённые клиентом варианты. Если цвет применим, но неизвестен — не выдумывай его и не генерируй случайные RAL; считай цвет недостающим параметром. Для нематериальной услуги без визуального объекта цвет не придумывай.
+8. При географической уникализации используй только подтверждённые районы, населённые пункты или улицы. Для Сочи в массовой кампании разноси объявления по подтверждённым районам/локациям, а не оставляй все просто «Сочи».
+
 Тема: "{req.topic}".
 {price_hint}
 О компании/услугах/акциях (вплети в каждое): {req.extra}
+{memory_block}
 
 {goal_text}
 
@@ -2447,7 +4151,7 @@ def build_prompt(req, price_hint, length_text, goal_text, my_ads_text):
 8. Цена: <strong>от N ₽</strong> + короткий эмоциональный абзац.
 9. Финальный призыв с мягкой срочностью 🔥.
 10. Последний абзац — просто перечень ключевых фраз через запятую (БЕЗ слов "SEO" или "хвост", это обычный текст).
-11. САМАЯ последняя строка блока уникализации: сначала слово-метка (без кавычек, с двоеточием), затем от 3 до 5 групп {{в1|в2|...|в10}} — В КАЖДОЙ ГРУППЕ МИНИМУМ 10 вариантов через |. Никогда не делай меньше 10 вариантов в группе и не пропускай ни одну группу.
+11. САМАЯ последняя строка — предметный блок уникализации: слово-метка и подтверждённые параметры конкретного объявления. Не генерируй искусственные значения ради количества. Для любого визуально наблюдаемого объекта/результата обязательно включай подтверждённый Цвет:.
 ПРИМЕР готовой строки целиком (структуру именно такую и делай, просто со своими значениями): "Пример товара: Цвет: {{РАЛ 5010|РАЛ 9016|РАЛ 3020|РАЛ 6005|РАЛ 7016|РАЛ 1015|РАЛ 8017|РАЛ 9005|РАЛ 5015|РАЛ 3005}} Размер: {{300х300х30|400х400х40|200х100х60|500х500х50|350х350х35|250х250х25|450х450х45|600х300х40|150х150х20|100х100х15}}"
 ВАЖНО: перед КАЖДОЙ группой {{}} ставь короткую подпись с двоеточием, что это за параметр (Цвет:, Размер:, Материал:, Повод:, Для кого:, Объём: и т.п. — подбери по смыслу).
 Слово-метку выбери по смыслу темы (пиши ИМЕННО его, не слово "НАЗВАНИЕ"):
@@ -2459,10 +4163,10 @@ def build_prompt(req, price_hint, length_text, goal_text, my_ads_text):
 - вакансия/работа → "Пример вакансии:"
 ПАРАМЕТРЫ подбирай КОНКРЕТНО под тему, реалистично, как в настоящей смете/спецификации:
 - для услуг: повод/для кого/объём (символы, предложения) — и, если уместно, срок/материал.
-- для товаров/стройматериалов: ЦВЕТ (реальные коды RAL, например РАЛ 5010, РАЛ 9016 — минимум 10 разных), РАЗМЕР (реальные размеры в мм/см, например "300х300х30", "400х400х40" — минимум 10 вариантов), материал, комплектация.
+- для товаров/стройматериалов: ЦВЕТ обязателен, ЕСЛИ он подтверждён в фактуре клиента; используй только подтверждённые названия/коды цветов. Размер, материал и комплектацию также бери только из подтверждённых данных.
 - для авто/мото/велотехники: год, комплектация, цвет, пробег — НИКОГДА не варьируй марку/модель/бренд.
 - для недвижимости: площадь, этаж, тип ремонта, район.
-Каждый параметр — минимум 10 РЕАЛЬНЫХ, разных, правдоподобных значений, не выдумывай абстрактные плейсхолдеры типа "вариант1".
+Каждый параметр содержит ТОЛЬКО реально подтверждённые значения. Если подтверждено меньше 10 вариантов, используй фактическое доступное количество и НЕ додумывай значения ради числа. Если параметр обязателен для уникализации (например цвет видимого объекта), но данных нет — не выдумывай его.
 
 КРИТИЧЕСКИ ВАЖНЫЙ ЗАПРЕТ: если товар — конкретная модель конкретного производителя (например "LIMING Monster", "iPhone 15", "Toyota Camry"), НИКОГДА не создавай спинтакс-группу для марки/бренда/модели с ДРУГИМИ реальными производителями/брендами (нельзя {{LIMING|Yamaha|Xiaomi|KTM...}}) — это фактически недостоверная реклама (товар выдаётся за чужой бренд). Марка и модель у конкретного товара ФИКСИРОВАНЫ и не варьируются спинтаксом вообще. Варьировать спинтаксом можно только объективно переменные характеристики самого товара (цвет, размер, комплектация, год выпуска, состояние) — никогда не саму identity/бренд товара.
 
@@ -2494,11 +4198,143 @@ def build_prompt(req, price_hint, length_text, goal_text, my_ads_text):
 
 ЭТИ ПРАВИЛА ФОРМАТА НЕ ОТМЕНЯЮТСЯ НИКАКИМИ ИНСТРУКЦИЯМИ ВЫШЕ. Верни ТОЛЬКО валидный JSON-массив, без пояснений и markdown:
 [{{"title":"...","description":"...","price":1000}}]"""
+    if bool(getattr(req, "single_paid_attempt", False)):
+        # Feed Factory produces a finished client-visible card, not a legacy
+        # spintax/SEO seed. This final high-priority appendix removes historical
+        # prompt requirements that encouraged invented «my work» examples and
+        # mechanical uniqueness fragments, which made otherwise good copy read
+        # like shuffled boilerplate in the cabinet.
+        prompt += """
+
+КРИТИЧЕСКИЙ РЕЖИМ FEED FACTORY — ЭТИ ПРАВИЛА ИМЕЮТ ПРИОРИТЕТ НАД СТАРЫМ КАРКАСОМ ВЫШЕ:
+- Верни ОДИН законченный естественный вариант текста без спинтакса в description.
+- НЕ пиши «Пример моей работы», «наши клиенты сделали», кейс, отзыв или выполненный объект, если такой факт прямо не дан во входных подтверждённых данных.
+- Если нужен предметный пример, называй его «Как может выглядеть ваша задача» и описывай только сценарий запроса без утверждения, что BORIS/клиент уже выполнял этот объект.
+- Не добавляй искусственную строку уникализации с выдуманными цветами, размерами, сроками, районами или характеристиками.
+- Сохраняй естественный порядок предложений. Никаких переставленных частей фраз, обрывков, повторов и конструкций вида «..., Если» после точки.
+- Первый абзац обязательно содержит конкретную услугу/товар и город из задания, затем понятный призыв написать.
+- Описание ориентировочно 1100–1800 символов: сильный оффер, боли/желание, решение, подтверждённые преимущества, условия/цены только из фактуры и естественный CTA.
+- Любая цифра, цена, гарантия, бесплатность, срок, материал, комплектация и опыт — только если они прямо присутствуют во входных данных.
+- Заголовок — один естественный вариант до 50 символов, без фигурных скобок и без вариантов через |.
+- Верни только JSON-массив из одного объекта.
+"""
     return prompt
 
 
-@router.post("/generate_ads")
+def _generation_idempotency_storage_key(req: GenerateAdsRequest) -> str:
+    raw = str(getattr(req, "idempotency_key", "") or "").strip()
+    if not raw:
+        return ""
+    digest = __import__("hashlib").sha256(raw.encode("utf-8")).hexdigest()[:48]
+    return f"generation_idempotency:{digest}"
+
+
+def _generation_idempotency_get(req: GenerateAdsRequest):
+    key = _generation_idempotency_storage_key(req)
+    if not key:
+        return None
+    from sqlalchemy import text as _sql_text
+    from app.db.session import SessionLocal as _SessionLocal
+    db = _SessionLocal()
+    try:
+        row = db.execute(_sql_text("select id,value from storage where account_id=:a and key=:k order by id desc limit 1"), {"a": str(req.account_id or ""), "k": key}).fetchone()
+        if not row:
+            return None
+        data = json.loads(row[1])
+        result = data.get("result") if isinstance(data, dict) else None
+        if isinstance(result, dict) and result.get("status") == "ok":
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            _now_hit = _dt.now(_tz.utc)
+            data["hit_count"] = int(data.get("hit_count") or 0) + 1
+            data["last_hit_at"] = _now_hit.isoformat()
+            _cutoff = _now_hit - _td(days=7)
+            _recent = []
+            for _ts in list(data.get("recent_hits") or []):
+                try:
+                    _dtv = _dt.fromisoformat(str(_ts))
+                    if _dtv.tzinfo is None: _dtv = _dtv.replace(tzinfo=_tz.utc)
+                    if _dtv >= _cutoff: _recent.append(_dtv.isoformat())
+                except Exception:
+                    continue
+            _recent.append(_now_hit.isoformat())
+            data["recent_hits"] = _recent[-100:]
+            db.execute(_sql_text("update storage set value=:v where id=:i"), {"v": json.dumps(data, ensure_ascii=False), "i": row[0]})
+            db.commit()
+            out = dict(result)
+            out["idempotency_cache_hit"] = True
+            out["idempotency_hit_count"] = int(data["hit_count"])
+            return out
+    except Exception:
+        return None
+    finally:
+        db.close()
+    return None
+
+
+def _generation_idempotency_put(req: GenerateAdsRequest, result: dict) -> None:
+    key = _generation_idempotency_storage_key(req)
+    if not key or not isinstance(result, dict) or result.get("status") != "ok":
+        return
+    from sqlalchemy import text as _sql_text
+    from app.db.session import SessionLocal as _SessionLocal
+    from datetime import datetime as _dt, timezone as _tz
+    payload = json.dumps({
+        "schema": 1,
+        "created_at": _dt.now(_tz.utc).isoformat(),
+        "result": result,
+    }, ensure_ascii=False)
+    db = _SessionLocal()
+    try:
+        row = db.execute(_sql_text("select id from storage where account_id=:a and key=:k order by id desc limit 1 for update"), {"a": str(req.account_id or ""), "k": key}).fetchone()
+        if row:
+            db.execute(_sql_text("update storage set value=:v where id=:i"), {"v": payload, "i": row[0]})
+        else:
+            db.execute(_sql_text("insert into storage(account_id,key,value) values(:a,:k,:v)"), {"a": str(req.account_id or ""), "k": key, "v": payload})
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _serialize_generation_idempotency(fn):
+    """Serialize the same paid-generation key across both backend replicas.
+
+    Cache lookup alone is racy: two concurrent requests can both miss and both
+    spend before either stores the result. A PostgreSQL advisory lock keeps the
+    existing Storage cache authoritative without creating a second job engine.
+    """
+    from functools import wraps
+
+    @wraps(fn)
+    def wrapped(req: GenerateAdsRequest, *args, **kwargs):
+        key = _generation_idempotency_storage_key(req)
+        if not key:
+            return fn(req, *args, **kwargs)
+        import hashlib as _hashlib
+        from sqlalchemy import text as _sql_text
+        from app.db.session import SessionLocal as _SessionLocal
+        raw = _hashlib.sha256((str(req.account_id or "") + ":" + key).encode("utf-8")).digest()[:8]
+        lock_id = int.from_bytes(raw, byteorder="big", signed=True)
+        lock_db = _SessionLocal()
+        try:
+            lock_db.execute(_sql_text("select pg_advisory_lock(:k)"), {"k": lock_id})
+            return fn(req, *args, **kwargs)
+        finally:
+            try:
+                lock_db.execute(_sql_text("select pg_advisory_unlock(:k)"), {"k": lock_id})
+            except Exception:
+                pass
+            lock_db.close()
+
+    return wrapped
+
+
+@_serialize_generation_idempotency
 def generate_ads(req: GenerateAdsRequest):
+    cached = _generation_idempotency_get(req)
+    if cached is not None:
+        return cached
     price_hint = ""
     if req.price_from and req.price_to and req.price_from == req.price_to:
         price_hint = f"ЦЕНА ФИКСИРОВАННАЯ: ровно {req.price_from} рублей. НЕ пиши слово \"от\", НЕ придумывай диапазон — только точное число {req.price_from}."
@@ -2508,28 +4344,61 @@ def generate_ads(req: GenerateAdsRequest):
     length_text = {
         "short": "КОРОТКОЕ, 150-300 символов. Ёмко, цепляюще, только суть и призыв.",
         "medium": "СРЕДНЕЕ, 400-600 символов. Баланс: выгоды, список, призыв.",
-        "long": "ДЛИННОЕ, 700-1200 символов. Подробно: боли клиента, все выгоды, список, гарантии, отработка возражений, сильный призыв. Больше текста хорошо для SEO Авито."
+        "long": "ДЛИННОЕ, 700-1200 символов. Подробно: боли клиента, подтверждённые выгоды, список, условия и гарантии ТОЛЬКО если они явно даны во входных фактах, отработка возражений, сильный призыв. Больше текста хорошо для SEO Авито."
     }.get(req.length, "СРЕДНЕЕ, 400-600 символов.")
 
     my_ads_text = ""
     if req.use_my_ads:
         try:
-            token_data = get_avito_token(req.account_id)
-            token = _extract_token(token_data)
-            r = httpx.get("https://api.avito.ru/core/v1/items",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"per_page": 5, "page": 1}, timeout=20)
-            titles = [it.get("title", "") for it in r.json().get("resources", [])[:5] if it.get("title")]
-            if titles:
-                my_ads_text = "СТИЛЬ КЛИЕНТА — вот реальные заголовки его активных объявлений, пиши в похожей манере и лексике, но НЕ копируй дословно:\n" + "\n".join(f"- {t}" for t in titles)
+            # GENERATE_ADS_REFERENCE_SHARED_THROTTLE_V1: reference-title lookup
+            # is optional enrichment, not a reason to pressure a throttled tenant.
+            # Skip it during shared Retry-After and publish any local 429 instead
+            # of retrying; generation may continue without this optional context.
+            from app.services.avito_account_throttle import (
+                account_throttle_remaining as _genref_throttle_remaining,
+                record_account_throttle as _genref_record_throttle,
+            )
+
+            def _genref_retry_after(resp) -> int:
+                try:
+                    raw = str((getattr(resp, "headers", {}) or {}).get("Retry-After") or "").strip()
+                    if raw:
+                        try:
+                            return max(0, int(float(raw)))
+                        except Exception:
+                            from email.utils import parsedate_to_datetime
+                            from datetime import datetime, timezone
+                            when = parsedate_to_datetime(raw)
+                            if when.tzinfo is None:
+                                when = when.replace(tzinfo=timezone.utc)
+                            return max(0, int((when.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
+                except Exception:
+                    pass
+                return 30
+
+            if _genref_throttle_remaining(req.account_id) <= 0:
+                token_data = get_avito_token(req.account_id)
+                token = _extract_token(token_data)
+                if _genref_throttle_remaining(req.account_id) <= 0:
+                    r = httpx.get("https://api.avito.ru/core/v1/items",
+                        headers={"Authorization": f"Bearer {token}"},
+                        params={"per_page": 5, "page": 1}, timeout=20)
+                    if r.status_code == 429:
+                        _genref_record_throttle(
+                            req.account_id, _genref_retry_after(r), source="generate_ads_reference_inventory_429"
+                        )
+                    elif r.status_code == 200:
+                        titles = [it.get("title", "") for it in r.json().get("resources", [])[:5] if it.get("title")]
+                        if titles:
+                            my_ads_text = "СТИЛЬ КЛИЕНТА — вот реальные заголовки его активных объявлений, пиши в похожей манере и лексике, но НЕ копируй дословно:\n" + "\n".join(f"- {t}" for t in titles)
         except Exception:
             my_ads_text = ""
 
     goal_text = {
         "call": "ГЛАВНАЯ ЦЕЛЬ — чтобы клиент ПОЗВОНИЛ. Призыв: позвоните прямо сейчас, звоните, наберите. Упор на срочность и живое общение.",
-        "message": "ГЛАВНАЯ ЦЕЛЬ — чтобы клиент НАПИСАЛ в чат. Призыв: напишите нам, задайте вопрос в сообщении, ответим за 5 минут. Лёгкий первый шаг.",
-        "order": "ГЛАВНАЯ ЦЕЛЬ — чтобы клиент СРАЗУ ЗАКАЗАЛ. Призыв: оформите заказ, закажите сейчас. Упор на выгоду, гарантии, простоту.",
-        "visit": "ГЛАВНАЯ ЦЕЛЬ — чтобы клиент ПРИШЁЛ или оставил заявку на замер. Призыв: приезжайте, запишитесь на бесплатный замер, оставьте заявку."
+        "message": "ГЛАВНАЯ ЦЕЛЬ — чтобы клиент НАПИСАЛ в чат. Призыв: напишите нам или задайте вопрос в сообщении. Не обещай скорость ответа, если она не подтверждена входными фактами.",
+        "order": "ГЛАВНАЯ ЦЕЛЬ — чтобы клиент СРАЗУ ЗАКАЗАЛ. Призыв: оформите заказ или напишите для согласования деталей. Упор только на подтверждённые выгоды и условия; не придумывай гарантии.",
+        "visit": "ГЛАВНАЯ ЦЕЛЬ — чтобы клиент ПРИШЁЛ или оставил заявку на замер. Призыв: приезжайте, запишитесь на замер или оставьте заявку. Не называй замер бесплатным без явного подтверждения."
     }.get(req.goal, "ГЛАВНАЯ ЦЕЛЬ — побудить клиента к действию.")
 
     prompt = build_prompt(req, price_hint, length_text, goal_text, my_ads_text)
@@ -2540,7 +4409,10 @@ def generate_ads(req: GenerateAdsRequest):
         raw = chat_with_fallback(
             [Messages(role=MessagesRole.USER, content=prompt)],
             temperature=0.9, max_tokens=_mt,
-            account_id=req.account_id, operation="генерация объявлений"
+            account_id=req.account_id, operation="генерация объявлений",
+            single_paid_attempt=bool(getattr(req, "single_paid_attempt", False)),
+            paid_request_id=(str(getattr(req, "idempotency_key", "") or "").strip() or None),
+            paid_provenance=(getattr(req, "paid_provenance", None) or None)
         )
     except Exception as e:
         return {"status": "error", "message": f"Борис недоступен (GigaChat и OpenAI): {str(e)[:200]}"}
@@ -2588,21 +4460,50 @@ def generate_ads(req: GenerateAdsRequest):
         return json.loads(text)
 
     ads = None
+    local_fallback_reason = ""
     try:
         ads = try_parse(raw)
     except Exception as _e:
         print("=== СЫРОЙ ОТВЕТ GIGACHAT (1я попытка) ===", flush=True)
         print(repr(raw[:2000]), flush=True)
         print("=== ошибка:", _e, "===", flush=True)
-        # вторая попытка — просим Бориса перегенерировать
+        # Before paying for another model call, try a safe local Python-literal
+        # repair. LLMs often return a perfectly usable list with single quotes,
+        # True/False/None, or a trailing comma — ast.literal_eval handles these
+        # without executing code and costs nothing.
         try:
-            raw2 = chat_with_fallback(
-                [Messages(role=MessagesRole.USER, content=prompt + "\n\nВАЖНО: верни ТОЛЬКО валидный JSON-массив, без пояснений и markdown. Экранируй кавычки внутри строк.")],
-                temperature=0.7, max_tokens=4096
-            )
-            ads = try_parse(raw2)
+            import ast as _ast
+            loose = raw.strip()
+            if loose.startswith("```"):
+                loose = loose.split("```", 2)[1]
+                if loose.lstrip().startswith("json"):
+                    loose = loose.lstrip()[4:]
+            _start, _end = loose.find("["), loose.rfind("]")
+            if _start >= 0 and _end > _start:
+                loose = loose[_start:_end+1]
+            candidate = _ast.literal_eval(loose)
+            ads = candidate if isinstance(candidate, list) else None
         except Exception:
-            return {"status": "error", "message": "Борис не смог собрать корректный ответ. Попробуйте ещё раз или уменьшите количество."}
+            ads = None
+        # Never buy a second model response merely to repair formatting. If the
+        # first paid answer is unrecoverable even after local JSON/Python parsing,
+        # build a conservative local fallback from facts already present in req.
+        if ads is None:
+            local_fallback_reason = "unrecoverable_model_format_single_paid_attempt"
+            safe_topic = _fix_title_len(str(req.topic or "").strip().capitalize()) or "Предложение"
+            safe_price = int(req.price_from or 0) if int(req.price_from or 0) == int(req.price_to or 0) else 0
+            count_local = max(1, min(int(req.count or 1), 50))
+            safe_ctas = [
+                "Напишите в сообщения Avito, чтобы уточнить детали по вашему запросу.",
+                "Задайте вопрос в чате Avito — уточним детали и подскажем по вашему запросу.",
+                "Свяжитесь через сообщения Avito, чтобы обсудить задачу и необходимые условия.",
+            ]
+            ads = []
+            for i in range(count_local):
+                desc_local = safe_topic + ".\n\n" + safe_ctas[i % len(safe_ctas)]
+                if safe_price > 0:
+                    desc_local += "\n\nЦена: %d ₽." % safe_price
+                ads.append({"title": safe_topic, "description": desc_local, "price": safe_price})
 
     if not isinstance(ads, list) or len(ads) == 0:
         return {"status": "error", "message": "Пустой результат, попробуйте ещё раз"}
@@ -2733,8 +4634,29 @@ def generate_ads(req: GenerateAdsRequest):
             parts = [p.strip()[:1].upper() + p.strip()[1:] if p.strip() else p for p in parts]
             return "{" + "|".join(parts) + "}"
         title = _re2.sub(r"\{([^{}]+)\}", _cap_variant, title)
-        # цена в тексте описания — всегда подставляем реальную price, не доверяем модели её писать
-        desc = _re2.sub(r"\d[\d\s]*\s*₽", f"{price} ₽", desc)
+        # Normalize money mentions only when the CALLER supplied one explicit
+        # fixed price.  A client profile can legitimately contain several factual
+        # prices (price tiers, different materials, add-on work).  Replacing every
+        # «... ₽» with the model-returned ad.price corrupted those verified facts.
+        _caller_fixed_price = bool(req.price_from and req.price_to and int(req.price_from)==int(req.price_to))
+        if _caller_fixed_price:
+            desc = _re2.sub(r"\d[\d\s]*\s*₽", f"{int(req.price_from)} ₽", desc)
+            price = int(req.price_from)
+        # Truth guard: remove unsupported absolute claims unless the client explicitly supplied that fact.
+        _facts = ((getattr(req, "extra", "") or "") + " " + (getattr(req, "topic", "") or "")).lower()
+        _unsupported = [
+            (r"(?i)идеальн(?:ый|ая|ое|ые|о)\s+", "", "идеаль"),
+            (r"(?i)люб(?:ой|ая|ое|ые)\s+сложност[ьи]", "разной сложности", "любой сложности"),
+            (r"(?i)полное\s+устранение", "устранение", "полное устранение"),
+            (r"(?i)быстр(?:ая|ый|ое|ые)\s+доставк[аи]", "доставка", "быстр"),
+            (r"(?i)ответим\s+за\s+\d+\s+минут[уы]?", "ответим в сообщениях", "ответим за"),
+            (r"(?i)бесплатн(?:ый|ая|ое|ые)\s+(замер|доставк[аи]|консультаци[яю])", r"\1", "бесплат"),
+        ]
+        for _pat,_replacement,_fact_key in _unsupported:
+            if _fact_key not in _facts:
+                desc = _re2.sub(_pat,_replacement,desc)
+        if "гарант" not in _facts:
+            desc = _re2.sub(r"(?i).*гарант(?:ия|ии|ию|ией|ируем|ирован).*", "", desc)
         # финальная страховка: если заголовок развалился (несколько блоков {} или слипшиеся слова) — безопасный дефолт
         _brace_pairs = title.count("{")
         _outside_glued = _re2.search(r"[А-Яа-яA-Za-z]{16,}", _re2.sub(r"\{[^}]*\}", "", title))
@@ -2751,21 +4673,48 @@ def generate_ads(req: GenerateAdsRequest):
             if len(items) > 1:
                 random.shuffle(items)
             return m.group(0)[:m.group(0).find("<li>")] + "".join(items) + "</ul>"
-        desc = _re2.sub(r"<ul>.*?</ul>", _shuffle_li_block, desc, flags=_re2.DOTALL)
+        # Legacy SEO callers may still randomize list order for mass uniqueness.
+        # Feed Factory's single-paid-attempt path is different: it produces one
+        # client-visible finished ad, so random comma-fragment/list shuffling can
+        # destroy grammar after the model already wrote coherent prose. Preserve
+        # paragraph/sentence order for that production path.
+        if not bool(getattr(req, "single_paid_attempt", False)):
+            desc = _re2.sub(r"<ul>.*?</ul>", _shuffle_li_block, desc, flags=_re2.DOTALL)
 
-        _lines2 = desc.split("\n")
-        for _li_idx, _ln2 in enumerate(_lines2):
-            if "," in _ln2 and len(_ln2) > 60 and "<" not in _ln2 and "₽" not in _ln2 and not _ln2.strip().startswith(("📝","✅","🎁","📌","🔥")):
-                _parts2 = [p.strip() for p in _ln2.split(",") if p.strip()]
-                if len(_parts2) >= 5:
-                    random.shuffle(_parts2)
-                    _lines2[_li_idx] = ", ".join(_parts2) + ("." if _ln2.rstrip().endswith(".") else "")
-        desc = "\n".join(_lines2)
+            _lines2 = desc.split("\n")
+            for _li_idx, _ln2 in enumerate(_lines2):
+                if "," in _ln2 and len(_ln2) > 60 and "<" not in _ln2 and "₽" not in _ln2 and not _ln2.strip().startswith(("📝","✅","🎁","📌","🔥")):
+                    _parts2 = [p.strip() for p in _ln2.split(",") if p.strip()]
+                    if len(_parts2) >= 5:
+                        random.shuffle(_parts2)
+                        _lines2[_li_idx] = ", ".join(_parts2) + ("." if _ln2.rstrip().endswith(".") else "")
+            desc = "\n".join(_lines2)
 
         if title:
             clean.append({"title": title, "description": desc, "price": price})
 
-    return {"status": "ok", "count": len(clean), "ads": clean}
+    result = {"status": "ok", "count": len(clean), "ads": clean}
+    if local_fallback_reason:
+        result["local_fallback"] = True
+        result["local_fallback_reason"] = local_fallback_reason
+    _generation_idempotency_put(req, result)
+    return result
+
+
+@router.post("/generate_ads")
+def generate_ads_http(req: GenerateAdsRequest, user=_DepSec(_CurUser)):
+    """Tenant-scoped HTTP surface; internal Campaign code calls generate_ads() directly."""
+    from fastapi import HTTPException as _HTTPException
+    from app.db.session import SessionLocal as _SessionLocal
+    from app.services.command_policy import account_visible as _account_visible
+    db = _SessionLocal()
+    try:
+        if not _account_visible(db, user, str(req.account_id or "")):
+            raise _HTTPException(status_code=403, detail="forbidden_account")
+    finally:
+        db.close()
+    return generate_ads(req)
+
 
 # ==== Генератор баннеров через Kandinsky (GigaChat) ====
 # ==== Менеджер картинок: генерация (1-5), папки, удаление, скачивание ====
@@ -2776,13 +4725,16 @@ import re as _re_img
 IMAGES_DIR = "/root/BORIS/backend/images"
 
 def uniquify_image(local_path: str) -> str:
-    """Открывает картинку, слегка видоизменяет (поворот/обрезка/яркость) и сохраняет как новый файл. Возвращает имя нового файла (без пути)."""
+    """Безопасно уникализирует фото без поворота/наклона: только лёгкий crop и тональные изменения."""
     try:
         import hashlib
-        # ВАЖНО: имя детерминировано по исходному пути — при повторном вызове на то же
-        # фото (например, при каждом запросе Avito к фиду) переиспользуем уже готовый
-        # файл вместо создания новой копии. Раньше это давало 167 000+ лишних файлов.
-        _stable_hash = hashlib.md5(local_path.encode("utf-8")).hexdigest()[:16]
+        # Имя зависит и от пути, и от СОДЕРЖИМОГО исходника. Если файл по тому же
+        # пути был заменён новой фотографией, старый uq_* больше не может попасть в XML.
+        # Для неизменившегося файла имя остаётся стабильным — лишние копии не плодятся.
+        with open(local_path, "rb") as _src_f:
+            _content_digest = hashlib.sha256(_src_f.read()).hexdigest()
+        _identity = f"{local_path}::{_content_digest}"
+        _stable_hash = hashlib.md5(_identity.encode("utf-8")).hexdigest()[:16]
         new_name = f"uq_{_stable_hash}.jpg"
         new_path = os.path.join(os.path.dirname(local_path), new_name)
 
@@ -2790,18 +4742,16 @@ def uniquify_image(local_path: str) -> str:
             return new_name
 
         from PIL import Image, ImageEnhance
+        _rnd = random.Random(_identity)
         img = Image.open(local_path).convert("RGB")
         w, h = img.size
 
-        angle = random.uniform(-2.5, 2.5)
-        img = img.rotate(angle, expand=False, fillcolor=(255, 255, 255))
-
-        crop_pct = random.uniform(0.01, 0.03)
+        crop_pct = _rnd.uniform(0.01, 0.03)
         cx, cy = int(w * crop_pct), int(h * crop_pct)
         img = img.crop((cx, cy, w - cx, h - cy)).resize((w, h))
 
-        img = ImageEnhance.Brightness(img).enhance(random.uniform(0.96, 1.04))
-        img = ImageEnhance.Contrast(img).enhance(random.uniform(0.96, 1.04))
+        img = ImageEnhance.Brightness(img).enhance(_rnd.uniform(0.96, 1.04))
+        img = ImageEnhance.Contrast(img).enhance(_rnd.uniform(0.96, 1.04))
 
         img.save(new_path, "JPEG", quality=90)
         return new_name
@@ -2894,12 +4844,33 @@ class GenerateBannerRequest(BaseModel):
     count: int = 1
     folder: str = "общая"
     account_id: str = "otdushi"
+    idempotency_key: str = ""
+    confirmed_paid_items: int = 0
 
 @router.post("/generate_banner")
 def generate_banner(req: GenerateBannerRequest):
     folder = _safe_folder(req.folder)
     folder_path = _resolve_folder_path(req.account_id, folder, create_if_missing=True)
     count = max(1, min(int(req.count or 1), 50))
+    _idem=str(getattr(req,"idempotency_key","") or "").strip()
+    _confirmed=max(0,int(getattr(req,"confirmed_paid_items",0) or 0))
+    _normal_cap=max(1,min(10,int(os.environ.get("BORIS_PAID_IMAGE_BATCH_CAP","10") or 10)))
+    if count > _normal_cap and _confirmed != count:
+        return {
+            "status":"paid_confirmation_required",
+            "code":"paid_batch_confirmation_required",
+            "paid_images":count,
+            "normal_paid_cap":_normal_cap,
+            "estimated_cost_rub":round(count*5.5,2),
+            "message":f"Защита бюджета остановила массовую генерацию {count} изображений. Подтвердите точный объём отдельно."
+        }
+    _burst_override=bool(count > _normal_cap and _confirmed == count)
+    if not _idem:
+        return {
+            "status":"idempotency_required",
+            "code":"paid_idempotency_required",
+            "message":"Для нескольких платных изображений нужен ключ операции, чтобы повтор запроса не создавал дубль расходов."
+        }
 
     variations = [
         "", " Ракурс крупным планом.", " Вид сбоку, другая композиция.",
@@ -2909,25 +4880,55 @@ def generate_banner(req: GenerateBannerRequest):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _generate_one(i):
-        full_prompt = f"Фотореалистичное изображение товара крупным планом: {req.prompt}.{variations[i % len(variations)]} Детальная фактура материала, естественное освещение, как профессиональная предметная фотосъёмка. Стиль: {req.style}. ВАЖНО: показывай именно сам товар вблизи, БЕЗ людей, БЕЗ текста, без надписей, без букв, без логотипов, без абстрактных фонов и пейзажей."
-        _attempts = 0
-        while _attempts < 3:
-            _attempts += 1
+        style_norm = (req.style or "").strip().lower()
+        is_ad_banner = any(mark in style_norm for mark in ("avito", "реклам", "banner", "баннер", "creative", "креатив"))
+        if is_ad_banner:
+            # Global Avito invariant: image models never render visible copy.
+            # Route every advertising/banner style through the canonical local-text compositor.
             try:
-                fname = f"gen_{int(_time.time())}_{random.randint(1000,9999)}.jpg"
-                fpath = f"{folder_path}/{fname}"
-                from banner_generator import generate_ai_image
-                if not generate_ai_image(full_prompt, fpath, size="1024x1024", quality="medium",
-                                         model="gpt-image-2", account_id=req.account_id,
-                                         operation="generate_banner"):
-                    return (i, None, f"Вариант {i+1}: OpenAI не вернул изображение")
-                return (i, _folder_url(req.account_id, folder, fname), None)
+                from app.api.banners import create_avito_safe_banner
+                safe_description = (str(req.prompt or "").strip() + variations[i % len(variations)]).strip()
+                safe = create_avito_safe_banner(
+                    account_id=req.account_id,
+                    description=safe_description,
+                    direction="architecture",
+                    idempotency_key=(_idem + ":ad-banner:" + str(i)),
+                )
+                if safe.get("status") == "ok" and safe.get("url"):
+                    return (i, safe.get("url"), None)
+                return (i, None, f"Вариант {i+1}: безопасный баннер не создан")
             except Exception as e:
-                if "429" in str(e) and _attempts < 3:
-                    _time.sleep(3 * _attempts)
-                    continue
                 return (i, None, f"Вариант {i+1}: {str(e)[:100]}")
-        return (i, None, f"Вариант {i+1}: не удалось после {_attempts} попыток")
+        else:
+            full_prompt = f"Фотореалистичное изображение товара крупным планом: {req.prompt}.{variations[i % len(variations)]} Детальная фактура материала, естественное освещение, как профессиональная предметная фотосъёмка. Стиль: {req.style}. ВАЖНО: показывай именно сам товар вблизи, БЕЗ людей, БЕЗ текста, без надписей, без букв, без логотипов, без абстрактных фонов и пейзажей."
+        # Paid image generation is single-attempt by contract. The guarded core
+        # already persists ambiguous provider outcomes and stable artifact paths;
+        # retrying a 429/network error here could create duplicate paid calls.
+        _attempts = 1
+        try:
+                if _idem:
+                    import hashlib as _hashlib
+                    _h=_hashlib.sha256((req.account_id+":"+_idem+":"+str(i)).encode("utf-8")).hexdigest()[:24]
+                    fname=f"gen_idem_{_h}.jpg"
+                else:
+                    fname = f"gen_{int(_time.time())}_{random.randint(1000,9999)}.jpg"
+                fpath = f"{folder_path}/{fname}"
+                from app.db.session import SessionLocal as _SessionLocal
+                from app.services import image_service as _IMG
+                _db=_SessionLocal()
+                try:
+                    _out=_IMG.generate_banner_financially_guarded(
+                        _db, req.account_id, full_prompt, fpath, size="1024x1024", quality="medium",
+                        model=_IMG.PREMIUM_MODEL, operation="generate_banner",
+                        burst_override=_burst_override
+                    )
+                finally:
+                    _db.close()
+                if not _out.get("ok"):
+                    return (i, None, f"Вариант {i+1}: {_out.get('error') or 'генерация остановлена'}")
+                return (i, _folder_url(req.account_id, folder, fname), None)
+        except Exception as e:
+            return (i, None, f"Вариант {i+1}: {str(e)[:100]}")
 
     results_by_index = {}
     errors = []
@@ -3018,7 +5019,9 @@ def search_stock_photos(req: StockPhotoSearchRequest):
     """Ищет реальные бесплатные фото (Pexels/Pixabay/Unsplash) по запросу и скачивает N штук в галерею клиента."""
     folder = _safe_folder(req.folder or req.query)
     folder_path = _resolve_folder_path(req.account_id, folder, create_if_missing=True)
-    proxy_url = _get_proxy_url()
+    # Stock providers are reachable directly from production; a stale proxy can return 407.
+    # Prefer direct transport here so free image discovery does not depend on proxy credentials.
+    proxy_url = None
     source = (req.source or "pexels").lower()
 
     try:
@@ -3034,6 +5037,14 @@ def search_stock_photos(req: StockPhotoSearchRequest):
                     headers={"Authorization": pexels_key},
                     params={"query": req.query, "per_page": min(req.count, 80), "orientation": "landscape"},
                 )
+            if resp.status_code == 407 and proxy_url:
+                with httpx.Client(timeout=20, follow_redirects=True) as client:
+                    resp = client.get(
+                        "https://api.pexels.com/v1/search",
+                        headers={"Authorization": pexels_key},
+                        params={"query": req.query, "per_page": min(req.count, 80), "orientation": "landscape"},
+                    )
+                proxy_url = None
             if resp.status_code != 200:
                 return {"status": "error", "message": f"Pexels API вернул код {resp.status_code}: {resp.text[:200]}"}
             photos = resp.json().get("photos", [])
@@ -3084,7 +5095,39 @@ def search_stock_photos(req: StockPhotoSearchRequest):
             except Exception:
                 continue
 
-        return {"status": "ok", "source": source, "folder": folder, "downloaded": len(downloaded), "images": downloaded}
+        # STOCK_COLLECTOR_WIRE: downloaded stock files must enter the same
+        # canonical media catalogue as uploads/AI assets. Registration is
+        # idempotent by storage_key, so retries cannot duplicate media rows.
+        # Do not guess a campaign_item here: this endpoint is a gallery search
+        # and has no item id in its request contract. Item linking remains the
+        # explicit campaign/catalog step.
+        registered = 0
+        if downloaded:
+            from app.db.session import SessionLocal
+            from app.models.account import Account
+            from app.services import media_service
+            db = SessionLocal()
+            try:
+                account = db.query(Account).filter(Account.account_id == req.account_id).first()
+                owner_user_id = getattr(account, "owner_user_id", None) if account else None
+                if owner_user_id:
+                    for url in downloaded:
+                        storage_key = str(url).split("/images/", 1)[-1].lstrip("/")
+                        filename = storage_key.rsplit("/", 1)[-1]
+                        asset, created = media_service.register_asset(
+                            db, owner_user_id, req.account_id, storage_key, filename,
+                            media_type="image", source_type="stock",
+                            created_by=owner_user_id, source_provider=source,
+                        )
+                        if created:
+                            registered += 1
+                    db.commit()
+            except Exception:
+                db.rollback()
+            finally:
+                db.close()
+
+        return {"status": "ok", "source": source, "folder": folder, "downloaded": len(downloaded), "registered": registered, "images": downloaded}
     except Exception as e:
         return {"status": "error", "message": str(e)[:200]}
 
@@ -3343,14 +5386,24 @@ def edit_item(req: EditItemRequest):
             "changes": preview,
         }
 
-    if req.title is not None:
-        found.title = req.title
-    if req.description is not None:
-        found.description = req.description
-    if req.price is not None:
-        found.price = req.price
-    if req.images is not None:
-        found.images = req.images
+    # FEED_ITEM_EDIT_ATOMIC_V1: confirmation can leave the browser open while
+    # other workers mutate the feed. Reapply only requested fields to the latest
+    # locked item instead of replacing the stale full list read above.
+    state = {"found": False}
+    def _edit_latest(current):
+        for it in current:
+            if str(it.id) != str(req.item_id):
+                continue
+            if req.title is not None: it.title = req.title
+            if req.description is not None: it.description = req.description
+            if req.price is not None: it.price = req.price
+            if req.images is not None: it.images = list(req.images or [])
+            state["found"] = True
+            break
+        return current
+    _mutate_feed_items(req.account_id, _edit_latest)
+    if not state["found"]:
+        return {"status":"error","message":"Объявление изменилось или было удалено параллельно"}
 
     # Фиксируем в журнал действий: что именно изменено
     changes = []
@@ -3362,7 +5415,6 @@ def edit_item(req: EditItemRequest):
                f"объявление {req.item_id}: изменено {', '.join(changes) or 'ничего'}",
                actor="user")
 
-    _save_feed_items(req.account_id, items)
     return {"status": "ok", "message": "Объявление обновлено, изменения появятся на Авито при следующей синхронизации фида"}
 
 
@@ -3392,7 +5444,7 @@ def get_audit_log(account_id: str, limit: int = 100):
 
 class AutopilotSettingsRequest(BaseModel):
     account_id: str = "otdushi"
-    mode: str = "always_ask"   # always_ask | always_auto | dates
+    mode: str = "always_ask"   # always_ask | always_auto | dates | goal_auto
     date_from: str | None = None
     date_to: str | None = None
 
@@ -3413,114 +5465,502 @@ def get_autopilot_settings(account_id: str = "otdushi"):
         db.close()
 
 
-@router.post("/set_autopilot_settings")
-def set_autopilot_settings(req: AutopilotSettingsRequest):
-    """Сохраняет настройки автопилота: когда Борису можно действовать без подтверждения."""
+def _apply_autopilot_settings(account_id: str, mode: str, date_from: str | None = None,
+                               date_to: str | None = None, actor: str = "user"):
+    """Единая точка записи autopilot_settings. Используется self-service эндпоинтом
+    (actor='user') и штатным админ-провижном /api/admin/clients/provision (actor='director')."""
     from app.db.session import SessionLocal
     from app.models.storage import Storage
     import json as _json
     db = SessionLocal()
     try:
-        cfg = {"mode": req.mode}
-        if req.mode == "dates":
-            cfg["date_from"] = req.date_from
-            cfg["date_to"] = req.date_to
+        cfg = {"mode": mode}
+        if mode == "dates":
+            cfg["date_from"] = date_from
+            cfg["date_to"] = date_to
         raw = _json.dumps(cfg, ensure_ascii=False)
-        row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "autopilot_settings").first()
+        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "autopilot_settings").first()
         if row:
             row.value = raw
         else:
-            row = Storage(account_id=req.account_id, key="autopilot_settings", value=raw)
+            row = Storage(account_id=account_id, key="autopilot_settings", value=raw)
             db.add(row)
 
         # СИНХРОНИЗАЦИЯ: "Автопилот всегда включён" (ежедневный, KPI) и "Автопилот ставок"
         # (почасовой, Советник) — это два уровня одного и того же переключателя для клиента.
         # Включаем/выключаем bid_autopilot вместе с always_auto, чтобы не было рассинхронизации.
-        kpi_row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "kpi_settings").first()
+        kpi_row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "kpi_settings").first()
         if kpi_row:
             try:
                 kpi_cfg = _json.loads(kpi_row.value)
             except Exception:
                 kpi_cfg = {}
-            kpi_cfg["bid_autopilot"] = (req.mode == "always_auto")
+            # AUTOPILOT_GOAL_AUTO_BID_SYNC_V1: goal_auto is the canonical KPI
+            # autonomous mode and must keep the hourly guarded bid lane enabled.
+            kpi_cfg["bid_autopilot"] = (mode in {"always_auto", "goal_auto"})
             kpi_row.value = _json.dumps(kpi_cfg, ensure_ascii=False)
 
+        try:
+            from app.services.control_plane import sync_marketing_baseline_from_actual
+            sync_marketing_baseline_from_actual(db, account_id, reason="canonical autopilot mode write", source_ref="api:set_autopilot_settings", fields={"autopilot_mode":mode})
+        except Exception:
+            db.rollback(); raise
         db.commit()
-        _audit_log(req.account_id, "set_autopilot", f"режим={req.mode} {req.date_from or ''}..{req.date_to or ''}", actor="user")
+        _audit_log(account_id, "set_autopilot", f"режим={mode} {date_from or ''}..{date_to or ''}", actor=actor)
         return {"status": "ok", "settings": cfg}
     finally:
         db.close()
 
 
-@router.get("/collect_stats")
-def collect_stats(account_id: str = "otdushi"):
+@router.post("/set_autopilot_settings")
+def set_autopilot_settings(req: AutopilotSettingsRequest):
+    """Сохраняет настройки автопилота: когда Борису можно действовать без подтверждения."""
+    return _apply_autopilot_settings(req.account_id, req.mode, req.date_from, req.date_to, actor="user")
+
+
+def _collect_stats_unlocked(account_id: str = "otdushi"):
+    from app.services.marketing_clock import marketing_today, marketing_today_iso
     """Собирает дневной снимок статистики: просмотры/контакты по объявлениям + баланс. Сохраняет в Storage."""
     from app.db.session import SessionLocal
+    from app.services.avito_account_throttle import account_throttle_remaining, record_account_throttle
     from app.models.storage import Storage
     import json as _json
-    from datetime import date as _date, timedelta as _timedelta
+    from datetime import date as _date, timedelta as _timedelta, datetime as _dt, timezone as _tz
+
+    # STATS_CYCLE_DEGRADED_MONEY_FENCE_V1: reporting deliberately preserves the
+    # last-known complete snapshot, but a failed *current* identity/inventory/stats
+    # refresh must not let that older snapshot combine with a freshly confirmed
+    # spend row to authorize a raise. Mark the dedicated spend row as fallback-only
+    # until the next successful spend refresh overwrites it cleanly.
+    def _mark_stats_cycle_money_degraded(reason: str) -> None:
+        _d = None
+        try:
+            _d = SessionLocal()
+            _key = f"daily_spending:{marketing_today_iso()}"
+            _row = _d.query(Storage).filter(Storage.account_id == account_id, Storage.key == _key).first()
+            if not _row:
+                return
+            _raw = _json.loads(_row.value or "{}")
+            if not isinstance(_raw, dict) or _raw.get("status") != "ok":
+                return
+            _raw = dict(_raw)
+            _raw["fallback_status"] = str(reason or "stats_cycle_degraded")[:120]
+            _raw["fallback_at"] = _dt.now(_tz.utc).isoformat()
+            _row.value = _json.dumps(_raw, ensure_ascii=False)
+            _d.commit()
+        except Exception as _exc:
+            if _d is not None:
+                try:
+                    _d.rollback()
+                except Exception:
+                    pass
+            print(f"[collect_stats] {account_id}: degraded money-fence persist error {type(_exc).__name__}", flush=True)
+        finally:
+            if _d is not None:
+                _d.close()
+
+    # AVITO_SHARED_ACCOUNT_THROTTLE_STATS_PRECHECK_V1: if another trusted stage
+    # already received provider backpressure for this tenant, preserve the last
+    # good reporting snapshot and do not begin a new inventory/stats cycle yet.
+    _shared_retry = account_throttle_remaining(account_id)
+    if _shared_retry > 0:
+        # STATS_PRECHECK_THROTTLE_MONEY_FENCE_V1: even without issuing a new
+        # provider request, this collection attempt has positive evidence that
+        # current stats cannot be refreshed. Preserve the last-known snapshot
+        # for reporting, but mark the spend signal degraded so an otherwise
+        # still-young previous sample cannot authorize a money raise.
+        _mark_stats_cycle_money_degraded("precheck_shared_throttle")
+        return {
+            "status": "degraded", "reason": "avito_account_throttled",
+            "retryable": True, "provider_status": 429,
+            "retry_after_seconds": int(_shared_retry),
+            "message": "Avito ограничил частоту запросов; предыдущая статистика сохранена",
+        }
 
     token_data = get_avito_token(account_id)
     if "access_token" not in token_data:
+        # STATS_AUTH_FAILURE_MONEY_FENCE_V1: current-cycle stats cannot be
+        # confirmed without provider authentication. Keep the previous snapshot
+        # for reporting only; do not let a still-young clean spend row authorize
+        # a raise after this failed refresh attempt.
+        _mark_stats_cycle_money_degraded("token_unavailable")
         return {"status": "error", "message": "Не удалось авторизоваться в Avito API"}
     token = _extract_token(token_data)
+
+    # STATS_DIRECT_TRANSPORT_V2: every statistics/inventory READ uses the
+    # dedicated direct Avito client (trust_env=False), bounded transport retry,
+    # and exactly one token refresh on 401. This contour is read-only: mutation
+    # endpoints deliberately do NOT use this helper, so an ambiguous network
+    # failure can never duplicate a paid provider action.
+    import time as _time_stats
+    def _stats_read(method: str, url: str, **kwargs):
+        nonlocal token
+        method = str(method or "GET").upper()
+        last_exc = None
+        for attempt in range(2):
+            # STATS_INTERCALL_SHARED_THROTTLE_V1: another trusted worker can
+            # publish Retry-After between inventory pages, stats batches, or
+            # our bounded transport retry. Re-read the tenant ledger before
+            # every provider attempt and synthesize the same 429 classification
+            # without touching Avito again when cooldown is already proven.
+            _intercall_retry = int(account_throttle_remaining(account_id) or 0)
+            if _intercall_retry > 0:
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": str(_intercall_retry)},
+                    request=httpx.Request(method, url),
+                )
+            headers = dict(kwargs.pop("headers", {}) or {})
+            headers["Authorization"] = f"Bearer {token}"
+            try:
+                resp = (_avito_http_post if method == "POST" else _avito_http_get)(url, headers=headers, **kwargs)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_exc = exc
+                if attempt == 0:
+                    _time_stats.sleep(0.35)
+                    continue
+                raise
+            if resp.status_code == 401 and attempt == 0:
+                _invalidate_avito_token(account_id)
+                refreshed = get_avito_token(account_id, force_refresh=True)
+                if "access_token" in refreshed:
+                    token = _extract_token(refreshed)
+                    _time_stats.sleep(0.05)
+                    continue
+            if resp.status_code == 429:
+                # STATS_RETRY_AFTER_BOUNDED_V2 compatibility alias: superseded by
+                # the stricter invariant below; confirmed 429 performs zero retries.
+                # STATS_CONFIRMED_429_NO_RETRY_V1: a confirmed provider throttle
+                # ends inventory/stats pressure for this tenant in the current cycle.
+                # Preserve the provider Retry-After in the shared ledger, but never
+                # perform an in-call retry even when the advertised delay is tiny.
+                _retry_after = 0.0
+                _retry_raw = str(resp.headers.get("Retry-After") or "").strip()
+                if _retry_raw:
+                    try:
+                        _retry_after = max(0.0, float(_retry_raw))
+                    except Exception:
+                        try:
+                            from email.utils import parsedate_to_datetime as _parse_retry_date
+                            from datetime import datetime as _retry_dt, timezone as _retry_tz
+                            _retry_at = _parse_retry_date(_retry_raw)
+                            if _retry_at.tzinfo is None:
+                                _retry_at = _retry_at.replace(tzinfo=_retry_tz.utc)
+                            _retry_after = max(0.0, (_retry_at - _retry_dt.now(_retry_tz.utc)).total_seconds())
+                        except Exception:
+                            _retry_after = 0.0
+                record_account_throttle(account_id, _retry_after or 30.0, source="stats_read_429")
+                return resp
+            if resp.status_code in {500, 502, 503, 504} and attempt == 0:
+                # Non-throttle transient read failures retain one tiny bounded retry.
+                _time_stats.sleep(0.35)
+                continue
+            return resp
+        if last_exc:
+            raise last_exc
+        return resp
+
     _, _, avito_user_id = _get_avito_credentials(account_id)
     if not avito_user_id:
-        me_resp = httpx.get("https://api.avito.ru/core/v1/accounts/self", headers={"Authorization": f"Bearer {token}"})
-        avito_user_id = str(me_resp.json().get("id", ""))
+        try:
+            me_resp = _stats_read("GET", "https://api.avito.ru/core/v1/accounts/self", timeout=12)
+            if me_resp.status_code == 200:
+                avito_user_id = str((me_resp.json() or {}).get("id", ""))
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            print(f"[collect_stats] {account_id}: account lookup transient error {type(exc).__name__}", flush=True)
     if not avito_user_id:
+        # AVITO_STATS_IDENTITY_429_CLASSIFICATION_V1: _stats_read() already
+        # publishes a confirmed /accounts/self 429 into the shared tenant ledger.
+        # Do not collapse that provider backpressure into a generic identity error:
+        # the fleet collector must classify it as external deferred, preserve the
+        # last-known reporting snapshot and keep all money raises fail-closed.
+        _identity_retry = int(account_throttle_remaining(account_id) or 0)
+        if _identity_retry > 0:
+            _mark_stats_cycle_money_degraded("identity_http_429")
+            return {
+                "status": "degraded", "reason": "avito_account_throttled",
+                "retryable": True, "provider_status": 429,
+                "retry_after_seconds": _identity_retry,
+                "message": "Avito ограничил identity-запрос; предыдущая статистика сохранена",
+            }
+        # STATS_IDENTITY_FAILURE_MONEY_FENCE_V1: an unresolved account identity
+        # means this cycle cannot prove current inventory/stats. Preserve the
+        # reporting snapshot, but explicitly degrade the money signal.
+        _mark_stats_cycle_money_degraded("identity_unavailable")
         return {"status": "error", "message": "Не удалось определить avito_user_id"}
+
+    # MONEY_SIGNAL_INDEPENDENT_OF_INVENTORY_V1
+    # Spend is a safety signal, so collect and persist it BEFORE inventory.
+    # A throttled/incomplete item list must never make the daily budget guard
+    # blind. We keep this in a separate storage key so degraded inventory can
+    # never overwrite a previously complete daily_stats snapshot.
+    spending_date = marketing_today_iso()
+    spending = {"status": "unavailable", "date": spending_date, "ad_spend_rub": None,
+                "all_spend_rub": None, "breakdown": {}, "timestamp": None}
+    try:
+        spending_resp = _stats_read(
+            "POST",
+            f"https://api.avito.ru/stats/v2/accounts/{avito_user_id}/spendings",
+            json={"dateFrom": spending_date, "dateTo": spending_date,
+                  "grouping": "day", "spendingTypes": ["all"]},
+            timeout=25,
+        )
+        if spending_resp.status_code == 200:
+            spending_json = spending_resp.json() or {}
+            result = spending_json.get("result") or {}
+            groupings = result.get("groupings") or []
+            day_group = next((g for g in groupings if str(g.get("date") or "")[:10] == spending_date), None)
+            if day_group is not None:
+                breakdown = {}
+                for _row in (day_group.get("spendings") or []):
+                    slug = str(_row.get("slug") or "")
+                    try:
+                        breakdown[slug] = float(_row.get("value") or 0)
+                    except Exception:
+                        breakdown[slug] = 0.0
+                ad_spend = float(breakdown.get("presence", 0) or 0) + float(breakdown.get("promotion", 0) or 0)
+                spending = {"status": "ok", "date": spending_date,
+                            "ad_spend_rub": round(ad_spend, 2),
+                            "all_spend_rub": round(sum(breakdown.values()), 2),
+                            "breakdown": breakdown, "timestamp": result.get("timestamp")}
+            else:
+                spending = {"status": "no_day_group", "date": spending_date,
+                            "ad_spend_rub": None, "all_spend_rub": None,
+                            "breakdown": {}, "timestamp": result.get("timestamp")}
+        else:
+            spending["status"] = f"http_{spending_resp.status_code}"
+    except Exception as _spending_exc:
+        spending["status"] = "error"
+        spending["error"] = type(_spending_exc).__name__
+
+    try:
+        _sp_db = SessionLocal()
+        try:
+            _sp_key = f"daily_spending:{spending_date}"
+            _sp_row = _sp_db.query(Storage).filter(Storage.account_id == account_id, Storage.key == _sp_key).first()
+            # STATS_LAST_GOOD_SPEND_GRACE_V1: a transient provider 429/5xx must not
+            # instantly destroy a just-confirmed same-day money signal. Preserve only
+            # a locally timestamped OK sample younger than 10 minutes; older/legacy
+            # samples stay fail-closed so budget safety never trusts stale spend.
+            _now_sp = _dt.now(_tz.utc)
+            if spending.get("status") == "ok":
+                spending["confirmed_at"] = _now_sp.isoformat()
+            elif _sp_row:
+                try:
+                    _prev_sp = _json.loads(_sp_row.value or "{}")
+                    _prev_confirmed = _prev_sp.get("confirmed_at") if isinstance(_prev_sp, dict) else None
+                    _prev_dt = _dt.fromisoformat(str(_prev_confirmed).replace("Z", "+00:00")) if _prev_confirmed else None
+                    if _prev_dt and _prev_dt.tzinfo is None:
+                        _prev_dt = _prev_dt.replace(tzinfo=_tz.utc)
+                    _prev_age = (_now_sp - _prev_dt).total_seconds() if _prev_dt else 999999
+                    if (isinstance(_prev_sp, dict) and _prev_sp.get("status") == "ok"
+                            and str(_prev_sp.get("date") or "") == spending_date
+                            and 0 <= _prev_age <= 600):
+                        _transient_status = spending.get("status")
+                        spending = dict(_prev_sp)
+                        spending["fallback_status"] = _transient_status
+                        spending["fallback_at"] = _now_sp.isoformat()
+                        spending["last_good_age_sec"] = round(_prev_age, 1)
+                except Exception:
+                    pass
+            _sp_raw = _json.dumps(spending, ensure_ascii=False)
+            if _sp_row:
+                _sp_row.value = _sp_raw
+            else:
+                _sp_db.add(Storage(account_id=account_id, key=_sp_key, value=_sp_raw))
+            _sp_db.commit()
+        finally:
+            _sp_db.close()
+    except Exception as _sp_persist_exc:
+        print(f"[collect_stats] {account_id}: spending persist error {type(_sp_persist_exc).__name__}", flush=True)
+
+    # AVITO_ACCOUNT_THROTTLE_STOP_V1: once spendings confirms account throttling,
+    # keep the last-good reporting snapshot but do not pressure inventory/stats
+    # again in the same cycle. Money raises stay fail-closed unless the preserved
+    # spend signal itself is still inside the strict freshness window.
+    if spending.get("status") == "http_429" or spending.get("fallback_status") == "http_429":
+        _retry_remaining = int(account_throttle_remaining(account_id) or 0)
+        return {
+            "status": "degraded", "reason": "avito_account_throttled",
+            "retryable": True, "provider_status": 429,
+            "retry_after_seconds": _retry_remaining,
+            "message": "Avito ограничил частоту запросов; предыдущая статистика сохранена",
+        }
 
     # Обходим ВСЕ страницы: раньше брали только первую сотню, и клиент с 1382
     # объявлениями видел статистику по 7% своих и считал её полной.
     items = []
+    inventory_complete = True
+    inventory_issue = None
+    inventory_pages = 0
     for page in range(1, 21):  # до 2000 объявлений
-        items_resp = httpx.get(
-            "https://api.avito.ru/core/v1/items",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"per_page": 100, "page": page, "status": "active"},
-            timeout=25
-        )
-        if items_resp.status_code != 200:
+        try:
+            items_resp = _stats_read(
+                "GET",
+                "https://api.avito.ru/core/v1/items",
+                params={"per_page": 100, "page": page, "status": "active"},
+                timeout=20
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # Never persist a false empty account when the very first inventory page failed.
+            if page == 1:
+                _mark_stats_cycle_money_degraded("inventory_transport_error")
+                return {"status":"degraded","reason":"avito_inventory_unavailable","retryable":True,"message":"Avito временно не ответил; предыдущая статистика сохранена"}
+            print(f"[collect_stats] {account_id}: inventory page {page} transient error {type(exc).__name__}; keeping previous persisted snapshot", flush=True)
+            inventory_complete = False
+            inventory_issue = f"inventory_page_{page}_{type(exc).__name__}"
             break
+        if items_resp.status_code != 200:
+            if items_resp.status_code == 429:
+                _retry_remaining = int(account_throttle_remaining(account_id) or 0)
+                _mark_stats_cycle_money_degraded("inventory_http_429")
+                return {"status":"degraded","reason":"avito_account_throttled","retryable":True,
+                        "provider_status":429,"retry_after_seconds":_retry_remaining,
+                        "message":"Avito ограничил частоту inventory-запросов; предыдущая статистика сохранена"}
+            if page == 1:
+                _mark_stats_cycle_money_degraded(f"inventory_http_{items_resp.status_code}")
+                return {"status":"degraded","reason":f"avito_inventory_http_{items_resp.status_code}","retryable":items_resp.status_code>=500,"message":"Avito временно не вернул список объявлений; предыдущая статистика сохранена"}
+            inventory_complete = False
+            inventory_issue = f"inventory_page_{page}_http_{items_resp.status_code}"
+            break
+        inventory_pages += 1
         page_items = items_resp.json().get("resources", [])
         if not page_items:
             break
         items.extend(page_items)
         if len(page_items) < 100:
             break
+        if page == 20:
+            inventory_complete = False
+            inventory_issue = "inventory_limit_2000_reached"
+    if not inventory_complete:
+        _mark_stats_cycle_money_degraded(inventory_issue or "inventory_incomplete")
+        return {
+            "status":"degraded","reason":"avito_inventory_incomplete","retryable":True,
+            "message":"Avito вернул неполный список объявлений; предыдущая статистика сохранена",
+            "collected_items":len(items),
+            "completeness":{"complete":False,"inventory_complete":False,"inventory_pages":inventory_pages,"inventory_issue":inventory_issue},
+        }
     item_ids = [it["id"] for it in items]
     print(f"[collect_stats] {account_id}: объявлений собрано {len(item_ids)}", flush=True)
 
     stats_by_id = {}
+    _raw_by_id = {}
+    stats_batches_total = (len(item_ids) + 199) // 200 if item_ids else 0
+    stats_batches_ok = 0
+    stats_batch_failures = []
     if item_ids:
         # Avito считает статистику с задержкой — "сегодня" почти всегда пусто.
         # Берём последние 2 дня (вчера+сегодня), чтобы не терять данные ни при какой задержке.
-        date_to = _date.today().isoformat()
-        date_from = (_date.today() - _timedelta(days=2)).isoformat()
+        date_to = marketing_today_iso()
+        date_from = (marketing_today() - _timedelta(days=2)).isoformat()
         # Avito не принимает произвольно длинный список — шлём партиями по 200
         for chunk_start in range(0, len(item_ids), 200):
             chunk = item_ids[chunk_start:chunk_start + 200]
-            stats_resp = httpx.post(
-                f"https://api.avito.ru/stats/v1/accounts/{avito_user_id}/items",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"dateFrom": date_from, "dateTo": date_to,
-                      "fields": ["uniqViews", "uniqContacts"], "itemIds": chunk},
-                timeout=40
-            )
-            if stats_resp.status_code != 200:
-                print(f"[collect_stats] {account_id}: партия {chunk_start//200 + 1} — статус {stats_resp.status_code}", flush=True)
+            batch_no = chunk_start//200 + 1
+            stats_resp = None
+            last_error = None
+            # _stats_read already performs the bounded transport/429/5xx retry.
+            # Do not wrap it in a second retry loop: that doubled calls (up to 4)
+            # for one failed batch and amplified Avito throttling during stats runs.
+            try:
+                stats_resp = _stats_read(
+                    "POST",
+                    f"https://api.avito.ru/stats/v1/accounts/{avito_user_id}/items",
+                    json={"dateFrom": date_from, "dateTo": date_to,
+                          "fields": ["uniqViews", "uniqContacts"], "itemIds": chunk},
+                    timeout=30
+                )
+                if stats_resp.status_code != 200:
+                    last_error = f"http_{stats_resp.status_code}"
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_error = type(exc).__name__
+                stats_resp = None
+            if stats_resp is None or stats_resp.status_code != 200:
+                print(f"[collect_stats] {account_id}: stats batch {batch_no} incomplete ({last_error or 'unknown'})", flush=True)
+                stats_batch_failures.append({"batch":batch_no,"reason":last_error or "unknown"})
+                # AVITO_ACCOUNT_THROTTLE_STOP_V2: one confirmed 429 is enough.
+                # Do not continue through the remaining batches and amplify the
+                # provider throttle for this account during the same collection.
+                if stats_resp is not None and stats_resp.status_code == 429:
+                    break
                 continue
+            stats_batches_ok += 1
             for it in stats_resp.json().get("result", {}).get("items", []):
-                views = 0
-                contacts = 0
+                # BORIS_STATS_ONE_DAY: раньше три дня складывались в одну цифру и
+                # отчёт показывал 20 обращений вместо 10. Копим разбивку по
+                # датам, день выбираем ниже - ОДИН на весь аккаунт.
+                _by_day = {}
                 for _s in it.get("stats", []):
-                    views += _s.get("uniqViews", 0)
-                    contacts += _s.get("uniqContacts", 0)
-                stats_by_id[it["itemId"]] = {"views": views, "contacts": contacts}
+                    _d = str(_s.get("date") or "")[:10]
+                    _by_day[_d] = {"views": int(_s.get("uniqViews") or 0),
+                                   "contacts": int(_s.get("uniqContacts") or 0)}
+                _raw_by_id[it["itemId"]] = _by_day
 
-    balance_resp = httpx.get(f"https://api.avito.ru/core/v1/accounts/{avito_user_id}/balance/", headers={"Authorization": f"Bearer {token}"})
-    balance = balance_resp.json() if balance_resp.status_code == 200 else {}
+    if stats_batch_failures:
+        _confirmed_429 = any(str((x or {}).get("reason") or "") == "http_429" for x in stats_batch_failures)
+        if _confirmed_429:
+            _retry_remaining = int(account_throttle_remaining(account_id) or 0)
+            _mark_stats_cycle_money_degraded("stats_http_429")
+            return {
+                "status":"degraded","reason":"avito_account_throttled","retryable":True,
+                "provider_status":429,"retry_after_seconds":_retry_remaining,
+                "message":"Avito ограничил частоту stats-запросов; предыдущий полный снимок сохранён",
+                "items_count":len(item_ids),
+                "completeness":{"complete":False,"inventory_complete":True,"inventory_pages":inventory_pages,
+                                "stats_batches_total":stats_batches_total,"stats_batches_ok":stats_batches_ok,
+                                "failed_batches":stats_batch_failures},
+            }
+        _mark_stats_cycle_money_degraded("stats_batches_incomplete")
+        return {
+            "status":"degraded","reason":"avito_stats_batches_incomplete","retryable":True,
+            "message":"Avito вернул статистику не по всем объявлениям; предыдущий полный снимок сохранён",
+            "items_count":len(item_ids),
+            "completeness":{"complete":False,"inventory_complete":True,"inventory_pages":inventory_pages,
+                            "stats_batches_total":stats_batches_total,"stats_batches_ok":stats_batches_ok,
+                            "failed_batches":stats_batch_failures},
+        }
+
+    # BORIS_STATS_ONE_DAY: выбираем ОДИН день на весь аккаунт - сегодняшний; если он
+    # ещё пуст из-за задержки Avito, берём последний день с данными.
+    _totals = {}
+    for _m in _raw_by_id.values():
+        for _d, _v in _m.items():
+            _t = _totals.setdefault(_d, {"views": 0, "contacts": 0})
+            _t["views"] += _v["views"]
+            _t["contacts"] += _v["contacts"]
+    _pick_day = date_to if item_ids else None
+    if _pick_day not in _totals or (_totals.get(_pick_day, {}).get("views", 0) == 0
+                                    and _totals.get(_pick_day, {}).get("contacts", 0) == 0):
+        for _d in sorted(_totals, reverse=True):
+            if _totals[_d]["views"] or _totals[_d]["contacts"]:
+                _pick_day = _d
+                break
+    for _iid, _m in _raw_by_id.items():
+        _v = _m.get(_pick_day) or {"views": 0, "contacts": 0}
+        stats_by_id[_iid] = {"views": _v["views"], "contacts": _v["contacts"]}
+    print("[collect_stats] %s: статистика за %s (просмотры %s, запросы %s)" % (
+        account_id, _pick_day,
+        sum(x["views"] for x in stats_by_id.values()),
+        sum(x["contacts"] for x in stats_by_id.values())), flush=True)
+    # Balance is auxiliary telemetry. A transient Avito/proxy timeout must never
+    # turn an otherwise successful statistics collection into HTTP 500.
+    balance = {}
+    try:
+        balance_resp = _stats_read(
+            "GET",
+            f"https://api.avito.ru/core/v1/accounts/{avito_user_id}/balance/",
+            timeout=12
+        )
+        if balance_resp.status_code == 200:
+            balance = balance_resp.json() or {}
+        else:
+            print(f"[collect_stats] {account_id}: balance unavailable status={balance_resp.status_code}", flush=True)
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        print(f"[collect_stats] {account_id}: balance transient error {type(exc).__name__}", flush=True)
+
+    # `spending` was already collected and persisted before inventory so money
+    # safety remains fresh even when the item inventory degrades.
 
     enriched = []
     for it in items:
@@ -3532,14 +5972,81 @@ def collect_stats(account_id: str = "otdushi"):
             "views": s["views"], "contacts": s["contacts"], "conversion": conversion
         })
 
+    # Canonical CampaignItem identity reconciliation. This is account-scoped and
+    # exact-only; ambiguous/unproven historical links remain unresolved.
+    identity_reconciliation = {"status": "skipped"}
+    try:
+        from app.services.campaign_identity import (
+            reconcile_snapshot, resolve, public_identity, record_observation,
+            is_canonical_writable, reconcile_published_status,
+        )
+        _id_db = SessionLocal()
+        try:
+            identity_reconciliation = reconcile_snapshot(_id_db, account_id, enriched)
+            _id_db.commit()
+            # Bulk-load resolved identities once. Per-item resolve() caused an N+1
+            # campaign_items loop and kept API transactions alive for 60-100s on
+            # large Avito accounts. Exact duplicate ids remain intentionally unresolved.
+            from app.models.campaign_item import CampaignItem as _CampaignItemBulk
+            _wanted_ids=[str(x.get("id") or "") for x in enriched if str(x.get("id") or "").strip()]
+            _resolved_rows=_id_db.query(_CampaignItemBulk).filter(
+                _CampaignItemBulk.account_id==account_id,
+                _CampaignItemBulk.avito_item_id.in_(_wanted_ids or ["__none__"]),
+            ).all()
+            # LIVE_ACTIVE_STATUS_RECONCILE_V1:
+            # The inventory endpoint above is explicitly status=active. Exact
+            # identity-linked active ads must not remain draft/ready in BORIS.
+            # reconcile_published_status is fail-closed: superseded and
+            # unproven/non-canonical identities are skipped.
+            _status_repair = reconcile_published_status(_resolved_rows)
+            if isinstance(identity_reconciliation, dict):
+                identity_reconciliation["published_status_repair"] = _status_repair
+            _by_live={}
+            for _r in _resolved_rows:
+                _aid=str(getattr(_r,"avito_item_id","") or "").strip()
+                _by_live.setdefault(_aid,[]).append(_r)
+            for _it in enriched:
+                _matches=_by_live.get(str(_it.get("id") or "")) or []
+                _row=_matches[0] if len(_matches)==1 else None
+                if _row:
+                    _it["campaign_identity"] = public_identity(_row)
+                    _it["origin"] = "boris_managed"
+                    _it["write_capability"] = "canonical" if is_canonical_writable(_row) else "read_only_until_mapped"
+                    _it["optimization_observation"] = record_observation(_row, {**_it, "snapshot_date": _pick_day})
+                else:
+                    _it["origin"] = "avito_native_external"
+                    _it["write_capability"] = "read_only_until_mapped"
+            _id_db.commit()
+        finally:
+            _id_db.close()
+    except Exception as _identity_exc:
+        identity_reconciliation = {"status": "error", "reason": str(_identity_exc)[:500]}
+
     sorted_by_conv = sorted(enriched, key=lambda x: x["conversion"], reverse=True)
     snapshot = {
-        "date": _date.today().isoformat(),
+        "date": marketing_today_iso(),
+        # MARKETER_STATS_COLLECTION_FRESHNESS_V1: authoritative local receipt time
+        # for this complete inventory/stats snapshot. Provider stats_date may lag
+        # by a day and must not be reused as collection freshness for money raises.
+        "collected_at": _dt.now(_tz.utc).isoformat(),
+        # Avito statistics may lag by a day. `date` is collection date;
+        # `stats_date` is the actual day represented by item views/contacts.
+        "stats_date": _pick_day,
         "balance": balance,
+        "spending": spending,
         "items_count": len(enriched),
         "items": enriched,
         "top_effective": sorted_by_conv[:5],
-        "least_effective": [x for x in sorted_by_conv if x["views"] > 0][-5:] if any(x["views"] > 0 for x in enriched) else []
+        "least_effective": [x for x in sorted_by_conv if x["views"] > 0][-5:] if any(x["views"] > 0 for x in enriched) else [],
+        "identity_reconciliation": identity_reconciliation,
+        "completeness": {
+            "complete": True,
+            "inventory_complete": True,
+            "inventory_pages": inventory_pages,
+            "stats_batches_total": stats_batches_total,
+            "stats_batches_ok": stats_batches_ok,
+            "failed_batches": [],
+        },
     }
 
     db = SessionLocal()
@@ -3556,7 +6063,63 @@ def collect_stats(account_id: str = "otdushi"):
     finally:
         db.close()
 
+    # FULL_ACCOUNT_MARKETING_MEMORY_V1: analyse active + completed Avito inventory,
+    # including ads that were created manually/outside BORIS. This is read-only for
+    # external/native ads until exact canonical identity is proven.
+    try:
+        from app.services.marketing_inventory import refresh_marketing_inventory
+        snapshot["full_inventory_analysis"] = refresh_marketing_inventory(
+            account_id, token, str(avito_user_id or ""), days=90
+        ).get("counts")
+    except Exception as _inv_exc:
+        snapshot["full_inventory_analysis"] = {"status":"error","reason":str(_inv_exc)[:300]}
+
     return {"status": "ok", "snapshot": snapshot}
+
+
+def _stats_refresh_lock(account_id: str):
+    """Cross-process session lock for one Avito stats refresh per account.
+
+    The advisory lock lives on a dedicated psycopg2 connection and its SQL
+    transaction is committed immediately, so slow Avito HTTP never appears as
+    idle-in-transaction. Holding the session lock prevents API replicas and
+    scheduled collectors from multiplying the same external workload.
+    """
+    import psycopg2 as _psycopg2
+    from app.db.session import DATABASE_URL as _DB_URL
+    dsn=str(_DB_URL).replace('+psycopg2','').replace('+asyncpg','')
+    conn=_psycopg2.connect(dsn, application_name='boris-avito-stats-singleflight')
+    conn.autocommit=True
+    cur=conn.cursor()
+    key='boris:avito:collect_stats:'+str(account_id or '')
+    cur.execute('SELECT pg_try_advisory_lock(hashtextextended(%s,744620))',(key,))
+    acquired=bool(cur.fetchone()[0])
+    return conn,cur,key,acquired
+
+
+@router.get("/collect_stats")
+
+def collect_stats(account_id: str = "otdushi"):
+    conn=cur=key=None
+    try:
+        conn,cur,key,acquired=_stats_refresh_lock(account_id)
+        if not acquired:
+            return {
+                "status":"degraded", "reason":"stats_refresh_in_progress",
+                "retryable":True, "money_actions_allowed":False,
+                "message":"Статистика этого аккаунта уже обновляется; повторный внешний запрос не запущен",
+            }
+        return _collect_stats_unlocked(account_id)
+    finally:
+        if cur is not None and key is not None:
+            try: cur.execute('SELECT pg_advisory_unlock(hashtextextended(%s,744620))',(key,))
+            except Exception: pass
+        if cur is not None:
+            try: cur.close()
+            except Exception: pass
+        if conn is not None:
+            try: conn.close()
+            except Exception: pass
 
 
 @router.get("/weekly_summary")
@@ -3631,11 +6194,33 @@ def director_overview(_=_DepSec(_ReqOwner)):
     try:
         accounts = db.query(Account).all()
         overview = []
+        # DIRECTOR_OVERVIEW_SHARED_THROTTLE_V1: owner-facing live inventory/balance/stats
+        # reads are provider pressure too. Respect the same tenant Retry-After ledger
+        # used by money lanes, while retaining last-known snapshots for reporting.
+        from app.services.avito_account_throttle import account_throttle_remaining as _overview_throttle_remaining, record_account_throttle as _overview_record_throttle
+        def _overview_record_429(account_id, resp, source):
+            retry = 30
+            try:
+                raw = str(resp.headers.get("Retry-After") or "").strip()
+                if raw:
+                    try:
+                        retry = max(0, int(float(raw)))
+                    except Exception:
+                        from email.utils import parsedate_to_datetime
+                        from datetime import datetime, timezone
+                        when = parsedate_to_datetime(raw)
+                        if when.tzinfo is None:
+                            when = when.replace(tzinfo=timezone.utc)
+                        retry = max(0, int((when.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
+            except Exception:
+                retry = 30
+            return _overview_record_throttle(account_id, retry or 30, source=source)
         for acc in accounts:
             has_avito_keys = bool(acc.avito_client_id and acc.avito_client_secret)
             live_items_count = None
             live_balance = None
             latest_snapshot = None
+            contacts_today = 0
             for i in range(7):
                 d = (_date.today() - _timedelta(days=i)).isoformat()
                 row = db.query(Storage).filter(Storage.account_id == acc.account_id, Storage.key == f"daily_stats:{d}").first()
@@ -3646,10 +6231,17 @@ def director_overview(_=_DepSec(_ReqOwner)):
                 live_balance = latest_snapshot.get("balance")
             if has_avito_keys:
                 try:
+                    if _overview_throttle_remaining(acc.account_id) > 0:
+                        raise RuntimeError("avito_account_throttled")
                     token_data = get_avito_token(acc.account_id)
                     token = _extract_token(token_data)
                     total = 0
                     for page in range(1, 21):  # до 2000 объявлений живьём
+                        # DIRECTOR_OVERVIEW_INTERCALL_THROTTLE_V1: a sibling trusted
+                        # worker may publish Retry-After while this long pagination
+                        # loop is in progress. Stop before the next provider call.
+                        if _overview_throttle_remaining(acc.account_id) > 0:
+                            raise RuntimeError("avito_account_throttled")
                         r = httpx.get(
                             "https://api.avito.ru/core/v1/items",
                             headers={"Authorization": f"Bearer {token}"},
@@ -3657,6 +6249,8 @@ def director_overview(_=_DepSec(_ReqOwner)):
                             timeout=10
                         )
                         if r.status_code != 200:
+                            if r.status_code == 429:
+                                _overview_record_429(acc.account_id, r, "director_overview_items_429")
                             break
                         page_items = r.json().get("resources", [])
                         if not page_items:
@@ -3665,35 +6259,61 @@ def director_overview(_=_DepSec(_ReqOwner)):
                         if len(page_items) < 100:
                             break
                     live_items_count = total
-                    balance_resp = httpx.get(
-                        "https://api.avito.ru/core/v1/accounts/self/balance/real",
-                        headers={"Authorization": f"Bearer {token}"},
-                        timeout=10
-                    )
-                    if balance_resp.status_code == 200:
-                        live_balance = {"real": balance_resp.json().get("real", 0), "bonus": 0}
+                    if _overview_throttle_remaining(acc.account_id) > 0:
+                        raise RuntimeError("avito_account_throttled")
+                    _, _, overview_avito_user_id = _get_avito_credentials(acc.account_id)
+                    if not overview_avito_user_id:
+                        me_resp_o = httpx.get("https://api.avito.ru/core/v1/accounts/self", headers={"Authorization": f"Bearer {token}"}, timeout=10)
+                        if me_resp_o.status_code == 429:
+                            _overview_record_429(acc.account_id, me_resp_o, "director_overview_self_429")
+                            raise RuntimeError("avito_account_throttled")
+                        overview_avito_user_id = str(me_resp_o.json().get("id", ""))
+                    if overview_avito_user_id:
+                        balance_resp = httpx.get(
+                            f"https://api.avito.ru/core/v1/accounts/{overview_avito_user_id}/balance/",
+                            headers={"Authorization": f"Bearer {token}"},
+                            timeout=10
+                        )
+                        if balance_resp.status_code == 429:
+                            _overview_record_429(acc.account_id, balance_resp, "director_overview_balance_429")
+                            raise RuntimeError("avito_account_throttled")
+                        if balance_resp.status_code == 200:
+                            live_balance = {"real": balance_resp.json().get("real", 0), "bonus": 0}
 
                     contacts_today = 0
                     try:
-                        _, _, avito_user_id_c = _get_avito_credentials(acc.account_id)
-                        if not avito_user_id_c:
-                            me_resp_c = httpx.get("https://api.avito.ru/core/v1/accounts/self", headers={"Authorization": f"Bearer {token}"}, timeout=10)
-                            avito_user_id_c = str(me_resp_c.json().get("id", ""))
+                        avito_user_id_c = overview_avito_user_id
+                        # DIRECTOR_OVERVIEW_CONTACTS_SHARED_THROTTLE_V1: do not start
+                        # the secondary contacts inventory read after any sibling
+                        # has confirmed tenant throttling.
+                        if _overview_throttle_remaining(acc.account_id) > 0:
+                            raise RuntimeError("avito_account_throttled")
                         r_items_c = httpx.get(
                             "https://api.avito.ru/core/v1/items",
                             headers={"Authorization": f"Bearer {token}"},
                             params={"per_page": 100, "page": 1, "status": "active"},
                             timeout=10
                         )
+                        if r_items_c.status_code == 429:
+                            _overview_record_429(acc.account_id, r_items_c, "director_overview_contacts_items_429")
+                            raise RuntimeError("avito_account_throttled")
                         item_ids_c = [it["id"] for it in r_items_c.json().get("resources", [])][:200]
                         if item_ids_c and avito_user_id_c:
                             today_c = _date.today().isoformat()
+                            # DIRECTOR_OVERVIEW_CONTACTS_STATS_THROTTLE_V1: the
+                            # inventory read above can overlap a sibling 429; honor
+                            # the shared cooldown before the follow-up stats call.
+                            if _overview_throttle_remaining(acc.account_id) > 0:
+                                raise RuntimeError("avito_account_throttled")
                             stats_resp_c = httpx.post(
                                 f"https://api.avito.ru/stats/v1/accounts/{avito_user_id_c}/items",
                                 headers={"Authorization": f"Bearer {token}"},
                                 json={"dateFrom": today_c, "dateTo": today_c, "fields": ["uniqContacts"], "itemIds": item_ids_c},
                                 timeout=15
                             )
+                            if stats_resp_c.status_code == 429:
+                                _overview_record_429(acc.account_id, stats_resp_c, "director_overview_contacts_stats_429")
+                                raise RuntimeError("avito_account_throttled")
                             if stats_resp_c.status_code == 200:
                                 for it_c in stats_resp_c.json().get("result", {}).get("items", []):
                                     for s_c in it_c.get("stats", []):
@@ -3922,81 +6542,584 @@ class RepublishApplyRequest(BaseModel):
 
 @router.post("/republish_apply")
 def republish_apply(req: RepublishApplyRequest):
-    """Снимает указанные неэффективные объявления (через DateEnd - штатный механизм
-    Автозагрузки Avito) и создаёт им замену того же направления в том же количестве.
-    Требует разрешения автопилота (always_auto) либо явного подтверждения владельца."""
+    """Безопасное additive-восстановление слабых объявлений.
+
+    OWNER_GROWTH_NO_SHRINK_V1 compatible; OWNER_GROWTH_NO_SHRINK_V2:
+    - исходные активные объявления НЕ снимаются и DateEnd не меняется;
+    - goal_auto платного клиента разрешает подготовку additive-варианта;
+    - если legacy gen_ads_history отсутствует, используем только уже проверенный
+      canonical feed: тот же template_id + тот же address;
+    - новых фактов не придумываем, фото не берём из другого направления/города;
+    - максимум 5 новых карточек за business-day на аккаунт;
+    - повтор exactly-once по durable manifest.
+    """
     from app.db.session import SessionLocal
     from app.models.storage import Storage
-    import json as _json_ra, time as _time_ra, random as _random_ra
-    from datetime import datetime as _dt_ra
+    import json as _json_ra, re as _re_ra, hashlib as _hash_ra
+    from datetime import datetime as _dt_ra, timezone as _tz_ra
+    from app.services.marketing_clock import marketing_today_iso
 
     db = SessionLocal()
     try:
-        autopilot_row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "autopilot_settings").first()
+        autopilot_row = db.query(Storage).filter(
+            Storage.account_id == req.account_id,
+            Storage.key == "autopilot_settings",
+        ).first()
         autopilot_mode = "always_ask"
         if autopilot_row:
-            autopilot_mode = _json_ra.loads(autopilot_row.value).get("mode", "always_ask")
+            try:
+                autopilot_mode = _json_ra.loads(autopilot_row.value or "{}").get("mode", "always_ask")
+            except Exception:
+                autopilot_mode = "always_ask"
 
-        if autopilot_mode != "always_auto":
+        paid_tier = False
+        try:
+            from app.api.billing import _load_billing as _load_billing_ra
+            paid_tier = (_load_billing_ra(req.account_id) or {}).get("tier") in ("tariff_1", "tariff_2")
+        except Exception:
+            paid_tier = False
+        autonomous_allowed = (
+            autopilot_mode == "always_auto"
+            or (autopilot_mode == "goal_auto" and paid_tier)
+        )
+        if not autonomous_allowed:
             return {
                 "status": "needs_confirmation",
-                "message": f"Автопилот в режиме '{autopilot_mode}' - для снятия {len(req.item_ids)} объявлений нужно явное подтверждение владельца. Переключите автопилот на 'Всегда автоматически' либо подтвердите вручную.",
-                "item_ids": req.item_ids
+                "message": (
+                    f"Автопилот в режиме '{autopilot_mode}' — additive-рост без "
+                    "активного платного goal_auto не выполняется."
+                ),
+                "item_ids": req.item_ids,
+                "changed_feed": False,
             }
 
-        feed_row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "feed_items").first()
-        items = _json_ra.loads(feed_row.value)
+        feed_row = db.query(Storage).filter(
+            Storage.account_id == req.account_id,
+            Storage.key == "feed_items",
+        ).first()
+        if not feed_row:
+            return {
+                "status": "blocked", "reason": "feed_items_missing",
+                "removed": 0, "preserved": 0, "added": 0, "changed_feed": False,
+            }
+        try:
+            items = _json_ra.loads(feed_row.value or "[]")
+        except Exception:
+            items = []
+        if not isinstance(items, list) or not items:
+            return {
+                "status": "blocked", "reason": "feed_items_empty",
+                "removed": 0, "preserved": 0, "added": 0, "changed_feed": False,
+            }
 
-        hist_row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "gen_ads_history").first()
-        gen_ads_history = _json_ra.loads(hist_row.value) if hist_row else []
+        hist_row = db.query(Storage).filter(
+            Storage.account_id == req.account_id,
+            Storage.key == "gen_ads_history",
+        ).first()
+        try:
+            gen_ads_history = _json_ra.loads(hist_row.value or "[]") if hist_row else []
+        except Exception:
+            gen_ads_history = []
+        if not isinstance(gen_ads_history, list):
+            gen_ads_history = []
 
-        now_iso = _dt_ra.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-        removed_count = 0
+        today = marketing_today_iso()
+        manifest_key = "kpi_additive_growth_manifest"
+        manifest_row = db.query(Storage).filter(
+            Storage.account_id == req.account_id,
+            Storage.key == manifest_key,
+        ).first()
+        try:
+            manifest = _json_ra.loads(manifest_row.value or "[]") if manifest_row else []
+        except Exception:
+            manifest = []
+        if not isinstance(manifest, list):
+            manifest = []
+        today_manifest = [
+            x for x in manifest
+            if str((x or {}).get("date") or "") == str(today)
+        ]
+        daily_limit = 5
+        remaining = max(0, daily_limit - len(today_manifest))
+        if remaining <= 0:
+            return {
+                "status": "daily_limit",
+                "reason": "additive_growth_daily_limit_reached",
+                "date": today, "daily_limit": daily_limit,
+                "already_added_today": len(today_manifest),
+                "removed": 0, "preserved": len(req.item_ids or []),
+                "added": 0, "changed_feed": False,
+            }
+
+        requested_ids = [str(x) for x in (req.item_ids or []) if str(x).strip()][:remaining]
+        if not requested_ids:
+            return {
+                "status": "blocked", "reason": "no_requested_sources",
+                "removed": 0, "preserved": 0, "added": 0, "changed_feed": False,
+            }
+
+        by_id = {str((x or {}).get("id") or ""): x for x in items if isinstance(x, dict)}
+        existing_titles = {
+            str((x or {}).get("title") or "").strip().casefold()
+            for x in items if isinstance(x, dict)
+        }
+        existing_galleries = {
+            tuple(str(u) for u in ((x or {}).get("images") or []))
+            for x in items if isinstance(x, dict)
+        }
+        existing_ids = set(by_id)
+
+        title_patterns = {
+            "95712": [
+                "Кухня на заказ по размерам {city}",
+                "Кухонный гарнитур по размерам {city}",
+                "Кухня по индивидуальным размерам {city}",
+                "Кухня под планировку помещения {city}",
+                "Кухонная мебель на заказ по размерам {city}",
+            ],
+            "68080": [
+                "Прихожая на заказ по размерам {city}",
+                "Шкаф в прихожую по размерам {city}",
+                "Прихожая по индивидуальным размерам {city}",
+                "Мебель в прихожую под планировку {city}",
+                "Система хранения для прихожей {city}",
+            ],
+            "68081": [
+                "Гардеробная на заказ по размерам {city}",
+                "Гардеробная система по размерам {city}",
+                "Гардеробная по индивидуальным размерам {city}",
+                "Мебель для гардеробной под планировку {city}",
+                "Система хранения для гардеробной на заказ {city}",
+            ],
+            "68104": [
+                "Мебель для ванной на заказ по размерам {city}",
+                "Тумба для ванной на заказ {city}",
+                "Мебель в ванную по индивидуальным размерам {city}",
+                "Мебель для ванной под планировку {city}",
+                "Тумба и система хранения для ванной {city}",
+            ],
+        }
+
+        def _safe_title(src):
+            template_id = str((src or {}).get("template_id") or "")
+            city = str((src or {}).get("address") or "").strip()
+            for p in (title_patterns.get(template_id) or []):
+                cand = p.format(city=city).strip()[:100]
+                if cand and cand.casefold() not in existing_titles:
+                    return cand
+            return ""
+
+        def _recompose_description(text, title, seed):
+            raw = str(text or "").strip()
+            if not raw:
+                return ""
+            paras = [p.strip() for p in _re_ra.split(r"\n\s*\n", raw) if p.strip()]
+            if len(paras) >= 4:
+                middle = paras[1:-1]
+                shift = max(1, int(seed, 16) % len(middle))
+                middle = middle[shift:] + middle[:shift]
+                body = [paras[0], *middle, paras[-1]]
+            else:
+                sentences = [
+                    s.strip() for s in _re_ra.split(r"(?<=[.!?])\s+", raw)
+                    if s.strip()
+                ]
+                if len(sentences) >= 4:
+                    body = [sentences[0], *sentences[2:], sentences[1]]
+                else:
+                    body = [raw]
+            out = "\n\n".join(body).strip()
+            if title and not out.casefold().startswith(title.casefold()):
+                out = f"{title}.\n\n{out}"
+            return out
+
+        def _same_scope_peers(src):
+            tid = str((src or {}).get("template_id") or "")
+            addr = str((src or {}).get("address") or "").strip().casefold()
+            sid = str((src or {}).get("id") or "")
+            return [
+                x for x in items
+                if isinstance(x, dict)
+                and str(x.get("id") or "") != sid
+                and str(x.get("template_id") or "") == tid
+                and str(x.get("address") or "").strip().casefold() == addr
+                and len(x.get("images") or []) >= 4
+            ]
+
+        def _safe_gallery(src, peers, seed_int):
+            src_images = [str(x) for x in ((src or {}).get("images") or []) if str(x)]
+            if len(src_images) < 4 or not peers:
+                return []
+            for offset in range(len(peers)):
+                peer = peers[(seed_int + offset) % len(peers)]
+                peer_images = [str(x) for x in (peer.get("images") or []) if str(x)]
+                candidate = []
+                for url in [*src_images[:4], *peer_images[4:], *peer_images[:4], *src_images[4:]]:
+                    if url and url not in candidate:
+                        candidate.append(url)
+                    if len(candidate) >= min(8, max(6, len(src_images))):
+                        break
+                sig = tuple(candidate)
+                if len(candidate) >= 6 and sig not in existing_galleries:
+                    return candidate
+            return []
+
+        skipped_no_source = 0
+        skipped_unsafe = []
         new_items = []
+        manifest_add = []
 
-        for it in items:
-            if it["id"] in req.item_ids:
-                it["date_end"] = now_iso
-                removed_count += 1
+        for source_id in requested_ids:
+            src = by_id.get(source_id)
+            if not src:
+                skipped_no_source += 1
+                skipped_unsafe.append({"source_id": source_id, "reason": "source_not_in_canonical_feed"})
+                continue
+            template_id = str(src.get("template_id") or "")
+            address = str(src.get("address") or "").strip()
+            if not template_id or not address:
+                skipped_no_source += 1
+                skipped_unsafe.append({"source_id": source_id, "reason": "source_contract_incomplete"})
+                continue
 
-                id_prefix = "-".join(it["id"].split("-")[:2])
-                direction_words = id_prefix.replace("boris-", "").replace("-", " ")
-                matching_batches = [b for b in gen_ads_history if any(w in b.get("topic", "").lower() for w in direction_words.split() if len(w) > 3)]
-                if matching_batches and matching_batches[0].get("ads"):
-                    source = _random_ra.choice(matching_batches[0]["ads"])
-                    new_item = dict(it)
-                    new_item["id"] = f"{id_prefix}-{int(_time_ra.time())}-{removed_count}"
-                    try:
-                        new_item["title"] = spin(source.get("title", it["title"]))[:100]
-                    except Exception:
-                        new_item["title"] = source.get("title", it["title"])
-                    try:
-                        new_item["description"] = spin(source.get("description", it["description"]))
-                    except Exception:
-                        new_item["description"] = source.get("description", it["description"])
-                    new_item["price"] = source.get("price", it["price"])
-                    new_item["date_end"] = ""
-                    new_item.pop("source_batch_id", None)
-                    new_items.append(new_item)
+            chosen_title = ""
+            chosen_desc = ""
+            chosen_price = src.get("price", 0)
+            id_prefix = "-".join(source_id.split("-")[:2])
+            direction_words = id_prefix.replace("boris-", "").replace("-", " ")
+            matching_batches = [
+                b for b in gen_ads_history
+                if any(
+                    w in str((b or {}).get("topic") or "").lower()
+                    for w in direction_words.split()
+                    if len(w) > 3
+                )
+            ]
+            if matching_batches and matching_batches[0].get("ads"):
+                source = matching_batches[0]["ads"][0]
+                try:
+                    chosen_title = spin(source.get("title", src.get("title", "")))[:100]
+                except Exception:
+                    chosen_title = str(source.get("title") or src.get("title") or "")[:100]
+                try:
+                    chosen_desc = spin(source.get("description", src.get("description", "")))
+                except Exception:
+                    chosen_desc = str(source.get("description") or src.get("description") or "")
+                chosen_price = source.get("price", src.get("price", 0))
+
+            seed = _hash_ra.sha256(
+                f"{req.account_id}|{source_id}|{today}|{len(today_manifest)+len(new_items)+1}".encode("utf-8")
+            ).hexdigest()
+            if not chosen_title or chosen_title.casefold() in existing_titles:
+                chosen_title = _safe_title(src)
+            if not chosen_title:
+                skipped_no_source += 1
+                skipped_unsafe.append({"source_id": source_id, "reason": "no_safe_unique_title"})
+                continue
+            if not chosen_desc:
+                chosen_desc = _recompose_description(src.get("description", ""), chosen_title, seed[:8])
+            if not chosen_desc or chosen_desc == str(src.get("description") or ""):
+                skipped_no_source += 1
+                skipped_unsafe.append({"source_id": source_id, "reason": "no_safe_unique_description"})
+                continue
+
+            peers = _same_scope_peers(src)
+            gallery = _safe_gallery(src, peers, int(seed[:8], 16))
+            if not gallery:
+                skipped_no_source += 1
+                skipped_unsafe.append({"source_id": source_id, "reason": "no_safe_unique_same_scope_gallery"})
+                continue
+
+            new_item = dict(src)
+            new_id = f"boris-growth-{seed[:24]}"
+            if new_id in existing_ids:
+                continue
+            new_item["id"] = new_id
+            new_item["title"] = chosen_title
+            new_item["description"] = chosen_desc
+            new_item["price"] = chosen_price
+            new_item["images"] = gallery
+            new_item["date_end"] = ""
+            new_item.pop("source_batch_id", None)
+
+            existing_ids.add(new_id)
+            existing_titles.add(chosen_title.casefold())
+            existing_galleries.add(tuple(gallery))
+            new_items.append(new_item)
+            manifest_add.append({
+                "date": today,
+                "created_at": _dt_ra.now(_tz_ra.utc).isoformat(),
+                "source_id": source_id,
+                "new_id": new_id,
+                "title": chosen_title,
+                "template_id": template_id,
+                "address": address,
+                "policy": "same_template_same_address_no_new_facts",
+            })
+
+        if not new_items:
+            return {
+                "status": "blocked",
+                "reason": "no_safe_additive_source",
+                "message": (
+                    "Безопасный источник для нового варианта не найден. "
+                    "Действующие объявления сохранены без изменений."
+                ),
+                "removed": 0,
+                "preserved": len(requested_ids),
+                "added": 0,
+                "replaced": 0,
+                "skipped_no_source": skipped_no_source,
+                "skipped": skipped_unsafe,
+                "changed_feed": False,
+            }
+
+        for _feed_it in [*items, *new_items]:
+            _assert_no_legacy_visual_urls(
+                db, req.account_id, (_feed_it or {}).get("images") or [],
+            )
 
         items.extend(new_items)
         feed_row.value = _json_ra.dumps(items, ensure_ascii=False)
+        manifest.extend(manifest_add)
+        manifest_payload = _json_ra.dumps(manifest[-500:], ensure_ascii=False)
+        if manifest_row:
+            manifest_row.value = manifest_payload
+        else:
+            db.add(Storage(
+                account_id=req.account_id,
+                key=manifest_key,
+                value=manifest_payload,
+            ))
         db.commit()
 
-        _audit_log(req.account_id, "republish_apply", f"Снято {removed_count} неэффективных объявлений, создано {len(new_items)} замен", actor="boris_auto")
+        _audit_log(
+            req.account_id,
+            "republish_apply",
+            (
+                f"Действующие объявления сохранены; добавлено {len(new_items)} "
+                f"новых additive-вариантов из canonical feed, "
+                f"без безопасного источника {skipped_no_source}"
+            ),
+            actor="boris_auto",
+        )
 
-        return {"status": "ok", "removed": removed_count, "replaced": len(new_items)}
+        return {
+            "status": "ok",
+            "removed": 0,
+            "preserved": len(requested_ids),
+            "added": len(new_items),
+            "replaced": 0,
+            "skipped_no_source": skipped_no_source,
+            "skipped": skipped_unsafe,
+            "changed_feed": bool(new_items),
+            "feed_size": len(items),
+            "new_ids": [x["new_id"] for x in manifest_add],
+            "new_titles": [x["title"] for x in manifest_add],
+            "daily_limit": daily_limit,
+            "added_today_after": len(today_manifest) + len(new_items),
+            "policy": "additive_no_shrink",
+            "source_policy": "canonical_same_template_same_address",
+            "paid_ai_calls": 0,
+        }
     finally:
         db.close()
 
 
+def _kpi_additive_growth_tick(account_id: str) -> dict:
+    """Ownerless bounded additive reach growth for an under-target KPI account.
+
+    KPI_ADDITIVE_GROWTH_AUTOPILOT_V1
+    This lane is intentionally independent from content-observation windows.
+    It never removes existing feed items and never starts CPX promotion itself.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from app.services.marketing_clock import marketing_today_iso
+    import json as _jag
+    from datetime import datetime as _dt_ag, timezone as _tz_ag
+
+    db = SessionLocal()
+    try:
+        policy_row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "inventory_growth_policy",
+        ).first()
+        try:
+            policy = _jag.loads(policy_row.value or "{}") if policy_row else {}
+        except Exception:
+            policy = {}
+        if not bool(policy.get("enabled")):
+            return {"status":"skipped","reason":"inventory_growth_policy_disabled","changed_feed":False,"changed_avito":False}
+        if str(policy.get("mode") or "") != "under_kpi_additive":
+            return {"status":"skipped","reason":"inventory_growth_policy_mode_invalid","changed_feed":False,"changed_avito":False}
+        if not bool(policy.get("no_shrink", True)):
+            return {"status":"blocked","reason":"inventory_growth_no_shrink_contract_missing","changed_feed":False,"changed_avito":False}
+
+        try:
+            active = _kpi_latest_active_operation(db, account_id)
+        except Exception:
+            active = None
+        if active and str(active.get("status") or "") != "published":
+            return {
+                "status":"waiting","reason":"active_kpi_operation",
+                "operation_id":active.get("operation_id"),"operation_status":active.get("status"),
+                "changed_feed":False,"changed_avito":False,
+            }
+        # KPI_ADDITIVE_PARALLEL_WITH_MEASUREMENT_V1:
+        # published means the old content mutation is finished and only
+        # item-level observation remains. It must not freeze additive reach.
+
+        db.close()
+        check = kpi_check(account_id, refresh_live=False) or {}
+        if str(check.get("status") or "") != "ok":
+            return {"status":"deferred","reason":check.get("reason") or check.get("message") or "kpi_unavailable","changed_feed":False,"changed_avito":False}
+        target = float(check.get("target_leads_per_day") or 0)
+        actual = float(check.get("contacts_today") or 0)
+        if target <= 0:
+            return {"status":"skipped","reason":"kpi_target_missing","changed_feed":False,"changed_avito":False}
+        if actual >= target:
+            return {"status":"goal_met","target":target,"actual":actual,"changed_feed":False,"changed_avito":False}
+
+        feed = _load_feed_items(account_id)
+        max_feed_items = int(policy.get("max_canonical_feed_items") or 80)
+        if len(feed) >= max_feed_items:
+            return {
+                "status":"capped","reason":"max_canonical_feed_items_reached",
+                "feed_items":len(feed),"max_canonical_feed_items":max_feed_items,
+                "target":target,"actual":actual,"changed_feed":False,"changed_avito":False,
+            }
+
+        db = SessionLocal()
+        today = marketing_today_iso()
+        manifest_row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "kpi_additive_growth_manifest",
+        ).first()
+        try:
+            manifest = _jag.loads(manifest_row.value or "[]") if manifest_row else []
+        except Exception:
+            manifest = []
+        if not isinstance(manifest, list):
+            manifest = []
+        max_daily = max(1, min(5, int(policy.get("max_additions_per_day") or 5)))
+        added_today = [
+            x for x in manifest if str((x or {}).get("date") or "") == str(today)
+        ]
+        if len(added_today) >= max_daily:
+            return {
+                "status":"daily_limit","reason":"additive_growth_daily_limit_reached",
+                "added_today":len(added_today),"max_additions_per_day":max_daily,
+                "target":target,"actual":actual,"changed_feed":False,"changed_avito":False,
+            }
+
+        stats_row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == f"daily_stats:{today}",
+        ).first()
+        try:
+            stats = _jag.loads(stats_row.value or "{}") if stats_row else {}
+        except Exception:
+            stats = {}
+        used_recent = {
+            str((x or {}).get("source_id") or "")
+            for x in manifest[-100:]
+            if str((x or {}).get("source_id") or "")
+        }
+        candidates = []
+        for item in (stats.get("items") or []):
+            if str((item or {}).get("status") or "").lower() != "active":
+                continue
+            if str((item or {}).get("origin") or "") != "boris_managed":
+                continue
+            identity = (item or {}).get("campaign_identity") or {}
+            fid = str(identity.get("feed_identity") or "").strip()
+            if not fid or fid in used_recent:
+                continue
+            candidates.append((
+                int((item or {}).get("contacts") or 0),
+                int((item or {}).get("views") or 0),
+                fid,
+                int((item or {}).get("id") or 0),
+            ))
+        candidates.sort(reverse=True)
+        remaining = min(max_daily - len(added_today), max_feed_items - len(feed))
+        source_ids = [x[2] for x in candidates[:remaining]]
+        if not source_ids:
+            return {
+                "status":"deferred","reason":"no_unused_managed_growth_source",
+                "target":target,"actual":actual,"changed_feed":False,"changed_avito":False,
+            }
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    built = republish_apply(
+        RepublishApplyRequest(account_id=account_id, item_ids=source_ids)
+    ) or {}
+    if not built.get("changed_feed"):
+        return {
+            "status":built.get("status") or "blocked",
+            "reason":built.get("reason") or "additive_build_not_changed",
+            "build":built,"target":target,"actual":actual,
+            "changed_feed":False,"changed_avito":False,
+        }
+
+    publish_requested = bool(policy.get("publish_additive", True))
+    publish = {"status":"skipped","reason":"publish_additive_disabled"}
+    if publish_requested:
+        publish = feed_send_to_avito(account_id=account_id) or {}
+
+    db2 = SessionLocal()
+    try:
+        payload = {
+            "policy_version":"KPI_ADDITIVE_GROWTH_AUTOPILOT_V1",
+            "account_id":account_id,
+            "checked_at":_dt_ag.now(_tz_ag.utc).isoformat(),
+            "target":target,"actual":actual,
+            "build":built,"publish":publish,
+            "owner_action_required":False,
+            "next_action":"autoload_readback_then_next_business_day_growth",
+        }
+        row = db2.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "kpi_additive_growth_runtime",
+        ).first()
+        raw = _jag.dumps(payload, ensure_ascii=False)
+        if row:
+            row.value = raw
+        else:
+            db2.add(Storage(account_id=account_id,key="kpi_additive_growth_runtime",value=raw))
+        db2.commit()
+    finally:
+        db2.close()
+
+    return {
+        "status":"submitted" if str(publish.get("status") or "") == "ok" else "prepared",
+        "target":target,"actual":actual,
+        "build":built,"publish":publish,
+        "changed_feed":True,
+        "changed_avito":bool(str(publish.get("status") or "") == "ok"),
+        "owner_action_required":False,
+    }
+
+
 class KpiSettingsRequest(BaseModel):
     account_id: str
-    target_leads_per_day: float = 0
-    max_cost_per_lead_rub: float = 0
-    daily_budget_limit_rub: float = 0  # суточный лимит бюджета (обязателен для активации Советника)
-    bid_autopilot: bool = False  # автопилот ставок: Борис сам меняет ставки
-    lead_temperature: str = "любые"  # "горячие" | "тёплые" | "холодные" | "любые"
+    # None means "preserve current owner KPI". Partial UI actions such as
+    # toggling bid autopilot must never invent or zero business targets.
+    target_leads_per_day: float | None = None
+    max_cost_per_lead_rub: float | None = None
+    # Optional fields preserve existing business settings when the simple KPI UX
+    # only edits plan + red CPL. This prevents a KPI save from zeroing budget/bid mode.
+    daily_budget_limit_rub: float | None = None
+    bid_autopilot: bool | None = None
+    lead_temperature: str | None = None
+    hard_max_bid_rub: float | None = None
+    # Explicit product consent. None = do not change the existing autopilot mode.
+    goal_auto_enabled: bool | None = None
 
 @router.get("/kpi_settings")
 def get_kpi_settings(account_id: str):
@@ -4014,51 +7137,381 @@ def get_kpi_settings(account_id: str):
         db.close()
 
 @router.post("/set_kpi_settings")
-def set_kpi_settings(req: KpiSettingsRequest):
+def set_kpi_settings(req: KpiSettingsRequest, user=_DepSec(_CurUser)):
     from app.db.session import SessionLocal
     from app.models.storage import Storage
+    from app.models.account import Account
     import json as _json_kpi
+    from datetime import datetime as _kpi_dt, timezone as _kpi_tz
 
     db = SessionLocal()
     try:
-        settings = {
-            "target_leads_per_day": req.target_leads_per_day,
-            "max_cost_per_lead_rub": req.max_cost_per_lead_rub,
-            "daily_budget_limit_rub": req.daily_budget_limit_rub,
-            "bid_autopilot": req.bid_autopilot,
-            "lead_temperature": req.lead_temperature
-        }
         row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "kpi_settings").first()
+        try:
+            previous = _json_kpi.loads(row.value) if row and row.value else {}
+        except Exception:
+            previous = {}
+        settings = dict(previous)
+        # KPI_PARTIAL_UPDATE_PRESERVES_OWNER_TARGET_V1: only explicitly supplied
+        # business KPI fields may change. UI toggles must not manufacture a target.
+        if req.target_leads_per_day is not None:
+            settings["target_leads_per_day"] = float(req.target_leads_per_day)
+        if req.max_cost_per_lead_rub is not None:
+            # max_cost_per_lead_rub is an explicit business KPI configured for the
+            # account. Never derive it from daily_budget_limit_rub / target_leads.
+            settings["max_cost_per_lead_rub"] = float(req.max_cost_per_lead_rub)
+            settings["max_cost_per_lead_source"] = "explicit"
+        if req.daily_budget_limit_rub is not None:
+            # MONEY_BUDGET_OWNER_PROVENANCE_V1: a daily advertising budget is
+            # money authority, not a normal editable KPI. Only the account owner
+            # or the BORIS platform owner may create that authority, and the exact
+            # value/user/time is persisted with the setting. Downstream money
+            # executors require this evidence before any automatic raise.
+            account = db.query(Account).filter(Account.account_id == req.account_id).first()
+            if not account:
+                raise HTTPException(status_code=404, detail="Аккаунт не найден")
+            from app.services.platform_roles import is_platform_owner
+            _money_owner = bool(is_platform_owner(user) or int(account.owner_user_id or 0) == int(getattr(user, "id", 0) or 0))
+            if not _money_owner:
+                raise HTTPException(status_code=403, detail="Суточный рекламный бюджет может подтвердить только владелец аккаунта")
+            _budget = max(0.0, float(req.daily_budget_limit_rub))
+            _before_budget = float(previous.get("daily_budget_limit_rub") or 0)
+            settings["daily_budget_limit_rub"] = _budget
+            settings["daily_budget_authorization"] = {
+                "policy_version": "MONEY_BUDGET_OWNER_PROVENANCE_V1",
+                "authorized_by_user_id": int(getattr(user, "id", 0) or 0),
+                "authorized_at": _kpi_dt.now(_kpi_tz.utc).isoformat(),
+                "daily_budget_limit_rub": _budget,
+                "previous_daily_budget_limit_rub": _before_budget,
+                "source": "authenticated_set_kpi_settings",
+            }
+        if req.bid_autopilot is not None:
+            settings["bid_autopilot"] = req.bid_autopilot
+        if req.lead_temperature is not None:
+            settings["lead_temperature"] = req.lead_temperature
+        if req.hard_max_bid_rub is not None:
+            settings["hard_max_bid_rub"] = max(1.0, float(req.hard_max_bid_rub))
+        settings.setdefault("daily_budget_limit_rub", 0)
+        settings.setdefault("bid_autopilot", False)
+        settings.setdefault("lead_temperature", "любые")
         if row:
             row.value = _json_kpi.dumps(settings, ensure_ascii=False)
         else:
             row = Storage(account_id=req.account_id, key="kpi_settings", value=_json_kpi.dumps(settings, ensure_ascii=False))
             db.add(row)
 
-        # ОБРАТНАЯ СИНХРОНИЗАЦИЯ: "Автопилот ставок" (почасовой, Советник) и "Автопилот всегда
-        # включён" (ежедневный, KPI) — один переключатель для клиента на двух экранах.
+        # KPI save must never silently disable an already activated goal_auto account.
+        # Autopilot mode changes only through explicit product consent.
         autopilot_row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "autopilot_settings").first()
-        new_mode = "always_auto" if req.bid_autopilot else "always_ask"
-        if autopilot_row:
+        if req.goal_auto_enabled is not None:
             try:
-                ap_cfg = _json_kpi.loads(autopilot_row.value)
+                ap_cfg = _json_kpi.loads(autopilot_row.value) if autopilot_row and autopilot_row.value else {}
             except Exception:
                 ap_cfg = {}
-            # не перезаписываем режим "dates" случайно при включении bid_autopilot=False,
-            # если клиент явно настроил период отпуска — трогаем только когда включаем автопилот
-            if req.bid_autopilot or ap_cfg.get("mode") != "dates":
-                ap_cfg["mode"] = new_mode
+            ap_cfg["mode"] = "goal_auto" if req.goal_auto_enabled else "always_ask"
+            if autopilot_row:
                 autopilot_row.value = _json_kpi.dumps(ap_cfg, ensure_ascii=False)
-        else:
-            autopilot_row = Storage(account_id=req.account_id, key="autopilot_settings",
-                                     value=_json_kpi.dumps({"mode": new_mode}, ensure_ascii=False))
-            db.add(autopilot_row)
+            else:
+                db.add(Storage(account_id=req.account_id, key="autopilot_settings", value=_json_kpi.dumps(ap_cfg, ensure_ascii=False)))
 
+        # CONTROL_PLANE_CANONICAL_WRITE_BRIDGE_V1: domain state and Registry
+        # advance in the same transaction. A legacy/local writer cannot silently
+        # outrank the canonical desired-state baseline.
+        try:
+            from app.services.control_plane import sync_marketing_baseline_from_actual
+            sync_marketing_baseline_from_actual(
+                db, req.account_id, reason="canonical KPI settings write", source_ref="api:set_kpi_settings",
+                fields={
+                    "target_leads_per_day": settings.get("target_leads_per_day"),
+                    "daily_budget_limit_rub": settings.get("daily_budget_limit_rub"),
+                    "max_cost_per_lead_rub": settings.get("max_cost_per_lead_rub"),
+                    "hard_max_bid_rub": settings.get("hard_max_bid_rub"),
+                    "autopilot_mode": (("goal_auto" if req.goal_auto_enabled else "always_ask") if req.goal_auto_enabled is not None else None),
+                },
+            )
+        except Exception:
+            db.rollback(); raise
         db.commit()
-        _audit_log(req.account_id, "set_kpi_settings", f"Цель: {req.target_leads_per_day} лидов/день, макс {req.max_cost_per_lead_rub}₽/лид, {req.lead_temperature}", actor="user")
-        return {"status": "ok"}
+        _budget_audit = settings.get("daily_budget_authorization") or {}
+        _audit_log(
+            req.account_id,
+            "set_kpi_settings",
+            (
+                f"Цель: {settings.get('target_leads_per_day', 0)} лидов/день, "
+                f"макс {settings.get('max_cost_per_lead_rub', 0)}₽/лид, "
+                f"{settings.get('lead_temperature', 'любые')}; "
+                f"суточный бюджет={settings.get('daily_budget_limit_rub', 0)}₽; "
+                f"user_id={int(getattr(user, 'id', 0) or 0)}; "
+                f"money_provenance={_budget_audit.get('policy_version') or 'preserved'}"
+            ),
+            actor="user",
+        )
+        return {"status": "ok", "settings": settings, "goal_auto_enabled": bool(req.goal_auto_enabled) if req.goal_auto_enabled is not None else None}
     finally:
         db.close()
+
+
+class AiMarketingTariffConfirmationRequest(BaseModel):
+    account_id: str
+    state: str  # CONFIRMED_ACTIVE | CONFIRMED_NOT_ACTIVE | NOT_CONFIRMED
+    actual_tariff: str | None = None
+
+
+@router.post("/ai_marketing_tariff_confirmation")
+def ai_marketing_tariff_confirmation(req: AiMarketingTariffConfirmationRequest):
+    """Persist user tariff evidence inside the existing account autopilot settings.
+
+    This is explicitly user evidence, never Avito API detection.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_tc
+    from datetime import datetime as _dt_tc
+    allowed = {"CONFIRMED_ACTIVE", "CONFIRMED_NOT_ACTIVE", "NOT_CONFIRMED"}
+    if req.state not in allowed:
+        raise HTTPException(status_code=422, detail="invalid tariff confirmation state")
+    db = SessionLocal()
+    try:
+        row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "autopilot_settings").first()
+        cfg = {}
+        if row and row.value:
+            try: cfg = _json_tc.loads(row.value) or {}
+            except Exception: cfg = {}
+        detected_row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "detected_category").first()
+        detected = {}
+        if detected_row and detected_row.value:
+            try: detected = _json_tc.loads(detected_row.value) or {}
+            except Exception: detected = {}
+        category = str(detected.get("category") or "").strip()
+        _category_path = str(detected.get("category_path") or detected.get("path") or "").strip()
+        _category_text = " > ".join(x for x in (category, _category_path) if x)
+        _service_category = bool(__import__('re').search(r"(^|>)\s*Услуги(?:\s*>|$)|Предложение услуг", _category_text, __import__('re').I))
+        category_type = "services" if _service_category else ("goods" if category else "unknown")
+        required = "Расширенный" if category_type == "services" else ("Максимальный" if category_type == "goods" else None)
+        actual = str(req.actual_tariff or required or "").strip() or None
+        effective_state = req.state
+        # Requirement is a minimum tariff capability. Максимальный satisfies
+        # a Расширенный requirement; lower/unknown tiers do not.
+        _tariff_rank = {"Расширенный": 1, "Максимальный": 2}
+        _satisfies_required = bool(required and actual and _tariff_rank.get(actual, 0) >= _tariff_rank.get(required, 99))
+        if effective_state == "CONFIRMED_ACTIVE" and not _satisfies_required:
+            effective_state = "CONFIRMED_NOT_ACTIVE"
+        cfg["tariff_confirmation"] = {
+            "state": effective_state,
+            "required_tariff": required,
+            "actual_tariff": actual,
+            "source": "user_confirmation",
+            "confirmed_at": _dt_tc.utcnow().isoformat() + "Z",
+        }
+        raw = _json_tc.dumps(cfg, ensure_ascii=False)
+        if row: row.value = raw
+        else: db.add(Storage(account_id=req.account_id, key="autopilot_settings", value=raw))
+        db.commit()
+        _audit_log(req.account_id, "ai_marketing_tariff_confirmation", f"Avito tariff: {effective_state}; required={required}; actual={actual}", actor="user")
+        return {"status":"ok", "confirmation":cfg["tariff_confirmation"], "autopilot_mode":cfg.get("mode") or "always_ask"}
+    finally:
+        db.close()
+
+
+@router.get("/ai_marketing_readiness")
+def ai_marketing_readiness(account_id: str):
+    """Read-only product projection over existing KPI/Avito/Feed Factory identity state."""
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from app.models.account import Account
+    from app.models.account_slot import AccountSlot
+    from app.models.campaign_item import CampaignItem
+    import json as _json_ready
+
+    db = SessionLocal()
+    try:
+        def load(key, default=None):
+            row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == key).first()
+            if not row or not row.value:
+                return default
+            try: return _json_ready.loads(row.value)
+            except Exception: return default
+
+        kpi = load("kpi_settings", {}) or {}
+        ap = load("autopilot_settings", {}) or {}
+        detected = load("detected_category", {}) or {}
+        category = str(detected.get("category") or "").strip()
+        _category_path = str(detected.get("category_path") or detected.get("path") or "").strip()
+        _category_text = " > ".join(x for x in (category, _category_path) if x)
+        # Avito may return either the top-level category, the leaf name or a full path.
+        # Any path rooted in «Услуги» must use the services tariff rule; treating a
+        # service leaf as goods would incorrectly require «Максимальный».
+        _service_category = bool(__import__('re').search(r"(^|>)\s*Услуги(?:\s*>|$)|Предложение услуг", _category_text, __import__('re').I))
+        category_type = "services" if _service_category else ("goods" if category else "unknown")
+        required_tariff = "Расширенный" if category_type == "services" else ("Максимальный" if category_type == "goods" else None)
+
+        account = db.query(Account).filter(Account.account_id == account_id).first()
+        avito_connected = bool(account and account.avito_client_id and account.avito_client_secret)
+        slot = db.query(AccountSlot).filter(AccountSlot.account_id == account_id).first()
+        autoload_access = slot.tariff_ok if slot else None
+        # LEGACY_AUTOLOAD_CAPABILITY_EVIDENCE_V1: direct/legacy Avito accounts may
+        # predate AccountSlot. Reuse only fresh provider-confirmed account-scoped
+        # Autoload evidence; never invent a tariff name. This removes owner babysitting
+        # while preserving fail-closed behavior when the evidence is stale/unknown.
+        if autoload_access is None:
+            try:
+                _cap_row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "avito_autoload_capability_v1").first()
+                _cap = _json_ready.loads(_cap_row.value or "{}") if _cap_row else {}
+                from datetime import datetime as _dt_ready_cap, timezone as _tz_ready_cap
+                _cap_checked = _dt_ready_cap.fromisoformat(str(_cap.get("checked_at") or "").replace("Z", "+00:00"))
+                if _cap_checked.tzinfo is None:
+                    _cap_checked = _cap_checked.replace(tzinfo=_tz_ready_cap.utc)
+                _cap_age = (_dt_ready_cap.now(_tz_ready_cap.utc) - _cap_checked).total_seconds()
+                if (_cap.get("connected") is True and _cap.get("autoload_ready") is True
+                        and int(_cap.get("http_status") or 0) == 200 and 0 <= _cap_age <= 86400):
+                    autoload_access = True
+            except Exception:
+                pass
+
+        # Readiness needs identity counts only. Do not hydrate full CampaignItem
+        # ORM rows (payload/metadata can be large on big accounts).
+        ci_rows = db.query(CampaignItem.feed_identity, CampaignItem.avito_item_id).filter(
+            CampaignItem.account_id == account_id
+        ).all()
+        avito_identity_count = sum(1 for feed_identity, avito_item_id in ci_rows if avito_item_id)
+        feed_row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "feed_items").first()
+        feed_factory_ready = bool(ci_rows or (feed_row and feed_row.value))
+        feed_ids = set()
+        if feed_row and feed_row.value:
+            try:
+                for raw in (_json_ready.loads(feed_row.value) or []):
+                    fid = str(raw.get("id") or raw.get("Id") or "").strip()
+                    if fid: feed_ids.add(fid)
+            except Exception:
+                pass
+        # Publication mapping means a deterministic CampaignItem -> authoritative
+        # account-feed identity, not merely that a live Avito id is known.
+        mapped = sum(1 for feed_identity, avito_item_id in ci_rows if str(feed_identity or "").strip() in feed_ids)
+        # Feed-only legacy accounts still have deterministic publication identities.
+        known_items = len(ci_rows) if ci_rows else len(feed_ids)
+        mapped_for_human = mapped if ci_rows else len(feed_ids)
+        mapping_ready = mapped_for_human > 0
+        kpi_configured = float(kpi.get("target_leads_per_day") or 0) > 0 and float(kpi.get("max_cost_per_lead_rub") or 0) > 0
+        # KPI_MONEY_READINESS_TRUTH_V1: a configured lead target is not the same
+        # as authorization to spend. Money autopilot needs an explicit positive
+        # daily advertising budget; zero keeps analysis/content active but MUST
+        # be visible as a blocker instead of a green readiness card.
+        explicit_daily_budget_rub = float(kpi.get("daily_budget_limit_rub") or 0)
+        money_budget_configured = explicit_daily_budget_rub > 0
+        # AUTONOMOUS_MARKETING_MODE_UNIFIED_V1: executor and product projection
+        # must agree that both supported autonomous modes are autonomous.
+        goal_auto = str(ap.get("mode") or "") in {"goal_auto", "always_auto"}
+
+        # Avito API does not expose the commercial tariff name. Only explicit
+        # account-scoped evidence is accepted; user confirmation is labelled as such.
+        tariff_confirmation = ap.get("tariff_confirmation") or {}
+        tariff_state = str(tariff_confirmation.get("state") or "NOT_CONFIRMED")
+        confirmed_required = tariff_confirmation.get("required_tariff")
+        confirmed_actual = tariff_confirmation.get("actual_tariff")
+        _tariff_rank = {"Расширенный": 1, "Максимальный": 2}
+        _tariff_satisfies = bool(
+            confirmed_required == required_tariff and confirmed_actual
+            and _tariff_rank.get(str(confirmed_actual), 0) >= _tariff_rank.get(str(required_tariff), 99)
+        )
+        required_tariff_active = (
+            True if tariff_state == "CONFIRMED_ACTIVE" and _tariff_satisfies
+            else False if tariff_state == "CONFIRMED_NOT_ACTIVE" else None
+        )
+        # AUTOLOAD_CAPABILITY_EVIDENCE_V1: successful /autoload/v2/profile
+        # access is direct provider evidence that Autoload is available. It
+        # authorizes feed delivery capability without inventing a tariff name.
+        # Explicit CONFIRMED_NOT_ACTIVE remains fail-closed.
+        if required_tariff_active is None and autoload_access is True:
+            required_tariff_active = True
+        blockers = []
+        if not kpi_configured: blockers.append("KPI_NOT_CONFIGURED")
+        if goal_auto and not money_budget_configured: blockers.append("DAILY_AD_BUDGET_NOT_CONFIGURED")
+        if not goal_auto: blockers.append("GOAL_AUTO_DISABLED")
+        if not avito_connected: blockers.append("AVITO_NOT_CONNECTED")
+        if not feed_factory_ready: blockers.append("FEED_FACTORY_NOT_READY")
+        if not mapping_ready: blockers.append("PUBLICATION_MAPPING_NOT_READY")
+        if required_tariff and required_tariff_active is not True: blockers.append("AVITO_TARIFF_NOT_CONFIRMED")
+
+        # End the read-only projection transaction before nested KPI work.
+        # This endpoint used to leave CampaignItem AccessShareLock/transaction
+        # open while kpi_check performed its own storage/analytics reads.
+        db.commit()
+
+        # Readiness is a fast state projection. It must never wait for a live
+        # Avito statistics refresh: slow/failed external stats used to leave the
+        # Home screen in a transient onboarding step even for already-operational
+        # accounts. The dedicated kpi_check endpoint still refreshes live data.
+        try:
+            check = kpi_check(account_id, refresh_live=False)
+        except Exception:
+            check = {"status": "error"}
+        _, actions = _kpi_apply_log_load(db, account_id)
+        last_action = actions[-1] if actions else None
+        human_blockers = []
+        if required_tariff and required_tariff_active is not True: human_blockers.append(f"Подтвердите тариф Avito «{required_tariff}» для этого аккаунта")
+        if not mapping_ready: human_blockers.append("BORIS пока не может доказанно связать объявление с рабочим фидом")
+        if not avito_connected: human_blockers.append("Подключите Avito")
+        if not kpi_configured: human_blockers.append("Укажите план лидов и красную цену лида")
+        if goal_auto and not money_budget_configured: human_blockers.append("Укажите суточный рекламный бюджет — без него BORIS не разгоняет уже запущенные ставки; для нового Feed Factory объявления разрешена только одна стартовая ставка в пределах hard cap")
+        if not goal_auto: human_blockers.append("Включите «Автоматически достигать KPI»")
+        if last_action: current_work = str(last_action.get("reason") or "BORIS ведёт KPI-оптимизацию")
+        elif check.get("status") == "ok" and float(check.get("contacts_today") or 0) < float(check.get("target_leads_per_day") or 0): current_work = "BORIS видит отставание от плана и ищет безопасное действие"
+        else: current_work = "BORIS контролирует KPI по штатному циклу"
+
+        return {
+            "status": "ok",
+            "account_id": account_id,
+            "kpi_configured": kpi_configured,
+            "money_budget_configured": money_budget_configured,
+            "daily_budget_limit_rub": explicit_daily_budget_rub,
+            "money_autopilot_ready": bool(goal_auto and kpi_configured and money_budget_configured),
+            "goal_auto_enabled": goal_auto,
+            "avito_connected": avito_connected,
+            "feed_factory_ready": feed_factory_ready,
+            "publication_mapping_ready": mapping_ready,
+            "mapped_campaign_items": mapped_for_human,
+            "avito_identity_items": avito_identity_count,
+            "campaign_items": known_items,
+            "category": category or None,
+            "category_type": category_type,
+            "category_source": detected.get("source"),
+            "required_avito_tariff": required_tariff,
+            "required_tariff_active": required_tariff_active,
+            "tariff_confirmation_state": tariff_state,
+            "tariff_confirmation": tariff_confirmation or None,
+            "avito_autoload_access": autoload_access,
+            "tariff_detection": "UNAVAILABLE_FROM_CURRENT_DATA",
+            "ai_marketing_ready": not blockers,
+            "blockers": blockers,
+            "capabilities": {
+                "analyze_statistics": {"allowed": avito_connected, "reason": None if avito_connected else "Подключите Avito"},
+                "detect_kpi_gap": {"allowed": kpi_configured and avito_connected, "reason": None if kpi_configured and avito_connected else "Нужны KPI и подключение Avito"},
+                "prepare_safe_change": {"allowed": goal_auto and feed_factory_ready, "reason": None if goal_auto and feed_factory_ready else "Нужны автопилот и Feed Factory"},
+                "publish_feed_change": {"allowed": bool(required_tariff_active) and mapping_ready, "reason": None if bool(required_tariff_active) and mapping_ready else ("Подтвердите требуемый тариф Avito" if required_tariff_active is not True else "BORIS должен знать объявление")},
+                "measure_effect": {"allowed": avito_connected and mapping_ready, "reason": None if avito_connected and mapping_ready else "Нужны Avito и связь объявления с BORIS"},
+            },
+            "kpi": kpi,
+            "current_kpi": check,
+            "autopilot_state": ap.get("mode") or "always_ask",
+            "last_action": last_action,
+            "current_work": current_work,
+            "human_blockers": human_blockers,
+            "user_action_required": human_blockers[0] if human_blockers else None,
+        }
+    finally:
+        db.close()
+
+
+@router.get("/ai_marketing_strategy_registry")
+def ai_marketing_strategy_registry():
+    """Product-visible registry of strategies backed by existing authoritative modules."""
+    return {"status": "ok", "strategies": [
+        {"id":"title_optimization","state":"active","module":"KPI + Feed Factory","mutation":"title"},
+        {"id":"cpx_adjust_bid","state":"active_when_evidence","module":"CPX Advisor","mutation":"promotion_bid"},
+        {"id":"replacement","state":"existing_guarded","module":"republish_apply","mutation":"replacement"},
+        {"id":"first_image_test","state":"candidate_guarded","module":"KPI runtime + media layer","mutation":"media"},
+        {"id":"description_optimization","state":"active_after_title_failure","module":"KPI + Feed Factory","mutation":"description"},
+    ]}
 
 
 @router.post("/delete_kpi_settings")
@@ -4083,6 +7536,23 @@ class RepublishSettingsRequest(BaseModel):
     min_views_no_contact: int = 10
     zero_views_days: int = 7
     enabled: bool = True
+    # Automatic republish cadence is opt-in. Legacy accounts may already have
+    # candidate thresholds enabled; they must not suddenly start publishing.
+    schedule_enabled: bool = False
+    interval_days: int = 7
+    max_items_per_cycle: int = 3
+
+
+def _republish_settings_defaults():
+    return {
+        "min_views_no_contact": 10,
+        "zero_views_days": 7,
+        "enabled": True,
+        "schedule_enabled": False,
+        "interval_days": 7,
+        "max_items_per_cycle": 3,
+    }
+
 
 @router.get("/republish_settings")
 def get_republish_settings(account_id: str):
@@ -4092,10 +7562,27 @@ def get_republish_settings(account_id: str):
 
     db = SessionLocal()
     try:
-        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "republish_settings").first()
-        if not row:
-            return {"status": "ok", "settings": {"min_views_no_contact": 10, "zero_views_days": 7, "enabled": True}}
-        return {"status": "ok", "settings": _json_rs.loads(row.value)}
+        settings = _republish_settings_defaults()
+        row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "republish_settings",
+        ).first()
+        if row:
+            try:
+                saved = _json_rs.loads(row.value or "{}")
+                if isinstance(saved, dict):
+                    settings.update(saved)
+            except Exception:
+                pass
+        runtime_row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "republish_runtime",
+        ).first()
+        try:
+            runtime = _json_rs.loads(runtime_row.value or "{}") if runtime_row else {}
+        except Exception:
+            runtime = {}
+        return {"status": "ok", "settings": settings, "runtime": runtime}
     finally:
         db.close()
 
@@ -4107,22 +7594,191 @@ def set_republish_settings(req: RepublishSettingsRequest):
 
     db = SessionLocal()
     try:
+        interval_days = min(30, max(3, int(req.interval_days or 7)))
+        max_items = min(5, max(1, int(req.max_items_per_cycle or 3)))
+        zero_days = min(30, max(1, int(req.zero_views_days or 7)))
+        min_views = max(1, int(req.min_views_no_contact or 10))
         settings = {
-            "min_views_no_contact": req.min_views_no_contact,
-            "zero_views_days": req.zero_views_days,
-            "enabled": req.enabled
+            "min_views_no_contact": min_views,
+            "zero_views_days": zero_days,
+            "enabled": bool(req.enabled),
+            "schedule_enabled": bool(req.schedule_enabled),
+            "interval_days": interval_days,
+            "max_items_per_cycle": max_items,
         }
-        row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "republish_settings").first()
+        row = db.query(Storage).filter(
+            Storage.account_id == req.account_id,
+            Storage.key == "republish_settings",
+        ).first()
         if row:
             row.value = _json_rs.dumps(settings, ensure_ascii=False)
         else:
-            row = Storage(account_id=req.account_id, key="republish_settings", value=_json_rs.dumps(settings, ensure_ascii=False))
+            row = Storage(
+                account_id=req.account_id,
+                key="republish_settings",
+                value=_json_rs.dumps(settings, ensure_ascii=False),
+            )
             db.add(row)
         db.commit()
-        _audit_log(req.account_id, "set_republish_settings", f"Пороги: {req.min_views_no_contact} просмотров/0 контактов, {req.zero_views_days} дней, включено={req.enabled}", actor="user")
-        return {"status": "ok"}
+        _audit_log(
+            req.account_id,
+            "set_republish_settings",
+            (
+                f"Перепубликация: каждые {interval_days} дн., "
+                f"до {max_items} объявлений за цикл; "
+                f"порог {min_views} просмотров/0 контактов или "
+                f"0 просмотров {zero_days} дн.; "
+                f"авторасписание={bool(req.schedule_enabled)}"
+            ),
+            actor="user",
+        )
+        return {"status": "ok", "settings": settings}
     finally:
         db.close()
+
+
+@router.post("/republish_cycle_run")
+def republish_cycle_run(account_id: str, force: bool = False):
+    """One scheduled republish cycle.
+
+    The cadence is owner-configured (3..30 days). A cycle never blindly deletes
+    healthy live listings: it selects weak candidates, creates bounded fresh feed
+    variants through republish_apply(), then publishes through the existing
+    feed_send_to_avito() path. This keeps current no-shrink / tariff / feed guards.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from datetime import datetime as _dt_rpc, timedelta as _td_rpc, timezone as _tz_rpc
+    import json as _json_rpc
+
+    snapshot = get_republish_settings(account_id) or {}
+    settings = snapshot.get("settings") or _republish_settings_defaults()
+    runtime = snapshot.get("runtime") or {}
+
+    if not bool(settings.get("schedule_enabled")):
+        return {
+            "status": "disabled",
+            "changed_feed": False,
+            "changed_avito": False,
+            "settings": settings,
+            "runtime": runtime,
+        }
+
+    interval_days = min(30, max(3, int(settings.get("interval_days") or 7)))
+    max_items = min(5, max(1, int(settings.get("max_items_per_cycle") or 3)))
+    now = _dt_rpc.now(_tz_rpc.utc)
+
+    last_raw = str(runtime.get("last_cycle_at") or "").strip()
+    last_at = None
+    if last_raw:
+        try:
+            last_at = _dt_rpc.fromisoformat(last_raw.replace("Z", "+00:00"))
+            if last_at.tzinfo is None:
+                last_at = last_at.replace(tzinfo=_tz_rpc.utc)
+            else:
+                last_at = last_at.astimezone(_tz_rpc.utc)
+        except Exception:
+            last_at = None
+
+    next_at = (last_at + _td_rpc(days=interval_days)) if last_at else now
+    if not force and next_at > now:
+        return {
+            "status": "scheduled",
+            "due": False,
+            "next_run_at": next_at.isoformat(),
+            "changed_feed": False,
+            "changed_avito": False,
+            "settings": settings,
+            "runtime": runtime,
+        }
+
+    checked = republish_check(account_id) or {}
+    candidates = list(checked.get("candidates") or [])
+    selected = candidates[:max_items]
+    build = {"status": "skipped", "reason": "no_candidates", "changed_feed": False}
+    publish = {"status": "skipped", "reason": "feed_not_changed"}
+    changed_feed = False
+    changed_avito = False
+
+    if selected:
+        build = republish_apply(RepublishApplyRequest(
+            account_id=account_id,
+            item_ids=[str(x.get("id") or "") for x in selected if str(x.get("id") or "").strip()],
+        )) or {}
+        changed_feed = bool(build.get("changed_feed"))
+        if changed_feed:
+            publish = feed_send_to_avito(account_id=account_id) or {}
+            changed_avito = str(publish.get("status") or "") == "ok"
+
+    next_run_at = now + _td_rpc(days=interval_days)
+    runtime_payload = {
+        "policy_version": "REPUBLISH_INTERVAL_AUTOPILOT_V1",
+        "last_cycle_at": now.isoformat(),
+        "next_run_at": next_run_at.isoformat(),
+        "interval_days": interval_days,
+        "max_items_per_cycle": max_items,
+        "candidate_count": len(candidates),
+        "selected_count": len(selected),
+        "selected": [
+            {
+                "id": str(x.get("id") or ""),
+                "title": str(x.get("title") or ""),
+                "reason": str(x.get("reason") or ""),
+            }
+            for x in selected
+        ],
+        "build_status": str(build.get("status") or ""),
+        "publish_status": str(publish.get("status") or ""),
+        "changed_feed": changed_feed,
+        "changed_avito": changed_avito,
+    }
+
+    db = SessionLocal()
+    try:
+        row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "republish_runtime",
+        ).first()
+        raw = _json_rpc.dumps(runtime_payload, ensure_ascii=False)
+        if row:
+            row.value = raw
+        else:
+            db.add(Storage(account_id=account_id, key="republish_runtime", value=raw))
+        db.commit()
+    finally:
+        db.close()
+
+    _audit_log(
+        account_id,
+        "republish_cycle",
+        (
+            f"Цикл перепубликации: кандидатов {len(candidates)}, "
+            f"взято {len(selected)}, feed_changed={changed_feed}, "
+            f"avito_changed={changed_avito}, следующий через {interval_days} дн."
+        ),
+        actor="boris_auto",
+    )
+    return {
+        "status": (
+            "published"
+            if changed_avito
+            else "prepared"
+            if changed_feed
+            else "no_candidates"
+            if not selected
+            else str(build.get("status") or "checked")
+        ),
+        "due": True,
+        "next_run_at": next_run_at.isoformat(),
+        "candidates": len(candidates),
+        "selected": len(selected),
+        "build": build,
+        "publish": publish,
+        "changed_feed": changed_feed,
+        "changed_avito": changed_avito,
+        "runtime": runtime_payload,
+    }
+
 
 @router.post("/delete_republish_settings")
 def delete_republish_settings(account_id: str):
@@ -4172,6 +7828,8 @@ def kpi_plan_execute(req: KpiPlanExecuteRequest):
             price_to = int(price_from * 1.5)
         _prefix_parts = req.id_prefix.split("-")
         _type_word = _prefix_parts[1] if len(_prefix_parts) > 1 else req.id_prefix
+        if not (req.id_prefix or "").strip():
+            _type_word = "все объявления"
         _direction_map = {"shkaf": "шкафы-купе", "kuhnya": "кухни", "beton": "товарный бетон", "plan": "товары"}
         direction = _direction_map.get(_type_word, _type_word)
 
@@ -4197,8 +7855,10 @@ def kpi_plan_execute(req: KpiPlanExecuteRequest):
             scored_batches = []
             for b in history_batches[:10]:
                 try:
-                    eff_resp = _httpx_kpe.get(f"http://127.0.0.1:8000/api/avito/batch_effectiveness?account_id={req.account_id}&batch_id={b['id']}&days=30", timeout=15)
-                    eff_data = eff_resp.json()
+                    # History is already materialized; do not keep this Session
+                    # transaction open while invoking another BORIS subsystem.
+                    db.rollback()
+                    eff_data = batch_effectiveness(req.account_id, int(b['id']), days=30) or {}
                     if eff_data.get("status") == "ok" and eff_data.get("conversion", 0) > 0:
                         scored_batches.append((eff_data["conversion"], b))
                 except Exception:
@@ -4219,13 +7879,15 @@ def kpi_plan_execute(req: KpiPlanExecuteRequest):
             "сразу называть товар И содержать конкретную выгоду (не просто название). Никогда не "
             "выдумывай факты (гарантии, скидки, сроки), которых нет в исходных данных."
         ) + learned_examples
-        ads_resp = _httpx_kpe.post("http://127.0.0.1:8000/api/avito/generate_ads", json={
-            "topic": direction, "count": min(len(matching), 10),
-            "price_from": price_from, "price_to": price_to,
-            "extra": strong_copy_prompt_extra, "goal": "message", "length": "medium",
-            "use_my_ads": False, "account_id": req.account_id
-        }, timeout=180)
-        ads_data = ads_resp.json()
+        # OpenAI generation can take tens of seconds. No caller DB transaction may
+        # survive across it; generate_ads owns its own financially guarded transport.
+        db.rollback()
+        ads_data = generate_ads(GenerateAdsRequest(
+            topic=direction, count=min(len(matching), 10),
+            price_from=price_from, price_to=price_to,
+            extra=strong_copy_prompt_extra, goal="message", length="medium",
+            use_my_ads=False, account_id=req.account_id
+        ))
         if ads_data.get("status") != "ok":
             return {"status": "error", "message": f"Не удалось сгенерировать усиленный копирайтинг: {ads_data.get('message')}"}
         new_ads = ads_data["ads"]
@@ -4261,6 +7923,8 @@ def kpi_plan_execute(req: KpiPlanExecuteRequest):
             it["source_batch_id"] = hist_batch["id"]
             updated_count += 1
 
+        for _feed_it in items:
+            _assert_no_legacy_visual_urls(db, req.account_id, (_feed_it or {}).get("images") or [])
         feed_row.value = _json_kpe.dumps(items, ensure_ascii=False)
         db.commit()
 
@@ -4284,21 +7948,147 @@ def kpi_autopilot_run(account_id: str):
     try:
         autopilot_row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "autopilot_settings").first()
         autopilot_mode = _json_kar.loads(autopilot_row.value).get("mode", "always_ask") if autopilot_row else "always_ask"
-        if autopilot_mode != "always_auto":
-            return {"status": "skipped", "reason": f"Автопилот в режиме '{autopilot_mode}', требуется 'always_auto' для автозапуска"}
+        # always_ask тоже должен анализировать KPI.
+        # Отличие от always_auto: BORIS готовит предложение,
+        # но НЕ выполняет никаких действий без подтверждения владельца.
+        if autopilot_mode not in ("always_auto", "always_ask", "goal_auto"):
+            return {
+                "status": "skipped",
+                "reason": f"Автопилот в режиме '{autopilot_mode}' — автоматический KPI-контур не запускается"
+            }
 
         kpi_row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "kpi_settings").first()
         if not kpi_row:
             return {"status": "skipped", "reason": "Цель по лидам не задана"}
 
-        check_resp = _httpx_kar.get(f"http://127.0.0.1:8000/api/avito/kpi_check?account_id={account_id}", timeout=30)
-        check_data = check_resp.json()
+        # Never call BORIS through its own HTTP listener. Besides wasting a worker
+        # slot, this deadlocks graceful shutdown when the same process waits on itself.
+        # End the settings-read transaction, then call the authoritative function directly.
+        db.rollback()
+        check_data = kpi_check(account_id)
         if check_data.get("status") != "ok":
             return {"status": "skipped", "reason": check_data.get("message", "kpi_check вернул статус не ok")}
 
         suggested_action = check_data.get("suggested_action")
         if suggested_action == "none_goal_met":
             return {"status": "ok", "action_taken": "none", "reason": "Цель уже достигается"}
+
+        # KPI_LEGACY_AUTOPILOT_CANONICAL_DELEGATE_V1:
+        # This endpoint existed before the guarded Goal Runner and used to own
+        # destructive republish/broad-edit branches. Autonomous modes now
+        # delegate to the single canonical state machine instead of maintaining
+        # a second mutation policy. That keeps budget, measurement, one-hypothesis
+        # and no-shrink rules identical no matter which old scheduler/client calls us.
+        if autopilot_mode in {"always_auto", "goal_auto"}:
+            db.rollback()
+            canonical = kpi_goal_tick(account_id) or {}
+            return {
+                "status": canonical.get("status") or "error",
+                "mode": autopilot_mode,
+                "suggested_action": suggested_action,
+                "action_taken": "canonical_goal_tick",
+                "canonical_delegate": True,
+                "result": canonical,
+            }
+
+        # В безопасном режиме always_ask BORIS не выполняет действие,
+        # а создаёт/обновляет один пункт плана, ожидающий запуска владельцем.
+        if autopilot_mode == "always_ask":
+            from app.models.plan_item import PlanItem
+
+            target = check_data.get("target_leads_per_day", 0)
+            actual = check_data.get("contacts_today", 0)
+            gap = check_data.get("leads_gap", 0)
+            cpl = check_data.get("cost_per_lead_today")
+            max_cpl = check_data.get("max_cost_per_lead_rub", 0)
+            recommendation = check_data.get("recommendation") or ""
+
+            diagnosis_data = {}
+            try:
+                db.rollback()
+                diagnosis_data = kpi_diagnose(account_id) or {}
+            except Exception:
+                diagnosis_data = {}
+
+            diagnosis = diagnosis_data.get("diagnosis") or "unknown"
+            diagnosis_reason = diagnosis_data.get("reason") or recommendation
+            evidence = diagnosis_data.get("evidence") or {}
+            recommended_actions = diagnosis_data.get("recommended_actions") or []
+
+            actions_text = "; ".join(
+                str(x) for x in recommended_actions if str(x).strip()
+            ) or "Требуется дополнительная диагностика"
+
+            evidence_text = (
+                f"просмотры={evidence.get('views_today', 'нет данных')}, "
+                f"контакты={evidence.get('contacts_today', actual)}, "
+                f"активные объявления={evidence.get('active_items', 'нет данных')}, "
+                f"конверсия={evidence.get('view_to_contact_conversion_pct', 'нет данных')}%"
+            )
+
+            plan_text = (
+                f"План достижения KPI по лидам. "
+                f"Цель: {target} лидов/день. "
+                f"Сегодня: {actual}. "
+                f"Недобор: {max(gap, 0)}. "
+                f"Диагноз BORIS: {diagnosis}. "
+                f"Причина: {diagnosis_reason}. "
+                f"Доказательства: {evidence_text}. "
+                f"CPL сегодня: {cpl if cpl is not None else 'нет данных'} ₽ "
+                f"(лимит {max_cpl} ₽). "
+                f"Предлагаемые действия: {actions_text}"
+            )
+
+            existing = (
+                db.query(PlanItem)
+                .filter(
+                    PlanItem.account_id == account_id,
+                    PlanItem.source == "boris_kpi",
+                    PlanItem.status == "needs_launch",
+                )
+                .order_by(PlanItem.id.desc())
+                .first()
+            )
+
+            if existing:
+                existing.text = plan_text
+                plan_item = existing
+                created = False
+            else:
+                plan_item = PlanItem(
+                    account_id=account_id,
+                    text=plan_text,
+                    source="boris_kpi",
+                    status="needs_launch",
+                )
+                db.add(plan_item)
+                created = True
+
+            db.commit()
+            db.refresh(plan_item)
+
+            _audit_log(
+                account_id,
+                "kpi_plan_proposed",
+                f"Подготовлен план достижения цели: {actual}/{target} лидов, ожидает подтверждения",
+                actor="boris_kpi"
+            )
+
+            return {
+                "status": "proposal_created" if created else "proposal_updated",
+                "mode": "always_ask",
+                "plan_item_id": plan_item.id,
+                "suggested_action": suggested_action,
+                "action_taken": "none",
+                "requires_confirmation": True,
+                "kpi": {
+                    "target_leads_per_day": target,
+                    "contacts_today": actual,
+                    "leads_gap": gap,
+                    "cost_per_lead_today": cpl,
+                    "max_cost_per_lead_rub": max_cpl,
+                },
+            }
 
         feed_row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "feed_items").first()
         if not feed_row:
@@ -4312,19 +8102,22 @@ def kpi_autopilot_run(account_id: str):
 
         actions_taken = []
 
+        # All action functions below own their DB/external boundaries. Release the
+        # autopilot projection transaction first and invoke them in-process.
+        db.rollback()
         if suggested_action == "republish_apply":
-            republish_resp = _httpx_kar.post("http://127.0.0.1:8000/api/avito/republish_apply", json={
-                "account_id": account_id,
-                "item_ids": [c["id"] for c in _httpx_kar.get(f"http://127.0.0.1:8000/api/avito/republish_check?account_id={account_id}", timeout=30).json().get("candidates", [])]
-            }, timeout=60)
-            actions_taken.append({"action": "republish_apply", "result": republish_resp.json()})
+            candidates=(republish_check(account_id) or {}).get("candidates", [])
+            republish_result = republish_apply(RepublishApplyRequest(
+                account_id=account_id, item_ids=[c["id"] for c in candidates]
+            ))
+            actions_taken.append({"action": "republish_apply", "result": republish_result})
 
         elif suggested_action == "edit_active_listings_review":
             for prefix in id_prefixes:
-                plan_resp = _httpx_kar.post("http://127.0.0.1:8000/api/avito/kpi_plan_execute", json={
-                    "account_id": account_id, "id_prefix": prefix, "confirm": True
-                }, timeout=180)
-                actions_taken.append({"action": "kpi_plan_execute", "id_prefix": prefix, "result": plan_resp.json()})
+                plan_result = kpi_plan_execute(KpiPlanExecuteRequest(
+                    account_id=account_id, id_prefix=prefix, confirm=True
+                ))
+                actions_taken.append({"action": "kpi_plan_execute", "id_prefix": prefix, "result": plan_result})
 
         _audit_log(account_id, "kpi_autopilot_run", f"Автоматически выполнено: {suggested_action}, действий: {len(actions_taken)}", actor="boris_kpi_auto")
 
@@ -4333,10 +8126,43 @@ def kpi_autopilot_run(account_id: str):
         db.close()
 
 
+# KPI_MOSCOW_DAY_CLOCK_V1: all Avito KPI/storage day keys must follow the
+# marketplace business day, not the server UTC calendar date. Moscow midnight
+# is three hours ahead of UTC; mixing the two makes yesterday's spend/budget
+# survive into the new Avito day and falsely blocks growth.
+def _kpi_marketing_today():
+    from app.services.marketing_clock import marketing_today
+    return marketing_today()
+
+
 @router.get("/kpi_check")
-def kpi_check(account_id: str):
+def kpi_check(account_id: str, refresh_live: bool = True):
     """Сравнивает реальные показатели (лиды сегодня, стоимость лида) с целью KPI
-    и возвращает конкретную рекомендацию, что сделать дальше."""
+    и возвращает конкретную рекомендацию, что сделать дальше.
+
+    Перед чтением обновляет текущий snapshot из Avito, чтобы Главная, Аналитика
+    и Маркетинг не показывали вчерашний/нулевой CPL после изменения расходов.
+    """
+    _live_refresh = {"status": "not_requested"}
+    if refresh_live:
+        try:
+            _live_refresh = collect_stats(account_id) or {"status": "error", "reason": "empty_refresh_result"}
+        except Exception as _refresh_exc:
+            print(f"[kpi_check] {account_id}: live_refresh_failed={type(_refresh_exc).__name__}", flush=True)
+            _live_refresh = {"status":"error","reason":type(_refresh_exc).__name__,"retryable":True}
+        # Money/KPI automation must never act on a stale snapshot after a failed
+        # live refresh. The previous full snapshot remains available to read-only
+        # projections via refresh_live=False, but action-producing callers fail closed.
+        if str(_live_refresh.get("status") or "") != "ok":
+            return {
+                "status":"degraded",
+                "reason":"live_stats_incomplete",
+                "message":_live_refresh.get("message") or "Свежая статистика Avito неполная; автоматические KPI-действия временно остановлены",
+                "refresh":_live_refresh,
+                "suggested_action":"blocked_stats_incomplete",
+                "money_actions_allowed":False,
+                "data_freshness":"stale_preserved_full_snapshot",
+            }
     from app.db.session import SessionLocal
     from app.models.storage import Storage
     import json as _json_kc
@@ -4350,54 +8176,14229 @@ def kpi_check(account_id: str):
         kpi = _json_kc.loads(kpi_row.value)
         target_leads = kpi.get("target_leads_per_day", 0)
         max_cpl = kpi.get("max_cost_per_lead_rub", 0)
+        # KPI_CONTENT_ONLY_MONEY_FENCE_V1:
+        # bid_autopilot=false (or explicit placement_package_content_only) means
+        # BORIS may diagnose/optimize content but must never authorize bid/reach
+        # money actions from this KPI read model.
+        _bid_autopilot_enabled_kc = bool(kpi.get("bid_autopilot"))
+        _content_only_placement_kc = bool(
+            kpi.get("placement_package_content_only")
+            or kpi.get("bid_autopilot") is False
+        )
+        _allowed_optimization_scope_kc = [
+            str(x) for x in (kpi.get("allowed_optimization_scope") or [])
+            if str(x).strip()
+        ]
+        try:
+            _content_daily_max_items_kc = max(
+                0, int(kpi.get("content_daily_max_items") or 0)
+            )
+        except Exception:
+            _content_daily_max_items_kc = 0
+        _content_existing_assets_only_kc = bool(
+            kpi.get("content_existing_assets_only")
+        )
+        try:
+            daily_budget_limit = float(kpi.get("daily_budget_limit_rub") or 0)
+        except (TypeError, ValueError):
+            daily_budget_limit = 0.0
 
-        today = _date_kc.today().isoformat()
-        yesterday = (_date_kc.today() - _timedelta_kc(days=1)).isoformat()
+        today = _kpi_marketing_today().isoformat()
+        yesterday = (_kpi_marketing_today() - _timedelta_kc(days=1)).isoformat()
         today_row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == f"daily_stats:{today}").first()
         yesterday_row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == f"daily_stats:{yesterday}").first()
 
-        contacts_today = 0
+        observed_contacts = 0
+        today_data = {}
         if today_row:
-            data = _json_kc.loads(today_row.value)
-            for it in data.get("items", []):
-                contacts_today += it.get("contacts", 0)
+            today_data = _json_kc.loads(today_row.value)
+            for it in today_data.get("items", []):
+                observed_contacts += it.get("contacts", 0)
+
+        # KPI_PROVIDER_STATS_DAY_TRUTH_V1: the storage key follows the current
+        # business day, but the provider contact counters may still belong to
+        # the previous day. Never combine lagging contacts with current-day
+        # spend when calculating today's KPI or CPL.
+        provider_stats_date = str(today_data.get("stats_date") or today_data.get("date") or "")[:10]
+        provider_stats_current = bool(provider_stats_date and provider_stats_date == today)
+        raw_contacts_observed = observed_contacts
+        raw_contacts_today = observed_contacts if provider_stats_current else None
+
+        # KPI_BUSINESS_LEAD_QUALITY_V1:
+        # uniqContacts is a raw contact count. On ordinary business ads job
+        # seekers can write about employment; those dialogs are not customer
+        # leads and must not satisfy the owner's sales KPI. Classification runs
+        # only for a provider snapshot proved to belong to the current day.
+        if provider_stats_current:
+            try:
+                from app.services.kpi_lead_quality import apply_business_lead_filter
+                lead_quality = apply_business_lead_filter(db, account_id, raw_contacts_today)
+                contacts_today = lead_quality.get("business_contacts_today", raw_contacts_today)
+            except Exception as _lead_quality_exc:
+                lead_quality = {
+                    "status": "degraded",
+                    "reason": f"lead_quality_failed:{type(_lead_quality_exc).__name__}",
+                    "raw_contacts_today": raw_contacts_today,
+                    "excluded_job_seekers_today": 0,
+                    "business_contacts_today": raw_contacts_today,
+                }
+                contacts_today = raw_contacts_today
+        else:
+            lead_quality = {
+                "status": "provider_stats_lagging",
+                "reason": "provider_stats_date_not_current_business_day",
+                "raw_contacts_today": None,
+                "observed_contacts": raw_contacts_observed,
+                "excluded_job_seekers_today": 0,
+                "business_contacts_today": None,
+            }
+            contacts_today = None
+
+        # Canonical intraday economics: use the persisted current-day spending
+        # fact. Wallet movements are not advertising cost.
+        spending = today_data.get("spending") if isinstance(today_data.get("spending"), dict) else {}
+        spending_fresh = (spending.get("status") == "ok" and str(spending.get("date") or "") == today)
+        spent = None
+        if spending_fresh and spending.get("all_spend_rub") is not None:
+            try:
+                spent = float(spending.get("all_spend_rub"))
+            except (TypeError, ValueError):
+                spent = None
+        budget_status = "known" if spent is not None else "unknown"
+        budget_reason = None if spent is not None else "blocked_spendings_unavailable"
 
         cost_per_lead = None
-        if today_row and yesterday_row:
-            today_data = _json_kc.loads(today_row.value)
-            yesterday_data = _json_kc.loads(yesterday_row.value)
-            prev_balance = yesterday_data.get("balance", {}).get("real", 0)
-            curr_balance = today_data.get("balance", {}).get("real", 0)
-            spent = max(prev_balance - curr_balance, 0)
-            if contacts_today > 0 and spent > 0:
-                cost_per_lead = round(spent / contacts_today, 2)
+        if provider_stats_current and spent is not None and contacts_today is not None and contacts_today > 0:
+            cost_per_lead = round(spent / contacts_today, 2)
 
-        leads_gap = target_leads - contacts_today
+        leads_gap = (target_leads - contacts_today) if contacts_today is not None else None
         recommendation = None
         suggested_action = None
 
-        if target_leads == 0:
+        emergency_threshold = (
+            max_cpl * 1.10
+            if max_cpl > 0
+            else 0
+        )
+
+        emergency_recovery = (
+            provider_stats_current
+            and contacts_today is not None
+            and spent is not None
+            and target_leads > 0
+            and max_cpl > 0
+            and spent >= emergency_threshold
+            and contacts_today <= 0
+        )
+
+        if not provider_stats_current:
+            recommendation = (
+                "Площадка ещё не отдала статистику контактов за текущий день. "
+                "Подтверждённый расход за сегодня показывается отдельно; лиды и цену "
+                "лида BORIS не считает, пока дата статистики не совпадёт с текущим днём."
+            )
+            suggested_action = "blocked_provider_stats_lagging"
+        elif emergency_recovery:
+            recommendation = (
+                f"Потрачено {spent:.0f} ₽ без обращений при "
+                f"допустимом CPL {max_cpl:.0f} ₽. "
+                "BORIS сохраняет действующие объявления и запускает ограниченное "
+                "восстановление спроса: сначала диагностика и точечные измеримые "
+                "изменения, затем при доказанном дефиците — добавление новых вариантов "
+                "без сокращения активного пула."
+            )
+            suggested_action = "emergency_recovery"
+
+        elif budget_status == "unknown":
+            recommendation = ("План вижу, но повышать ставки не буду: нет достоверных "
+                              "данных о расходах за сегодня.")
+            suggested_action = "blocked_balance_unknown"
+        elif target_leads == 0:
             recommendation = "Цель не задана корректно (0 лидов/день) — уточните желаемое количество лидов."
         elif contacts_today >= target_leads and (cost_per_lead is None or max_cpl == 0 or cost_per_lead <= max_cpl):
             recommendation = f"Цель достигается: {contacts_today} лидов сегодня при цели {target_leads}. Дополнительных действий не требуется."
             suggested_action = "none_goal_met"
         elif cost_per_lead is not None and max_cpl > 0 and cost_per_lead > max_cpl:
-            recommendation = f"Стоимость лида ({cost_per_lead}₽) выше цели ({max_cpl}₽) — рекомендуется улучшить конверсию: обновить тексты/баннеры через 'Перепубликацию неэффективных' или отредактировать активные объявления, а не увеличивать количество."
-            suggested_action = "edit_active_listings_review"
+            recommendation = (
+                f"Стоимость лида ({cost_per_lead}₽) выше цели ({max_cpl}₽). "
+                "BORIS не снимает действующие объявления из-за недобора KPI: сначала снижает стоимость трафика "
+                "и улучшает конверсию точечными измеримыми гипотезами. После чистого окна измерения, если лидов "
+                "всё ещё не хватает, добавляет новые контролируемые варианты без сокращения активного пула."
+            )
+            suggested_action = "canonical_cpl_recovery"
         else:
-            recommendation = f"Не хватает лидов: {contacts_today} из {target_leads} в день. Рекомендуется: 1) проверить и снять неэффективные объявления через 'Перепубликацию', 2) при возможности увеличить число активных объявлений."
-            suggested_action = "republish_apply"
+            if _content_only_placement_kc:
+                recommendation = (
+                    f"Не хватает лидов: {contacts_today} из {target_leads} в день. "
+                    "Пакетное размещение сохраняем без изменения ставок и количества объявлений. "
+                    "BORIS постепенно тестирует заголовки, описания и порядок уже существующих изображений."
+                )
+                suggested_action = "content_only_conversion_recovery"
+            else:
+                recommendation = (
+                    f"Не хватает лидов: {contacts_today} из {target_leads} в день. "
+                    "Действующие объявления сохраняем. BORIS усиливает доказанно работающие позиции в пределах бюджета, "
+                    "тестирует заголовок/контент по одной гипотезе и при сохраняющемся недоборе добавляет новые варианты, "
+                    "не уменьшая активный рекламный пул."
+                )
+                suggested_action = "canonical_goal_recovery"
+
+        # KPI_CHECK_CANONICAL_MARKETING_ENTITLEMENT_V1: the read model shown
+        # to owner/UI must use the same current paid-period truth as the money
+        # planner/executor. Fresh spend + budget alone are not authorization.
+        try:
+            from app.services.control_plane_adapters_ext import marketing_service_entitlement as _marketing_entitlement_kc
+            _service_entitlement_kc = _marketing_entitlement_kc(db, account_id) or {}
+        except Exception as _ent_exc_kc:
+            _service_entitlement_kc = {"state":"unknown","source":"entitlement_check_failed","reason":type(_ent_exc_kc).__name__}
+
+        # KPI_CHECK_EXPIRED_PERIOD_TRUTH_V1:
+        # Historical plan/fact remains useful after a paid marketing period
+        # ends, but the owner/UI must never be told that BORIS is launching a
+        # recovery action which the executor is correctly forbidden to run.
+        _service_entitlement_state_kc = str(
+            _service_entitlement_kc.get("state") or "unknown"
+        ).lower()
+        if _service_entitlement_state_kc == "expired":
+            recommendation = (
+                "Оплаченный период AI-маркетолога завершён. "
+                "План/факт показывается справочно; новые KPI-действия и "
+                "денежные изменения остановлены до нового оплаченного периода."
+            )
+            suggested_action = "service_period_expired"
+        elif _service_entitlement_state_kc != "active":
+            recommendation = (
+                "Нет явного текущего оплаченного периода AI-маркетолога. "
+                "BORIS показывает план/факт справочно, но fail-closed не запускает "
+                "новые AI, feed, публикации или денежные действия, пока коммерческий "
+                "период не зафиксирован."
+            )
+            suggested_action = "service_period_unknown"
 
         return {
             "status": "ok",
             "target_leads_per_day": target_leads,
             "max_cost_per_lead_rub": max_cpl,
             "contacts_today": contacts_today,
+            "raw_contacts_today": lead_quality.get("raw_contacts_today", raw_contacts_today),
+            "observed_contacts": raw_contacts_observed,
+            "provider_stats_date": provider_stats_date or None,
+            "provider_stats_current": provider_stats_current,
+            "provider_stats_lagging": bool(today_data) and not provider_stats_current,
+            "excluded_job_seekers_today": lead_quality.get("excluded_job_seekers_today", 0),
+            "lead_quality_status": lead_quality.get("status"),
+            "lead_quality_rule": lead_quality.get("rule"),
+            "lead_quality_account_mode": lead_quality.get("account_mode"),
+            "excluded_job_seeker_dialogs": (lead_quality.get("items") or [])[:20],
+            "spent_today_rub": round(spent, 2) if spent is not None else None,
+            "budget_status": budget_status,
+            "budget_reason_code": budget_reason,
+            # KPI_MONEY_AUTHORITY_V1: fresh spend proves economics, not owner
+            # authority to buy more reach. Positive explicit daily budget is
+            # mandatory for raise/reach planning; money-saving lowers are a
+            # separate lane and do not depend on this flag.
+            "daily_budget_limit_rub": daily_budget_limit,
+            # KPI_CONFIG_GAP_MONEY_FAIL_CLOSED_V1: budget+fresh spend are not
+            # sufficient authority when the business target/red CPL are absent.
+            # A paid/autopilot account with target=0 or max_cpl=0 may continue
+            # read-only/non-money lifecycle work, but must never raise bids.
+            "kpi_config_complete": bool(
+                float(target_leads or 0) > 0
+                and (
+                    _content_only_placement_kc
+                    or float(max_cpl or 0) > 0
+                )
+            ),
+            "kpi_config_gap": [
+                name
+                for name, missing in (
+                    ("target_leads_per_day", float(target_leads or 0) <= 0),
+                    (
+                        "max_cost_per_lead_rub",
+                        (not _content_only_placement_kc)
+                        and float(max_cpl or 0) <= 0,
+                    ),
+                )
+                if missing
+            ],
+            "service_entitlement": _service_entitlement_kc,
+            "bid_autopilot": _bid_autopilot_enabled_kc,
+            "placement_package_content_only": _content_only_placement_kc,
+            "allowed_optimization_scope": _allowed_optimization_scope_kc,
+            "content_daily_max_items": _content_daily_max_items_kc,
+            "content_existing_assets_only": _content_existing_assets_only_kc,
+            # KPI_BUDGET_EXHAUSTED_MONEY_FALSE_V1: a configured budget is a
+            # ceiling, not merely an authorization flag. Once confirmed spend
+            # reaches/exceeds it, all growth money actions must read as blocked
+            # in the same owner/API truth that the budget brake already enforces.
+            "budget_exhausted": bool(
+                spent is not None and daily_budget_limit > 0
+                and spent >= daily_budget_limit
+            ),
+            "money_block_reason": (
+                "daily_budget_exhausted"
+                if spent is not None and daily_budget_limit > 0 and spent >= daily_budget_limit
+                else "provider_stats_lagging" if not provider_stats_current
+                else None
+            ),
+            "money_actions_allowed": bool(
+                provider_stats_current
+                and spent is not None and daily_budget_limit > 0
+                and spent < daily_budget_limit
+                and float(target_leads or 0) > 0 and float(max_cpl or 0) > 0
+                and _service_entitlement_kc.get("state") == "active"
+                and _bid_autopilot_enabled_kc
+                and not _content_only_placement_kc
+            ),
             "cost_per_lead_today": cost_per_lead,
             "leads_gap": leads_gap,
             "recommendation": recommendation,
-            "suggested_action": suggested_action
+            "suggested_action": suggested_action,
+            "data_freshness": (
+                "provider_stats_lagging" if not provider_stats_current
+                else "live_complete" if refresh_live else "persisted_snapshot"
+            ),
+            "live_refresh_status": (_live_refresh.get("status") if refresh_live else "not_requested"),
         }
+    finally:
+        db.close()
+
+
+
+
+@router.get("/kpi_root_cause")
+def kpi_root_cause(account_id: str):
+    """
+    Read-only анализ первопричины отклонения KPI по лидам.
+    Находит сильные и слабые объявления по просмотрам/контактам/конверсии.
+    Никаких изменений на Avito не выполняет.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_krc
+    from datetime import date as _date_krc
+
+    db = SessionLocal()
+    try:
+        today = _kpi_marketing_today().isoformat()
+
+        stats_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == f"daily_stats:{today}",
+            )
+            .first()
+        )
+
+        if not stats_row:
+            return {
+                "status": "ok",
+                "root_cause": "insufficient_data",
+                "reason": "Нет daily_stats за сегодня",
+                "best_items": [],
+                "worst_items": [],
+                "read_only": True,
+            }
+
+        stats = _json_krc.loads(stats_row.value)
+        items = stats.get("items") or []
+
+        # POSITION_SIGNAL_V1: attach the latest identity-verified Avito Pro
+        # position evidence to the same canonical item IDs used by KPI analysis.
+        # Missing position data is neutral and never guessed from views/spend.
+        _position_latest = {}
+        _position_signal = {}
+        _position_by_item = {}
+        try:
+            _pr = db.query(Storage).filter(
+                Storage.account_id == account_id,
+                Storage.key == "avito_position_latest",
+            ).order_by(Storage.id.desc()).first()
+            _position_latest = _json_krc.loads(_pr.value or "{}") if _pr else {}
+            for _row in (_position_latest.get("rows") or []):
+                if isinstance(_row, dict) and _row.get("item_id"):
+                    _position_by_item[str(_row.get("item_id"))] = _row
+            _ps = db.query(Storage).filter(
+                Storage.account_id == account_id,
+                Storage.key == "avito_position_marketer_signal",
+            ).order_by(Storage.id.desc()).first()
+            _position_signal = _json_krc.loads(_ps.value or "{}") if _ps else {}
+        except Exception:
+            _position_latest = {}; _position_signal = {}; _position_by_item = {}
+
+        enriched = []
+
+        for raw in items:
+            views = int(raw.get("views") or raw.get("uniqViews") or 0)
+            contacts = int(raw.get("contacts") or raw.get("uniqContacts") or 0)
+
+            conversion = round((contacts / views) * 100, 2) if views > 0 else 0.0
+            _iid = str(raw.get("id") or raw.get("itemId") or "")
+            _pos = _position_by_item.get(_iid) or {}
+
+            enriched.append({
+                "id": raw.get("id") or raw.get("itemId"),
+                "title": raw.get("title") or raw.get("name") or "Без названия",
+                "status": raw.get("status"),
+                "views": views,
+                "contacts": contacts,
+                "conversion": conversion,
+                "search_position": _pos.get("position"),
+                "search_position_delta": _pos.get("delta"),
+                "search_position_trend": _pos.get("trend") or "unknown",
+                "search_visibility": _pos.get("visibility") or "unknown",
+                "origin": raw.get("origin") or ("boris_managed" if raw.get("campaign_identity") else "avito_native_external"),
+                # Never infer write authority merely from the presence of a
+                # CampaignItem identity. Only stats reconciliation may stamp an
+                # explicit canonical capability after publication-proof checks.
+                "write_capability": raw.get("write_capability") or "read_only_until_mapped",
+            })
+
+        if not enriched:
+            return {
+                "status": "ok",
+                "root_cause": "insufficient_data",
+                "reason": "В daily_stats нет статистики по отдельным объявлениям",
+                "best_items": [],
+                "worst_items": [],
+                "read_only": True,
+            }
+
+        # Dynamic evidence thresholds: judge the account against its own traffic
+        # distribution instead of universal 10 views / 2% conversion constants.
+        positive_views = sorted(x["views"] for x in enriched if x["views"] > 0)
+        if positive_views:
+            mid = len(positive_views) // 2
+            median_views = (positive_views[mid] if len(positive_views) % 2
+                            else (positive_views[mid - 1] + positive_views[mid]) / 2)
+        else:
+            median_views = 0
+        # Enough evidence means at least half of this account's median item traffic,
+        # never less than 3 observations. High-volume accounts therefore require more.
+        min_views = max(3, int(round(median_views * 0.5)))
+        judgeable = [x for x in enriched if x["views"] >= min_views]
+
+        observed_conversions = sorted(
+            x["conversion"] for x in judgeable if x["contacts"] > 0
+        )
+        if observed_conversions:
+            mid = len(observed_conversions) // 2
+            median_conversion = (observed_conversions[mid] if len(observed_conversions) % 2
+                                 else (observed_conversions[mid - 1] + observed_conversions[mid]) / 2)
+            # A loser is materially below the account's own proven median.
+            loser_conversion_threshold = max(0.1, round(median_conversion * 0.5, 2))
+        else:
+            median_conversion = None
+            loser_conversion_threshold = None
+
+        best_items = sorted(
+            [x for x in judgeable if x["contacts"] > 0],
+            key=lambda x: (x["conversion"], x["contacts"], x["views"]),
+            reverse=True
+        )[:5]
+
+        zero_contact = [x for x in judgeable if x["contacts"] == 0]
+        low_conversion = [
+            x for x in judgeable
+            if x["contacts"] > 0 and loser_conversion_threshold is not None
+            and x["conversion"] < loser_conversion_threshold
+        ]
+
+        # Position evidence has separate semantics from conversion evidence.
+        # "hidden" is an explicit Avito cabinet state, while >30 means the item
+        # is below the useful first-scroll range. Neither is inferred when the
+        # Browser Gateway source is absent.
+        hidden_position_items = [x for x in enriched if x.get("search_visibility") == "hidden"]
+        low_position_items = [
+            x for x in enriched
+            if x.get("search_position") is not None and int(x.get("search_position") or 0) > 30
+        ]
+        falling_position_items = [
+            x for x in enriched
+            if x.get("search_position") is not None and int(x.get("search_position_delta") or 0) < 0
+        ]
+
+        # В worst_items попадают только доказанно слабые позиции. Explicit Avito
+        # search hiding is also proven weakness, so it is included once, without
+        # manufacturing a conversion verdict for unmeasured traffic.
+        weak_items = []
+        _weak_seen = set()
+        for _weak in zero_contact + low_conversion + hidden_position_items:
+            _wk = str(_weak.get("id") or _weak.get("title") or "")
+            if _wk in _weak_seen:
+                continue
+            _weak_seen.add(_wk); weak_items.append(_weak)
+
+        worst_items = sorted([x for x in enriched if str(x.get("status") or "active") == "active"],
+            key=lambda x: (
+                x["contacts"] > 0,
+                x["conversion"],
+                -x["views"]
+            )
+        )[:max(10, int(__import__("math").ceil(len(enriched) * 0.20)))]  # TITLE_ACTIVE_COHORT_20_V1
+
+        total_views = sum(x["views"] for x in enriched)
+        total_contacts = sum(x["contacts"] for x in enriched)
+
+        account_conversion = (
+            round(total_contacts / total_views * 100, 2)
+            if total_views > 0 else None
+        )
+
+        if hidden_position_items:
+            root_cause = "hidden_from_search"
+            reason = (
+                f"Avito Pro прямо показывает скрытие из поисковой выдачи у {len(hidden_position_items)} "
+                "объявлений. Сначала устраняем причину видимости; увеличение ставок само по себе не разрешается."
+            )
+
+        elif low_position_items and not judgeable:
+            root_cause = "low_search_position"
+            reason = (
+                f"У {len(low_position_items)} объявлений подтверждена позиция ниже 30 места, "
+                "а трафика ещё недостаточно для вывода о конверсии. Позиция используется как отдельный сигнал охвата."
+            )
+
+        elif not judgeable:
+            root_cause = "insufficient_item_traffic"
+            reason = (
+                "Есть статистика аккаунта, но ни одно объявление ещё "
+                f"не набрало динамический порог {min_views} просмотров для надёжного сравнения."
+            )
+
+        elif zero_contact:
+            root_cause = "zero_contact_items"
+            reason = (
+                f"Найдено {len(zero_contact)} объявлений с {min_views}+ просмотрами "
+                "и без единого контакта."
+            )
+
+        elif low_conversion:
+            root_cause = "low_conversion_items"
+            _loser_thr_text = (f"{loser_conversion_threshold:.2f}%" if loser_conversion_threshold is not None else "динамического порога аккаунта")
+            reason = (
+                f"Найдено {len(low_conversion)} объявлений с конверсией просмотр→контакт ниже {_loser_thr_text}; "
+                "порог рассчитан относительно фактической медианной конверсии этого аккаунта."
+            )
+
+        elif best_items and worst_items:
+            root_cause = "performance_spread"
+            reason = (
+                "Объявления работают неравномерно: есть сильные и более слабые "
+                "позиции, которые можно сравнить между собой."
+            )
+
+        else:
+            root_cause = "no_clear_item_cause"
+            reason = (
+                "По отдельным объявлениям явной причины не найдено. "
+                "Нужен анализ охвата, цены, спроса или других факторов."
+            )
+
+        historical_native = []
+        historical_all = []
+        try:
+            _inv_row = db.query(Storage).filter(Storage.account_id==account_id, Storage.key=="marketing_inventory_audit").first()
+            _inv = _json_krc.loads(_inv_row.value) if _inv_row and _inv_row.value else {}
+            historical_native = (_inv.get("top_native_external") or [])[:10]
+            historical_all = (_inv.get("top_all") or [])[:10]
+        except Exception:
+            historical_native = []; historical_all = []
+
+        return {
+            "status": "ok",
+            "root_cause": root_cause,
+            "reason": reason,
+            "account": {
+                "views_today": total_views,
+                "contacts_today": total_contacts,
+                "conversion_pct": account_conversion,
+                "items_total": len(enriched),
+                "items_judgeable": len(judgeable),
+                "zero_contact_items": len(zero_contact),
+                "low_conversion_items": len(low_conversion),
+                "evidence_thresholds": {
+                    "min_views": min_views,
+                    "median_item_views": median_views,
+                    "median_conversion_pct": median_conversion,
+                    "loser_conversion_threshold_pct": loser_conversion_threshold,
+                    "source": "account_daily_distribution",
+                },
+            },
+            "best_items": best_items,
+            "worst_items": worst_items,
+            "position_hidden_items": hidden_position_items[:20],
+            "position_low_items": low_position_items[:20],
+            "position_falling_items": falling_position_items[:20],
+            "historical_top_all": historical_all,
+            "historical_top_native_external": historical_native,
+            "position_monitor": {
+                "measured_at": _position_latest.get("measured_at"),
+                "source": _position_latest.get("source"),
+                "signal": _position_signal,
+                "hidden_items": len(hidden_position_items),
+                "low_below_30": len(low_position_items),
+                "falling_items": len(falling_position_items),
+                "measured_items": len([x for x in enriched if x.get("search_position") is not None]),
+                "money_authority": "existing_kpi_budget_and_cpl_guards_only",
+            },
+            "analysis_scope": "all_active_plus_completed_including_non_boris",
+            "external_write_policy": "read_only_until_exact_canonical_mapping",
+            "read_only": True,
+        }
+
+    finally:
+        db.close()
+
+
+
+
+
+
+class KpiBudgetReserveRequest(BaseModel):
+    account_id: str
+    amount_rub: float
+    action: str
+    operation_id: str
+
+
+class KpiBudgetCommitRequest(BaseModel):
+    account_id: str
+    operation_id: str
+    actual_amount_rub: float
+
+
+class KpiBudgetReleaseRequest(BaseModel):
+    account_id: str
+    operation_id: str
+
+
+def _kpi_budget_ledger_load(db, account_id: str, day: str):
+    from app.models.storage import Storage
+    import json as _json_kbl
+
+    key = f"kpi_budget_ledger:{day}"
+    row = (
+        db.query(Storage)
+        .filter(
+            Storage.account_id == account_id,
+            Storage.key == key,
+        )
+        .first()
+    )
+
+    if not row:
+        return row, {
+            "date": day,
+            "operations": [],
+        }
+
+    try:
+        data = _json_kbl.loads(row.value)
+    except Exception:
+        data = {
+            "date": day,
+            "operations": [],
+        }
+
+    if not isinstance(data.get("operations"), list):
+        data["operations"] = []
+
+    return row, data
+
+
+def _kpi_budget_ledger_totals(data: dict):
+    spent = 0.0
+    reserved = 0.0
+
+    for op in data.get("operations", []):
+        status = op.get("status")
+
+        if status == "committed":
+            spent += float(op.get("actual_amount_rub") or 0)
+
+        elif status == "reserved":
+            reserved += float(op.get("reserved_amount_rub") or 0)
+
+    return round(spent, 2), round(reserved, 2)
+
+
+@router.get("/kpi_budget_ledger")
+def kpi_budget_ledger(account_id: str):
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kbl
+    from datetime import date as _date_kbl
+
+    db = SessionLocal()
+    try:
+        kpi_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "kpi_settings",
+            )
+            .first()
+        )
+
+        if not kpi_row:
+            return {
+                "status": "no_goal",
+                "reason": "KPI-настройки не найдены",
+            }
+
+        kpi = _json_kbl.loads(kpi_row.value)
+        limit_rub = float(kpi.get("daily_budget_limit_rub") or 0)
+
+        day = _kpi_marketing_today().isoformat()
+        _, data = _kpi_budget_ledger_load(db, account_id, day)
+
+        spent, reserved = _kpi_budget_ledger_totals(data)
+        available = max(limit_rub - spent - reserved, 0)
+
+        return {
+            "status": "ok",
+            "date": day,
+            "daily_budget_limit_rub": round(limit_rub, 2),
+            "spent_rub": spent,
+            "reserved_rub": reserved,
+            "available_rub": round(available, 2),
+            "budget_exhausted": limit_rub > 0 and available <= 0,
+            "operations": data.get("operations", []),
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_budget_reserve")
+def kpi_budget_reserve(req: KpiBudgetReserveRequest):
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kbr
+    from datetime import date as _date_kbr, datetime as _dt_kbr
+
+    if req.amount_rub <= 0:
+        return {"status": "error", "reason": "amount_rub должен быть > 0"}
+
+    db = SessionLocal()
+    try:
+        kpi_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == req.account_id,
+                Storage.key == "kpi_settings",
+            )
+            .first()
+        )
+
+        if not kpi_row:
+            return {"status": "blocked", "reason": "KPI-настройки не найдены"}
+
+        kpi = _json_kbr.loads(kpi_row.value)
+        limit_rub = float(kpi.get("daily_budget_limit_rub") or 0)
+
+        day = _kpi_marketing_today().isoformat()
+        row, data = _kpi_budget_ledger_load(db, req.account_id, day)
+
+        # operation_id идемпотентный: одно действие нельзя зарезервировать дважды.
+        for op in data["operations"]:
+            if op.get("operation_id") == req.operation_id:
+                return {
+                    "status": "exists",
+                    "operation": op,
+                }
+
+        spent, reserved = _kpi_budget_ledger_totals(data)
+        available = max(limit_rub - spent - reserved, 0)
+
+        if req.amount_rub > available:
+            return {
+                "status": "blocked",
+                "reason": "Недостаточно дневного бюджета",
+                "requested_rub": round(req.amount_rub, 2),
+                "available_rub": round(available, 2),
+            }
+
+        op = {
+            "operation_id": req.operation_id,
+            "action": req.action,
+            "status": "reserved",
+            "reserved_amount_rub": round(req.amount_rub, 2),
+            "actual_amount_rub": None,
+            "created_at": _dt_kbr.utcnow().isoformat(),
+            "updated_at": _dt_kbr.utcnow().isoformat(),
+        }
+
+        data["operations"].append(op)
+
+        raw = _json_kbr.dumps(data, ensure_ascii=False)
+
+        if row:
+            row.value = raw
+        else:
+            row = Storage(
+                account_id=req.account_id,
+                key=f"kpi_budget_ledger:{day}",
+                value=raw,
+            )
+            db.add(row)
+
+        db.commit()
+
+        return {
+            "status": "reserved",
+            "operation": op,
+            "available_after_rub": round(available - req.amount_rub, 2),
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_budget_commit")
+def kpi_budget_commit(req: KpiBudgetCommitRequest):
+    from app.db.session import SessionLocal
+    import json as _json_kbc
+    from datetime import date as _date_kbc, datetime as _dt_kbc
+
+    if req.actual_amount_rub < 0:
+        return {"status": "error", "reason": "actual_amount_rub не может быть < 0"}
+
+    db = SessionLocal()
+    try:
+        day = _kpi_marketing_today().isoformat()
+        row, data = _kpi_budget_ledger_load(db, req.account_id, day)
+
+        if not row:
+            return {"status": "not_found", "reason": "Ledger за сегодня отсутствует"}
+
+        target = None
+
+        for op in data["operations"]:
+            if op.get("operation_id") == req.operation_id:
+                target = op
+                break
+
+        if not target:
+            return {"status": "not_found", "reason": "operation_id не найден"}
+
+        if target.get("status") == "committed":
+            return {
+                "status": "already_committed",
+                "operation": target,
+            }
+
+        target["status"] = "committed"
+        target["actual_amount_rub"] = round(req.actual_amount_rub, 2)
+        target["updated_at"] = _dt_kbc.utcnow().isoformat()
+
+        row.value = _json_kbc.dumps(data, ensure_ascii=False)
+        db.commit()
+
+        spent, reserved = _kpi_budget_ledger_totals(data)
+
+        return {
+            "status": "committed",
+            "operation": target,
+            "spent_rub": spent,
+            "reserved_rub": reserved,
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_budget_release")
+def kpi_budget_release(req: KpiBudgetReleaseRequest):
+    from app.db.session import SessionLocal
+    import json as _json_kbrl
+    from datetime import date as _date_kbrl, datetime as _dt_kbrl
+
+    db = SessionLocal()
+    try:
+        day = _kpi_marketing_today().isoformat()
+        row, data = _kpi_budget_ledger_load(db, req.account_id, day)
+
+        if not row:
+            return {"status": "not_found", "reason": "Ledger за сегодня отсутствует"}
+
+        target = None
+
+        for op in data["operations"]:
+            if op.get("operation_id") == req.operation_id:
+                target = op
+                break
+
+        if not target:
+            return {"status": "not_found", "reason": "operation_id не найден"}
+
+        if target.get("status") == "committed":
+            return {
+                "status": "blocked",
+                "reason": "Committed-операцию нельзя освободить",
+            }
+
+        target["status"] = "released"
+        target["updated_at"] = _dt_kbrl.utcnow().isoformat()
+
+        row.value = _json_kbrl.dumps(data, ensure_ascii=False)
+        db.commit()
+
+        spent, reserved = _kpi_budget_ledger_totals(data)
+
+        return {
+            "status": "released",
+            "operation": target,
+            "spent_rub": spent,
+            "reserved_rub": reserved,
+        }
+
+    finally:
+        db.close()
+
+
+@router.get("/kpi_budget_status")
+def kpi_budget_status(account_id: str):
+    """
+    Read-only состояние дневного бюджета KPI.
+    Ничего не выполняет.
+    Считает:
+    - дневной лимит;
+    - фактический расход сегодня;
+    - остаток бюджета.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kbs
+    from datetime import date as _date_kbs, timedelta as _td_kbs
+
+    db = SessionLocal()
+    try:
+        kpi_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "kpi_settings",
+            )
+            .first()
+        )
+
+        if not kpi_row:
+            return {
+                "status": "no_goal",
+                "reason": "KPI-настройки не найдены",
+                "read_only": True,
+            }
+
+        kpi = _json_kbs.loads(kpi_row.value)
+        limit_rub = float(kpi.get("daily_budget_limit_rub") or 0)
+
+        today = _kpi_marketing_today()
+        yesterday = today - _td_kbs(days=1)
+
+        today_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == f"daily_stats:{today.isoformat()}",
+            )
+            .first()
+        )
+
+        yesterday_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == f"daily_stats:{yesterday.isoformat()}",
+            )
+            .first()
+        )
+
+        spent_rub = None
+        source = "unavailable"
+
+        if today_row and yesterday_row:
+            try:
+                today_data = _json_kbs.loads(today_row.value)
+                yesterday_data = _json_kbs.loads(yesterday_row.value)
+
+                prev_real = float(
+                    (yesterday_data.get("balance") or {}).get("real") or 0
+                )
+                curr_real = float(
+                    (today_data.get("balance") or {}).get("real") or 0
+                )
+
+                # Используем тот же принцип, который уже есть в KPI-контуре.
+                spent_rub = max(prev_real - curr_real, 0)
+                source = "daily_balance_delta"
+
+            except Exception:
+                spent_rub = None
+                source = "daily_balance_delta_error"
+
+        remaining_rub = None
+        exhausted = None
+
+        if spent_rub is not None:
+            remaining_rub = max(limit_rub - spent_rub, 0)
+            exhausted = limit_rub > 0 and spent_rub >= limit_rub
+
+        return {
+            "status": "ok",
+            "daily_budget_limit_rub": round(limit_rub, 2),
+            "spent_today_rub": (
+                round(spent_rub, 2)
+                if spent_rub is not None
+                else None
+            ),
+            "remaining_today_rub": (
+                round(remaining_rub, 2)
+                if remaining_rub is not None
+                else None
+            ),
+            "budget_exhausted": exhausted,
+            "source": source,
+            "read_only": True,
+        }
+
+    finally:
+        db.close()
+
+
+
+
+def _kpi_action_history_load(db, account_id: str):
+    from app.models.storage import Storage
+    import json as _json_krh
+
+    row = (
+        db.query(Storage)
+        .filter(
+            Storage.account_id == account_id,
+            Storage.key == "kpi_action_history",
+        )
+        .first()
+    )
+
+    if not row:
+        return row, []
+
+    try:
+        data = _json_krh.loads(row.value)
+        if not isinstance(data, list):
+            data = []
+    except Exception:
+        data = []
+
+    return row, data
+
+
+def _kpi_ai_ledger_load(db, account_id: str, day: str):
+    from app.models.storage import Storage
+    import json as _json_kai
+
+    key = f"kpi_ai_ledger:{day}"
+
+    row = (
+        db.query(Storage)
+        .filter(
+            Storage.account_id == account_id,
+            Storage.key == key,
+        )
+        .first()
+    )
+
+    if not row:
+        return row, {
+            "date": day,
+            "operations": [],
+        }
+
+    try:
+        data = _json_kai.loads(row.value)
+    except Exception:
+        data = {
+            "date": day,
+            "operations": [],
+        }
+
+    if not isinstance(data.get("operations"), list):
+        data["operations"] = []
+
+    return row, data
+
+
+def _kpi_ai_totals(data: dict):
+    spent = 0.0
+    reserved = 0.0
+
+    for op in data.get("operations", []):
+        status = op.get("status")
+
+        if status == "committed":
+            spent += float(op.get("actual_rub") or 0)
+
+        elif status == "reserved":
+            reserved += float(op.get("reserved_rub") or 0)
+
+    return round(spent, 4), round(reserved, 4)
+
+
+
+
+def _kpi_exec_cpx_adjust_bid(account_id: str, action_data: dict):
+    """
+    KPI-гипотеза №1:
+    изменить ставку продвижения ОДНОГО объявления.
+
+    Важно:
+    - используется уже существующий cpx_advisor;
+    - максимум одно объявление;
+    - только raise/lower;
+    - никакого изменения текста/цены/фото;
+    - следующий цикл должен измерить эффект.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_cpx
+
+    db = SessionLocal()
+
+    try:
+        row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "cpx_advice",
+            )
+            .first()
+        )
+
+        if not row:
+            return {
+                "status": "blocked",
+                "action": "cpx_adjust_bid",
+                "reason": "Нет свежих рекомендаций CPX.",
+                "changed_avito": False,
+            }
+
+        try:
+            advice = _json_cpx.loads(row.value)
+        except Exception:
+            return {
+                "status": "blocked",
+                "action": "cpx_adjust_bid",
+                "reason": "cpx_advice повреждён.",
+                "changed_avito": False,
+            }
+
+        recommendations = advice.get("recommendations") or {}
+
+        raises = recommendations.get("raise") or []
+        lowers = recommendations.get("lower_or_archive") or []
+
+        # Для первой гипотезы используем только изменение ставки.
+        # Архивирование здесь категорически запрещено.
+        candidate = None
+        action = None
+
+        if raises:
+            candidate = raises[0]
+            action = "raise"
+        elif lowers:
+            # В lower_or_archive могут быть кандидаты,
+            # но берём только те, для которых советник предлагает снижение.
+            for x in lowers:
+                suggest = str(x.get("suggest") or "").lower()
+                if "сниз" in suggest:
+                    candidate = x
+                    action = "lower"
+                    break
+
+        if not candidate:
+            return {
+                "status": "blocked",
+                "action": "cpx_adjust_bid",
+                "reason": "CPX не дал безопасной рекомендации raise/lower.",
+                "changed_avito": False,
+            }
+
+        item_id = candidate.get("item_id") or candidate.get("id")
+
+        if item_id is None:
+            return {
+                "status": "blocked",
+                "action": "cpx_adjust_bid",
+                "reason": "В рекомендации CPX отсутствует item_id.",
+                "changed_avito": False,
+            }
+
+        # Защита: только одно объявление за один KPI-такт.
+        item_id = int(item_id)
+
+        # Используем существующий реальный Apply Engine CPX.
+        from app.api.cpx_advisor import (
+            ApplyOneBody,
+            apply_one,
+        )
+
+        result = apply_one(
+            ApplyOneBody(
+                account_id=account_id,
+                item_id=item_id,
+                action=action,
+            )
+        )
+
+        changed = (
+            isinstance(result, dict)
+            and result.get("status") == "ok"
+        )
+
+        return {
+            "status": "ok" if changed else result.get("status", "error"),
+            "action": "cpx_adjust_bid",
+            "result": result,
+            "item_id": item_id,
+            "bid_action": action,
+            "changed_avito": changed,
+            "next": "measure_effect",
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "action": "cpx_adjust_bid",
+            "reason": str(e),
+            "changed_avito": False,
+        }
+
+    finally:
+        db.close()
+
+
+def _kpi_exec_expand_inventory(account_id: str, action_data: dict):
+    """Prepare a bounded additive inventory expansion without shrinking live ads.
+
+    KPI_INVENTORY_EXPANSION_PREPARE_V1
+    This stage is deliberately non-destructive and provider-free. It materializes
+    the exact inventory gap and candidate source identities, persists one durable
+    expansion plan, and checks for a dedicated publication mandate. It never edits
+    feed_items and never publishes by itself when that external money boundary is
+    absent.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from app.models.campaign_item import CampaignItem
+    from app.services.marketing_clock import marketing_today_iso
+    from sqlalchemy import text as _sqltext_invexp
+    from datetime import datetime as _dt_invexp, timezone as _tz_invexp
+    import json as _json_invexp
+    import math as _math_invexp
+
+    db = SessionLocal()
+    try:
+        kpi_row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "kpi_settings",
+        ).first()
+        try:
+            kpi = _json_invexp.loads(kpi_row.value or "{}") if kpi_row else {}
+        except Exception:
+            kpi = {}
+
+        target = float(kpi.get("target_leads_per_day") or 0)
+        today = marketing_today_iso()
+        stats_row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == f"daily_stats:{today}",
+        ).first()
+        try:
+            stats = _json_invexp.loads(stats_row.value or "{}") if stats_row else {}
+        except Exception:
+            stats = {}
+
+        active_stats = [
+            x for x in (stats.get("items") or [])
+            if str(x.get("status") or "").lower() == "active"
+            and str(x.get("id") or "").isdigit()
+        ]
+        active_count = len(active_stats)
+        desired_min = max(3, int(_math_invexp.ceil(target))) if target > 0 else 0
+        gap = max(0, desired_min - active_count)
+
+        if target <= 0:
+            return {
+                "status": "blocked",
+                "action": "expand_inventory",
+                "reason": "kpi_target_missing",
+                "changed_feed": False,
+                "changed_avito": False,
+            }
+        if gap <= 0:
+            return {
+                "status": "skipped",
+                "action": "expand_inventory",
+                "reason": "inventory_gap_not_present",
+                "active_items": active_count,
+                "desired_min_items": desired_min,
+                "changed_feed": False,
+                "changed_avito": False,
+            }
+
+        ranked = sorted(
+            active_stats,
+            key=lambda x: (
+                int(x.get("contacts") or 0),
+                (float(x.get("contacts") or 0) / max(1, int(x.get("views") or 0))),
+                int(x.get("views") or 0),
+            ),
+            reverse=True,
+        )
+        ranked_ids = [int(x["id"]) for x in ranked[:20]]
+        mapping = {}
+        if ranked_ids:
+            rows = db.query(CampaignItem).filter(
+                CampaignItem.account_id == account_id,
+                CampaignItem.status == "published",
+                CampaignItem.avito_item_id.in_(ranked_ids),
+            ).all()
+            for row in rows:
+                if str(row.avito_item_id or "").isdigit():
+                    mapping[int(row.avito_item_id)] = str(
+                        getattr(row, "feed_identity", "") or ""
+                    ).strip()
+
+        source_candidates = []
+        for item in ranked:
+            iid = int(item["id"])
+            feed_identity = mapping.get(iid)
+            if not feed_identity:
+                continue
+            source_candidates.append({
+                "avito_item_id": iid,
+                "feed_identity": feed_identity,
+                "views_today": int(item.get("views") or 0),
+                "contacts_today": int(item.get("contacts") or 0),
+            })
+            if len(source_candidates) >= min(5, gap):
+                break
+
+        mandate = db.execute(_sqltext_invexp("""
+            select id, source, max_actions_run, max_actions_day, valid_until
+            from money_mandates
+            where :a = any(account_scope)
+              and status='active' and revoked_at is null
+              and 'avito.publish_feed_additive'=any(allowed_operations)
+              and (valid_until is null or valid_until>now())
+            order by id desc limit 1
+        """), {"a": account_id}).mappings().first()
+        publication_authorized = bool(mandate)
+
+        plan = {
+            "version": "KPI_INVENTORY_EXPANSION_PREPARE_V1",
+            "status": "ready_to_build" if publication_authorized else "waiting_publication_authority",
+            "account_id": account_id,
+            "prepared_at": _dt_invexp.now(_tz_invexp.utc).isoformat(),
+            "date": today,
+            "target_leads_per_day": target,
+            "active_items": active_count,
+            "desired_min_items": desired_min,
+            "inventory_gap": gap,
+            "max_additions_next_cycle": min(5, gap),
+            "source_candidates": source_candidates,
+            "publication_authorized": publication_authorized,
+            "publication_mandate_id": int(mandate["id"]) if mandate else None,
+            "publication_operation": "avito.publish_feed_additive",
+            "policy": "additive_only_no_shrink",
+            "changed_feed": False,
+            "changed_avito": False,
+        }
+
+        key = "kpi_inventory_expansion_prepare"
+        row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == key,
+        ).first()
+        raw = _json_invexp.dumps(plan, ensure_ascii=False)
+        if row:
+            row.value = raw
+        else:
+            db.add(Storage(account_id=account_id, key=key, value=raw))
+        db.commit()
+
+        if not source_candidates:
+            return {
+                **plan,
+                "status": "blocked",
+                "reason": "no_proven_active_source_identity",
+                "owner_action_required": False,
+                "next_action": "collect_more_item_evidence",
+            }
+        if not publication_authorized:
+            return {
+                **plan,
+                "status": "waiting_authorization",
+                "reason": "publication_authority_missing",
+                "owner_action_required": True,
+                "next_action": "authorize_additive_avito_publication",
+            }
+        return {
+            **plan,
+            "status": "prepared",
+            "reason": "publication_authority_present_unique_variant_build_next",
+            "owner_action_required": False,
+            "next_action": "build_unique_additive_variants",
+        }
+    finally:
+        db.close()
+
+
+def _kpi_executor_registry():
+    """
+    Единый реестр KPI-операций.
+
+    v1 содержит только безопасные операции:
+    - аналитика;
+    - диагностика;
+    - подготовка плана оптимизации.
+
+    Никаких изменений Avito.
+    """
+    return {
+        "deep_item_analysis": {
+            "risk": "read_only",
+            "ai": False,
+            "visible_change": False,
+            "handler": "_kpi_exec_deep_item_analysis",
+        },
+        "deep_conversion_analysis": {
+            "risk": "read_only",
+            "ai": False,
+            "visible_change": False,
+            "handler": "_kpi_exec_deep_conversion_analysis",
+        },
+        "recover_canonical_mapping": {
+            "risk": "prepare_only",
+            "ai": False,
+            "visible_change": False,
+            "handler": "_kpi_exec_recover_canonical_mapping",
+        },
+        "cpx_adjust_bid": {
+            "risk": "money",
+            "ai": False,
+            "visible_change": True,
+            "handler": "_kpi_exec_cpx_adjust_bid",
+        },
+
+        "optimize_weak_items": {
+            "risk": "prepare_only",
+            "ai": False,
+            "visible_change": False,
+            "handler": "_kpi_exec_optimize_weak_items",
+        },
+        "expand_inventory": {
+            "risk": "prepare_only",
+            "ai": False,
+            "visible_change": False,
+            "handler": "_kpi_exec_expand_inventory",
+        },
+
+        "increase_reach": {
+            "risk": "money",
+            "ai": False,
+            "visible_change": False,
+            "handler": "_kpi_exec_increase_reach",
+        },
+        "reduce_cpl": {
+            "risk": "money_saving",
+            "ai": False,
+            "visible_change": False,
+            "handler": "_kpi_exec_reduce_cpl",
+        },
+    }
+
+
+def _kpi_exec_increase_reach(account_id: str, action_data: dict):
+    """
+    Увеличение охвата через существующий CPX Apply Engine.
+
+    Без нового механизма ставок:
+    - берём только CPX raise;
+    - только одно объявление за цикл;
+    - lower/archive запрещены;
+    - фактическое изменение выполняет существующий apply_one().
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_reach
+
+    db = SessionLocal()
+
+    try:
+        # P0 KPI FEASIBILITY: every reach-purchase path must prove that the
+        # configured KPI fits inside the owner's explicit daily budget. This is
+        # repeated here intentionally because multiple planners can call this
+        # authoritative executor.
+        _kpi_row = db.query(Storage).filter(
+            Storage.account_id == account_id, Storage.key == "kpi_settings"
+        ).first()
+        try:
+            _kpi_cfg = _json_reach.loads(_kpi_row.value or "{}") if _kpi_row else {}
+            _target = float(_kpi_cfg.get("target_leads_per_day") or 0)
+            _max_cpl = float(_kpi_cfg.get("max_cost_per_lead_rub") or 0)
+            _daily_budget = float(_kpi_cfg.get("daily_budget_limit_rub") or 0)
+        except Exception:
+            _target = _max_cpl = _daily_budget = 0.0
+        if _target <= 0 or _max_cpl <= 0 or _daily_budget <= 0:
+            return {
+                "status":"blocked", "action":"increase_reach",
+                "reason":"kpi_economic_limits_missing", "changed_avito":False,
+                "target_leads_per_day":_target, "max_cpl_rub":_max_cpl,
+                "daily_budget_rub":_daily_budget,
+            }
+        _required_budget = _target * _max_cpl
+        if _required_budget > _daily_budget + 1e-9:
+            return {
+                "status":"blocked", "action":"increase_reach",
+                "reason":"kpi_economically_infeasible", "changed_avito":False,
+                "required_budget_rub":_required_budget,
+                "daily_budget_rub":_daily_budget,
+            }
+
+        row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "cpx_advice",
+            )
+            .first()
+        )
+
+        if not row or not row.value:
+            return {
+                "status": "blocked",
+                "action": "increase_reach",
+                "reason": "Нет сохранённой рекомендации CPX.",
+                "changed_avito": False,
+            }
+
+        try:
+            advice = _json_reach.loads(row.value)
+        except Exception:
+            return {
+                "status": "blocked",
+                "action": "increase_reach",
+                "reason": "Не удалось прочитать cpx_advice.",
+                "changed_avito": False,
+            }
+
+        recommendations = advice.get("recommendations") or {}
+        raises = recommendations.get("raise") or []
+
+        # MONEY_SAFE_PORTFOLIO_V2: reach is bought only for proven converters.
+        # Zero-traffic / zero-lead listings are NEVER promoted just because KPI
+        # is behind. Their next action is content/title/photo/offer testing.
+        def _candidate_measurement_free(x):
+            _iid = x.get("item_id") or x.get("id")
+            if _iid is None:
+                return False
+            _mrow = db.query(Storage).filter(
+                Storage.account_id == account_id,
+                Storage.key == f"cpx_measure:{int(_iid)}:raise",
+            ).first()
+            if not _mrow or not _mrow.value:
+                return True
+            try:
+                _mdata = _json_reach.loads(_mrow.value) or {}
+            except Exception:
+                return False
+            # KPI_WINNER_SCALE_POSITIVE_FEEDBACK_ONLY_V1: after the first
+            # measurement, another autonomous raise is allowed only when the
+            # previous raise proved improved. Neutral/insufficient/worsened is
+            # not evidence to buy more traffic on the same listing.
+            if _mdata.get("status") == "measured":
+                return _mdata.get("effect") == "improved"
+            return _mdata.get("status") != "waiting_measurement"
+
+        proven = []
+        for x in raises:
+            if not _candidate_measurement_free(x):
+                continue
+            contacts = int(x.get("contacts_7d") or 0)
+            views = int(x.get("views_7d") or 0)
+            if contacts > 0 and views >= 10:
+                proven.append(x)
+
+        if not proven:
+            return {
+                "status": "blocked",
+                "action": "increase_reach",
+                "reason": "Нет доказанных конвертирующих объявлений. Деньги не повышаем; сначала тест заголовка, оффера, фото и органического спроса.",
+                "changed_avito": False,
+                "next": "optimize_weak_items",
+                "content_work_required": True,
+                "content_work_contract": {
+                    "actions": ["title", "offer", "first_image"],
+                    "must_create_experiment": True,
+                    "report_only_forbidden": True,
+                },
+            }
+
+        # KPI_WINNER_PORTFOLIO_TOP10_V1: rank the proven converter portfolio,
+        # not an arbitrary recommendation order. The current tick still mutates
+        # only one item; subsequent hourly ticks rotate through eligible winners.
+        proven = sorted(proven, key=lambda x: (
+            float(x.get("conversion_7d") or x.get("conversion") or 0),
+            int(x.get("contacts_7d") or 0), int(x.get("views_7d") or 0)
+        ), reverse=True)[:10]
+        candidate = proven[0]
+
+        item_id = candidate.get("item_id") or candidate.get("id")
+
+        if item_id is None:
+            return {
+                "status": "blocked",
+                "action": "increase_reach",
+                "reason": "В рекомендации CPX отсутствует item_id.",
+                "changed_avito": False,
+            }
+
+        item_id = int(item_id)
+
+        from app.api.cpx_advisor import (
+            ApplyOneBody,
+            apply_one,
+        )
+
+        # KPI_WINNER_CUMULATIVE_70_V1: each mutation remains a bounded +10% step.
+        # The durable measurement/baseline journal is the authority for the
+        # cumulative +70% ceiling; normal CPL/budget/hard-cap guards remain binding.
+        # KPI_WINNER_SCALE_STEP_10_V1: winner scaling is always one bounded
+        # +10% (or smaller advisor-requested) step; a stale suggestion can never
+        # widen the global money step. Missing percent safely defaults to 10%.
+        _m_step = __import__("re").search(
+            r"(\d+(?:\.\d+)?)\s*%", str(candidate.get("suggest") or "")
+        )
+        try:
+            _requested_step = int(float(_m_step.group(1))) if _m_step else 10
+        except Exception:
+            _requested_step = 10
+        _winner_step = max(1, min(10, _requested_step))
+        _baseline_bid = None  # KPI_WINNER_CUMULATIVE_70_ENFORCE_V1
+        try:
+            _lr = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "cpx_learning_journal").order_by(Storage.id.desc()).first()
+            _lh = _json_reach.loads(_lr.value or "[]") if _lr else []
+            for _e in (_lh if isinstance(_lh, list) else []):
+                if str(_e.get("item_id") or "") == str(item_id) and str(_e.get("action") or "") == "raise":
+                    _ob = float(_e.get("old_bid_rub") or 0)
+                    if _ob > 0 and _baseline_bid is None: _baseline_bid = _ob
+        except Exception: _baseline_bid = None
+        _current_bid = float(candidate.get("bid_rub") or 0)
+        if _baseline_bid and _current_bid > 0:
+            _ceiling_bid = _baseline_bid * 1.70
+            if _current_bid >= _ceiling_bid: return {"status":"blocked","action":"increase_reach","reason":"winner_cumulative_70_reached","item_id":item_id,"changed_avito":False}
+            _remaining_pct = int(max(0, ((_ceiling_bid / _current_bid) - 1.0) * 100.0))
+            _winner_step = min(_winner_step, _remaining_pct)
+            if _winner_step <= 0: return {"status":"blocked","action":"increase_reach","reason":"winner_cumulative_70_reached","item_id":item_id,"changed_avito":False}
+        # KPI_WINNER_SCALE_HOURLY_IDEMPOTENCY_V1: replay-safe within the current
+        # measurement hour; after a completed non-negative measurement a later
+        # hour may deliberately scale the same proven winner by another step.
+        from datetime import datetime as _dt_win, timezone as _tz_win
+        _winner_hour_key = _dt_win.now(_tz_win.utc).strftime("%Y%m%d%H")
+        result = apply_one(
+            ApplyOneBody(
+                account_id=account_id,
+                item_id=item_id,
+                action="raise",
+                max_bid_delta_pct=_winner_step,
+                actor_type="system",
+                source="boris_kpi_autopilot",
+                trigger="kpi_cycle",
+                request_id=f"kpi:{account_id}:increase_reach:{item_id}:{_winner_hour_key}",
+            )
+        )
+
+        changed = (
+            isinstance(result, dict)
+            and result.get("status") == "ok"
+        )
+
+        return {
+            "status": "ok" if changed else result.get("status", "error"),
+            "action": "increase_reach",
+            "result": result,
+            "item_id": item_id,
+            "bid_action": "raise",
+            "changed_avito": changed,
+            "next": "measure_effect",
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "action": "increase_reach",
+            "reason": str(e),
+            "changed_avito": False,
+        }
+
+    finally:
+        db.close()
+
+
+# KPI_REDUCE_CPL_EXECUTOR_V1
+def _kpi_exec_reduce_cpl(account_id: str, action_data: dict):
+    """Lower one proven zero-contact paid listing through the canonical CPX guard."""
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from datetime import datetime as _dt_rcpl, timezone as _tz_rcpl
+    import json as _json_rcpl
+    db = SessionLocal()
+    try:
+        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "cpx_advice").first()
+        try: advice = _json_rcpl.loads(row.value or "{}") if row else {}
+        except Exception: advice = {}
+        lowers = ((advice.get("recommendations") or {}).get("lower") or
+                  (advice.get("recommendations") or {}).get("lower_or_archive") or [])
+        candidate = next((x for x in lowers if x.get("id") is not None and x.get("bid_rub") is not None), None)
+        if not candidate:
+            return {"status":"blocked","action":"reduce_cpl","reason":"Нет доказанного paid-кандидата для безопасного снижения ставки","changed_avito":False}
+        item_id = int(candidate.get("id"))
+        # KPI_REDUCE_CPL_FEEDBACK_GUARD_V1: do not stack another lower while the
+        # previous one is still measuring; if the previous lower worsened the
+        # result, stop repeating that strategy on this item.
+        _mrow = db.query(Storage).filter(
+            Storage.account_id == account_id, Storage.key == f"cpx_measure:{item_id}:lower"
+        ).first()
+        if _mrow and _mrow.value:
+            try: _mstate = _json_rcpl.loads(_mrow.value) or {}
+            except Exception: _mstate = {}
+            if _mstate.get("status") == "waiting_measurement":
+                return {"status":"blocked","action":"reduce_cpl","reason":"measure_effect","item_id":item_id,"changed_avito":False}
+            if _mstate.get("status") == "measured" and _mstate.get("effect") == "worsened":
+                return {"status":"blocked","action":"reduce_cpl","reason":"previous_lower_worsened","item_id":item_id,"changed_avito":False}
+        db.close()
+        from app.api.cpx_advisor import ApplyOneBody, apply_one
+        # KPI_REDUCE_CPL_HOURLY_IDEMPOTENCY_V1: replay-safe inside the same
+        # measurement hour, but a later measured cycle may perform another
+        # deliberate bounded -10% step on the same proven wasteful listing.
+        _hour_key = _dt_rcpl.now(_tz_rcpl.utc).strftime("%Y%m%d%H")
+        result = apply_one(ApplyOneBody(
+            account_id=account_id, item_id=item_id, action="lower",
+            max_bid_delta_pct=10, actor_type="boris_auto",
+            source="kpi_reduce_cpl", trigger="cpl_above_owner_limit",
+            request_id=f"reduce-cpl:{account_id}:{item_id}:{_hour_key}",
+        )) or {}
+        return {"status":result.get("status") or "error","action":"reduce_cpl",
+                "item_id":item_id,"result":result,"changed_avito":result.get("status")=="ok",
+                "next":"measure_effect"}
+    except Exception as exc:
+        return {"status":"error","action":"reduce_cpl","reason":str(exc)[:300],"changed_avito":False}
+    finally:
+        try: db.close()
+        except Exception: pass
+
+
+def _kpi_exec_deep_item_analysis(account_id: str, action_data: dict):
+    """
+    Полный read-only разбор сильных/слабых объявлений.
+    """
+    root = kpi_root_cause(account_id)
+
+    return {
+        "status": "ok",
+        "action": "deep_item_analysis",
+        "result": {
+            "root_cause": root.get("root_cause"),
+            "reason": root.get("reason"),
+            "account": root.get("account"),
+            "best_items": root.get("best_items") or [],
+            "worst_items": root.get("worst_items") or [],
+        },
+        "changed_avito": False,
+    }
+
+
+def _kpi_exec_deep_conversion_analysis(account_id: str, action_data: dict):
+    """
+    Read-only анализ конверсии.
+    """
+    diagnosis = kpi_diagnose(account_id)
+    root = kpi_root_cause(account_id)
+
+    weak = root.get("worst_items") or []
+    best = root.get("best_items") or []
+
+    return {
+        "status": "ok",
+        "action": "deep_conversion_analysis",
+        "result": {
+            "diagnosis": diagnosis.get("diagnosis"),
+            "reason": diagnosis.get("reason"),
+            "evidence": diagnosis.get("evidence") or {},
+            "weak_items": weak[:10],
+            "reference_items": best[:5],
+        },
+        "changed_avito": False,
+    }
+
+
+def _kpi_exec_recover_canonical_mapping(account_id: str, action_data: dict):
+    """Bounded exact identity self-heal before AI/content/money mutation.
+
+    Avito access is read-only. Local binding is allowed only by the existing
+    official autoload avito_id<->ad_id evidence contract. A durable cooldown
+    prevents hourly re-reading the same unavailable evidence.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_map_recovery
+    from datetime import datetime as _dt_map_recovery, timezone as _tz_map_recovery, timedelta as _td_map_recovery
+
+    candidate_ids = []
+    for raw in (action_data.get("candidate_items") or []):
+        iid = raw.get("id") if isinstance(raw, dict) else raw
+        iid = str(iid or "").strip()
+        if iid and iid not in candidate_ids:
+            candidate_ids.append(iid)
+    candidate_ids = candidate_ids[:25]
+    if not candidate_ids:
+        return {
+            "status": "empty",
+            "action": "recover_canonical_mapping",
+            "reason": "Нет bounded-кандидатов для exact mapping recovery",
+            "changed_identity": False,
+            "changed_avito": False,
+            "ai_calls_made": 0,
+        }
+
+    state_key = "kpi_mapping_recovery_state"
+
+    # KPI_MAPPING_RECOVERY_REQUIRES_AUTHORITATIVE_FEED_V1:
+    # Exact Avito<->feed recovery is meaningful only when BORIS has an
+    # authoritative feed_items source for this account. Native/legacy cabinets
+    # without BORIS feed must not poll Autoload forever and turn a non-applicable
+    # content lane into a fake internal blocker. CPX money lanes stay independent.
+    db = SessionLocal()
+    try:
+        feed_row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "feed_items",
+        ).order_by(Storage.id.desc()).first()
+        try:
+            feed_items = _json_map_recovery.loads(feed_row.value or "[]") if feed_row else []
+        except Exception:
+            feed_items = []
+        has_authoritative_feed = bool(
+            isinstance(feed_items, list)
+            and any(
+                isinstance(x, dict)
+                and str(x.get("id") or x.get("Id") or "").strip()
+                for x in feed_items
+            )
+        )
+        if not has_authoritative_feed:
+            now = _dt_map_recovery.now(_tz_map_recovery.utc)
+            payload = {
+                "status": "not_applicable_no_authoritative_feed",
+                "checked_at": now.isoformat(),
+                "next_retry_at": None,
+                "retry_backoff_seconds": None,
+                "retry_scheduler_alignment_seconds": 0,
+                "candidate_item_ids": candidate_ids,
+                "evidence": None,
+                "provider_status": "not_called",
+                "provider_reason": "no_authoritative_feed_items",
+                "http_status": None,
+                "bound_count": 0,
+                "exists_count": 0,
+                "unresolved_count": 0,
+                "blocked_count": 0,
+                "changed_identity": False,
+                "managed_supply": {
+                    "policy_version": "NO_AUTHORITATIVE_FEED_NATIVE_SCOPE_V1",
+                    "recoverable_active_exact_pairs": 0,
+                    "feed_item_count": 0,
+                },
+            }
+            row = db.query(Storage).filter(
+                Storage.account_id == account_id,
+                Storage.key == state_key,
+            ).order_by(Storage.id.desc()).first()
+            raw = _json_map_recovery.dumps(payload, ensure_ascii=False)
+            if row:
+                row.value = raw
+            else:
+                db.add(Storage(account_id=account_id, key=state_key, value=raw))
+            db.commit()
+            return {
+                "status": "not_applicable_no_authoritative_feed",
+                "action": "recover_canonical_mapping",
+                "reason": "У аккаунта нет authoritative BORIS feed; Autoload mapping неприменим и не запрашивался",
+                "result": payload,
+                "changed_identity": False,
+                "changed_avito": False,
+                "ai_calls_made": 0,
+            }
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == state_key,
+        ).order_by(Storage.id.desc()).first()
+        try:
+            prev = _json_map_recovery.loads(row.value or "{}") if row else {}
+        except Exception:
+            prev = {}
+        same_batch = set(str(x) for x in (prev.get("candidate_item_ids") or [])) == set(candidate_ids)
+        next_raw = str(prev.get("next_retry_at") or "").strip()
+        try:
+            next_at = _dt_map_recovery.fromisoformat(next_raw.replace("Z", "+00:00")) if next_raw else None
+            if next_at is not None and next_at.tzinfo is None:
+                next_at = next_at.replace(tzinfo=_tz_map_recovery.utc)
+        except Exception:
+            next_at = None
+        now = _dt_map_recovery.now(_tz_map_recovery.utc)
+        if same_batch and next_at is not None and now < next_at:
+            return {
+                "status": "waiting",
+                "action": "recover_canonical_mapping",
+                "reason": "Exact mapping evidence уже проверено; повтор после durable backoff",
+                "next_retry_at": next_at.isoformat(),
+                "candidate_item_ids": candidate_ids,
+                "changed_identity": False,
+                "changed_avito": False,
+                "ai_calls_made": 0,
+            }
+    finally:
+        db.close()
+
+    result = _recover_canonical_identities_batch_from_autoload(account_id, candidate_ids) or {}
+    bound_n = len(result.get("bound") or [])
+    exists_n = len(result.get("exists") or [])
+    unresolved_n = len(result.get("unresolved") or [])
+    blocked_n = len(result.get("blocked") or [])
+    changed_identity = bool(bound_n or exists_n)
+    now = _dt_map_recovery.now(_tz_map_recovery.utc)
+
+    if changed_identity:
+        retry_seconds = 300
+        state = "recovered"
+    elif str(result.get("reason") or "") == "shared_avito_account_throttle":
+        retry_seconds = max(60, int(result.get("retry_after_seconds") or 60))
+        state = "provider_deferred"
+    elif str(result.get("status") or "") == "ok":
+        retry_seconds = 6 * 3600
+        state = "waiting_official_mapping_evidence"
+    else:
+        retry_seconds = 3600
+        state = "provider_deferred"
+
+    # KPI_MAPPING_RETRY_SCHEDULER_ALIGNMENT_V1:
+    # The canonical non-money scheduler is hourly. A durable retry timestamp
+    # that lands a few seconds *after* that account's hourly pass would
+    # otherwise delay exact mapping self-heal by almost another full hour.
+    # Keep short provider Retry-After values exact; for long 1h/6h backoffs,
+    # expose the retry one minute before the nominal boundary so the next
+    # hourly pass cannot miss it because of normal per-account scheduling drift.
+    retry_alignment_seconds = 60 if retry_seconds >= 3600 else 0
+    retry_due_seconds = max(60, retry_seconds - retry_alignment_seconds)
+
+    payload = {
+        "status": state,
+        "checked_at": now.isoformat(),
+        "next_retry_at": (now + _td_map_recovery(seconds=retry_due_seconds)).isoformat(),
+        "retry_backoff_seconds": retry_seconds,
+        "retry_scheduler_alignment_seconds": retry_alignment_seconds,
+        "candidate_item_ids": candidate_ids,
+        "evidence": result.get("evidence"),
+        "provider_status": result.get("status"),
+        "provider_reason": result.get("reason"),
+        "http_status": result.get("http_status"),
+        "bound_count": bound_n,
+        "exists_count": exists_n,
+        "unresolved_count": unresolved_n,
+        "blocked_count": blocked_n,
+        "changed_identity": changed_identity,
+        "managed_supply": result.get("managed_supply") or {},
+    }
+    db = SessionLocal()
+    try:
+        row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == state_key,
+        ).order_by(Storage.id.desc()).first()
+        raw = _json_map_recovery.dumps(payload, ensure_ascii=False)
+        if row:
+            row.value = raw
+        else:
+            db.add(Storage(account_id=account_id, key=state_key, value=raw))
+        db.commit()
+    finally:
+        db.close()
+
+    return {
+        "status": state,
+        "action": "recover_canonical_mapping",
+        "result": payload,
+        "changed_identity": changed_identity,
+        "changed_avito": False,
+        "ai_calls_made": 0,
+    }
+
+
+def _kpi_exec_optimize_weak_items(account_id: str, action_data: dict):
+    """
+    v1: только ГОТОВИТ план работы со слабыми объявлениями.
+
+    Ничего не переписывает и не публикует.
+    Это намеренно: следующим этапом сюда подключим
+    генераторы заголовка/описания/изображения через отдельные
+    контролируемые операции Registry.
+    """
+    root = kpi_root_cause(account_id)
+
+    weak = root.get("worst_items") or []
+    best = root.get("best_items") or []
+
+    requested_ids = {
+        str(x.get("id"))
+        for x in (action_data.get("candidate_items") or [])
+        if x.get("id") is not None
+    }
+
+    if requested_ids:
+        weak = [
+            x for x in weak
+            if str(x.get("id")) in requested_ids
+        ]
+
+    proposals = []
+
+    for item in weak:
+        proposals.append({
+            "item_id": item.get("id"),
+            "title": item.get("title"),
+            "views": item.get("views"),
+            "contacts": item.get("contacts"),
+            "conversion": item.get("conversion"),
+            "proposed_work": [
+                "сравнить заголовок с сильными объявлениями",
+                "сравнить первое изображение с сильными объявлениями",
+                "проверить цену и предложение",
+                "подготовить точечную новую версию",
+            ],
+        })
+
+    return {
+        "status": "ok",
+        "action": "optimize_weak_items",
+        "result": {
+            "items_count": len(proposals),
+            "items": proposals,
+            "reference_items": best[:5],
+            "mode": "prepare_only",
+        },
+        "changed_avito": False,
+    }
+
+
+def _kpi_action_history_append(
+    db,
+    account_id: str,
+    action: str,
+    result: dict,
+    item_ids=None,
+):
+    # KPI_HISTORY_ATOMIC_SINGLETON_V1: serialize append by account/key, merge any
+    # historical duplicate Storage rows, and keep one canonical bounded history.
+    from app.models.storage import Storage
+    from sqlalchemy import text as _sql_text
+    import hashlib as _hashlib
+    import json as _json_kha
+    from datetime import datetime as _dt_kha
+
+    digest=_hashlib.blake2b((str(account_id)+"|kpi_action_history").encode("utf-8"),digest_size=8).digest()
+    lk=int.from_bytes(digest,"big",signed=False)
+    if lk >= (1 << 63):
+        lk -= (1 << 64)
+    db.execute(_sql_text("select pg_advisory_xact_lock(:k)"), {"k":lk})
+    rows=(db.query(Storage).filter(Storage.account_id==account_id,Storage.key=="kpi_action_history")
+          .order_by(Storage.id.asc()).with_for_update().all())
+    merged=[]; seen=set()
+    for _row in rows:
+        try:
+            _items=_json_kha.loads(_row.value or "[]")
+        except Exception:
+            _items=[]
+        if not isinstance(_items,list):
+            _items=[]
+        for _it in _items:
+            if not isinstance(_it,dict):
+                continue
+            _sig=_json_kha.dumps(_it,ensure_ascii=False,sort_keys=True,separators=(",",":"),default=str)
+            if _sig in seen:
+                continue
+            seen.add(_sig); merged.append(_it)
+    merged.append({
+        "ts": _dt_kha.utcnow().isoformat(),
+        "action": action,
+        "item_ids": [str(x) for x in (item_ids or [])],
+        "status": result.get("status"),
+        "changed_avito": bool(result.get("changed_avito", False)),
+    })
+    merged=sorted(merged,key=lambda x:str(x.get("ts") or ""))[-500:]
+    raw=_json_kha.dumps(merged,ensure_ascii=False)
+    if rows:
+        canonical=rows[-1]; canonical.value=raw
+        for _old in rows[:-1]:
+            db.delete(_old)
+    else:
+        db.add(Storage(account_id=account_id,key="kpi_action_history",value=raw))
+
+
+def _kpi_prepare_registry():
+    return {
+        "prepare_weak_titles": {
+            "risk": "prepare_only",
+            "ai": True,
+            "visible_change": False,
+            "max_items": 100,
+            "estimated_ai_rub": 0.50,
+        },
+        "prepare_weak_descriptions": {
+            "risk": "prepare_only",
+            "ai": True,
+            "visible_change": False,
+            "max_items": 3,
+            "estimated_ai_rub": 1.00,
+        },
+        "prepare_first_image_test": {
+            "risk": "prepare_only",
+            "ai": False,
+            "visible_change": False,
+            "max_items": 1,
+            "estimated_ai_rub": 0.0,
+        },
+    }
+
+
+def _kpi_ai_reserve_internal(
+    db,
+    account_id: str,
+    operation_id: str,
+    action: str,
+    amount_rub: float,
+):
+    from app.models.storage import Storage
+    import json as _json_kair
+    from datetime import date as _date_kair, datetime as _dt_kair
+
+    day = _kpi_marketing_today().isoformat()
+
+    runtime_row = (
+        db.query(Storage)
+        .filter(
+            Storage.account_id == account_id,
+            Storage.key == "kpi_runtime_settings",
+        )
+        .first()
+    )
+
+    runtime = {}
+
+    if runtime_row:
+        try:
+            runtime = _json_kair.loads(runtime_row.value)
+        except Exception:
+            runtime = {}
+
+    limit_rub = float(
+        runtime.get("ai_daily_limit_rub", 30)
+        or 30
+    )
+
+    row, data = _kpi_ai_ledger_load(
+        db,
+        account_id,
+        day,
+    )
+
+    for op in data["operations"]:
+        if op.get("operation_id") == operation_id:
+            return {
+                "status": "exists",
+                "operation": op,
+            }
+
+    spent, reserved = _kpi_ai_totals(data)
+
+    available = max(
+        limit_rub - spent - reserved,
+        0,
+    )
+
+    if amount_rub > available:
+        return {
+            "status": "blocked",
+            "reason": "Недостаточно дневного AI-бюджета",
+            "requested_rub": round(amount_rub, 4),
+            "available_rub": round(available, 4),
+        }
+
+    op = {
+        "operation_id": operation_id,
+        "action": action,
+        "status": "reserved",
+        "reserved_rub": round(amount_rub, 4),
+        "actual_rub": None,
+        "created_at": _dt_kair.utcnow().isoformat(),
+        "updated_at": _dt_kair.utcnow().isoformat(),
+    }
+
+    data["operations"].append(op)
+
+    raw = _json_kair.dumps(
+        data,
+        ensure_ascii=False,
+    )
+
+    if row:
+        row.value = raw
+    else:
+        row = Storage(
+            account_id=account_id,
+            key=f"kpi_ai_ledger:{day}",
+            value=raw,
+        )
+        db.add(row)
+
+    db.commit()
+
+    return {
+        "status": "reserved",
+        "operation": op,
+        "available_after_rub": round(
+            available - amount_rub,
+            4,
+        ),
+    }
+
+
+def _kpi_ai_commit_internal(
+    db,
+    account_id: str,
+    operation_id: str,
+    actual_rub: float,
+):
+    import json as _json_kaic
+    from datetime import date as _date_kaic, datetime as _dt_kaic
+
+    day = _kpi_marketing_today().isoformat()
+
+    row, data = _kpi_ai_ledger_load(
+        db,
+        account_id,
+        day,
+    )
+
+    if not row:
+        return {"status": "not_found"}
+
+    target = None
+
+    for op in data["operations"]:
+        if op.get("operation_id") == operation_id:
+            target = op
+            break
+
+    if not target:
+        return {"status": "not_found"}
+
+    target["status"] = "committed"
+    target["actual_rub"] = round(
+        max(float(actual_rub or 0), 0),
+        4,
+    )
+    target["updated_at"] = _dt_kaic.utcnow().isoformat()
+
+    row.value = _json_kaic.dumps(
+        data,
+        ensure_ascii=False,
+    )
+
+    db.commit()
+
+    return {
+        "status": "committed",
+        "operation": target,
+    }
+
+
+def _kpi_ai_release_internal(
+    db,
+    account_id: str,
+    operation_id: str,
+):
+    import json as _json_kairl
+    from datetime import date as _date_kairl, datetime as _dt_kairl
+
+    day = _kpi_marketing_today().isoformat()
+
+    row, data = _kpi_ai_ledger_load(
+        db,
+        account_id,
+        day,
+    )
+
+    if not row:
+        return {"status": "not_found"}
+
+    target = None
+
+    for op in data["operations"]:
+        if op.get("operation_id") == operation_id:
+            target = op
+            break
+
+    if not target:
+        return {"status": "not_found"}
+
+    if target.get("status") == "committed":
+        return {
+            "status": "blocked",
+            "reason": "committed",
+        }
+
+    target["status"] = "released"
+    target["updated_at"] = _dt_kairl.utcnow().isoformat()
+
+    row.value = _json_kairl.dumps(
+        data,
+        ensure_ascii=False,
+    )
+
+    db.commit()
+
+    return {
+        "status": "released",
+        "operation": target,
+    }
+
+
+
+class KpiApplyTitleRequest(BaseModel):
+    account_id: str
+    item_id: str
+    new_title: str
+    reason: str = "KPI optimization"
+    operation_id: str | None = None
+
+
+def _kpi_apply_log_load(db, account_id: str):
+    """
+    История реальных изменений KPI.
+    Отдельно от аналитического kpi_action_history.
+    """
+    from app.models.storage import Storage
+    import json as _json_kal
+
+    row = (
+        db.query(Storage)
+        .filter(
+            Storage.account_id == account_id,
+            Storage.key == "kpi_apply_log",
+        )
+        .first()
+    )
+
+    if not row:
+        return row, []
+
+    try:
+        data = _json_kal.loads(row.value)
+        if not isinstance(data, list):
+            data = []
+    except Exception:
+        data = []
+
+    return row, data
+
+
+def _kpi_obligation_ledger_sync(db, account_id: str, history: list):
+    """Persist the current unfinished KPI obligations separately from history.
+
+    This is a recovery/observability index, not a second source of truth. The
+    authoritative operation payload remains kpi_apply_log; this ledger makes
+    stranded work explicit and durable across process/service restarts.
+    """
+    from app.models.storage import Storage
+    import json as _json_kol
+    from datetime import datetime as _dt_kol, timezone as _tz_kol
+
+    active_statuses = {
+        "prepared", "safe_feed_ready", "mapping_wait", "feed_applied",
+        "publishing", "publish_requested", "publish_failed", "published",
+        "effect_rollback_requested", "rollback_feed_ready",
+        "rollback_publish_requested", "rollback_publish_failed",
+    }
+    obligations = []
+    for op in history or []:
+        if str(op.get("status") or "") not in active_statuses:
+            continue
+        obligations.append({
+            "operation_id": op.get("operation_id"),
+            "status": op.get("status"),
+            "item_id": op.get("avito_item_id") or op.get("item_id"),
+            "feed_identity": op.get("feed_identity"),
+            "effect_status": (op.get("effect") or {}).get("status"),
+            "mapping_obligation": op.get("mapping_obligation"),
+        })
+    payload = {
+        "version": 1,
+        "updated_at": _dt_kol.now(_tz_kol.utc).isoformat(),
+        "active_count": len(obligations),
+        "obligations": obligations[-100:],
+    }
+    row = db.query(Storage).filter(
+        Storage.account_id == account_id, Storage.key == "kpi_execution_ledger"
+    ).first()
+    raw = _json_kol.dumps(payload, ensure_ascii=False)
+    if row:
+        row.value = raw
+    else:
+        db.add(Storage(account_id=account_id, key="kpi_execution_ledger", value=raw))
+
+
+def _kpi_apply_log_save(db, account_id: str, history: list):
+    from app.models.storage import Storage
+    import json as _json_kals
+
+    # EXECUTION_LEDGER_V1: maintain a restart-safe index of unfinished work.
+    _kpi_obligation_ledger_sync(db, account_id, history)
+
+    row = (
+        db.query(Storage)
+        .filter(
+            Storage.account_id == account_id,
+            Storage.key == "kpi_apply_log",
+        )
+        .first()
+    )
+
+    # Ограничиваем рост Storage.
+    history = history[-1000:]
+
+    raw = _json_kals.dumps(
+        history,
+        ensure_ascii=False,
+    )
+
+    if row:
+        row.value = raw
+    else:
+        db.add(Storage(
+            account_id=account_id,
+            key="kpi_apply_log",
+            value=raw,
+        ))
+
+
+def _kpi_find_item_snapshot(db, account_id: str, item_id: str):
+    """
+    Ищем текущее объявление в feed_items.
+
+    Пока только читаем.
+    Никаких изменений feed здесь нет.
+    """
+    from app.models.storage import Storage
+    import json as _json_kfis
+
+    row = (
+        db.query(Storage)
+        .filter(
+            Storage.account_id == account_id,
+            Storage.key == "feed_items",
+        )
+        .first()
+    )
+
+    if not row:
+        return None
+
+    try:
+        items = _json_kfis.loads(row.value)
+    except Exception:
+        return None
+
+    if not isinstance(items, list):
+        return None
+
+    for item in items:
+        if str(item.get("id")) == str(item_id):
+            return {
+                "id": item.get("id"),
+                "title": item.get("title")
+                    or item.get("Title"),
+                "description": item.get("description")
+                    or item.get("Description"),
+                "raw": item,
+            }
+
+    return None
+
+
+def _kpi_title_apply_adapter(
+    account_id: str,
+    item_id: str,
+    new_title: str,
+):
+    """
+    ЕДИНСТВЕННАЯ точка, где KPI Apply Engine имеет право
+    записывать заголовок.
+
+    Сейчас намеренно fail-closed.
+
+    Следующим шагом сюда подключается УЖЕ СУЩЕСТВУЮЩИЙ
+    механизм BORIS: feed/update/export либо прямой write API,
+    в зависимости от реального ownership поля Title.
+
+    Никакой другой код KPI не должен сам писать в Avito.
+    """
+    return {
+        "status": "adapter_not_connected",
+        "changed_avito": False,
+        "reason": (
+            "Write-adapter для Title ещё не подключён. "
+            "Операция сохранена, но изменение не выполнено."
+        ),
+    }
+
+
+
+class KpiApplyChangesRequest(BaseModel):
+    account_id: str
+    item_id: str
+    changes: dict
+    reason: str = "KPI goal_auto optimization"
+    operation_id: str | None = None
+    regenerate_feed: bool = True
+
+
+KPI_APPLY_ALLOWED_FIELDS = {
+    "title",
+    "description",
+    "images",
+}
+
+# Эти поля пока ЗАПРЕЩЕНЫ в автономном v2.
+# Подключим отдельно, когда будут собственные валидаторы/ownership.
+KPI_APPLY_PROTECTED_FIELDS = {
+    "price",
+    "stock",
+    "address",
+    "category",
+    "params",
+    "attributes",
+}
+
+
+
+def _kpi_feed_key_normalize(value: str) -> str:
+    """
+    Нормализует имя поля для сопоставления legacy ↔ FeedItem.
+
+    Примеры:
+        Title -> title
+        GoodsSubType -> goodssubtype
+        goods_subtype -> goodssubtype
+        PriceType -> pricetype
+    """
+    import re as _re_kfkn
+
+    return _re_kfkn.sub(
+        r"[^a-z0-9]",
+        "",
+        str(value or "").lower(),
+    )
+
+
+def _kpi_feed_item_to_model(
+    raw_item: dict,
+):
+    """
+    Единственная точка преобразования legacy feed_items
+    в production FeedItem.
+
+    НИЧЕГО не выдумывает и не подставляет.
+
+    Если обязательных данных нет:
+        status = invalid
+
+    В частности НЕ подставляем пустой Address.
+    """
+    if isinstance(raw_item, FeedItem):
+        return {
+            "status": "ok",
+            "item": raw_item,
+            "payload": raw_item.model_dump(),
+        }
+
+    if not isinstance(raw_item, dict):
+        return {
+            "status": "invalid",
+            "reason": (
+                "feed item должен быть dict или FeedItem"
+            ),
+            "errors": [
+                {
+                    "field": "__item__",
+                    "message": (
+                        f"Получен {type(raw_item).__name__}"
+                    ),
+                }
+            ],
+        }
+
+    # -----------------------------------------------------
+    # 1. Индексируем реальные legacy-ключи.
+    # -----------------------------------------------------
+
+    source_by_normalized_key = {}
+
+    for source_key, source_value in raw_item.items():
+        nk = _kpi_feed_key_normalize(
+            source_key
+        )
+
+        # Если вдруг существуют и lowercase, и legacy-версия,
+        # первый найденный не перетираем произвольно.
+        if nk not in source_by_normalized_key:
+            source_by_normalized_key[nk] = (
+                source_key,
+                source_value,
+            )
+
+    payload = {}
+
+    # -----------------------------------------------------
+    # 2. Берём контракт непосредственно из FeedItem.
+    #
+    # Не поддерживаем вручную 30+ полей:
+    # если завтра FeedItem расширится, адаптер автоматически
+    # увидит новое поле.
+    # -----------------------------------------------------
+
+    for field_name in FeedItem.model_fields.keys():
+        normalized_field = (
+            _kpi_feed_key_normalize(
+                field_name
+            )
+        )
+
+        source = source_by_normalized_key.get(
+            normalized_field
+        )
+
+        if source is None:
+            continue
+
+        _, value = source
+
+        payload[field_name] = value
+
+    # -----------------------------------------------------
+    # 3. Pydantic = единственный источник истины контракта.
+    # -----------------------------------------------------
+
+    try:
+        model = FeedItem.model_validate(
+            payload
+        )
+
+    except Exception as exc:
+        errors = []
+
+        try:
+            for err in exc.errors():
+                loc = err.get("loc") or []
+
+                errors.append({
+                    "field": ".".join(
+                        str(x)
+                        for x in loc
+                    ),
+                    "type": err.get("type"),
+                    "message": err.get("msg"),
+                })
+
+        except Exception:
+            errors = [
+                {
+                    "field": "__validation__",
+                    "message": str(exc)[:500],
+                }
+            ]
+
+        return {
+            "status": "invalid",
+            "item_id": (
+                raw_item.get("id")
+                or raw_item.get("Id")
+            ),
+            "reason": (
+                "Legacy feed item не проходит "
+                "контракт FeedItem"
+            ),
+            "errors": errors,
+            "payload_keys": sorted(
+                payload.keys()
+            ),
+        }
+
+    return {
+        "status": "ok",
+        "item": model,
+        "payload": model.model_dump(),
+    }
+
+
+def _kpi_feed_items_to_models(
+    raw_items: list,
+):
+    """
+    Валидирует ВЕСЬ будущий feed до сохранения.
+
+    Один невалидный item блокирует KPI Apply:
+    нельзя генерировать частичный фид и случайно потерять
+    остальные объявления.
+    """
+    models = []
+    invalid = []
+
+    for index, raw_item in enumerate(
+        raw_items or []
+    ):
+        result = _kpi_feed_item_to_model(
+            raw_item
+        )
+
+        if result.get("status") != "ok":
+            invalid.append({
+                "index": index,
+                "item_id":
+                    result.get("item_id"),
+                "reason":
+                    result.get("reason"),
+                "errors":
+                    result.get("errors")
+                    or [],
+            })
+            continue
+
+        models.append(
+            result["item"]
+        )
+
+    if invalid:
+        return {
+            "status": "invalid",
+            "valid_count": len(models),
+            "invalid_count": len(invalid),
+            "invalid_items": invalid,
+        }
+
+    return {
+        "status": "ok",
+        "items": models,
+        "items_count": len(models),
+    }
+
+
+def _kpi_normalize_feed_field(item: dict, field: str):
+    """
+    Возвращает реально используемый ключ feed_items.
+    Поддерживаем legacy Title/Description и lowercase.
+    """
+    variants = {
+        "title": ("title", "Title"),
+        "description": ("description", "Description"),
+        "images": ("images", "Images"),
+    }
+
+    for key in variants.get(field, (field,)):
+        if key in item:
+            return key
+
+    # Для новых записей используем lowercase.
+    return field
+
+
+def _kpi_feed_items_load(db, account_id: str):
+    from app.models.storage import Storage
+    import json as _json_kfil
+
+    row = (
+        db.query(Storage)
+        .filter(
+            Storage.account_id == account_id,
+            Storage.key == "feed_items",
+        )
+        .first()
+    )
+
+    if not row:
+        return None, None
+
+    try:
+        items = _json_kfil.loads(row.value)
+    except Exception:
+        return row, None
+
+    if not isinstance(items, list):
+        return row, None
+
+    return row, items
+
+
+def _kpi_regenerate_feed_internal(account_id: str, items: list):
+    """
+    KPI -> production generate_feed adapter.
+
+    Принимает legacy feed_items или FeedItem,
+    валидирует ВСЮ будущую выгрузку и только затем
+    вызывает существующий generate_feed().
+
+    Никаких фиктивных Address/Description/etc.
+    """
+    converted = _kpi_feed_items_to_models(
+        items
+    )
+
+    if converted.get("status") != "ok":
+        return {
+            "status": "invalid_feed_items",
+            "changed_avito": False,
+            "reason": (
+                "Будущий feed не проходит "
+                "production-контракт FeedItem"
+            ),
+            "validation": converted,
+        }
+
+    try:
+        req = GenerateFeedRequest(
+            account_id=account_id,
+            items=converted["items"],
+            merge=False,
+        )
+
+        result = generate_feed(
+            req
+        )
+
+    except Exception as exc:
+        return {
+            "status": "error",
+            "changed_avito": False,
+            "reason": str(exc)[:2000],
+        }
+
+    if not isinstance(result, dict):
+        return {
+            "status": "error",
+            "changed_avito": False,
+            "reason": (
+                "generate_feed вернул "
+                "неожиданный тип результата"
+            ),
+        }
+
+    if result.get("status") != "ok":
+        return {
+            "status": "error",
+            "changed_avito": False,
+            "reason": (
+                result.get("reason")
+                or result.get("message")
+                or "generate_feed завершился неуспешно"
+            ),
+            "result": result,
+        }
+
+    return {
+        "status": "ok",
+        "changed_avito": False,
+        "items_count": (
+            result.get("items_count")
+            or len(converted["items"])
+        ),
+        "feed_url": result.get("feed_url"),
+        "result": result,
+    }
+
+
+
+class KpiPublishRequest(BaseModel):
+    account_id: str
+    operation_id: str
+
+
+def _kpi_find_apply_operation(
+    db,
+    account_id: str,
+    operation_id: str,
+):
+    _, history = _kpi_apply_log_load(
+        db,
+        account_id,
+    )
+
+    for op in history:
+        if op.get("operation_id") == operation_id:
+            return history, op
+
+    return history, None
+
+
+def _kpi_publish_adapter(
+    account_id: str,
+    operation: dict,
+):
+    """
+    Единая production write-point KPI -> Avito.
+
+    Использует СУЩЕСТВУЮЩИЙ feed_send_to_avito(),
+    который уже работает через официальный autoload upload.
+
+    ВАЖНО:
+    успешный HTTP/upload означает только, что выгрузка
+    ПРИНЯТА на обработку.
+
+    Это ещё НЕ доказательство, что новое значение уже
+    появилось в объявлении.
+
+    Поэтому здесь:
+        changed_avito = False
+        status = publish_requested
+
+    Фактический changed_avito=True ставится только
+    отдельной проверкой после обработки Avito.
+    """
+    try:
+        result = feed_send_to_avito(
+            account_id=account_id
+        )
+    except Exception as exc:
+        return {
+            "status": "error",
+            "changed_avito": False,
+            "reason": (
+                "Ошибка отправки фида в Avito: "
+                + str(exc)[:500]
+            ),
+        }
+
+    # FastAPI-функция при прямом внутреннем вызове
+    # должна возвращать dict. Не угадываем другой контракт.
+    if not isinstance(result, dict):
+        return {
+            "status": "error",
+            "changed_avito": False,
+            "reason": (
+                "feed_send_to_avito вернул "
+                f"неожиданный тип: {type(result).__name__}"
+            ),
+        }
+
+    raw_status = str(
+        result.get("status") or ""
+    ).lower()
+
+    explicit_error = (
+        raw_status in (
+            "error",
+            "failed",
+            "blocked",
+        )
+        or result.get("success") is False
+    )
+
+    if raw_status in ("waiting", "deferred"):
+        return {
+            "status": "waiting",
+            "changed_avito": False,
+            "reason": result.get("message") or result.get("reason") or "Внешняя проверка ещё не завершена",
+            "upload_result": result,
+        }
+
+    if explicit_error:
+        return {
+            "status": "error",
+            "changed_avito": False,
+            "reason": (
+                result.get("message")
+                or result.get("reason")
+                or "Avito upload завершился ошибкой"
+            ),
+            "upload_result": result,
+        }
+
+    # ВАЖНО:
+    # здесь намеренно НЕ changed_avito=True.
+    # Фид принят/отправлен, но эффект ещё надо подтвердить.
+    return {
+        "status": "publish_requested",
+        "changed_avito": False,
+        "upload_result": result,
+    }
+
+
+
+def _kpi_fetch_live_item(account_id: str, item_id: str):
+    """
+    Read-only получение актуального объявления из Avito.
+
+    Использует существующий get_items2().
+    Ничего не меняет.
+    """
+    try:
+        result = get_items2(account_id=account_id)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "reason": str(exc)[:500],
+        }
+
+    # Поддерживаем разные существующие форматы ответа.
+    if isinstance(result, dict):
+        items = (
+            result.get("items")
+            or result.get("resources")
+            or result.get("result")
+            or []
+        )
+    elif isinstance(result, list):
+        items = result
+    else:
+        items = []
+
+    if isinstance(items, dict):
+        items = (
+            items.get("items")
+            or items.get("resources")
+            or []
+        )
+
+    for item in items:
+        if str(item.get("id")) == str(item_id):
+            return {
+                "status": "ok",
+                "item": item,
+            }
+
+    return {
+        "status": "not_found",
+        "item_id": str(item_id),
+    }
+
+
+def _kpi_title_matches_expected(expected, live_value):
+    """Exact title proof with Avito feed alternation support.
+
+    KPI_TEMPLATE_TITLE_LIVE_PROOF_V1: a feed title like {A|B|C} is materialized
+    by Avito as one concrete variant. Any exact listed variant is authoritative
+    proof of publication/rollback; unrelated text is still rejected.
+    """
+    exp=str(expected or "").strip(); live=str(live_value or "").strip()
+    if exp == live:
+        return True
+    if len(exp) >= 2 and exp.startswith("{") and exp.endswith("}") and "|" in exp:
+        variants=[x.strip() for x in exp[1:-1].split("|") if x.strip()]
+        return live in variants
+    return False
+
+
+def _kpi_compare_expected_with_live(
+    operation: dict,
+    live_item: dict,
+):
+    """
+    Сравнивает ожидаемые изменения операции с актуальным Avito item.
+    Пока поддерживаем только title/description.
+    """
+    changes = operation.get("changes") or {}
+
+    checks = []
+    all_match = True
+
+    field_variants = {
+        "title": ("title", "Title"),
+        "description": ("description", "Description"),
+        "images": ("images", "Images"),
+    }
+
+    for field, change in changes.items():
+        if field not in field_variants:
+            continue
+
+        expected = change.get("new")
+
+        live_value = None
+
+        for key in field_variants[field]:
+            if key in live_item:
+                live_value = live_item.get(key)
+                break
+
+        if field == "images":
+            _live_images = list(live_value or []) if isinstance(live_value, (list, tuple)) else []
+            _expected_images = list(expected or []) if isinstance(expected, (list, tuple)) else []
+            # First-image experiment only needs the first live image to match;
+            # providers may normalize/drop later gallery entries in read APIs.
+            match = bool(_live_images and _expected_images and str(_live_images[0]).strip() == str(_expected_images[0]).strip())
+        elif field == "title":
+            match = _kpi_title_matches_expected(expected, live_value)
+        else:
+            match = str(live_value or "").strip() == str(expected or "").strip()
+
+        checks.append({
+            "field": field,
+            "expected": expected,
+            "live": live_value,
+            "match": match,
+        })
+
+        if not match:
+            all_match = False
+
+    if not checks:
+        return {
+            "status": "insufficient_data",
+            "all_match": False,
+            "checks": [],
+        }
+
+    return {
+        "status": "ok",
+        "all_match": all_match,
+        "checks": checks,
+    }
+
+
+class KpiConfirmPublishRequest(BaseModel):
+    account_id: str
+    operation_id: str
+
+
+
+class KpiEffectCheckRequest(BaseModel):
+    account_id: str
+    operation_id: str
+
+
+def _kpi_extract_item_stats(account_id: str, item_id: str):
+    """
+    Read-only статистика конкретного объявления из текущего daily_stats.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kes
+    from datetime import date as _date_kes
+
+    db = SessionLocal()
+
+    try:
+        today = _kpi_marketing_today().isoformat()
+
+        row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == f"daily_stats:{today}",
+            )
+            .first()
+        )
+
+        if not row:
+            return {
+                "status": "no_data",
+            }
+
+        try:
+            data = _json_kes.loads(row.value)
+        except Exception:
+            return {
+                "status": "error",
+                "reason": "daily_stats повреждён",
+            }
+
+        for item in data.get("items") or []:
+            if str(item.get("id")) != str(item_id):
+                continue
+
+            views = int(
+                item.get("views")
+                or item.get("uniqViews")
+                or 0
+            )
+
+            contacts = int(
+                item.get("contacts")
+                or item.get("uniqContacts")
+                or 0
+            )
+
+            conversion = (
+                round(contacts / views * 100, 2)
+                if views > 0
+                else 0
+            )
+
+            return {
+                "status": "ok",
+                "views": views,
+                "contacts": contacts,
+                "conversion": conversion,
+            }
+
+        return {
+            "status": "not_found",
+        }
+
+    finally:
+        db.close()
+
+
+
+class KpiEffectResolveRequest(BaseModel):
+    account_id: str
+    operation_id: str
+    execute: bool = False
+
+
+def _kpi_extract_item_stats_window(account_id: str, item_id: str, start_date: str, end_date: str):
+    """Aggregate only distinct Avito source days in [start_date, end_date].
+
+    `daily_stats:<collection day>` can contain Avito data for the previous day;
+    therefore observation keys off persisted `stats_date`, not the Storage key.
+    This prevents old-version traffic from leaking into KPI_AFTER.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_win
+    from datetime import date as _date_win
+    try:
+        start = _date_win.fromisoformat(str(start_date)[:10])
+        end = _date_win.fromisoformat(str(end_date)[:10])
+    except Exception:
+        return {"status":"error","reason":"invalid observation dates"}
+    db = SessionLocal(); by_day={}
+    try:
+        rows = db.query(Storage).filter(
+            Storage.account_id==account_id,
+            Storage.key.like("daily_stats:%"),
+        ).all()
+        for row in rows:
+            try: data = _json_win.loads(row.value)
+            except Exception: continue
+            _complete_meta = data.get("completeness")
+            if isinstance(_complete_meta, dict) and not bool(_complete_meta.get("complete", False)):
+                continue
+            source_day = str(data.get("stats_date") or data.get("date") or "")[:10]
+            try: d = _date_win.fromisoformat(source_day)
+            except Exception: continue
+            if d < start or d > end: continue
+            for item in data.get("items") or []:
+                if str(item.get("id")) != str(item_id): continue
+                views = int(item.get("views") or item.get("uniqViews") or 0)
+                contacts = int(item.get("contacts") or item.get("uniqContacts") or 0)
+                # Re-collection of the same Avito source day replaces, never adds.
+                by_day[source_day] = {"date":source_day,"views":views,"contacts":contacts}
+                break
+    finally:
+        db.close()
+    days=[by_day[k] for k in sorted(by_day)]
+    if not days:
+        return {"status":"no_data","days":[]}
+    total_views=sum(x["views"] for x in days); total_contacts=sum(x["contacts"] for x in days)
+    return {
+        "status":"ok", "days":days, "complete_days":len(days),
+        "views":total_views, "contacts":total_contacts,
+        "contacts_per_day":round(total_contacts/len(days), 3),
+        "conversion":round(total_contacts/total_views*100, 2) if total_views else 0.0,
+    }
+
+
+def _kpi_effect_decision(verdict: str) -> dict:
+    """
+    Чистая deterministic-логика после измерения эффекта.
+    Никакого AI.
+    """
+    mapping = {
+        "improved": {
+            "decision": "keep",
+            "requires_action": False,
+            "reason": "Изменение дало положительный эффект — оставляем.",
+        },
+
+        "worse": {
+            "decision": "rollback",
+            "requires_action": True,
+            "reason": "После изменения показатели ухудшились — нужен откат.",
+        },
+
+        "insufficient_data": {
+            "decision": "wait",
+            "requires_action": False,
+            "reason": "Недостаточно новых данных — вмешиваться рано.",
+        },
+
+        "no_clear_effect": {
+            "decision": "try_next_action",
+            "requires_action": True,
+            "reason": (
+                "Данных уже достаточно, но подтверждённого эффекта нет — "
+                "не повторяем ту же гипотезу, выбираем следующий манёвр."
+            ),
+        },
+    }
+
+    return mapping.get(
+        verdict,
+        {
+            "decision": "wait",
+            "requires_action": False,
+            "reason": f"Неизвестный verdict: {verdict}",
+        },
+    )
+
+
+
+def _kpi_latest_active_operation(db, account_id: str):
+    """
+    Возвращает последнюю незавершённую KPI apply/publish/effect операцию.
+    """
+    _, history = _kpi_apply_log_load(
+        db,
+        account_id,
+    )
+
+    active_statuses = {
+        "prepared",
+        "safe_feed_ready",
+        "mapping_wait",
+        "feed_applied",
+        "publishing",
+        "publish_requested",
+        "publish_failed",
+        "published",
+        "effect_rollback_requested",
+        "rollback_feed_ready",
+        "rollback_publish_requested",
+        "rollback_publish_failed",
+    }
+
+    for op in reversed(history):
+        if op.get("status") not in active_statuses:
+            continue
+        # PROVIDER_STALLED_TERMINAL_LIFECYCLE_V1: three proven live mismatches
+        # are a terminal outcome for this exact content hypothesis. Keeping the
+        # row as the account's active operation made goal_auto call confirm on
+        # every tick forever even though confirm itself correctly refused any
+        # fourth publish attempt. Skip the stalled row here: history/evidence is
+        # preserved, blind retries stay fenced, and the scheduler can move to a
+        # different item/hypothesis without owner babysitting.
+        if (str(op.get("status") or "") == "publish_provider_stalled" or (
+                op.get("publish_provider_stalled_at")
+                and int(op.get("publish_retry_count") or 0) >= 3
+                and str(op.get("publish_error") or "") == "avito_publish_not_applying_after_bounded_retries")):
+            continue
+        return op
+
+    return None
+
+
+# AUTOLOAD_IDENTITY_REPORT_PERPAGE100_V1: official item-report recovery uses 100 rows/page to avoid self-induced API 429.
+def _recover_one_canonical_identity_from_autoload(account_id: str, avito_item_id: str) -> dict:
+    """Recover one live Avito↔feed identity from official autoload report only.
+
+    Read-only toward Avito. DB is changed only when the report explicitly carries
+    both ``avito_id`` and source ``ad_id`` and that ad_id exists exactly once in
+    the authoritative account feed. No title/price/content matching is allowed.
+    """
+    import httpx as _httpx_recover
+    import json as _json_recover
+    from app.db.session import SessionLocal as _SessionRecover
+    from app.models.storage import Storage as _StorageRecover
+    from app.services.campaign_identity import bind_from_autoload_evidence as _bind_recover
+    from app.services.avito_account_throttle import account_throttle_remaining as _autoload_throttle_remaining, record_account_throttle as _autoload_record_throttle
+    def _autoload_retry_after(resp) -> int:
+        from email.utils import parsedate_to_datetime
+        raw=str((getattr(resp,"headers",{}) or {}).get("Retry-After") or "").strip()
+        if not raw: return 30
+        try: return max(1,int(float(raw)))
+        except Exception:
+            try:
+                dt=parsedate_to_datetime(raw)
+                if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+                return max(1,int((dt-datetime.now(timezone.utc)).total_seconds()))
+            except Exception: return 30
+    aid=str(avito_item_id or "").strip()
+    if not account_id or not aid:
+        return {"status":"blocked","reason":"missing_account_or_avito_item_id"}
+    # AUTOLOAD_IDENTITY_RECOVERY_SHARED_THROTTLE_V1: identity repair is read-only,
+    # but it still consumes tenant provider quota. A Retry-After observed by any
+    # trusted Autoload contour is binding before token/provider I/O and pagination.
+    _retry_before = _autoload_throttle_remaining(account_id)
+    if _retry_before > 0:
+        return {"status":"blocked","reason":"shared_avito_account_throttle","retry_after_seconds":int(_retry_before)}
+    token=_extract_token(get_avito_token(account_id))
+    if not token:
+        return {"status":"blocked","reason":"avito_token_unavailable"}
+    head={"Authorization":"Bearer "+token}
+    try:
+        if _autoload_throttle_remaining(account_id) > 0:
+            return {"status":"blocked","reason":"shared_avito_account_throttle","retry_after_seconds":int(_autoload_throttle_remaining(account_id))}
+        first=_httpx_recover.get("https://api.avito.ru/autoload/v4/uploads/current/items",headers=head,params={"page":1,"perPage":100},timeout=20)
+        if first.status_code == 429:
+            _autoload_record_throttle(account_id, _autoload_retry_after(first), source="autoload_identity_recover_items_429")
+            return {"status":"blocked","reason":"shared_avito_account_throttle","http_status":429,"retry_after_seconds":int(_autoload_throttle_remaining(account_id))}
+        if first.status_code != 200:
+            return {"status":"blocked","reason":"autoload_items_report_unavailable","http_status":first.status_code}
+        body=first.json() or {}; report_items=list(body.get("items") or [])
+        meta=body.get("meta") or {}; pages=max(1,int(meta.get("pages") or 1))
+        # AUTOLOAD_SINGLE_UPLOAD_ID_FALLBACK_V1: current/items may omit upload_id.
+        # Read the authoritative current upload header so the exact binding stores
+        # a real upload id instead of referencing an undefined local variable.
+        _authoritative_upload_id=int(meta.get("upload_id") or body.get("upload_id") or 0)
+        if not _authoritative_upload_id:
+            try:
+                if _autoload_throttle_remaining(account_id) <= 0:
+                    _cur=_httpx_recover.get("https://api.avito.ru/autoload/v4/uploads/current",headers=head,timeout=20)
+                    if _cur.status_code==429:
+                        _autoload_record_throttle(account_id, _autoload_retry_after(_cur), source="autoload_identity_recover_current_429")
+                    elif _cur.status_code==200:
+                        _authoritative_upload_id=int((_cur.json() or {}).get("upload_id") or 0)
+            except Exception:
+                _authoritative_upload_id=0
+        for page_no in range(2,min(pages,50)+1):
+            if _autoload_throttle_remaining(account_id) > 0:
+                return {"status":"blocked","reason":"shared_avito_account_throttle","page":page_no,"retry_after_seconds":int(_autoload_throttle_remaining(account_id))}
+            rr=_httpx_recover.get("https://api.avito.ru/autoload/v4/uploads/current/items",headers=head,params={"page":page_no,"perPage":100},timeout=20)
+            if rr.status_code == 429:
+                _autoload_record_throttle(account_id, _autoload_retry_after(rr), source="autoload_identity_recover_page_429")
+                return {"status":"blocked","reason":"shared_avito_account_throttle","page":page_no,"http_status":429,"retry_after_seconds":int(_autoload_throttle_remaining(account_id))}
+            if rr.status_code != 200:
+                return {"status":"blocked","reason":"autoload_items_report_page_unavailable","page":page_no,"http_status":rr.status_code}
+            report_items.extend((rr.json() or {}).get("items") or [])
+        matches=[x for x in report_items if str(x.get("avito_id") or "")==aid and str(x.get("ad_id") or "").strip()]
+        if len(matches) != 1:
+            return {"status":"unresolved","reason":"official_pair_not_unique","matches":len(matches)}
+        rep=matches[0]; fid=str(rep.get("ad_id") or "").strip()
+        db=_SessionRecover()
+        try:
+            row=db.query(_StorageRecover).filter(_StorageRecover.account_id==account_id,_StorageRecover.key=="feed_items").order_by(_StorageRecover.id.desc()).first()
+            raw=getattr(row,"value",None) if row else None
+            if isinstance(raw,str):
+                try: feed_items=_json_recover.loads(raw)
+                except Exception: feed_items=[]
+            else:
+                feed_items=raw if isinstance(raw,list) else []
+            exact=[x for x in feed_items if isinstance(x,dict) and str(x.get("id") or x.get("Id") or "").strip()==fid]
+            if len(exact) != 1:
+                return {"status":"unresolved","reason":"authoritative_feed_id_not_unique","feed_identity":fid,"matches":len(exact)}
+            result=_bind_recover(db,account_id,fid,aid,upload_id=_authoritative_upload_id or meta.get("upload_id") or body.get("upload_id"),
+                                 report_section=str((rep.get("section") or {}).get("slug") or ""),
+                                 avito_status=str(rep.get("avito_status") or ""))
+            if result.get("status") in {"bound","exists"}: db.commit()
+            else: db.rollback()
+            return {**result,"feed_identity":fid,"evidence":"official_autoload_current_items"}
+        finally:
+            db.close()
+    except Exception as exc:
+        return {"status":"blocked","reason":"autoload_identity_recovery_error","detail":f"{type(exc).__name__}:{exc}"[:240]}
+
+
+
+def _recover_feed_identity_snapshot_from_autoload(account_id: str) -> dict:
+    from app.services.avito_account_throttle import account_throttle_remaining as _autoload_throttle_remaining, record_account_throttle as _autoload_record_throttle
+    """Read the exact XML snapshot Avito stored for the newest upload.
+
+    This is a secondary *feed-identity* recovery path for accounts where the
+    item report is unavailable/incomplete. It never derives Avito item ids and
+    therefore cannot create an Avito↔feed pair. It proves only which source Ids
+    Avito actually fetched, by reading Avito's own immutable package URL from
+    v4 upload history. No title/price/fuzzy matching and no external mutation.
+    """
+    import httpx as _httpx_snap
+    import xml.etree.ElementTree as _ET_snap
+    # AUTOLOAD_FEED_SNAPSHOT_SHARED_THROTTLE_V1: this secondary identity
+    # recovery path is reporting/read-only, but it consumes the same tenant
+    # provider budget. Honor shared Retry-After before token/provider I/O.
+    _snap_retry = _autoload_throttle_remaining(account_id)
+    if _snap_retry > 0:
+        return {"status":"blocked","reason":"shared_avito_account_throttle","retry_after_seconds":int(_snap_retry),"feed_ids":[]}
+    token=_extract_token(get_avito_token(account_id))
+    if not token:
+        return {"status":"blocked","reason":"avito_token_unavailable","feed_ids":[]}
+    head={"Authorization":"Bearer "+token}
+    try:
+        _snap_retry = _autoload_throttle_remaining(account_id)
+        if _snap_retry > 0:
+            return {"status":"blocked","reason":"shared_avito_account_throttle","retry_after_seconds":int(_snap_retry),"feed_ids":[]}
+        rr=_httpx_snap.get("https://api.avito.ru/autoload/v4/uploads",headers=head,params={"perPage":20},timeout=20)
+        if rr.status_code == 429:
+            _autoload_record_throttle(account_id, _autoload_retry_after(rr), source="autoload_feed_snapshot_uploads_429")
+            return {"status":"blocked","reason":"shared_avito_account_throttle","http_status":429,"retry_after_seconds":int(_autoload_throttle_remaining(account_id)),"feed_ids":[]}
+        if rr.status_code!=200:
+            return {"status":"blocked","reason":"autoload_upload_history_unavailable","http_status":rr.status_code,"feed_ids":[]}
+        uploads=list((rr.json() or {}).get("uploads") or [])
+        for up in uploads:
+            uid=int(up.get("upload_id") or 0); urls=up.get("feed_urls") or []
+            for rec in urls:
+                url=str((rec or {}).get("url") or "").strip()
+                # Trust only Avito-hosted package snapshots advertised by the
+                # official upload report, never an arbitrary external feed URL.
+                if not url.startswith("https://api.avito.ru/autoload/v2/feed/content/"):
+                    continue
+                _snap_retry = _autoload_throttle_remaining(account_id)
+                if _snap_retry > 0:
+                    return {"status":"blocked","reason":"shared_avito_account_throttle","retry_after_seconds":int(_snap_retry),"feed_ids":[]}
+                fr=_httpx_snap.get(url,headers=head,timeout=20)
+                if fr.status_code == 429:
+                    _autoload_record_throttle(account_id, _autoload_retry_after(fr), source="autoload_feed_snapshot_content_429")
+                    return {"status":"blocked","reason":"shared_avito_account_throttle","http_status":429,"retry_after_seconds":int(_autoload_throttle_remaining(account_id)),"feed_ids":[]}
+                if fr.status_code!=200:
+                    continue
+                try: root=_ET_snap.fromstring(fr.content)
+                except Exception: continue
+                ids=[]
+                for ad in root.findall('.//Ad'):
+                    fid=str(ad.findtext('Id') or '').strip()
+                    if fid: ids.append(fid)
+                if ids and len(ids)==len(set(ids)):
+                    return {"status":"ok","evidence":"official_autoload_feed_snapshot","upload_id":uid,
+                            "feed_ids":ids,"feed_count":len(ids),"source":str(up.get("source") or ""),
+                            "upload_status":str(up.get("status") or "")}
+        return {"status":"unresolved","reason":"no_readable_unique_avito_feed_snapshot","feed_ids":[]}
+    except Exception as exc:
+        return {"status":"blocked","reason":"autoload_feed_snapshot_error","detail":f"{type(exc).__name__}:{exc}"[:240],"feed_ids":[]}
+
+
+def _recover_canonical_identities_batch_from_autoload(account_id: str, avito_item_ids=None) -> dict:
+    """Recover many exact Avito↔feed identities using one official report read.
+
+    External side is read-only. A binding is allowed only when the current
+    autoload report contains exactly one row for an Avito id with non-empty
+    ``ad_id`` and the authoritative account ``feed_items`` contains that ad_id
+    exactly once. No title/price/category matching is used.
+    """
+    import httpx as _httpx_batch
+    import json as _json_batch
+    from app.db.session import SessionLocal as _SessionBatch
+    from app.models.storage import Storage as _StorageBatch
+    from app.models.campaign_item import CampaignItem as _CampaignItemBatch
+    from app.services.campaign_identity import (
+        bind_from_autoload_evidence as _bind_batch,
+        materialize_exact_feed_target as _materialize_exact_feed_target,
+    )
+    from app.services.avito_account_throttle import account_throttle_remaining as _autoload_throttle_remaining, record_account_throttle as _autoload_record_throttle
+    def _autoload_retry_after(resp) -> int:
+        from email.utils import parsedate_to_datetime
+        raw=str((getattr(resp,"headers",{}) or {}).get("Retry-After") or "").strip()
+        if not raw: return 30
+        try: return max(1,int(float(raw)))
+        except Exception:
+            try:
+                dt=parsedate_to_datetime(raw)
+                if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+                return max(1,int((dt-datetime.now(timezone.utc)).total_seconds()))
+            except Exception: return 30
+
+    wanted={str(x).strip() for x in (avito_item_ids or []) if str(x).strip()}
+    # AUTOLOAD_IDENTITY_BATCH_SHARED_THROTTLE_V1: do not fan out recovery reads
+    # while this tenant is inside a trusted Retry-After window.
+    _retry_before = _autoload_throttle_remaining(account_id)
+    if _retry_before > 0:
+        return {"status":"blocked","reason":"shared_avito_account_throttle","retry_after_seconds":int(_retry_before),"bound":[],"unresolved":sorted(wanted)}
+    token=_extract_token(get_avito_token(account_id))
+    if not token:
+        return {"status":"blocked","reason":"avito_token_unavailable","bound":[],"unresolved":sorted(wanted)}
+    head={"Authorization":"Bearer "+token}
+    try:
+        if _autoload_throttle_remaining(account_id) > 0:
+            return {"status":"blocked","reason":"shared_avito_account_throttle","retry_after_seconds":int(_autoload_throttle_remaining(account_id)),"bound":[],"unresolved":sorted(wanted)}
+        first=_httpx_batch.get("https://api.avito.ru/autoload/v4/uploads/current/items",headers=head,params={"page":1,"perPage":100},timeout=20)
+        if first.status_code == 429:
+            _autoload_record_throttle(account_id, _autoload_retry_after(first), source="autoload_identity_batch_items_429")
+            return {"status":"blocked","reason":"shared_avito_account_throttle","http_status":429,"retry_after_seconds":int(_autoload_throttle_remaining(account_id)),"bound":[],"unresolved":sorted(wanted)}
+        if first.status_code != 200:
+            _snapshot=_recover_feed_identity_snapshot_from_autoload(account_id)
+            return {"status":"blocked","reason":"autoload_items_report_unavailable","http_status":first.status_code,"bound":[],
+                    "feed_snapshot":_snapshot,
+                    "identity_pair_blocked_reason":"official_feed_snapshot_has_no_avito_item_pair"}
+        body=first.json() or {}; report_items=list(body.get("items") or [])
+        meta=body.get("meta") or {}; pages=max(1,int(meta.get("pages") or 1))
+        # AUTOLOAD_CURRENT_UPLOAD_ID_FALLBACK_V1: item report may omit upload_id.
+        _authoritative_upload_id=int(meta.get("upload_id") or body.get("upload_id") or 0)
+        if not _authoritative_upload_id:
+            try:
+                if _autoload_throttle_remaining(account_id) <= 0:
+                    _cur_upload=_httpx_batch.get("https://api.avito.ru/autoload/v4/uploads/current",headers=head,timeout=20)
+                    if _cur_upload.status_code==429:
+                        _autoload_record_throttle(account_id, _autoload_retry_after(_cur_upload), source="autoload_identity_batch_current_429")
+                    elif _cur_upload.status_code==200:
+                        _authoritative_upload_id=int((_cur_upload.json() or {}).get("upload_id") or 0)
+            except Exception:
+                _authoritative_upload_id=0
+        for page_no in range(2,min(pages,50)+1):
+            if _autoload_throttle_remaining(account_id) > 0:
+                return {"status":"blocked","reason":"shared_avito_account_throttle","page":page_no,"retry_after_seconds":int(_autoload_throttle_remaining(account_id)),"bound":[],"unresolved":sorted(wanted)}
+            rr=_httpx_batch.get("https://api.avito.ru/autoload/v4/uploads/current/items",headers=head,params={"page":page_no,"perPage":100},timeout=20)
+            if rr.status_code == 429:
+                _autoload_record_throttle(account_id, _autoload_retry_after(rr), source="autoload_identity_batch_page_429")
+                return {"status":"blocked","reason":"shared_avito_account_throttle","page":page_no,"http_status":429,"retry_after_seconds":int(_autoload_throttle_remaining(account_id)),"bound":[],"unresolved":sorted(wanted)}
+            if rr.status_code != 200:
+                return {"status":"blocked","reason":"autoload_items_report_page_unavailable","page":page_no,"http_status":rr.status_code,"bound":[]}
+            report_items.extend((rr.json() or {}).get("items") or [])
+
+        # AUTOLOAD_EXACT_MANAGED_SUPPLY_V1: keep the complete official pair map,
+        # not only the current 25 recovery candidates. The complete report lets
+        # BORIS distinguish a true mapping defect from a structurally read-only
+        # historical/native inventory whose current managed feed is smaller than
+        # 20% of all live Avito ads.
+        report_by_avito_all={}
+        for rep in report_items:
+            aid=str(rep.get("avito_id") or "").strip(); fid=str(rep.get("ad_id") or "").strip()
+            if aid and fid: report_by_avito_all.setdefault(aid,[]).append(rep)
+        report_by_avito={aid:reps for aid,reps in report_by_avito_all.items() if (not wanted or aid in wanted)}
+
+        db=_SessionBatch()
+        try:
+            row=db.query(_StorageBatch).filter(_StorageBatch.account_id==account_id,_StorageBatch.key=="feed_items").order_by(_StorageBatch.id.desc()).first()
+            raw=getattr(row,"value",None) if row else None
+            if isinstance(raw,str):
+                try: feed_items=_json_batch.loads(raw)
+                except Exception: feed_items=[]
+            else: feed_items=raw if isinstance(raw,list) else []
+            feed_counts={}; feed_by_id={}
+            for x in feed_items:
+                if not isinstance(x,dict): continue
+                fid=str(x.get("id") or x.get("Id") or "").strip()
+                if fid:
+                    feed_counts[fid]=feed_counts.get(fid,0)+1
+                    feed_by_id.setdefault(fid,[]).append(x)
+
+            # AUTOLOAD_EXACT_MANAGED_SUPPLY_SNAPSHOT_V1: exact supply is not
+            # the raw feed size. Require BOTH an exact unique Autoload pair and
+            # presence of that Avito id in the latest active stats snapshot.
+            # This excludes removed/deleted feed rows and historical native ads.
+            try:
+                _latest_stats_row=(db.query(_StorageBatch).filter(
+                    _StorageBatch.account_id==account_id,
+                    _StorageBatch.key.like("daily_stats:%"),
+                ).order_by(_StorageBatch.id.desc()).first())
+                _latest_stats=_json_batch.loads(getattr(_latest_stats_row,"value","") or "{}") if _latest_stats_row else {}
+            except Exception:
+                _latest_stats={}
+            _latest_active_ids={
+                str((x or {}).get("id") or "").strip()
+                for x in (_latest_stats.get("items") or [])
+                if isinstance(x,dict)
+                and str(x.get("status") or "").lower()=="active"
+                and str(x.get("id") or "").strip()
+            }
+            _recoverable_active_pairs=[]
+            for _aid_supply,_reps_supply in report_by_avito_all.items():
+                if len(_reps_supply)!=1 or _aid_supply not in _latest_active_ids:
+                    continue
+                _fid_supply=str((_reps_supply[0] or {}).get("ad_id") or "").strip()
+                if _fid_supply and feed_counts.get(_fid_supply,0)==1:
+                    _recoverable_active_pairs.append((_aid_supply,_fid_supply))
+            _feed_fingerprint=__import__("hashlib").sha256(
+                "\n".join(sorted(feed_counts)).encode("utf-8")
+            ).hexdigest()
+            _managed_supply={
+                "policy_version":"AUTOLOAD_EXACT_MANAGED_SUPPLY_SNAPSHOT_V1",
+                "recoverable_active_exact_pairs":len(_recoverable_active_pairs),
+                "source_active_items":len(_latest_active_ids),
+                "active_ids_fingerprint":__import__("hashlib").sha256(
+                    "\n".join(sorted(_latest_active_ids)).encode("utf-8")
+                ).hexdigest(),
+                "feed_item_count":len(feed_counts),
+                "feed_fingerprint":_feed_fingerprint,
+                "stats_collected_at":_latest_stats.get("collected_at"),
+                "provider_upload_id":_authoritative_upload_id or meta.get("upload_id") or body.get("upload_id"),
+                "provider_report_items":len(report_items),
+            }
+
+            if not wanted:
+                wanted={str(x.avito_item_id) for x in db.query(_CampaignItemBatch).filter(
+                    _CampaignItemBatch.account_id==account_id,
+                    _CampaignItemBatch.identity_status=='external_linked_feed_unresolved',
+                ).all() if str(x.avito_item_id or '').strip()}
+
+            bound=[]; exists=[]; unresolved=[]; blocked=[]
+            for aid in sorted(wanted):
+                reps=report_by_avito.get(aid) or []
+                if len(reps)!=1:
+                    unresolved.append({"avito_item_id":aid,"reason":"official_pair_not_unique","matches":len(reps)})
+                    continue
+                rep=reps[0]; fid=str(rep.get("ad_id") or "").strip()
+                if feed_counts.get(fid,0)!=1:
+                    unresolved.append({"avito_item_id":aid,"feed_identity":fid,"reason":"authoritative_feed_id_not_unique","matches":feed_counts.get(fid,0)})
+                    continue
+                # EXACT_FEED_TARGET_MATERIALIZE_WIRE_V1: official Autoload has
+                # already proved one exact avito_id<->ad_id pair and feed_items
+                # has independently proved this ad_id exists exactly once. If a
+                # historical migration left no CampaignItem target, materialize
+                # that exact feed row locally before binding. This is DB-only and
+                # does not grant write authority until _bind_batch records the
+                # official provider proof below.
+                _mat=_materialize_exact_feed_target(db,account_id,(feed_by_id.get(fid) or [{}])[0],aid)
+                _mat_state=str((_mat or {}).get("status") or "")
+                if _mat_state=="blocked" and str((_mat or {}).get("reason") or "") not in {
+                    "avito_item_owner_exists_without_feed_target",
+                    "feed_identity_not_unique",
+                }:
+                    blocked.append({"avito_item_id":aid,"feed_identity":fid,"status":"blocked",
+                                    "reason":(_mat or {}).get("reason") or "exact_feed_target_materialization_blocked"})
+                    continue
+                result=_bind_batch(db,account_id,fid,aid,upload_id=_authoritative_upload_id or meta.get("upload_id") or body.get("upload_id"),
+                    report_section=str((rep.get("section") or {}).get("slug") or ""),avito_status=str(rep.get("avito_status") or ""))
+                state=str(result.get("status") or "")
+                rec={"avito_item_id":aid,"feed_identity":fid,"status":state,
+                     "local_target":_mat_state or None}
+                if state=='bound': bound.append(rec)
+                elif state=='exists': exists.append(rec)
+                else: blocked.append({**rec,"reason":result.get("reason")})
+            if bound or exists: db.commit()
+            else: db.rollback()
+            return {"status":"ok","evidence":"official_autoload_current_items","bound":bound,"exists":exists,
+                    "unresolved":unresolved,"blocked":blocked,"requested":len(wanted),"report_items":len(report_items),
+                    "managed_supply":_managed_supply}
+        finally: db.close()
+    except Exception as exc:
+        return {"status":"blocked","reason":"autoload_batch_identity_recovery_error","detail":f"{type(exc).__name__}:{exc}"[:240],"bound":[]}
+
+
+def _kpi_promote_campaign_safe_feed(account_id: str, operation_id: str):
+    """Bridge CampaignItem safe mutation into the existing authoritative account feed.
+
+    Exact feed_identity/id matching only. No fuzzy resolver and no external publication.
+    """
+    from app.db.session import SessionLocal
+    import json as _json_bridge
+    db = SessionLocal()
+    try:
+        history, op = _kpi_find_apply_operation(db, account_id, operation_id)
+        if not op or op.get("status") != "safe_feed_ready":
+            return {"status":"blocked", "reason":"safe_feed_ready operation required", "changed_avito":False}
+        fid = str(op.get("feed_identity") or "").strip()
+        if not fid:
+            return {"status":"blocked", "reason":"Нет canonical feed identity", "changed_avito":False}
+        feed_row, items = _kpi_feed_items_load(db, account_id)
+        if feed_row is None or items is None:
+            return {"status":"blocked", "reason":"Authoritative account feed отсутствует", "changed_avito":False}
+        matches = [(i,x) for i,x in enumerate(items) if str(x.get("id") or x.get("Id") or "").strip() == fid]
+        if len(matches) != 1:
+            # Before declaring a terminal mapping blocker, try one exact recovery
+            # from Avito's official autoload report. This is authoritative because
+            # the same report row carries avito_id + source ad_id.
+            _aid_recover=str(op.get("avito_item_id") or op.get("item_id") or "").strip()
+            _recovered=_recover_one_canonical_identity_from_autoload(account_id,_aid_recover) if _aid_recover else {"status":"unresolved"}
+            _rfid=str(_recovered.get("feed_identity") or "").strip()
+            if _recovered.get("status") in {"bound","exists"} and _rfid:
+                op["feed_identity"]=_rfid
+                fid=_rfid
+                matches=[(i,x) for i,x in enumerate(items) if str(x.get("id") or x.get("Id") or "").strip()==fid]
+                op["canonical_mapping_recovery"]={"status":_recovered.get("status"),"evidence":_recovered.get("evidence"),"feed_identity":fid}
+        if len(matches) != 1:
+            # KPI_MAPPING_BOUNDED_V2: never let one orphan/non-canonical item
+            # block the whole account forever. Exact official Avito↔feed evidence
+            # is still mandatory; no fuzzy binding is introduced. A safe preview
+            # already known to be non-publishable is terminal immediately when
+            # official autoload contains no exact pair. Otherwise retry on a
+            # bounded cadence, then terminalize without touching Avito.
+            from datetime import datetime as _dt_map_ob, timedelta as _td_map_ob
+            _mapping = op.get("mapping_obligation") or {}
+            _previous_attempts = int(_mapping.get("attempts") or 0)
+            _last_attempt_raw = _mapping.get("last_attempt_at")
+            try:
+                _last_attempt_dt = _dt_map_ob.fromisoformat(str(_last_attempt_raw).replace("Z","+00:00")) if _last_attempt_raw else None
+                _now_dt = _dt_map_ob.now(_last_attempt_dt.tzinfo) if (_last_attempt_dt and _last_attempt_dt.tzinfo) else _dt_map_ob.utcnow()
+                _too_soon = bool(_last_attempt_dt and (_now_dt - _last_attempt_dt) < _td_map_ob(minutes=30))
+            except Exception:
+                _too_soon = False
+            _preview = op.get("safe_feed_preview") or {}
+            _official_matches = int((_recovered or {}).get("matches") or 0)
+            _nonpublishable_orphan = bool(_preview.get("publishable_full_feed") is False and _official_matches == 0)
+            if _too_soon and not _nonpublishable_orphan:
+                return {"status":"mapping_wait","reason":"mapping_retry_cooldown",
+                        "mapping_obligation":_mapping,"changed_avito":False}
+            _attempts = _previous_attempts + 1
+            _now_map = _dt_map_ob.utcnow().isoformat()
+            _terminal = _nonpublishable_orphan or _attempts >= 6
+            if _terminal:
+                op["status"] = "mapping_unresolvable"
+                op["changed_avito"] = False
+                op["terminal_reason"] = ("nonpublishable_live_import_without_official_feed_pair"
+                                         if _nonpublishable_orphan else "canonical_mapping_unavailable_after_bounded_retries")
+                op["effect"] = {"status":"skipped_unresolvable_mapping","reason":op["terminal_reason"]}
+                op["mapping_obligation"] = {
+                    "status":"terminal","attempts":_attempts,"last_attempt_at":_now_map,
+                    "avito_item_id":str(op.get("avito_item_id") or op.get("item_id") or ""),
+                    "feed_identity":fid or None,"last_recovery":_recovered,
+                    "evidence_required":"official_autoload_current_items",
+                    "terminal_reason":op["terminal_reason"],
+                }
+                _kpi_apply_log_save(db, account_id, history); db.commit()
+                return {"status":"mapping_unresolvable","reason":op["terminal_reason"],
+                        "mapping_obligation":op["mapping_obligation"],"changed_avito":False}
+            op["status"] = "mapping_wait"
+            op["effect"] = {"status":"waiting_mapping", "reason":"canonical_feed_mapping_unavailable"}
+            op["mapping_obligation"] = {
+                "status":"pending","attempts":_attempts,"last_attempt_at":_now_map,
+                "avito_item_id":str(op.get("avito_item_id") or op.get("item_id") or ""),
+                "feed_identity":fid or None,"last_recovery":_recovered,
+                "evidence_required":"official_autoload_current_items",
+            }
+            op.pop("terminal_reason", None)
+            _kpi_apply_log_save(db, account_id, history); db.commit()
+            return {"status":"mapping_wait","reason":"canonical_feed_mapping_unavailable",
+                    "mapping_obligation":op.get("mapping_obligation"),"changed_avito":False}
+        idx, item = matches[0]
+        before = dict(item)
+        changed = {}
+        for field, delta in (op.get("changes") or {}).items():
+            if field not in {"title","description","images"}: continue
+            key = _kpi_normalize_feed_field(item, field)
+            new = delta.get("new")
+            if field == "images":
+                old_gallery = [str(x or "").strip() for x in (item.get(key) or []) if str(x or "").strip()]
+                new_gallery = [str(x or "").strip() for x in (new or []) if str(x or "").strip()]
+                # Defense in depth: a first-image experiment may reorder only the
+                # exact authoritative gallery. It cannot add/remove media.
+                if len(old_gallery) < 2 or sorted(old_gallery) != sorted(new_gallery) or old_gallery[0] == new_gallery[0]:
+                    return {"status":"blocked","reason":"Unsafe first-image mutation: gallery membership changed or first image unchanged","changed_avito":False}
+                if old_gallery != new_gallery:
+                    item[key] = new_gallery; changed[field] = {"old": old_gallery, "new": new_gallery}
+                continue
+            if str(item.get(key) or "") != str(new or ""):
+                item[key] = new; changed[field] = {"old": before.get(key), "new": new}
+        if not changed:
+            op["status"]="feed_applied"; op["rollback"]={"snapshot":before,"feed_index":idx}; op["effect"]={"status":"waiting_publish"}
+            _kpi_apply_log_save(db, account_id, history); db.commit()
+            return {"status":"feed_applied","changed_feed":False,"changed_avito":False,"reason":"feed already matches safe version"}
+        validation = _kpi_feed_items_to_models(items)
+        if validation.get("status") != "ok":
+            return {"status":"blocked","reason":"Safe mutation cannot produce valid full account feed","validation":validation,"changed_avito":False}
+        # Do not dirty/flush feed_items in this session before generate_feed().
+        # generate_feed -> _save_feed_items uses its own DB session; pre-flushing
+        # the same Storage row here self-locks that write until this transaction
+        # ends and caused the five-minute KPI timeout. Existing generate_feed()
+        # remains the authoritative persistence path.
+        regeneration = _kpi_regenerate_feed_internal(account_id, items)
+        if regeneration.get("status") != "ok":
+            db.rollback()
+            return {"status":"blocked","reason":"Feed regeneration failed","regeneration":regeneration,"changed_avito":False}
+        op["status"]="feed_applied"; op["rollback"]={"snapshot":before,"feed_index":idx}; op["regeneration"]=regeneration; op["effect"]={"status":"waiting_publish"}
+        _kpi_apply_log_save(db, account_id, history); db.commit()
+        _audit_log(account_id,"kpi_campaign_safe_feed_promoted",f"Safe Feed version promoted to authoritative feed for {fid}; Avito not called",actor="boris_kpi_auto")
+        return {"status":"feed_applied","changed_feed":True,"changed_avito":False,"feed_identity":fid,"regeneration":regeneration}
+    finally:
+        db.close()
+
+
+def _campaign_revision_observation_state(account_id: str, db=None):
+    """Read the account-wide clean observation window after a full campaign publish."""
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from datetime import datetime as _dt_cro, timezone as _tz_cro
+
+    own_db = db is None
+    if own_db:
+        db = SessionLocal()
+    try:
+        row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "campaign_revision_observation",
+        ).order_by(Storage.id.desc()).first()
+        if not row or not row.value:
+            return {"active": False, "status": "missing"}
+        try:
+            data = json.loads(row.value) if isinstance(row.value, str) else dict(row.value or {})
+        except Exception:
+            return {"active": False, "status": "invalid"}
+        raw = str(data.get("complete_after") or "").strip()
+        try:
+            complete_at = _dt_cro.fromisoformat(raw.replace("Z", "+00:00")) if raw else None
+            if complete_at is not None and complete_at.tzinfo is None:
+                complete_at = complete_at.replace(tzinfo=_tz_cro.utc)
+        except Exception:
+            complete_at = None
+        now = _dt_cro.now(_tz_cro.utc)
+        active = bool(
+            str(data.get("status") or "") == "active"
+            and complete_at is not None
+            and now < complete_at
+        )
+        return {
+            **data,
+            "active": active,
+            "remaining_seconds": max(0, int((complete_at - now).total_seconds()))
+            if active and complete_at else 0,
+        }
+    finally:
+        if own_db:
+            db.close()
+
+
+@router.post("/kpi_goal_tick")
+def kpi_goal_tick(account_id: str, allow_stale_non_money: bool = False):
+    """
+    Один управленческий тик KPI Goal Runner.
+
+    КРИТИЧЕСКОЕ ПРАВИЛО:
+    один вызов = максимум один переход state machine.
+
+    Никаких рекурсивных циклов.
+    Никакого "выполнить всё сразу".
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kgt
+
+    db = SessionLocal()
+
+    try:
+        # =====================================================
+        # 0. Мандат
+        # =====================================================
+
+        autopilot_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "autopilot_settings",
+            )
+            .first()
+        )
+
+        mode = "always_ask"
+
+        if autopilot_row:
+            try:
+                mode = _json_kgt.loads(
+                    autopilot_row.value
+                ).get("mode", "always_ask")
+            except Exception:
+                pass
+
+        # ACTIVE_BORIS_TARIFF_MARKETER_V1
+        # Для платного активного BORIS-тарифа виртуальный маркетолог обязан
+        # работать 24/7 по KPI. Старый mode=goal_auto остаётся совместимым,
+        # но больше не является единственным способом включения lifecycle.
+        try:
+            from app.api.billing import _load_billing as _load_billing_kgt
+            _billing_kgt = _load_billing_kgt(account_id) or {}
+        except Exception:
+            _billing_kgt = {}
+        _paid_boris_tariff = _billing_kgt.get("tier") in ("tariff_1", "tariff_2")
+
+        # KPI_GOAL_CONTENT_ONLY_MONEY_FENCE_V1:
+        # Read the owner's account-level money policy before any early CPX lane.
+        # Content-only/package accounts may still improve listings, but no
+        # bootstrap/ramp/bid action is allowed even before kpi_check() runs.
+        try:
+            _kpi_policy_row_kgt = (
+                db.query(Storage)
+                .filter(
+                    Storage.account_id == account_id,
+                    Storage.key == "kpi_settings",
+                )
+                .order_by(Storage.id.desc())
+                .first()
+            )
+            _kpi_policy_kgt = (
+                _json_kgt.loads(_kpi_policy_row_kgt.value or "{}")
+                if _kpi_policy_row_kgt else {}
+            )
+        except Exception:
+            _kpi_policy_kgt = {}
+        _bid_autopilot_enabled_kgt = bool(_kpi_policy_kgt.get("bid_autopilot"))
+        _content_only_placement_kgt = bool(
+            _kpi_policy_kgt.get("placement_package_content_only")
+            or _kpi_policy_kgt.get("bid_autopilot") is False
+        )
+
+        # KPI_GOAL_SERVICE_PERIOD_FAIL_CLOSED_V2:
+        # Canonical marketing entitlement is the only commercial permission for
+        # NEW work. "unknown" is not "active": a legacy/manual account without
+        # an explicit current paid period must not keep promoting prepared feed,
+        # publishing, creating AI/content hypotheses, or entering money/growth
+        # lanes merely because goal_auto is still stored.
+        #
+        # Already-started externally visible work is different. We may finish
+        # only the safety/observation tail that prevents a stranded state:
+        # - confirm a publication that was already submitted,
+        # - measure/resolve an already-published bounded experiment,
+        # - complete rollback/rollback-confirm.
+        # Pre-publication safe_feed_ready/feed_applied/publish_failed work stays
+        # durable and resumes automatically after explicit entitlement appears.
+        try:
+            from app.services.control_plane_adapters_ext import marketing_service_entitlement
+            _marketing_entitlement = marketing_service_entitlement(db, account_id) or {}
+        except Exception:
+            _marketing_entitlement = {"state": "unknown", "source": "entitlement_check_error"}
+        _marketing_entitlement_state = str(
+            _marketing_entitlement.get("state") or "unknown"
+        ).lower()
+        _service_new_work_allowed = _marketing_entitlement_state == "active"
+        _service_existing_only = False
+        if not _service_new_work_allowed:
+            try:
+                _service_active_preview = _kpi_latest_active_operation(db, account_id)
+            except Exception:
+                _service_active_preview = None
+            _service_active_status = str(
+                (_service_active_preview or {}).get("status") or ""
+            )
+            _service_safe_tail_statuses = {
+                "publish_requested",
+                "published",
+                "effect_rollback_requested",
+                "rollback_feed_ready",
+                "rollback_publish_failed",
+                "rollback_publish_requested",
+            }
+            if _service_active_status in _service_safe_tail_statuses:
+                _service_existing_only = True
+            else:
+                _service_reason = (
+                    "Оплаченный период AI-маркетолога завершён; новые KPI-действия "
+                    "остановлены, существующие подготовленные изменения сохранены."
+                    if _marketing_entitlement_state == "expired"
+                    else
+                    "Нет явного текущего оплаченного периода AI-маркетолога. "
+                    "BORIS fail-closed остановил новые AI, feed, публикации и "
+                    "денежные действия; дата оплаты не угадывается."
+                )
+                return {
+                    "status": "waiting",
+                    "stage": "service_period",
+                    "control_state": (
+                        "service_period_expired"
+                        if _marketing_entitlement_state == "expired"
+                        else "service_period_unknown"
+                    ),
+                    "reason": _service_reason,
+                    "entitlement": _marketing_entitlement,
+                    "held_operation_id": (
+                        (_service_active_preview or {}).get("operation_id")
+                    ),
+                    "held_operation_status": _service_active_status or None,
+                    "changed_avito": False,
+                    "owner_action_required": (
+                        _marketing_entitlement_state == "unknown"
+                    ),
+                    "next_action": (
+                        "record_explicit_marketing_paid_period"
+                        if _marketing_entitlement_state == "unknown"
+                        else "wait_for_new_paid_period"
+                    ),
+                }
+
+        if mode != "goal_auto" and not _paid_boris_tariff:
+            return {
+                "status": "skipped",
+                "stage": "mandate",
+                "reason": f"Нет активного платного BORIS-тарифа и goal_auto; сейчас {mode}",
+            }
+
+        # KPI_PROVIDER_STATS_NEW_WORK_FENCE_V1:
+        # The business-day storage key can be current while provider contact
+        # counters still belong to the previous day. New KPI work must never be
+        # started from that lagging fact. Only an already external safety tail
+        # may continue; everything else waits for the next automatic snapshot.
+        _provider_today_kgt = _kpi_marketing_today().isoformat()
+        try:
+            _provider_row_kgt = (
+                db.query(Storage)
+                .filter(
+                    Storage.account_id == account_id,
+                    Storage.key == f"daily_stats:{_provider_today_kgt}",
+                )
+                .order_by(Storage.id.desc())
+                .first()
+            )
+            _provider_data_kgt = (
+                _json_kgt.loads(_provider_row_kgt.value or "{}")
+                if _provider_row_kgt else {}
+            )
+        except Exception:
+            _provider_data_kgt = {}
+        _provider_stats_date_kgt = str(
+            _provider_data_kgt.get("stats_date")
+            or _provider_data_kgt.get("date")
+            or ""
+        )[:10]
+        _provider_stats_current_kgt = bool(
+            _provider_stats_date_kgt
+            and _provider_stats_date_kgt == _provider_today_kgt
+        )
+        _provider_observed_contacts_kgt = sum(
+            float(x.get("contacts") or 0)
+            for x in (_provider_data_kgt.get("items") or [])
+            if isinstance(x, dict)
+        )
+        _provider_stats_lagging_kgt = not _provider_stats_current_kgt
+        _provider_existing_only_kgt = False
+        if _provider_stats_lagging_kgt:
+            try:
+                _provider_active_preview_kgt = _kpi_latest_active_operation(
+                    db, account_id
+                )
+            except Exception:
+                _provider_active_preview_kgt = None
+            _provider_active_status_kgt = str(
+                (_provider_active_preview_kgt or {}).get("status") or ""
+            )
+            _provider_safe_tail_statuses_kgt = {
+                "publish_requested",
+                "published",
+                "effect_rollback_requested",
+                "rollback_feed_ready",
+                "rollback_publish_failed",
+                "rollback_publish_requested",
+            }
+            if _provider_active_status_kgt in _provider_safe_tail_statuses_kgt:
+                _provider_existing_only_kgt = True
+            else:
+                return {
+                    "status": "waiting",
+                    "stage": "provider_stats_lagging",
+                    "control_state": "provider_stats_lagging",
+                    "reason": (
+                        "Площадка ещё не отдала статистику контактов за текущий день. "
+                        "BORIS не считает вчерашние контакты сегодняшними и не запускает "
+                        "новые KPI-изменения до следующей автоматической проверки."
+                    ),
+                    "business_date": _provider_today_kgt,
+                    "provider_stats_date": _provider_stats_date_kgt or None,
+                    "observed_contacts": _provider_observed_contacts_kgt,
+                    "changed_avito": False,
+                    "owner_action_required": False,
+                    "next_action": "automatic_provider_stats_recheck",
+                }
+
+        # KPI_LOW_WALLET_GLOBAL_PAUSE_V1:
+        # Guardian is the canonical balance observer. If the real Avito wallet
+        # is below one owner red-CPL while the goal is still missed, this account
+        # must not enter *any* new KPI mutation lane: no AI prepare, no feed
+        # growth, no publication, no title/photo lifecycle, no money action.
+        # We keep the unfinished operation durable and auto-resume after Guardian
+        # observes sufficient balance (or the goal is met).
+        try:
+            _fund_row = (
+                db.query(Storage)
+                .filter(
+                    Storage.account_id == account_id,
+                    Storage.key == "guardian_balance_funding_health",
+                )
+                .order_by(Storage.id.desc())
+                .first()
+            )
+            _funding_health = (
+                _json_kgt.loads(_fund_row.value or "{}")
+                if _fund_row and _fund_row.value
+                else {}
+            )
+        except Exception:
+            _funding_health = {}
+
+        # KPI_LOW_WALLET_SAFE_TAIL_V1:
+        # Funding shortage blocks NEW work, not the read-only/safety tail of an
+        # operation already exposed externally. Otherwise publish_requested can
+        # be stranded forever even though confirm_publish spends no money.
+        _funding_work_pause_kgt = bool(
+            _service_new_work_allowed
+            and _funding_health.get("work_pause_required") is True
+        )
+        _funding_existing_only = False
+        _funding_active_preview = None
+        _funding_active_status = ""
+        if _funding_work_pause_kgt:
+            try:
+                _funding_active_preview = _kpi_latest_active_operation(
+                    db, account_id
+                )
+            except Exception:
+                _funding_active_preview = None
+            _funding_active_status = str(
+                (_funding_active_preview or {}).get("status") or ""
+            )
+            _funding_safe_tail_statuses = {
+                "publish_requested",
+                "published",
+                "effect_rollback_requested",
+                "rollback_feed_ready",
+                "rollback_publish_failed",
+                "rollback_publish_requested",
+            }
+            if _funding_active_status in _funding_safe_tail_statuses:
+                _funding_existing_only = True
+            else:
+                return {
+                    "status": "waiting",
+                    "stage": "external_funding_pause",
+                    "control_state": "external_funding_pause",
+                    "reason": (
+                        "Реальный баланс Avito ниже одной красной цены лида. "
+                        "BORIS остановил новые оптимизации, AI, публикации и денежные "
+                        "действия до восстановления финансирования."
+                    ),
+                    "real_balance_rub": _funding_health.get("real_balance_rub"),
+                    "max_cpl_rub": _funding_health.get("max_cpl_rub"),
+                    "contacts_today": _funding_health.get("contacts_today"),
+                    "target_leads_per_day": _funding_health.get("target_leads_per_day"),
+                    "owner_action_required": bool(
+                        _funding_health.get("owner_action_required")
+                    ),
+                    "funding_suppressed_by_money_guard": bool(
+                        _funding_health.get("funding_suppressed_by_money_guard")
+                    ),
+                    "resume_condition": _funding_health.get("resume_condition"),
+                    "changed_avito": False,
+                }
+        _funding_new_work_allowed = bool(
+            _service_new_work_allowed
+            and not _funding_work_pause_kgt
+            and not _provider_stats_lagging_kgt
+        )
+
+        # REPUBLISH_INTERVAL_AUTOPILOT_V1:
+        # Owner-configured 3..30 day "second cast" gets one bounded turn before
+        # other new KPI mutations. If it actually changes the feed/provider, this
+        # tick stops here so the one-transition rule remains true.
+        if _funding_new_work_allowed:
+            try:
+                _scheduled_republish_kgt = republish_cycle_run(account_id) or {}
+            except Exception as _republish_exc_kgt:
+                _scheduled_republish_kgt = {
+                    "status": "error",
+                    "reason": type(_republish_exc_kgt).__name__,
+                    "changed_feed": False,
+                    "changed_avito": False,
+                }
+            if (
+                bool(_scheduled_republish_kgt.get("changed_feed"))
+                or bool(_scheduled_republish_kgt.get("changed_avito"))
+            ):
+                return {
+                    "status": _scheduled_republish_kgt.get("status") or "prepared",
+                    "stage": "republish_cycle",
+                    "control_state": "scheduled_republish",
+                    "reason": "Наступил срок перепубликации; BORIS выполнил один безопасный цикл.",
+                    "republish": _scheduled_republish_kgt,
+                    "changed_feed": bool(_scheduled_republish_kgt.get("changed_feed")),
+                    "changed_avito": bool(_scheduled_republish_kgt.get("changed_avito")),
+                    "owner_action_required": False,
+                    "next_action": "measure_then_wait_for_next_republish_interval",
+                }
+
+        # KPI_ADDITIVE_GROWTH_BEFORE_CONTENT_WAIT_V1:
+        # Owner policy: when KPI is behind, do not shrink the listing pool.
+        # A bounded additive inventory lane gets a chance before campaign
+        # content-observation can freeze title/photo experiments. It is
+        # independent from CPX: newly created items receive no paid boost here.
+        if _funding_new_work_allowed and not _content_only_placement_kgt:
+            try:
+                _additive_growth = _kpi_additive_growth_tick(account_id) or {}
+            except Exception as _growth_exc:
+                _additive_growth = {
+                    "status": "error",
+                    "reason": f"{type(_growth_exc).__name__}: {_growth_exc}"[:300],
+                    "changed_feed": False,
+                    "changed_avito": False,
+                }
+        else:
+            _additive_growth = {
+                "status": "skipped",
+                "reason": "service_period_not_active",
+                "changed_feed": False,
+                "changed_avito": False,
+            }
+        if _additive_growth.get("changed_feed"):
+            return {
+                "status": "ok",
+                "stage": "additive_inventory_growth",
+                "result": _additive_growth,
+                "reason": (
+                    "KPI ниже плана: BORIS сохранил действующие объявления и "
+                    "добавил bounded-пакет новых уникальных карточек без снятия старых."
+                ),
+                "owner_action_required": False,
+            }
+
+        # PLANETA_GROWTH_CAMPAIGN_OBSERVATION_V1
+        # A full-campaign publication still freezes NEW content/title/image changes
+        # until the clean observation window completes, but it must not freeze reach.
+        # First activation and guarded bid ramp are allowed to continue so an
+        # underperforming KPI does not shrink/stall the active advertising pool.
+        _campaign_observation = _campaign_revision_observation_state(account_id, db=db)
+        _campaign_content_observation_waiting = bool(_campaign_observation.get("active"))
+
+        # NEW_ITEM_NO_PROMO_BOOTSTRAP_V2
+        # `allow_stale_non_money` is a hard money-lane barrier. It is used when
+        # spend/inventory facts are stale and therefore MUST skip every bid-side
+        # bootstrap/ramp before any provider write can happen.
+        if (
+            _funding_new_work_allowed
+            and not allow_stale_non_money
+            and _bid_autopilot_enabled_kgt
+            and not _content_only_placement_kgt
+        ):
+            # Existing KPI tick is the scheduler. A bounded cohort of up to
+            # five unseen active items without promotion may receive the owner-approved
+            # minBid+20% starter bid through CPX apply_one + money/autonomy guards.
+            try:
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                from app.api.cpx_advisor import bootstrap_new_no_promo_batch
+                # Growth safety: activate no more than five at once; the final money
+                # guard still enforces live balance, 3000/day account budget, day/run quotas
+                # and the account hard bid cap immediately before each Avito write.
+                _new_item_bootstrap = bootstrap_new_no_promo_batch(account_id, max_items=5) or {}
+            except Exception as _new_item_exc:
+                _new_item_bootstrap = {"status": "error", "reason": str(_new_item_exc)[:160], "changed_avito": False}
+            if _new_item_bootstrap.get("changed_avito"):
+                return {
+                    "status": "ok",
+                    "stage": "new_item_no_promo_min_plus_20",
+                    "bootstrap": _new_item_bootstrap,
+                    "reason": "Новое объявление без продвижения получило стартовую ставку Avito minBid +20% через существующий CPX guard.",
+                }
+
+            # New ads that already have a starter bid must not sit forever at the
+            # floor when they receive almost no views. Reuse the guarded hourly
+            # 72h ramp: at most one safe transition per KPI tick, with the same
+            # account hard cap / Avito maxBid / mandate / receipt protections.
+            try:
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                from app.api.cpx_advisor import hourly_new_feed_low_views_ramp
+                _new_item_ramp = hourly_new_feed_low_views_ramp(account_id, max_items=1) or {}
+            except Exception as _new_item_ramp_exc:
+                _new_item_ramp = {"status":"error","reason":str(_new_item_ramp_exc)[:160],"changed_avito":False}
+            if _new_item_ramp.get("changed_avito"):
+                return {
+                    "status":"ok",
+                    "stage":"new_item_low_views_bid_ramp",
+                    "ramp":_new_item_ramp,
+                    "reason":"Новое объявление получает мало просмотров: BORIS безопасно повысил ставку внутри лимитов аккаунта.",
+                }
+
+            # ACCOUNT_LOW_VIEWS_API_MONEY_LANE_REMOVED_V2: generic KPI API cannot
+            # perform portfolio-wide low-view raises. Only bounded staged rollout
+            # may execute those money actions.
+
+        # Content attribution remains clean: after the bounded reach lane has had
+        # its chance this tick, wait before any NEW title/image/text hypothesis.
+        # CAMPAIGN_OBSERVATION_DO_NOT_STARVE_ACTIVE_LIFECYCLE_V1:
+        # an already-started operation must still reach confirm/effect/resolve,
+        # otherwise the observation window itself can keep a published operation
+        # alive forever and block additive reach on every future tick.
+        _observation_active_op = None
+        if _campaign_content_observation_waiting:
+            try:
+                _observation_active_op = _kpi_latest_active_operation(db, account_id)
+            except Exception:
+                _observation_active_op = None
+        if _campaign_content_observation_waiting and not _observation_active_op:
+            return {
+                "status": "waiting",
+                "stage": "campaign_revision_observation",
+                "control_state": "measure_campaign_revision",
+                "reason": (
+                    "После полной публикации BORIS продолжает безопасно наращивать охват, "
+                    "но новые изменения текста/фото ждут чистого окна измерения."
+                ),
+                "campaign_id": _campaign_observation.get("campaign_id"),
+                "upload_id": _campaign_observation.get("upload_id"),
+                "complete_after": _campaign_observation.get("complete_after"),
+                "remaining_seconds": _campaign_observation.get("remaining_seconds"),
+                "changed_avito": False,
+                "owner_action_required": False,
+            }
+
+        # =====================================================
+        # 1. Сначала проверяем сам KPI
+        # =====================================================
+
+        db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+        check = kpi_check(account_id, refresh_live=not allow_stale_non_money)
+
+        if check.get("status") != "ok":
+            return {
+                "status": "skipped",
+                "stage": "kpi_check",
+                "reason": (
+                    check.get("message")
+                    or check.get("reason")
+                    or "KPI недоступен"
+                ),
+            }
+        _money_lane_allowed = bool(check.get("money_actions_allowed")) and not allow_stale_non_money
+
+        # KPI_CONFIG_GAP_CONTROL_STATE_V1: an autonomous paid account must expose
+        # a truthful missing-business-target state instead of looking healthy or
+        # entering any money lane. This is irreducible business input, so BORIS
+        # diagnoses it and escalates only the missing fields.
+        if check.get("kpi_config_complete") is False:
+            # KPI_CONFIG_GAP_EXISTING_CONTENT_LIFECYCLE_V1: target/red-CPL are
+            # mandatory for money and for starting new optimisation work, but
+            # they must not strand an already-started non-money content change
+            # half-way between internal feed and live Avito. In NON_MONEY mode
+            # allow only an existing title/description/image lifecycle to finish
+            # publish-confirm-measure/rollback; no new hypothesis is created.
+            _existing_content_gap_op = None
+            if allow_stale_non_money:
+                try:
+                    _candidate_gap = _kpi_latest_active_operation(db, account_id)
+                    _changes_gap = (_candidate_gap or {}).get("changes") or {}
+                    if _candidate_gap and _changes_gap and set(_changes_gap).issubset({"title","description","images"}):
+                        _existing_content_gap_op = _candidate_gap
+                except Exception:
+                    _existing_content_gap_op = None
+            if not _existing_content_gap_op:
+                return {
+                    "status": "waiting",
+                    "stage": "kpi_config_gap",
+                    "control_state": "kpi_config_gap",
+                    "reason": "Не заданы обязательные бизнес-границы KPI; денежные действия и новые гипотезы остановлены.",
+                    "missing_fields": list(check.get("kpi_config_gap") or []),
+                    "changed_avito": False,
+                    "owner_action_required": True,
+                    "next_action": "set_only_missing_kpi_business_limits",
+                }
+
+        target = float(
+            check.get("target_leads_per_day")
+            or 0
+        )
+
+        actual = float(
+            check.get("contacts_today")
+            or 0
+        )
+
+        # KPI_ZERO_ACTIVE_INVENTORY_PRECEDENCE_V1:
+        # A paid KPI account with zero active Avito inventory is not a healthy
+        # safe-executor state. Detect it before proposal/apply lifecycle work.
+        _today_items = []
+        try:
+            from datetime import date as _date_inv
+            _stats_row_inv = db.query(Storage).filter(
+                Storage.account_id == account_id,
+                Storage.key == f"daily_stats:{_kpi_marketing_today().isoformat()}",
+            ).first()
+            _stats_inv = _json_kgt.loads(_stats_row_inv.value or "{}") if _stats_row_inv else {}
+            _today_items = [x for x in (_stats_inv.get("items") or []) if str(x.get("status") or "").lower() == "active"]
+        except Exception:
+            _today_items = []
+        if not _today_items and target > 0:
+            # KPI_ZERO_INVENTORY_PUBLISHABLE_SOURCE_TRUTH_V1: distinguish a true
+            # source gap from a ready-but-not-authorized publication. Publishing
+            # hundreds of ads is irreversible/external; BORIS may self-heal all
+            # preparatory stages but must not claim owner_action_required=False
+            # when the only missing boundary is explicit Avito publication auth.
+            _ready_campaigns = []
+            try:
+                from sqlalchemy import text as _sqltext_inv
+                _rows_inv = db.execute(_sqltext_inv("""
+                    select c.id, count(ci.id) filter (where ci.status='ready') as ready_count
+                    from campaigns c join campaign_items ci on ci.campaign_id=c.id
+                    where c.default_account_id=:a and c.status='draft'
+                    group by c.id having count(ci.id) filter (where ci.status='ready') > 0
+                    order by c.id desc limit 5
+                """), {"a": account_id}).fetchall()
+                _ready_campaigns = [{"campaign_id": int(r[0]), "ready_items": int(r[1] or 0)} for r in _rows_inv]
+            except Exception:
+                _ready_campaigns = []
+            _has_publishable_source = bool(_ready_campaigns)
+            return {
+                "status": "waiting",
+                "stage": "inventory_recovery",
+                "control_state": "publication_authorization_gap" if _has_publishable_source else "inventory_recovery",
+                "reason": (
+                    "Активных объявлений нет, но готовая кампания существует. BORIS не будет выдавать отсутствие публикации за технический сбой и не отправит массовую кампанию без разрешения на публикацию."
+                    if _has_publishable_source else
+                    "Нет активных объявлений Avito: сначала нужно восстановить активный инвентарь; ставки и контент не могут дать лиды без публикаций."
+                ),
+                "active_items": 0,
+                "publishable_sources": _ready_campaigns,
+                "changed_avito": False,
+                "owner_action_required": _has_publishable_source,
+                "next_action": "authorize_existing_publishable_campaign" if _has_publishable_source else "restore_active_inventory_automatically_when_publishable_source_is_available",
+            }
+
+        # =====================================================
+        # 2. Есть ли уже незавершённая операция?
+        # =====================================================
+        # An already-started production operation must finish its lifecycle
+        # (publish confirmation -> complete-day observation -> KPI_AFTER ->
+        # learning/resolve) even if today's account-level KPI is already met.
+        # goal_met may stop NEW work only; it must not strand a published op.
+        active = _kpi_latest_active_operation(
+            db,
+            account_id,
+        )
+
+        # KPI_GOAL_MET_ECONOMICS_GUARD_V1:
+        # Lead volume alone is not a completed business goal when the confirmed
+        # CPL is already above the owner's red line. In that case the same goal
+        # runner must continue into cpl_recovery instead of idling until tomorrow.
+        _max_cpl = float(check.get("max_cost_per_lead_rub") or 0)
+        _actual_cpl_raw = check.get("cost_per_lead_today")
+        try:
+            _actual_cpl = (
+                float(_actual_cpl_raw)
+                if _actual_cpl_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            _actual_cpl = None
+        _cpl_over_red = bool(
+            _max_cpl > 0
+            and _actual_cpl is not None
+            and _actual_cpl > _max_cpl + 1e-9
+        )
+
+        if target > 0 and actual >= target and not active and not _cpl_over_red:
+            return {
+                "status": "ok",
+                "stage": "goal_met",
+                "action": "none",
+                "target": target,
+                "actual": actual,
+                "reason": (
+                    f"KPI выполнен: {actual:g}/{target:g}"
+                ),
+            }
+
+        if active:
+            op_id = active.get("operation_id")
+            op_status = active.get("status")
+            effect = active.get("effect") or {}
+            effect_status = effect.get("status")
+
+            # KPI_SUPERSEDED_IDENTITY_TERMINAL_V1:
+            # A pre-publication content operation must not keep the whole KPI
+            # account in confirm_publish after its exact CampaignItem was
+            # deliberately replaced by a distinct cutover. The old live Avito
+            # item may legitimately disappear, so repeated provider confirmation
+            # can never succeed. Close only the exact linked operation, preserve
+            # history, learn no winner/loser verdict, and let the next KPI tick
+            # work on the current active inventory.
+            if (
+                op_status in {
+                    "safe_feed_ready", "mapping_wait", "feed_applied",
+                    "publish_requested", "publish_failed",
+                }
+                and active.get("campaign_item_id")
+            ):
+                try:
+                    from app.models.campaign_item import CampaignItem as _SupersededCampaignItem
+                    _sup_ci = (
+                        db.query(_SupersededCampaignItem)
+                        .filter(
+                            _SupersededCampaignItem.id == int(active.get("campaign_item_id")),
+                            _SupersededCampaignItem.account_id == account_id,
+                        )
+                        .first()
+                    )
+                    _sup_status = str(getattr(_sup_ci, "status", "") or "").lower()
+                    _sup_identity = str(getattr(_sup_ci, "identity_status", "") or "").lower()
+                    _identity_superseded = bool(
+                        _sup_ci
+                        and (
+                            _sup_status == "superseded"
+                            or _sup_identity.startswith("superseded")
+                        )
+                    )
+                except Exception:
+                    _sup_ci = None
+                    _sup_status = ""
+                    _sup_identity = ""
+                    _identity_superseded = False
+
+                if _identity_superseded:
+                    from datetime import datetime as _dt_superseded
+                    _history_sup, _op_sup = _kpi_find_apply_operation(
+                        db, account_id, op_id
+                    )
+                    if _op_sup and str(_op_sup.get("status") or "") in {
+                        "safe_feed_ready", "mapping_wait", "feed_applied",
+                        "publish_requested", "publish_failed",
+                    }:
+                        _resolved_at = _dt_superseded.utcnow().isoformat()
+                        _op_sup["status"] = "superseded_identity_cutover"
+                        _op_sup["changed_avito"] = False
+                        _op_sup["superseded_at"] = _resolved_at
+                        _op_sup["superseded_reason"] = "campaign_item_identity_superseded"
+                        _op_sup["superseded_campaign_item"] = {
+                            "campaign_item_id": int(active.get("campaign_item_id")),
+                            "status": _sup_status,
+                            "identity_status": _sup_identity,
+                        }
+                        _sup_effect = _op_sup.get("effect") or {}
+                        _sup_effect.update({
+                            "status": "superseded",
+                            "decision": "do_not_learn_from_superseded_identity",
+                            "resolved_at": _resolved_at,
+                        })
+                        _op_sup["effect"] = _sup_effect
+                        _kpi_apply_log_save(db, account_id, _history_sup)
+                        db.commit()
+                        try:
+                            _audit_log(
+                                account_id,
+                                "kpi_operation_superseded_identity_cutover",
+                                (
+                                    f"KPI-операция {op_id} закрыта без effect verdict: "
+                                    f"CampaignItem {active.get('campaign_item_id')} уже superseded"
+                                ),
+                                actor="boris_kpi_auto",
+                            )
+                        except Exception:
+                            pass
+                    return {
+                        "status": "ok",
+                        "stage": "superseded_identity_cutover",
+                        "operation_id": op_id,
+                        "result": {
+                            "status": "superseded",
+                            "changed_avito": False,
+                            "decision": "do_not_learn_from_superseded_identity",
+                            "campaign_item_id": active.get("campaign_item_id"),
+                            "campaign_item_status": _sup_status,
+                            "identity_status": _sup_identity,
+                        },
+                        "reason": (
+                            "Старая KPI-операция закрыта: её точная карточка уже "
+                            "заменена новой distinct-публикацией; ожидание Avito больше "
+                            "не блокирует работу с текущим активным пулом."
+                        ),
+                        "owner_action_required": False,
+                    }
+
+            # -------------------------------------------------
+            # CAMPAIGN SAFE VERSION -> AUTHORITATIVE ACCOUNT FEED
+            # -------------------------------------------------
+            if op_status in {"safe_feed_ready", "mapping_wait"}:
+                # KPI_MAPPING_OBLIGATION_V1: exact identity recovery is retried by
+                # the same lifecycle until official autoload evidence appears.
+                # Never discard the hypothesis and never guess/fuzzy-bind.
+                if op_status == "mapping_wait":
+                    _history_retry, _active_retry = _kpi_find_apply_operation(db, account_id, op_id)
+                    if _active_retry:
+                        _active_retry["status"] = "safe_feed_ready"
+                        _kpi_apply_log_save(db, account_id, _history_retry)
+                        db.commit()
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                result = _kpi_promote_campaign_safe_feed(account_id, op_id)
+                return {
+                    "status":"ok",
+                    "stage":"mapping_recovery" if result.get("status") == "mapping_wait" else "safe_feed_promote",
+                    "operation_id":op_id,
+                    "result":result,
+                    "target":target,
+                    "actual":actual,
+                }
+
+            # -------------------------------------------------
+            # FEED READY -> PUBLISH
+            # -------------------------------------------------
+
+            if op_status in (
+                "feed_applied",
+                "publish_failed",
+            ):
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                result = kpi_publish_changes(
+                    KpiPublishRequest(
+                        account_id=account_id,
+                        operation_id=op_id,
+                    )
+                )
+
+                return {
+                    "status": "ok",
+                    "stage": "publish",
+                    "operation_id": op_id,
+                    "result": result,
+                }
+
+            # -------------------------------------------------
+            # WAITING AVITO -> CONFIRM
+            # -------------------------------------------------
+
+            if op_status == "publish_requested":
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                result = kpi_confirm_publish(
+                    KpiConfirmPublishRequest(
+                        account_id=account_id,
+                        operation_id=op_id,
+                    )
+                )
+                # KPI_PUBLISH_WAIT_NO_REPEAT_ANALYSIS_V1:
+                # External publication waiting is already a complete diagnosis.
+                # Re-running account root-cause analysis on every confirm tick adds
+                # latency but cannot safely change this in-flight hypothesis. Keep
+                # the fleet moving; resume analysis only after publication resolves.
+                _parallel = {
+                    "status": "skipped",
+                    "read_only": True,
+                    "reason": "publish_wait_no_repeat_analysis",
+                }
+
+                return {
+                    "status": "ok",
+                    "stage": "confirm_publish",
+                    "operation_id": op_id,
+                    "result": result,
+                    "parallel_analysis": _parallel,
+                }
+
+            # -------------------------------------------------
+            # PUBLISHED -> EFFECT
+            # -------------------------------------------------
+
+            if op_status == "published":
+                # Effect уже измерен -> resolve.
+                if effect_status in {
+                    "improved",
+                    "worse",
+                    "insufficient_data",
+                    "no_clear_effect",
+                }:
+                    db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                    result = kpi_effect_resolve(
+                        KpiEffectResolveRequest(
+                            account_id=account_id,
+                            operation_id=op_id,
+                            execute=True,
+                        )
+                    )
+
+                    return {
+                        "status": "ok",
+                        "stage": "effect_resolve",
+                        "operation_id": op_id,
+                        "result": result,
+                    }
+
+                # Иначе делаем только measurement.
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                result = kpi_effect_check(
+                    KpiEffectCheckRequest(
+                        account_id=account_id,
+                        operation_id=op_id,
+                    )
+                )
+                try:
+                    _parallel_root = kpi_root_cause(account_id)
+                    _parallel = {
+                        "status":"ok","read_only":True,
+                        "root_cause":_parallel_root.get("root_cause"),
+                        "reason":_parallel_root.get("reason"),
+                        "other_weak_items":[x for x in (_parallel_root.get("worst_items") or []) if str(x.get("id")) != str(active.get("avito_item_id") or active.get("item_id") or "")][:10],
+                    }
+                except Exception as _parallel_exc:
+                    _parallel = {"status":"error","read_only":True,"reason":str(_parallel_exc)[:300]}
+
+                # KPI_NON_MONEY_PARALLEL_PREPARE_DURING_EFFECT_V1:
+                # Measurement of one published item must not serialize the whole
+                # account. In the hard-money-disabled lane we may prepare NEW
+                # content hypotheses for other independently weak items in the
+                # same tick. Planner-level active-item exclusion + prepare history
+                # guards keep one hypothesis per item. This creates prepare tasks
+                # only: no AI call, feed mutation, publication or bid write here.
+                _parallel_prepare = None
+                _parallel_lifecycle = None
+                if allow_stale_non_money and _funding_new_work_allowed:
+                    try:
+                        # KPI_NON_MONEY_PARALLEL_EXISTING_OBLIGATION_V1:
+                        # A confirmed published item may need days of measurement.
+                        # Do not let that serialize already-paid, already-applied
+                        # work for OTHER items. Advance exactly one disjoint existing
+                        # obligation per tick, without creating a new hypothesis.
+                        # External publication remains single-file: an existing
+                        # publish_requested/feed_applied obligation is always serviced
+                        # before another safe_feed_ready item is promoted.
+                        _existing_db = SessionLocal()
+                        try:
+                            _, _existing_history = _kpi_apply_log_load(_existing_db, account_id)
+                            _active_iid = str(active.get("avito_item_id") or active.get("item_id") or "")
+                            _existing_candidates = []
+                            _existing_rank = {"publish_requested": 40, "publish_failed": 35, "feed_applied": 30, "safe_feed_ready": 20, "mapping_wait": 20}
+                            for _eo in _existing_history:
+                                _es = str(_eo.get("status") or "")
+                                if _es not in _existing_rank:
+                                    continue
+                                if str(_eo.get("operation_id") or "") == str(op_id):
+                                    continue
+                                _eiid = str(_eo.get("avito_item_id") or _eo.get("item_id") or "")
+                                if _active_iid and _eiid == _active_iid:
+                                    continue
+                                _existing_candidates.append((_existing_rank[_es], _es, str(_eo.get("operation_id") or "")))
+                        finally:
+                            _existing_db.close()
+
+                        if _existing_candidates:
+                            _, _es, _eoid = sorted(_existing_candidates, key=lambda z: (-z[0], z[2]))[0]
+                            if _es == "publish_requested":
+                                _parallel_lifecycle = {"stage":"confirm_publish", "operation_id":_eoid,
+                                    "result":kpi_confirm_publish(KpiConfirmPublishRequest(account_id=account_id, operation_id=_eoid))}
+                            elif _es in {"feed_applied", "publish_failed"}:
+                                _parallel_lifecycle = {"stage":"publish", "operation_id":_eoid,
+                                    "result":kpi_publish_changes(KpiPublishRequest(account_id=account_id, operation_id=_eoid))}
+                            else:
+                                _parallel_lifecycle = {"stage":"safe_feed_promote", "operation_id":_eoid,
+                                    "result":_kpi_promote_campaign_safe_feed(account_id, _eoid)}
+
+                        # KPI_NON_MONEY_PARALLEL_LIFECYCLE_DURING_EFFECT_V3:
+                        # If no already-applied obligation exists, advance exactly
+                        # one already-prepared proposal/task for a disjoint item.
+                        _parallel_db = SessionLocal()
+                        try:
+                            _parallel_entries = _kpi_prepare_queue_load(_parallel_db, account_id)
+                            _parallel_candidates = []
+                            for _pe in _parallel_entries:
+                                _pd = _pe.get("data") or {}
+                                _ps = str(_pd.get("status") or "")
+                                if _ps not in {"ready_for_ai", "proposal_ready", "apply_in_progress"}:
+                                    continue
+                                _pitems = {str(x.get("id")) for x in (_pd.get("items") or []) if x.get("id") is not None}
+                                _active_iid = str(active.get("avito_item_id") or active.get("item_id") or "")
+                                if _active_iid and _active_iid in _pitems:
+                                    continue
+                                _parallel_candidates.append((_ps, str(_pd.get("operation_id") or "")))
+                        finally:
+                            _parallel_db.close()
+
+                        if _parallel_lifecycle is None and _parallel_candidates:
+                            _rank = {"proposal_ready": 30, "apply_in_progress": 30, "ready_for_ai": 20}
+                            _ps, _poid = sorted(_parallel_candidates, key=lambda z: (-_rank.get(z[0], 0), z[1]))[0]
+                            if _ps == "ready_for_ai":
+                                # KPI_NON_MONEY_PARALLEL_AI_FENCE_V1:
+                                # allow_stale_non_money=True is a hard paid-AI
+                                # boundary. Preserve the queued preparation for a
+                                # later paid/canonical cycle; do not turn an
+                                # observation/recovery tick into a provider charge.
+                                _parallel_lifecycle = {
+                                    "stage": "ai_prepare_deferred",
+                                    "prepare_operation_id": _poid,
+                                    "result": {
+                                        "status": "deferred_non_money_ai_fence",
+                                        "reason": "paid_ai_not_allowed_in_non_money_cycle",
+                                        "ai_calls_made": 0,
+                                        "ai_cost_rub": 0.0,
+                                        "changed_feed": False,
+                                        "changed_avito": False,
+                                    },
+                                }
+                            else:
+                                _parallel_lifecycle = {
+                                    "stage": "proposal_apply",
+                                    "prepare_operation_id": _poid,
+                                    "result": kpi_proposal_apply_next(
+                                        KpiProposalApplyRequest(account_id=account_id, prepare_operation_id=_poid)
+                                    ),
+                                }
+                        elif _parallel_lifecycle is None:
+                            _parallel_plan = kpi_orchestrate(account_id, allow_stale_non_money=True) or {}
+                            _parallel_content_actions = [
+                                x for x in (_parallel_plan.get("actions") or [])
+                                if str(x.get("action") or "") in {"optimize_weak_items", "rewrite_weak_titles"}
+                            ]
+                            if _parallel_content_actions:
+                                _parallel_prepare = kpi_prepare_cycle(account_id, actions=_parallel_content_actions)
+                            else:
+                                _parallel_prepare = {"status":"skipped", "reason":"no_parallel_content_action", "changed_avito":False}
+                    except Exception as _parallel_prepare_exc:
+                        _parallel_prepare = {"status":"error", "reason":f"{type(_parallel_prepare_exc).__name__}: {_parallel_prepare_exc}"[:300], "changed_avito":False}
+
+                return {
+                    "status": "ok",
+                    "stage": "effect_check",
+                    "operation_id": op_id,
+                    "result": result,
+                    "parallel_analysis": _parallel,
+                    "parallel_prepare": _parallel_prepare,
+                    "parallel_lifecycle": _parallel_lifecycle,
+                }
+
+            # -------------------------------------------------
+            # Rollback lifecycle. Upload acceptance is never treated as proof:
+            # first publish/republish the rollback snapshot, then confirm the
+            # restored live value from Avito before closing the operation.
+            # -------------------------------------------------
+
+            if op_status == "rollback_publish_requested":
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                result = kpi_confirm_rollback(
+                    KpiPublishRollbackRequest(
+                        account_id=account_id,
+                        operation_id=op_id,
+                    )
+                )
+                return {
+                    "status": "ok",
+                    "stage": "confirm_rollback",
+                    "operation_id": op_id,
+                    "result": result,
+                }
+
+            if op_status in {
+                "effect_rollback_requested",
+                "rollback_feed_ready",
+                "rollback_publish_failed",
+            }:
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                result = kpi_publish_rollback(
+                    KpiPublishRollbackRequest(
+                        account_id=account_id,
+                        operation_id=op_id,
+                    )
+                )
+                return {
+                    "status": "ok",
+                    "stage": "rollback_publish",
+                    "operation_id": op_id,
+                    "result": result,
+                }
+
+            if op_status in {
+                "publishing",
+                "prepared",
+            }:
+                return {
+                    "status": "waiting",
+                    "stage": "active_operation",
+                    "operation_id": op_id,
+                    "operation_status": op_status,
+                    "reason": (
+                        "Есть незавершённая KPI-операция; "
+                        "новую гипотезу не создаём"
+                    ),
+                }
+
+        # =====================================================
+        # 3. Проверяем существующую prepare/AI очередь.
+        #
+        # Apply-operation и prepare-operation живут отдельно:
+        # поэтому после отсутствия активного kpi_apply_log
+        # обязательно смотрим kpi_prepare:*.
+        #
+        # Один тик = максимум один переход.
+        # =====================================================
+
+        prepare_entries = _kpi_prepare_queue_load(
+            db,
+            account_id,
+        )
+
+        active_prepare = None
+
+        prepare_priority = {
+            "ai_running": 100,
+            "ready_for_ai": 90,
+
+            # Финально забракованный контент остаётся
+            # активным терминальным состоянием.
+            # Runner не должен молча забыть его и
+            # создать новую такую же AI-гипотезу.
+            "proposal_rejected_final": 86,
+            "proposal_rejected": 85,
+
+            "proposal_ready": 80,
+            "apply_in_progress": 70,
+        }
+
+        candidates = []
+
+        for entry in prepare_entries:
+            data = entry.get("data") or {}
+            status = data.get("status")
+
+            if status in prepare_priority:
+                # KPI_PREPARE_TERMINAL_STALE_DEMOTION_V1: an older rejected
+                # hypothesis must not permanently outrank a newer viable proposal.
+                # Priority decides lifecycle urgency, but creation/update time breaks
+                # ties and any viable proposal outranks terminal rejection history.
+                viable = status in {"ai_running", "ready_for_ai", "proposal_ready", "apply_in_progress"}
+                ts = str(data.get("updated_at") or data.get("proposal_ready_at") or data.get("proposal_rejected_at") or data.get("created_at") or "")
+                candidates.append((
+                    1 if viable else 0,
+                    prepare_priority[status],
+                    ts,
+                    entry,
+                ))
+
+        if candidates:
+            candidates.sort(
+                key=lambda x: (x[0], x[1], x[2]),
+                reverse=True,
+            )
+
+            active_prepare = candidates[0][3]
+
+        # CONTENT_LIFECYCLE_V2: proposal queue must not starve behind an active
+        # apply operation forever.  If the current apply operation is already
+        # waiting for external publication/measurement, we still keep the
+        # one-transition-per-tick rule above, but expose the next content step
+        # as real work rather than a report-only suggestion.  No second content
+        # mutation is allowed while an apply op is active.
+        if active_prepare:
+            prepare_data = (
+                active_prepare.get("data")
+                or {}
+            )
+
+            prepare_status = (
+                prepare_data.get("status")
+            )
+
+            prepare_operation_id = (
+                prepare_data.get("operation_id")
+            )
+
+            # ---------------------------------------------
+            # AI RUNNING
+            #
+            # Не запускаем второй AI-вызов поверх первого.
+            # ---------------------------------------------
+
+            if prepare_status == "ai_running":
+                return {
+                    "status": "waiting",
+                    "stage": "ai_running",
+                    "prepare_operation_id":
+                        prepare_operation_id,
+                    "reason": (
+                        "AI prepare уже выполняется; "
+                        "повторный вызов запрещён"
+                    ),
+                }
+
+            # ---------------------------------------------
+            # FINAL FACT-GUARD REJECTION -> HARD STOP
+            # ---------------------------------------------
+            if prepare_status == "proposal_rejected_final":
+                return {
+                    "status": "waiting",
+                    "stage": "proposal_rejected_final",
+                    "prepare_operation_id":
+                        prepare_operation_id,
+                    "reason": (
+                        "Fact Guard повторно отклонил контент; "
+                        "автоматические AI-повторы остановлены"
+                    ),
+                    "ai_calls_made": 0,
+                    "changed_avito": False,
+                    "requires_review": True,
+                }
+
+            # ---------------------------------------------
+            # FACT GUARD REJECTED -> ONE CONTROLLED REPAIR
+            # ---------------------------------------------
+            if prepare_status == "proposal_rejected":
+                _repair_attempts = int(
+                    prepare_data.get("repair_attempts")
+                    or 0
+                )
+
+                if _repair_attempts >= 1:
+                    return {
+                        "status": "waiting",
+                        "stage": "proposal_rejected_final",
+                        "prepare_operation_id":
+                            prepare_operation_id,
+                        "reason": (
+                            "Fact Guard повторно отклонил контент; "
+                            "автоматические AI-повторы остановлены"
+                        ),
+                    }
+
+                prepare_data["repair_attempts"] = (
+                    _repair_attempts + 1
+                )
+
+                prepare_data["status"] = "ready_for_ai"
+
+                prepare_data["repair_reason"] = (
+                    "Исправить неподтверждённые факты "
+                    "из предыдущего Fact Guard"
+                )
+
+                active_prepare["row"].value = (
+                    _json_kgt.dumps(
+                        prepare_data,
+                        ensure_ascii=False,
+                    )
+                )
+
+                db.commit()
+
+                return {
+                    "status": "ok",
+                    "stage": "proposal_repair_scheduled",
+                    "prepare_operation_id":
+                        prepare_operation_id,
+                    "repair_attempts":
+                        prepare_data["repair_attempts"],
+                    "ai_calls_made": 0,
+                    "changed_avito": False,
+                    "next": "ai_prepare_next_tick",
+                }
+
+            # ---------------------------------------------
+            # READY FOR AI -> EXECUTOR
+            # ---------------------------------------------
+
+            if prepare_status == "ready_for_ai":
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                result = kpi_ai_prepare_execute(
+                    KpiAiPrepareExecuteRequest(
+                        account_id=account_id,
+                        operation_id=
+                            prepare_operation_id,
+                    )
+                )
+
+                return {
+                    "status": "ok",
+                    "stage": "ai_prepare",
+                    "prepare_operation_id":
+                        prepare_operation_id,
+                    "result": result,
+                }
+
+            # ---------------------------------------------
+            # PROPOSAL READY / APPLY IN PROGRESS
+            # -> ровно один proposal в Apply Engine.
+            # ---------------------------------------------
+
+            if prepare_status in {
+                "proposal_ready",
+                "apply_in_progress",
+            }:
+                db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                result = kpi_proposal_apply_next(
+                    KpiProposalApplyRequest(
+                        account_id=account_id,
+                        prepare_operation_id=
+                            prepare_operation_id,
+                    )
+                )
+
+                return {
+                    "status": "ok",
+                    "stage": "proposal_apply",
+                    "prepare_operation_id":
+                        prepare_operation_id,
+                    "result": result,
+                }
+
+        # =====================================================
+        # 4. Нет ни активной Apply-, ни Prepare-операции.
+        # Строим новый управленческий цикл.
+        # =====================================================
+
+        # A lagging provider snapshot may have been allowed through only to
+        # finish an already external safety tail. Once there is no active tail,
+        # do not fall through into creation of a fresh KPI hypothesis.
+        if _provider_stats_lagging_kgt:
+            return {
+                "status": "waiting",
+                "stage": "provider_stats_lagging",
+                "control_state": "provider_stats_lagging",
+                "reason": (
+                    "Свежий факт контактов за текущий день ещё не подтверждён. "
+                    "BORIS завершил доступный безопасный хвост и ждёт следующую "
+                    "автоматическую проверку вместо запуска новой гипотезы."
+                ),
+                "business_date": _provider_today_kgt,
+                "provider_stats_date": _provider_stats_date_kgt or None,
+                "observed_contacts": _provider_observed_contacts_kgt,
+                "changed_avito": False,
+                "owner_action_required": False,
+                "next_action": "automatic_provider_stats_recheck",
+            }
+
+        db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+        guarded = kpi_runtime_guard(
+            account_id,
+            allow_stale_non_money=allow_stale_non_money,
+        )
+
+        if guarded.get("status") != "ok":
+            return {
+                "status": "skipped",
+                "stage": "runtime_guard",
+                "reason": (
+                    guarded.get("reason")
+                    or "Runtime Guard недоступен"
+                ),
+                "guard": guarded,
+            }
+
+        if not guarded.get("execute"):
+            return {
+                "status": "ok",
+                "stage": "no_action",
+                "action": "none",
+                "reason": (
+                    guarded.get("reason")
+                    or "В этом цикле действий не требуется"
+                ),
+                "next_check_minutes":
+                    guarded.get(
+                        "next_check_minutes",
+                        60,
+                    ),
+            }
+
+        guarded_actions = (
+            guarded.get("actions")
+            or []
+        )
+
+        # =====================================================
+        # 4. Prepare AI/content work
+        #
+        # Если одновременно есть диагностика и работа
+        # со слабыми объявлениями, сначала создаём prepare
+        # очередь. Иначе safe_executor завершал тик раньше,
+        # чем мы доходили до AI-контурa.
+        # =====================================================
+
+        # KPI_GOAL_CONTENT_ALIAS_WIRE_V1: planner may emit the explicit
+        # rewrite_weak_titles action while the prepare engine intentionally
+        # exposes one sequential content pipeline under optimize_weak_items
+        # (title -> description -> first-image). Normalize that planner alias
+        # here instead of falsely reporting unsupported_action. This is
+        # non-money work and preserves the one-hypothesis-per-item guards.
+        if any(x.get("action") == "rewrite_weak_titles" for x in guarded_actions):
+            guarded_actions = [
+                ({**x, "action": "optimize_weak_items",
+                  "planner_action": "rewrite_weak_titles"}
+                 if x.get("action") == "rewrite_weak_titles" else x)
+                for x in guarded_actions
+            ]
+
+        prepare_needed = any(
+            x.get("action")
+            in {
+                "optimize_weak_items",
+                "rewrite_weak_titles",
+            }
+            for x in guarded_actions
+        )
+
+        if prepare_needed:
+            # Передаём именно тот план, который уже разрешил
+            # Runtime Guard этого тика.
+            #
+            # Повторный Guard внутри prepare запрещён:
+            # иначе собственный cooldown может заблокировать
+            # только что разрешённое действие.
+            db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+            result = kpi_prepare_cycle(
+                account_id,
+                actions=guarded_actions,
+            )
+
+            return {
+                "status": "ok",
+                "stage": "prepare",
+                "result": result,
+            }
+
+        # KPI_REDUCE_CPL_GOAL_WIRE_V1: economics-first mutation.
+        reduce_action = next((x for x in guarded_actions if x.get("action") == "reduce_cpl"), None)
+        # NON_MONEY_REDUCE_CPL_HARD_FENCE_V1: lowering a paid bid still mutates
+        # external money state. The ownerless non-money lane may diagnose CPL
+        # recovery, but it must never change a bid in either direction.
+        if reduce_action and allow_stale_non_money:
+            fallback = next((
+                x for x in guarded_actions
+                if x.get("action") in {"deep_conversion_analysis", "deep_item_analysis"}
+            ), None)
+            if fallback:
+                db.close()
+                fallback_result = kpi_execute_cycle(account_id, allow_stale_non_money=True)
+                return {
+                    "status":"ok", "stage":"non_money_cpl_diagnostic",
+                    "result":{"status":"blocked","action":"reduce_cpl","reason":"non_money_money_mutation_fence","changed_avito":False},
+                    "fallback_action":fallback.get("action"), "fallback_result":fallback_result,
+                    "reason":"NON_MONEY режим запретил изменение ставки; выполнена только бесплатная диагностика CPL.",
+                }
+            return {
+                "status":"ok", "stage":"non_money_cpl_wait",
+                "result":{"status":"blocked","action":"reduce_cpl","reason":"non_money_money_mutation_fence","changed_avito":False},
+                "reason":"NON_MONEY режим запретил изменение ставки; безопасного диагностического действия в этом тике нет.",
+            }
+        if reduce_action:
+            db.close()
+            result = _kpi_exec_reduce_cpl(account_id, reduce_action)
+            # KPI_REDUCE_CPL_BLOCKED_DIAGNOSTIC_FALLBACK_V1: if economics says
+            # "lower spend" but there is no safely lowerable paid waste candidate
+            # (or the candidate is still measuring), BORIS must not idle for the
+            # whole KPI tick. Execute one already-guarded read-only diagnosis so
+            # the next cycle has evidence for a conversion/content hypothesis.
+            # No second money mutation and no blind reach purchase are allowed.
+            if result.get("status") == "blocked":
+                fallback = next((
+                    x for x in guarded_actions
+                    if x.get("action") in {"deep_conversion_analysis", "deep_item_analysis"}
+                ), None)
+                if fallback:
+                    db.close()
+                    fallback_result = kpi_execute_cycle(
+                        account_id,
+                        allow_stale_non_money=allow_stale_non_money,
+                    )
+                    return {
+                        "status": "ok",
+                        "stage": "reduce_cpl_blocked_diagnostic",
+                        "result": result,
+                        "fallback_action": fallback.get("action"),
+                        "fallback_result": fallback_result,
+                        "reason": "Снизить ставку безопасно не на чем; BORIS не простаивает и выполняет бесплатную диагностику конверсии.",
+                    }
+            return {
+                "status":"ok" if result.get("status") in ("ok","blocked","skipped") else result.get("status","error"),
+                "stage":"reduce_cpl", "result":result,
+                "reason":"CPL выше лимита: BORIS сначала уменьшает стоимость неэффективного трафика, а не покупает ещё охват.",
+            }
+
+        # =====================================================
+        # 5. KPI reach execution — existing CPX executor.
+        # =====================================================
+        reach_action = next((x for x in guarded_actions if x.get("action") == "increase_reach"), None)
+        if reach_action:
+            db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+            result = _kpi_exec_increase_reach(account_id, reach_action)
+            # KPI_REACH_BLOCKED_CONTENT_FALLBACK_V1: a safe money block is not
+            # useful work by itself. If reach cannot be purchased (no proven
+            # converter, economic limit, budget guard, etc.), immediately run
+            # one existing read-only diagnostic from THIS already-guarded plan.
+            # We deliberately do not create a second money transition and do
+            # not call paid AI here. The next hourly tick can turn the resulting
+            # evidence into a content experiment through the normal prepare lane.
+            if result.get("status") == "blocked":
+                fallback = next((
+                    x for x in guarded_actions
+                    if x.get("action") in {"deep_conversion_analysis", "deep_item_analysis"}
+                ), None)
+                if fallback:
+                    db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+                    fallback_result = kpi_execute_cycle(
+                        account_id,
+                        allow_stale_non_money=allow_stale_non_money,
+                    )
+                    return {
+                        "status": "ok",
+                        "stage": "reach_blocked_diagnostic",
+                        "result": result,
+                        "fallback_action": fallback.get("action"),
+                        "fallback_result": fallback_result,
+                        "reason": "Денежное увеличение охвата безопасно заблокировано; BORIS вместо простоя выполнил бесплатную диагностику.",
+                    }
+            return {
+                "status": "ok" if result.get("status") in ("ok", "blocked") else result.get("status", "error"),
+                "stage": "increase_reach",
+                "result": result,
+            }
+
+        # KPI_GOAL_INVENTORY_PREPARE_WIRE_V1:
+        # Inventory shortage is no longer an unsupported action. Prepare the
+        # exact additive gap ownerlessly, but keep the external publish boundary
+        # fail-closed until a dedicated publication mandate exists.
+        inventory_action = next(
+            (x for x in guarded_actions if x.get("action") == "expand_inventory"),
+            None,
+        )
+        if inventory_action:
+            db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+            result = _kpi_exec_expand_inventory(account_id, inventory_action)
+            _inventory_status = str(result.get("status") or "")
+            if _inventory_status in {"waiting_authorization", "blocked"}:
+                return {
+                    "status": "waiting",
+                    "stage": "inventory_expand_prepare",
+                    "result": result,
+                    "owner_action_required": bool(result.get("owner_action_required")),
+                    "reason": result.get("reason") or "inventory_expansion_wait",
+                    "next_check_minutes": 60,
+                }
+            return {
+                "status": "ok",
+                "stage": "inventory_expand_prepare",
+                "result": result,
+                "reason": "План расширения активного пула подготовлен без снятия действующих объявлений.",
+            }
+
+        # =====================================================
+        # 6. Безопасные аналитические операции
+        #
+        # Выполняются только когда нет активной prepare
+        # работы, требующей следующего перехода.
+        # =====================================================
+
+        safe_actions = {
+            "deep_item_analysis",
+            "deep_conversion_analysis",
+            "recover_canonical_mapping",
+        }
+
+        # KPI_SAFE_ACTION_PRECEDES_FIRST_IMAGE_V1:
+        # Guarded actions are already priority ordered. Read-only/prep recovery
+        # (especially recover_canonical_mapping) must execute before a lower
+        # priority first-image hypothesis. Otherwise an unavailable gallery could
+        # return no_action and starve mapping recovery forever.
+        safe_present = any(
+            x.get("action") in safe_actions
+            for x in guarded_actions
+        )
+
+        if safe_present:
+            db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+            result = kpi_execute_cycle(
+                account_id,
+                allow_stale_non_money=allow_stale_non_money,
+            )
+
+            return {
+                "status": "ok",
+                "stage": "safe_executor",
+                "result": result,
+            }
+
+        # KPI_GOAL_FIRST_IMAGE_PREPARE_WIRE_V1: planner can select the free
+        # first-image hypothesis directly only when no higher-priority safe
+        # recovery/diagnostic action is present. Route it into the existing
+        # deterministic prepare-only gallery reorder path. This makes no
+        # provider/AI call and does not publish or mutate Avito.
+        first_image_actions = [
+            x for x in guarded_actions
+            if x.get("action") == "test_first_image"
+        ]
+        if first_image_actions:
+            db.close()  # KPI_GOAL_SESSION_BOUNDARY_V1
+            result = kpi_prepare_cycle(
+                account_id,
+                actions=first_image_actions,
+            )
+            if not (result.get("prepared") or []):
+                return {
+                    "status": "ok",
+                    "stage": "no_action",
+                    "result": result,
+                    "reason": "First-image тест безопасно не подготовлен; нет подходящей canonical галереи или гипотеза уже исчерпана.",
+                }
+            return {
+                "status": "ok",
+                "stage": "first_image_prepare",
+                "result": result,
+                "reason": "Бесплатная first-image гипотеза передана в существующий prepare-only контур без публикации.",
+            }
+
+        # =====================================================
+        # 6. Остальные операции пока fail-closed.
+        # =====================================================
+
+        return {
+            "status": "blocked",
+            "stage": "unsupported_action",
+            "actions": [
+                x.get("action")
+                for x in guarded_actions
+            ],
+            "reason": (
+                "Следующее KPI-действие ещё не подключено "
+                "к Goal Runner"
+            ),
+        }
+
+    finally:
+        db.close()
+
+
+@router.get("/kpi_goal_state")
+def kpi_goal_state(account_id: str):
+    """
+    Read-only: показывает, где сейчас находится KPI state machine.
+    """
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+
+    try:
+        check = kpi_check(
+            account_id
+        )
+
+        active = _kpi_latest_active_operation(
+            db,
+            account_id,
+        )
+
+        return {
+            "status": "ok",
+
+            "kpi": {
+                "target":
+                    check.get(
+                        "target_leads_per_day"
+                    ),
+                "actual":
+                    check.get(
+                        "contacts_today"
+                    ),
+                "gap":
+                    check.get(
+                        "leads_gap"
+                    ),
+            },
+
+            "active_operation": active,
+
+            "has_active_operation":
+                active is not None,
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_effect_resolve")
+def kpi_effect_resolve(req: KpiEffectResolveRequest):
+    """
+    Замыкает effect-loop.
+
+    execute=False:
+        только показывает решение.
+
+    execute=True:
+        keep            -> фиксирует успех;
+        rollback        -> запускает реальный publish rollback;
+        wait            -> ничего не делает;
+        try_next_action -> завершает текущую гипотезу и отдаёт
+                           управление следующему циклу Orchestrator.
+
+    ВАЖНО:
+    никаких рекурсивных Orchestrator-вызовов здесь нет.
+    Один запуск = одно решение.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_ker
+    from datetime import datetime as _dt_ker
+
+    db = SessionLocal()
+
+    try:
+        history, op = _kpi_find_apply_operation(
+            db,
+            req.account_id,
+            req.operation_id,
+        )
+
+        if not op:
+            return {
+                "status": "not_found",
+            }
+
+        effect = op.get("effect") or {}
+        verdict = effect.get("status")
+
+        allowed_verdicts = {
+            "improved",
+            "worse",
+            "insufficient_data",
+            "no_clear_effect",
+        }
+
+        if verdict not in allowed_verdicts:
+            return {
+                "status": "blocked",
+                "reason": (
+                    "Effect ещё не готов к решению: "
+                    f"{verdict}"
+                ),
+            }
+
+        decision_data = _kpi_effect_decision(
+            verdict
+        )
+
+        decision = decision_data["decision"]
+
+        # -------------------------------------------------
+        # READ-ONLY PREVIEW
+        # -------------------------------------------------
+
+        if not req.execute:
+            return {
+                "status": "preview",
+                "verdict": verdict,
+                "decision": decision,
+                "reason": decision_data["reason"],
+                "requires_action":
+                    decision_data["requires_action"],
+                "changed_avito": bool(
+                    op.get("changed_avito")
+                ),
+            }
+
+        # -------------------------------------------------
+        # Перед автономным действием нужен goal_auto.
+        # KEEP/WAIT ничего не меняют, но всё равно
+        # сохраняем единый мандат поведения.
+        # -------------------------------------------------
+
+        autopilot_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == req.account_id,
+                Storage.key == "autopilot_settings",
+            )
+            .first()
+        )
+
+        mode = "always_ask"
+
+        if autopilot_row:
+            try:
+                mode = _json_ker.loads(
+                    autopilot_row.value
+                ).get("mode", "always_ask")
+            except Exception:
+                pass
+
+        # ACTIVE_BORIS_TARIFF_EFFECT_RESOLVE_V1: paid BORIS marketing service
+        # may finish the lifecycle of an already-started bounded experiment.
+        # This grants no new experiment or money authority; it only prevents a
+        # published test from being stranded at keep/rollback/try-next.
+        try:
+            from app.api.billing import _load_billing as _load_billing_ker
+            _billing_ker = _load_billing_ker(req.account_id) or {}
+        except Exception:
+            _billing_ker = {}
+        _paid_boris_tariff = _billing_ker.get("tier") in ("tariff_1", "tariff_2")
+        if mode != "goal_auto" and not _paid_boris_tariff:
+            return {
+                "status": "blocked",
+                "decision": decision,
+                "reason": (
+                    f"Автономное effect-resolution требует активный BORIS-тариф или "
+                    f"goal_auto; сейчас {mode}"
+                ),
+            }
+
+        now = _dt_ker.utcnow().isoformat()
+
+        def _sync_campaign_version(decision_value: str, result_value: str):
+            try:
+                from app.services import campaign_identity as _CID_RESOLVE
+                _ci = _CID_RESOLVE.resolve(db, req.account_id, op.get("avito_item_id") or op.get("item_id"))
+                if _ci:
+                    _CID_RESOLVE.version_effect_update(_ci, req.operation_id, result=result_value, decision=decision_value)
+            except Exception:
+                pass
+
+        # =================================================
+        # KEEP
+        # =================================================
+
+        if decision == "keep":
+            op["status"] = "effect_kept"
+
+            effect["status"] = "kept"
+            effect["resolved_at"] = now
+            effect["decision"] = "keep"
+
+            # KPI_TITLE_WINNER_MEMORY_V1: persist the exact proven title mutation
+            # as deterministic account learning. This is evidence only: it never
+            # authorizes a new mutation or paid action by itself.
+            _kept_title_change = ((op.get("changes") or {}).get("title") or {})
+            if _kept_title_change.get("new"):
+                effect["title_learning"] = {
+                    "classification": "winner",
+                    "old": _kept_title_change.get("old"),
+                    "new": _kept_title_change.get("new"),
+                    "item_id": str(op.get("avito_item_id") or op.get("item_id") or ""),
+                    "operation_id": op.get("operation_id"),
+                    "evidence": "contacts_per_day_improved_after_complete_observation_window",
+                    "scale_policy": "similar_proven_items_only_after_independent_weak_item_evidence",
+                }
+
+            op["effect"] = effect
+            _sync_campaign_version("keep", "kept")
+
+            _kpi_apply_log_save(
+                db,
+                req.account_id,
+                history,
+            )
+
+            db.commit()
+
+            _audit_log(
+                req.account_id,
+                "kpi_effect_keep",
+                (
+                    f"KPI-изменение объявления "
+                    f"{op.get('item_id')} оставлено: "
+                    "подтверждён положительный эффект"
+                ),
+                actor="boris_kpi_auto",
+            )
+
+            return {
+                "status": "resolved",
+                "decision": "keep",
+                "changed_avito": True,
+                "next": "continue_monitoring",
+            }
+
+        # =================================================
+        # WAIT
+        # =================================================
+
+        if decision == "wait":
+            effect["status"] = "waiting_more_data"
+            effect["decision"] = "wait"
+            effect["last_decision_at"] = now
+
+            op["effect"] = effect
+            _sync_campaign_version("wait", "waiting_more_data")
+
+            _kpi_apply_log_save(
+                db,
+                req.account_id,
+                history,
+            )
+
+            db.commit()
+
+            return {
+                "status": "resolved",
+                "decision": "wait",
+                "changed_avito": True,
+                "next": "measure_later",
+            }
+
+        # =================================================
+        # TRY NEXT ACTION
+        #
+        # Текущее изменение НЕ откатываем автоматически,
+        # потому что оно не доказано плохим.
+        # Но эту гипотезу считаем исчерпанной.
+        # =================================================
+
+        if decision == "try_next_action":
+            op["status"] = "effect_no_clear_result"
+
+            effect["status"] = "try_next_action"
+            effect["resolved_at"] = now
+            effect["decision"] = "try_next_action"
+
+            op["effect"] = effect
+            _sync_campaign_version("iterate", "try_next_action")
+
+            _kpi_apply_log_save(
+                db,
+                req.account_id,
+                history,
+            )
+
+            db.commit()
+
+            _audit_log(
+                req.account_id,
+                "kpi_effect_next_action",
+                (
+                    f"Изменение объявления {op.get('item_id')} "
+                    "не дало подтверждённого эффекта; "
+                    "BORIS выберет другую гипотезу"
+                ),
+                actor="boris_kpi_auto",
+            )
+
+            return {
+                "status": "resolved",
+                "decision": "try_next_action",
+                "changed_avito": True,
+
+                # Не вызываем Orchestrator рекурсивно.
+                # Следующий scheduler tick выберет новый манёвр.
+                "next": "orchestrator_next_cycle",
+            }
+
+        # =================================================
+        # ROLLBACK
+        # =================================================
+
+        if decision == "rollback":
+            # Сначала фиксируем намерение.
+            op["status"] = "effect_rollback_requested"
+
+            effect["status"] = "rollback_requested"
+            effect["decision"] = "rollback"
+            effect["resolved_at"] = now
+
+            op["effect"] = effect
+            _sync_campaign_version("revert", "rollback_requested")
+
+            _kpi_apply_log_save(
+                db,
+                req.account_id,
+                history,
+            )
+
+            db.commit()
+
+            rollback_result = kpi_publish_rollback(
+                KpiPublishRollbackRequest(
+                    account_id=req.account_id,
+                    operation_id=req.operation_id,
+                )
+            )
+
+            return {
+                "status": (
+                    "resolved"
+                    if rollback_result.get("status")
+                    == "rolled_back_published"
+                    else "rollback_pending_or_failed"
+                ),
+                "decision": "rollback",
+                "rollback": rollback_result,
+                "changed_avito": bool(
+                    rollback_result.get(
+                        "changed_avito",
+                        False,
+                    )
+                ),
+                "next": "confirm_rollback",
+            }
+
+        return {
+            "status": "blocked",
+            "reason": "Необработанное решение",
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_effect_check")
+def kpi_effect_check(req: KpiEffectCheckRequest):
+    """
+    Сравнивает эффект опубликованной KPI-операции.
+
+    Пока:
+    - ничего не откатывает;
+    - только измеряет и классифицирует результат.
+    """
+    from app.db.session import SessionLocal
+    from datetime import datetime as _dt_kec
+
+    db = SessionLocal()
+
+    try:
+        history, op = _kpi_find_apply_operation(
+            db,
+            req.account_id,
+            req.operation_id,
+        )
+
+        if not op:
+            return {
+                "status": "not_found",
+            }
+
+        if op.get("status") != "published":
+            return {
+                "status": "blocked",
+                "reason": (
+                    f"Effect можно измерять только после published; "
+                    f"сейчас {op.get('status')}"
+                ),
+            }
+
+        from datetime import date as _date_kec, datetime as _datetime_kec
+        window = op.get("observation_window") or {}
+        start_date = str(window.get("start_date") or "")[:10]
+        end_date = str(window.get("end_date") or "")[:10]
+        min_days = max(1, int(window.get("min_complete_days") or 1))
+        if not start_date or not end_date:
+            return {"status":"waiting","reason":"Observation window has not been opened by confirmed publication"}
+        try:
+            end_day = _date_kec.fromisoformat(end_date)
+        except Exception:
+            return {"status":"waiting","reason":"Observation window dates are invalid"}
+        if _date_kec.today() <= end_day:
+            return {
+                "status":"waiting_observation_window",
+                "reason":"Собираю полные дни статистики новой опубликованной версии",
+                "start_date":start_date, "end_date":end_date,
+                "min_complete_days":min_days,
+            }
+
+        stats = _kpi_extract_item_stats_window(req.account_id, op.get("item_id"), start_date, end_date)
+        if stats.get("status") != "ok" or int(stats.get("complete_days") or 0) < min_days:
+            # KPI_EFFECT_INVENTORY_EXIT_TERMINAL_V1:
+            # Once the calendar window is complete, a missing item inside a
+            # *complete* daily inventory is not "stats still loading". The exact
+            # experiment object left the measurable inventory (replacement,
+            # cutover, archive, provider removal, etc.). Waiting can never create
+            # the missing observation later and would serialize the whole
+            # account forever. Close without winner/loser learning and without
+            # any provider mutation.
+            _missing_complete_inventory_days = []
+            try:
+                from app.models.storage import Storage as _EffectStorage
+                from datetime import timedelta as _td_effect_inventory
+                _iid_effect = str(op.get("avito_item_id") or op.get("item_id") or "")
+                _cur_effect_day = _date_kec.fromisoformat(start_date)
+                while _cur_effect_day <= end_day:
+                    _day_key = "daily_stats:" + _cur_effect_day.isoformat()
+                    _day_row = (
+                        db.query(_EffectStorage)
+                        .filter(
+                            _EffectStorage.account_id == req.account_id,
+                            _EffectStorage.key == _day_key,
+                        )
+                        .order_by(_EffectStorage.id.desc())
+                        .first()
+                    )
+                    try:
+                        _day_snap = json.loads(_day_row.value or "{}") if _day_row else {}
+                    except Exception:
+                        _day_snap = {}
+                    _day_comp = _day_snap.get("completeness") if isinstance(_day_snap.get("completeness"), dict) else {}
+                    _day_complete = bool(
+                        _day_comp.get("complete") is True
+                        and _day_comp.get("inventory_complete") is True
+                    )
+                    _day_ids = {
+                        str((x or {}).get("id") or "")
+                        for x in (_day_snap.get("items") or [])
+                        if isinstance(x, dict)
+                    }
+                    if _day_complete and _iid_effect and _iid_effect not in _day_ids:
+                        _missing_complete_inventory_days.append(_cur_effect_day.isoformat())
+                    _cur_effect_day += _td_effect_inventory(days=1)
+            except Exception:
+                _missing_complete_inventory_days = []
+
+            if _missing_complete_inventory_days:
+                _resolved_at = _dt_kec.utcnow().isoformat()
+                op["status"] = "effect_no_clear_result"
+                _effect_exit = op.get("effect") or {}
+                _effect_exit.update({
+                    "status": "superseded_inventory_exit",
+                    "decision": "do_not_learn_from_inventory_exit",
+                    "resolved_at": _resolved_at,
+                    "missing_complete_inventory_days": _missing_complete_inventory_days,
+                    "available_days": int(stats.get("complete_days") or 0),
+                    "required_days": min_days,
+                })
+                op["effect"] = _effect_exit
+                _kpi_apply_log_save(db, req.account_id, history)
+                db.commit()
+                try:
+                    _audit_log(
+                        req.account_id,
+                        "kpi_effect_inventory_exit",
+                        (
+                            f"KPI effect {req.operation_id} закрыт без verdict: "
+                            f"item отсутствует в полном inventory за "
+                            f"{','.join(_missing_complete_inventory_days)}"
+                        ),
+                        actor="boris_kpi_auto",
+                    )
+                except Exception:
+                    pass
+                return {
+                    "status": "resolved",
+                    "decision": "do_not_learn_from_inventory_exit",
+                    "changed_avito": False,
+                    "effect_status": "superseded_inventory_exit",
+                    "missing_complete_inventory_days": _missing_complete_inventory_days,
+                    "available_days": int(stats.get("complete_days") or 0),
+                    "required_days": min_days,
+                    "next": "orchestrator_next_cycle",
+                }
+
+            return {
+                "status":"waiting_observation_window",
+                "reason":"Не все суточные снимки новой версии ещё доступны",
+                "available_days":int(stats.get("complete_days") or 0),
+                "required_days":min_days,
+            }
+
+        before = op.get("kpi_before") or {}
+        after = {
+            "ts": _dt_kec.utcnow().isoformat(),
+            "window_start": start_date,
+            "window_end": end_date,
+            "complete_days": stats["complete_days"],
+            "views": stats["views"],
+            "contacts": stats["contacts"],
+            "contacts_per_day": stats["contacts_per_day"],
+            "conversion": stats["conversion"],
+        }
+        # Existing sales context by exact account + Avito item. This is not a
+        # second attribution engine and never invents causality: it only exposes
+        # MOP/CRM records already linked to the same item and time window.
+        sales_context = {"source":"existing_mop_crm","item_id":str(op.get("avito_item_id") or op.get("item_id") or ""),"before":{},"after":{}}
+        try:
+            from sqlalchemy import text as _sql_text_kec
+            _iid_sales = str(op.get("avito_item_id") or op.get("item_id") or "")
+            _before_day = str(before.get("snapshot_date") or "")[:10]
+            if _iid_sales and _before_day:
+                sales_context["before"] = {
+                    "mop_dialogs":int(db.execute(_sql_text_kec("select count(*) from mop_drafts where account_id=:a and cast(item_id as text)=:i and created_at::date=:d"),{"a":req.account_id,"i":_iid_sales,"d":_before_day}).scalar() or 0),
+                    "crm_deals":int(db.execute(_sql_text_kec("select count(*) from boris_crm_deals where avito_account_id=:a and cast(avito_item_id as text)=:i and created_at::date=:d"),{"a":req.account_id,"i":_iid_sales,"d":_before_day}).scalar() or 0),
+                }
+            if _iid_sales:
+                sales_context["after"] = {
+                    "mop_dialogs":int(db.execute(_sql_text_kec("select count(*) from mop_drafts where account_id=:a and cast(item_id as text)=:i and created_at::date between :s and :e"),{"a":req.account_id,"i":_iid_sales,"s":start_date,"e":end_date}).scalar() or 0),
+                    "crm_deals":int(db.execute(_sql_text_kec("select count(*) from boris_crm_deals where avito_account_id=:a and cast(avito_item_id as text)=:i and created_at::date between :s and :e"),{"a":req.account_id,"i":_iid_sales,"s":start_date,"e":end_date}).scalar() or 0),
+                    "won_deals":int(db.execute(_sql_text_kec("select count(*) from boris_crm_deals where avito_account_id=:a and cast(avito_item_id as text)=:i and created_at::date between :s and :e and lower(coalesce(status,'')) in ('won','success','closed_won')"),{"a":req.account_id,"i":_iid_sales,"s":start_date,"e":end_date}).scalar() or 0),
+                }
+        except Exception:
+            db.rollback()
+            sales_context["status"] = "unavailable"
+
+        after["sales_funnel_context"] = sales_context
+        effect = op.get("effect") or {}
+        effect["before"] = before
+        effect["after"] = after
+
+        delta_views = (
+            after["views"] - before["views"]
+        )
+
+        delta_contacts = round(
+            float(after.get("contacts_per_day") or 0) - float(before.get("contacts") or 0), 3
+        )
+
+        delta_conversion = round(
+            after["conversion"]
+            - before["conversion"],
+            2,
+        )
+
+        # Conservative KPI classification. Leads/day is the primary outcome.
+        # Views or conversion alone are contextual/diagnostic and cannot mark a
+        # change EFFECTIVE when the number of contacts did not improve.
+        before_views = int(before.get("views") or 0)
+        if stats["views"] == 0 and before_views == 0:
+            verdict = "insufficient_data"
+        elif delta_contacts > 0:
+            verdict = "improved"
+        elif delta_contacts < 0 and (stats["views"] > 0 or before_views > 0):
+            verdict = "worse"
+        elif stats["views"] == 0 and before_views > 0:
+            verdict = "worse"
+        else:
+            verdict = "no_clear_effect"
+
+        effect["status"] = verdict
+        effect["classification_basis"] = "contacts_per_day_primary; views_conversion_sales_context_secondary"
+        effect["delta"] = {
+            "views": delta_views,
+            "contacts": delta_contacts,
+            "conversion": delta_conversion,
+        }
+
+        op["effect"] = effect
+        try:
+            from app.services import campaign_identity as _CID_EFFECT2
+            _ci = _CID_EFFECT2.resolve(db, req.account_id, op.get("avito_item_id") or op.get("item_id"))
+            if _ci:
+                _CID_EFFECT2.version_effect_update(_ci, req.operation_id, after=after, result=verdict)
+        except Exception:
+            pass
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            history,
+        )
+
+        db.commit()
+
+        return {
+            "status": "ok",
+            "verdict": verdict,
+            "before": before,
+            "after": after,
+            "delta": effect["delta"],
+            "changed_avito": True,
+        }
+
+    finally:
+        db.close()
+
+
+def _kpi_publish_money_policy(account_id: str, db=None) -> dict:
+    """Read-only account money policy used by content publication recovery."""
+    from app.db.session import SessionLocal as _KpiMoneySession
+    _owned_db = db is None
+    _db = db or _KpiMoneySession()
+    try:
+        from app.services.marketing_money_policy import (
+            effective_daily_budget_limit as _effective_daily_budget_limit,
+            presence_budget_pressure as _presence_budget_pressure,
+        )
+        _limit = _effective_daily_budget_limit(_db, account_id)
+        if _limit is None or float(_limit) <= 0:
+            return {
+                "blocked": False,
+                "authoritative": False,
+                "reason": "daily_limit_missing",
+                "daily_budget_limit_rub": _limit,
+            }
+        _out = dict(_presence_budget_pressure(_db, account_id, float(_limit)) or {})
+        _out.setdefault("daily_budget_limit_rub", float(_limit))
+        _out.setdefault("authoritative", True)
+        return _out
+    except Exception as _exc:
+        return {
+            "blocked": False,
+            "authoritative": False,
+            "reason": "money_policy_unavailable",
+            "error_type": type(_exc).__name__,
+        }
+    finally:
+        if _owned_db:
+            _db.close()
+
+
+def _kpi_account_durable_2214_budget_hold(account_id: str) -> dict:
+    """Return a confirmed account-level Avito 2214 hold only while money is red.
+
+    Avito code 2214 is an account funding/advance condition.  The current
+    Autoload upload is ephemeral: another scheduled account upload can become
+    "current" before a KPI confirmation tick and hide the row that originally
+    proved 2214.  campaign_post_publish_watch already persists provider-confirmed
+    account evidence in campaign replacement_cleanup.  Reuse that durable truth
+    only while the canonical money policy is still blocked, so stale historical
+    2214 evidence can never keep the account frozen after the budget condition
+    clears.
+    """
+    from app.db.session import SessionLocal as _KpiHoldSession
+    from app.models.campaign import Campaign as _KpiHoldCampaign
+    from app.models.campaign_item import CampaignItem as _KpiHoldCampaignItem
+    import json as _json_kpi_hold
+
+    _db = _KpiHoldSession()
+    try:
+        _money = _kpi_publish_money_policy(account_id, db=_db)
+        if bool(_money.get("blocked")) is not True:
+            return {
+                "status": "clear",
+                "reason": "money_policy_not_blocked",
+                "money_policy": _money,
+            }
+
+        _campaign_ids = [
+            int(x[0])
+            for x in (
+                _db.query(_KpiHoldCampaignItem.campaign_id)
+                .filter(_KpiHoldCampaignItem.account_id == account_id)
+                .distinct()
+                .all()
+            )
+            if x and x[0] is not None
+        ]
+        _campaigns = []
+        if _campaign_ids:
+            _campaigns = (
+                _db.query(_KpiHoldCampaign)
+                .filter(_KpiHoldCampaign.id.in_(_campaign_ids))
+                .all()
+            )
+
+        _candidates = []
+        for _campaign in _campaigns:
+            try:
+                _root = _json_kpi_hold.loads(_campaign.settings_json or "{}")
+            except Exception:
+                continue
+            if not isinstance(_root, dict):
+                continue
+            _cleanup = dict(_root.get("replacement_cleanup") or {})
+            _provider_state = dict(_cleanup.get("budget_hold_provider_state") or {})
+            _budget = dict(_cleanup.get("restore_budget_policy") or {})
+            if not (
+                str(_cleanup.get("status") or "") == "waiting_budget_policy"
+                and int(_cleanup.get("restore_provider_code") or 0) == 2214
+                and _cleanup.get("owner_action_required") is False
+                and _provider_state.get("confirmed") is True
+                and int(_provider_state.get("upload_id") or 0) > 0
+                and (
+                    _budget.get("blocked") is True
+                    or _money.get("blocked") is True
+                )
+            ):
+                continue
+            _confirmed_at = str(
+                _cleanup.get("budget_hold_provider_confirmed_at")
+                or _cleanup.get("restore_last_checked_at")
+                or ""
+            )
+            _candidates.append({
+                "campaign_id": int(_campaign.id),
+                "provider_code": 2214,
+                "upload_id": int(_provider_state.get("upload_id") or 0),
+                "confirmed_at": _confirmed_at,
+                "provider_state": _provider_state,
+                "stored_budget_policy": _budget,
+            })
+
+        if not _candidates:
+            return {
+                "status": "unknown",
+                "reason": "durable_account_2214_not_found",
+                "money_policy": _money,
+            }
+
+        _best = sorted(
+            _candidates,
+            key=lambda x: (str(x.get("confirmed_at") or ""), int(x.get("upload_id") or 0)),
+            reverse=True,
+        )[0]
+        return {
+            "status": "avito_advance_required",
+            "provider_code": 2214,
+            "scope": "account_durable_budget_hold",
+            "upload_id": _best.get("upload_id"),
+            "campaign_id": _best.get("campaign_id"),
+            "confirmed_at": _best.get("confirmed_at"),
+            "money_policy": _money,
+            "provider_state": _best.get("provider_state"),
+        }
+    except Exception as _exc:
+        return {
+            "status": "unknown",
+            "reason": "durable_account_2214_error",
+            "error_type": type(_exc).__name__,
+        }
+    finally:
+        _db.close()
+
+
+def _kpi_publish_provider_blocker(account_id: str, feed_identity: str) -> dict:
+    """Read provider evidence for one feed identity with durable account fallback.
+
+    The normal scoped snapshot may contain BORIS-synthesized errors after
+    canonical identity reconciliation.  AUTOLOAD_RAW_PROVIDER_ROWS_V1 preserves
+    the pre-overlay provider messages so external blockers such as Avito 2214
+    cannot be mistaken for an ordinary stale publication.
+    """
+    _fid = str(feed_identity or "").strip()
+    if not _fid:
+        return {"status": "unknown", "reason": "feed_identity_missing"}
+
+    # KPI_ACCOUNT_DURABLE_2214_BUDGET_HOLD_V1:
+    # Prefer already provider-confirmed account funding evidence while the
+    # canonical money policy is still red. This is deliberately checked before
+    # Avito current-upload I/O: a newer unrelated/scheduled upload must not erase
+    # a proven account-level 2214 and trigger another blind KPI publish retry.
+    _durable_hold = _kpi_account_durable_2214_budget_hold(account_id)
+    if str(_durable_hold.get("status") or "") == "avito_advance_required":
+        return {
+            **_durable_hold,
+            "feed_identity": _fid,
+            "active_listing": None,
+            "evidence_source": "durable_account_provider_hold",
+        }
+
+    try:
+        _snap = _autoload_upload_snapshot(
+            account_id,
+            expected_ad_ids=[_fid],
+        ) or {}
+    except Exception as _exc:
+        return {
+            "status": "unknown",
+            "reason": "autoload_snapshot_error",
+            "error_type": type(_exc).__name__,
+        }
+    _scope = dict((_snap or {}).get("scope") or {})
+    _row = next(
+        (
+            dict(x or {})
+            for x in (_scope.get("provider_rows") or [])
+            if str((x or {}).get("ad_id") or "").strip() == _fid
+        ),
+        None,
+    )
+    if not _row:
+        return {
+            "status": "unknown",
+            "reason": "provider_row_missing",
+            "upload_id": (_snap or {}).get("upload_id"),
+        }
+    _codes = set()
+    for _msg in (_row.get("messages") or []):
+        try:
+            _code = int((_msg or {}).get("code") or 0)
+        except Exception:
+            _code = 0
+        if _code:
+            _codes.add(_code)
+    _active = str(_row.get("avito_status") or "").lower() == "active"
+    if 2214 in _codes:
+        return {
+            "status": "avito_advance_required",
+            "provider_code": 2214,
+            "active_listing": _active,
+            "upload_id": (_snap or {}).get("upload_id"),
+            "feed_identity": _fid,
+            "provider_row": _row,
+        }
+    return {
+        "status": "clear",
+        "active_listing": _active,
+        "upload_id": (_snap or {}).get("upload_id"),
+        "feed_identity": _fid,
+        "provider_codes": sorted(_codes),
+    }
+
+
+@router.post("/kpi_confirm_publish")
+def kpi_confirm_publish(req: KpiConfirmPublishRequest):
+    """
+    Подтверждает, что Avito реально применил изменение.
+
+    Только после совпадения live-value:
+        changed_avito = True
+        status = published
+
+    До этого операция остаётся publish_requested.
+    """
+    from app.db.session import SessionLocal
+    from datetime import datetime as _dt_kcp
+
+    db = SessionLocal()
+
+    try:
+        history, op = _kpi_find_apply_operation(
+            db,
+            req.account_id,
+            req.operation_id,
+        )
+
+        if not op:
+            return {
+                "status": "not_found",
+                "changed_avito": False,
+            }
+
+        if op.get("status") == "published":
+            return {
+                "status": "exists",
+                "changed_avito": True,
+                "operation": op,
+            }
+
+        # KPI_PRE_SUBMIT_LIVE_PROOF_RECONCILE_V1: a scheduled URL Autoload may
+        # apply the canonical feed before the explicit KPI submit lane runs.
+        # feed_applied is therefore eligible for a read-only live proof. This
+        # never sends a feed and only advances when exact expected fields already
+        # match the live Avito item.
+        _pre_submit_live_proof = op.get("status") == "feed_applied"
+        if op.get("status") not in {"publish_requested", "feed_applied"}:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": (
+                    f"Ожидался publish_requested/feed_applied, "
+                    f"сейчас {op.get('status')}"
+                ),
+            }
+
+        # KPI_PUBLISH_2214_EXISTING_HOLD_V2:
+        # A proved 2214 hold is serviced by one durable state machine. While
+        # canonical money policy is red, only the cheap local policy check runs.
+        # When policy clears, DO NOT drop supervision before Avito answers:
+        # transition to waiting_provider_after_budget_release and keep the same
+        # watchdog obligation until live/provider evidence is authoritative.
+        _external_hold = dict(op.get("publish_external_hold") or {})
+        _external_hold_state = str(_external_hold.get("state") or "")
+        if _external_hold_state == "waiting_budget_policy":
+            _money_hold = _kpi_publish_money_policy(req.account_id, db=db)
+            _hold_check_now = _dt_kcp.utcnow().isoformat()
+            _external_hold["last_hold_checked_at"] = _hold_check_now
+            _external_hold["last_policy_checked_at"] = _hold_check_now
+            if bool(_money_hold.get("blocked")):
+                _external_hold["money_policy"] = {
+                    "blocked": True,
+                    "reason": _money_hold.get("reason"),
+                    "daily_budget_limit_rub": _money_hold.get("daily_budget_limit_rub"),
+                    "completed_over_budget_days": _money_hold.get("completed_over_budget_days"),
+                }
+                op["publish_external_hold"] = _external_hold
+                _kpi_apply_log_save(db, req.account_id, history)
+                db.commit()
+                return {
+                    "status": "waiting_budget_policy",
+                    "changed_avito": False,
+                    "provider_code": 2214,
+                    "owner_action_required": False,
+                    "reason": "money_policy_blocks_avito_advance",
+                    "money_policy": _money_hold,
+                    "retry_count": int(op.get("publish_retry_count") or 0),
+                }
+
+            # Budget guard is green, but that is NOT proof that Avito cleared
+            # 2214. Preserve the durable hold until exact live/provider evidence
+            # resolves it, otherwise a transient provider outage could strand the
+            # operation outside all watchdogs.
+            _external_hold["state"] = "waiting_provider_after_budget_release"
+            _external_hold["owner_action_required"] = False
+            _external_hold["money_policy"] = {
+                "blocked": False,
+                "reason": _money_hold.get("reason"),
+                "daily_budget_limit_rub": _money_hold.get("daily_budget_limit_rub"),
+                "completed_over_budget_days": _money_hold.get("completed_over_budget_days"),
+            }
+            op["publish_external_hold"] = _external_hold
+            _effect_resume = dict(op.get("effect") or {})
+            _effect_resume["status"] = "waiting_avito_confirmation"
+            _effect_resume["decision"] = "resume_after_money_policy_release"
+            op["effect"] = _effect_resume
+            _kpi_apply_log_save(db, req.account_id, history)
+            db.commit()
+
+        # KPI_CONFIRM_SESSION_ISOLATION_V1: live Avito reads may refresh tokens
+        # and open their own DB session. Never hold the tiny controller pool
+        # transaction across that network boundary; otherwise direct live reads
+        # work while confirm_publish/confirm_rollback see provider errors.
+        _confirm_item_id = op.get("avito_item_id") or op.get("item_id")
+        db.close()
+        live = _kpi_fetch_live_item(req.account_id, _confirm_item_id)
+        db = SessionLocal()
+        history, op = _kpi_find_apply_operation(db, req.account_id, req.operation_id)
+        if not op:
+            return {"status":"not_found","changed_avito":False}
+        if op.get("status") == "published":
+            return {"status":"exists","changed_avito":True,"operation":op}
+        if op.get("status") not in {"publish_requested", "feed_applied"}:
+            return {"status":"blocked","changed_avito":False,
+                    "reason":f"Состояние изменилось во время live-check: {op.get('status')}"}
+
+        if live.get("status") != "ok":
+            op["last_confirmation_check"] = {
+                "ts": _dt_kcp.utcnow().isoformat(),
+                "status": live.get("status"),
+                "reason": live.get("reason"),
+            }
+
+            _kpi_apply_log_save(
+                db,
+                req.account_id,
+                history,
+            )
+
+            db.commit()
+
+            return {
+                "status": "waiting",
+                "changed_avito": False,
+                "reason": (
+                    "Актуальное объявление пока не подтверждено"
+                ),
+                "live_status": live.get("status"),
+            }
+
+        comparison = _kpi_compare_expected_with_live(
+            op,
+            live["item"],
+        )
+
+        op["last_confirmation_check"] = {
+            "ts": _dt_kcp.utcnow().isoformat(),
+            "comparison": comparison,
+        }
+
+        if (
+            comparison.get("status") == "ok"
+            and comparison.get("all_match") is True
+        ):
+            from datetime import timedelta as _td_kcp
+            publish_dt = _dt_kcp.utcnow()
+            publish_ts = publish_dt.isoformat()
+
+            # Re-assert the canonical publication identity on the live proof.
+            # bind_publication is idempotent and conflict-safe; a conflict fails
+            # closed instead of opening an observation window on the wrong item.
+            try:
+                from app.services.campaign_identity import bind_publication as _bind_kcp
+                binding = _bind_kcp(
+                    db, req.account_id, str(op.get("feed_identity") or ""),
+                    str(op.get("avito_item_id") or op.get("item_id") or ""),
+                    published_at=publish_ts,
+                    publication_version=str(op.get("version") or ""),
+                )
+            except Exception as exc:
+                binding = {"status":"blocked","reason":str(exc)[:500]}
+            if binding.get("status") == "blocked":
+                op["last_confirmation_check"]["publication_binding"] = binding
+                _kpi_apply_log_save(db, req.account_id, history); db.commit()
+                return {"status":"blocked","changed_avito":False,"reason":"Live version confirmed but canonical publication binding failed","binding":binding}
+
+            # KPI_PUBLISH_EXTERNAL_HOLD_AUTORESUME_V1:
+            # A proven live match is authoritative evidence that any earlier
+            # 2214/funding hold has ended. Do not leave a stale "waiting funds"
+            # marker on an already-published revision.
+            op.pop("publish_external_hold", None)
+            if str(op.get("publish_error") or "") == "avito_advance_required_2214":
+                op["publish_error"] = None
+            op["status"] = "published"
+            op["changed_avito"] = True
+            op["published_at"] = publish_ts
+            min_days = max(1, int((op.get("observation_window") or {}).get("min_complete_days") or 1))
+            # Exclude the publication calendar day: it contains traffic from the
+            # previous version. Observe only complete days after live confirmation.
+            observation_start = (publish_dt.date() + _td_kcp(days=1)).isoformat()
+            observation_end = (publish_dt.date() + _td_kcp(days=min_days)).isoformat()
+            complete_after = (publish_dt.date() + _td_kcp(days=min_days + 1)).isoformat() + "T00:00:00"
+            op["observation_window"] = {
+                **(op.get("observation_window") or {}),
+                "status":"active",
+                "published_at":publish_ts,
+                "start_date":observation_start,
+                "end_date":observation_end,
+                "complete_after":complete_after,
+                "starts_after_external_publish":True,
+            }
+            op["effect"] = {
+                "status": "waiting_observation_window",
+                "publication_binding": binding,
+            }
+
+            _kpi_apply_log_save(db, req.account_id, history)
+            db.commit()
+
+            _audit_log(
+                req.account_id,
+                "kpi_publish_confirmed",
+                (
+                    f"Avito подтвердил KPI-изменения "
+                    f"объявления {op.get('item_id')}"
+                ),
+                actor="boris_kpi_auto",
+            )
+
+            return {
+                "status": "published",
+                "changed_avito": True,
+                "comparison": comparison,
+            }
+
+        # KPI_PUBLISH_2214_BUDGET_HOLD_V1: first detection path.
+        # A live mismatch is not enough reason to republish. Before the bounded
+        # stale retry, read the exact raw Autoload row for this feed identity.
+        # Provider code 2214 means Avito is waiting for advance/funds, so sending
+        # the same feed again cannot heal the problem and must not increment the
+        # retry counter.
+        if comparison.get("status") == "ok" and comparison.get("all_match") is False:
+            _confirm_feed_identity = str(op.get("feed_identity") or "").strip()
+            db.close()
+            _provider_hold = _kpi_publish_provider_blocker(
+                req.account_id,
+                _confirm_feed_identity,
+            )
+            db = SessionLocal()
+            history, op = _kpi_find_apply_operation(
+                db,
+                req.account_id,
+                req.operation_id,
+            )
+            if not op:
+                return {
+                    "status": "not_found",
+                    "changed_avito": False,
+                }
+            if op.get("status") == "published":
+                return {
+                    "status": "exists",
+                    "changed_avito": True,
+                    "operation": op,
+                }
+            if op.get("status") not in {"publish_requested", "feed_applied"}:
+                return {
+                    "status": "blocked",
+                    "changed_avito": False,
+                    "reason": (
+                        "Состояние изменилось во время provider-check: "
+                        f"{op.get('status')}"
+                    ),
+                }
+
+            if (
+                str(_provider_hold.get("status") or "")
+                == "avito_advance_required"
+                and int(_provider_hold.get("provider_code") or 0) == 2214
+            ):
+                _money_hold = _kpi_publish_money_policy(
+                    req.account_id,
+                    db=db,
+                )
+                _money_policy_blocked = bool(_money_hold.get("blocked"))
+                _hold_state = (
+                    "waiting_budget_policy"
+                    if _money_policy_blocked
+                    else "waiting_owner_funds"
+                )
+                _owner_action_required = not _money_policy_blocked
+                _hold_now = _dt_kcp.utcnow().isoformat()
+                _prior_external_hold = dict(op.get("publish_external_hold") or {})
+                op["publish_external_hold"] = {
+                    "state": _hold_state,
+                    "provider_code": 2214,
+                    "provider_reason": "avito_advance_required",
+                    "feed_identity": _confirm_feed_identity or None,
+                    "upload_id": _provider_hold.get("upload_id"),
+                    "detected_at": (
+                        _prior_external_hold.get("detected_at") or _hold_now
+                    ),
+                    "last_hold_checked_at": _hold_now,
+                    "last_policy_checked_at": _hold_now,
+                    "money_policy": {
+                        "blocked": _money_policy_blocked,
+                        "reason": _money_hold.get("reason"),
+                        "daily_budget_limit_rub": _money_hold.get(
+                            "daily_budget_limit_rub"
+                        ),
+                        "completed_over_budget_days": _money_hold.get(
+                            "completed_over_budget_days"
+                        ),
+                    },
+                    "owner_action_required": _owner_action_required,
+                }
+                op["publish_error"] = "avito_advance_required_2214"
+                _hold_effect = dict(op.get("effect") or {})
+                _hold_effect["status"] = _hold_state
+                _hold_effect["decision"] = (
+                    "wait_budget_policy_no_republish"
+                    if _money_policy_blocked
+                    else "wait_owner_funds_no_republish"
+                )
+                _hold_effect["provider_code"] = 2214
+                op["effect"] = _hold_effect
+                _kpi_apply_log_save(
+                    db,
+                    req.account_id,
+                    history,
+                )
+                db.commit()
+
+                _hold_response = {
+                    "status": _hold_state,
+                    "changed_avito": False,
+                    "provider_code": 2214,
+                    "reason": (
+                        "money_policy_blocks_avito_advance"
+                        if _money_policy_blocked
+                        else "waiting_owner_funds"
+                    ),
+                    "owner_action_required": _owner_action_required,
+                    "retry_count": int(op.get("publish_retry_count") or 0),
+                    "money_policy": _money_hold,
+                }
+                if _owner_action_required:
+                    _hold_response["owner_action"] = (
+                        "Пополнить аванс/баланс Avito; "
+                        "после пополнения BORIS перепроверит автоматически"
+                    )
+                return _hold_response
+
+            # KPI_PUBLISH_EXTERNAL_HOLD_AUTORESUME_V1:
+            # A non-2214 provider response is not automatically proof that the
+            # blocker cleared. Only explicit provider status=clear may release
+            # waiting_owner_funds and allow the normal bounded stale-retry path.
+            # Unknown/retryable provider evidence keeps the operation waiting and
+            # cannot consume another publication attempt.
+            _provider_status = str(_provider_hold.get("status") or "")
+            if _provider_status != "clear":
+                _confirm_state = dict(op.get("last_confirmation_check") or {})
+                _confirm_state["provider_blocker_status"] = _provider_status or "unknown"
+                _confirm_state["provider_blocker_reason"] = str(
+                    _provider_hold.get("reason") or ""
+                )[:240]
+                op["last_confirmation_check"] = _confirm_state
+                _still_hold = dict(op.get("publish_external_hold") or {})
+                if _still_hold:
+                    _still_hold["last_hold_checked_at"] = _dt_kcp.utcnow().isoformat()
+                    op["publish_external_hold"] = _still_hold
+                _kpi_apply_log_save(db, req.account_id, history)
+                db.commit()
+                return {
+                    "status": "waiting",
+                    "changed_avito": False,
+                    "reason": "provider_blocker_not_authoritatively_clear",
+                    "provider_status": _provider_status or "unknown",
+                    "retry_count": int(op.get("publish_retry_count") or 0),
+                }
+
+            _prior_hold = dict(op.get("publish_external_hold") or {})
+            _prior_hold_state = str(_prior_hold.get("state") or "")
+            if _prior_hold_state in {
+                "waiting_owner_funds",
+                "waiting_provider_after_budget_release",
+            }:
+                op.pop("publish_external_hold", None)
+                if str(op.get("publish_error") or "") == "avito_advance_required_2214":
+                    op["publish_error"] = None
+                _resume_effect = dict(op.get("effect") or {})
+                _resume_effect["status"] = "waiting_avito_confirmation"
+                _resume_effect["decision"] = (
+                    "resume_after_owner_funds_detected"
+                    if _prior_hold_state == "waiting_owner_funds"
+                    else "resume_after_provider_clear"
+                )
+                _resume_effect["provider_code"] = None
+                op["effect"] = _resume_effect
+                _kpi_apply_log_save(db, req.account_id, history)
+                db.commit()
+
+        # STALE_PUBLISH_AUTORETRY_V1: upload acceptance is not business proof.
+        # When live Avito still shows the previous version after a 2h grace,
+        # schedule one bounded republish through the existing publish_failed lane.
+        # Stop after 3 proven mismatches instead of blocking the account forever.
+        try:
+            from datetime import timedelta as _td_kcp_retry
+            _requested = op.get("publish_requested_at")
+            _requested_dt = _dt_kcp.fromisoformat(str(_requested).replace("Z", "+00:00")) if _requested else None
+            _now_dt = _dt_kcp.now(_requested_dt.tzinfo) if (_requested_dt and _requested_dt.tzinfo) else _dt_kcp.utcnow()
+            _stale = bool(_requested_dt and (_now_dt - _requested_dt) >= _td_kcp_retry(hours=2))
+        except Exception:
+            _stale = False
+        if _stale and comparison.get("status") == "ok" and comparison.get("all_match") is False:
+            _retry_count = int(op.get("publish_retry_count") or 0)
+            if _retry_count >= 3:
+                # PUBLISH_PROVIDER_STALLED_TERMINAL_STATE_V1: this exact
+                # hypothesis has exhausted its bounded provider retries. Persist
+                # a terminal status so execution ledger / owner UI / scheduler
+                # all agree that BORIS is no longer "waiting for Avito".
+                op["status"] = "publish_provider_stalled"
+                op["publish_provider_stalled_at"] = op.get("publish_provider_stalled_at") or _dt_kcp.utcnow().isoformat()
+                op["publish_error"] = "avito_publish_not_applying_after_bounded_retries"
+                effect = op.get("effect") or {}
+                effect["status"] = "provider_stalled"
+                effect["decision"] = "stop_retry_and_rotate_hypothesis"
+                effect["resolved_at"] = op["publish_provider_stalled_at"]
+                op["effect"] = effect
+                _kpi_apply_log_save(db, req.account_id, history); db.commit()
+                return {"status":"provider_stalled","changed_avito":False,"retry_count":_retry_count,
+                        "terminal_operation_status":"publish_provider_stalled",
+                        "reason":"Avito не применил публикацию после 3 доказанных попыток; слепые повторы остановлены",
+                        "comparison":comparison}
+            op["status"] = "publish_failed"
+            op["publish_error"] = "stale_live_mismatch_autoretry"
+            op["publish_retry_count"] = _retry_count + 1
+            op["publish_retry_scheduled_at"] = _dt_kcp.utcnow().isoformat()
+            _kpi_apply_log_save(db, req.account_id, history); db.commit()
+            _audit_log(req.account_id,"kpi_publish_retry_scheduled",
+                       f"Публикация объявления {op.get('avito_item_id') or op.get('item_id')} не появилась в live Avito за 2ч; безопасный повтор {op['publish_retry_count']}/3",
+                       actor="boris_kpi_auto")
+            return {"status":"retry_scheduled","changed_avito":False,"retry_count":op["publish_retry_count"],
+                    "comparison":comparison}
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            history,
+        )
+
+        db.commit()
+
+        return {
+            "status": "waiting",
+            "changed_avito": False,
+            "comparison": comparison,
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_publish_changes")
+def kpi_publish_changes(req: KpiPublishRequest):
+    """
+    Публикация уже подготовленной apply-операции.
+
+    Preconditions:
+    - операция существует;
+    - внутренний feed успешно изменён;
+    - changed_avito ещё False;
+    - rollback snapshot существует.
+
+    Пока adapter fail-closed.
+    """
+    from app.db.session import SessionLocal
+    from datetime import datetime as _dt_kpub
+
+    db = SessionLocal()
+
+    try:
+        history, op = _kpi_find_apply_operation(
+            db,
+            req.account_id,
+            req.operation_id,
+        )
+
+        if not op:
+            return {
+                "status": "not_found",
+                "changed_avito": False,
+            }
+
+        status = op.get("status")
+
+        # Идемпотентность
+        if status == "published":
+            return {
+                "status": "exists",
+                "changed_avito": True,
+                "operation": op,
+            }
+
+        if status == "publishing":
+            return {
+                "status": "busy",
+                "changed_avito": False,
+                "reason": "Операция уже публикуется",
+            }
+
+        # PUBLISH_PROVIDER_STALLED_REPUBLISH_FENCE_V2:
+        # Three proven live mismatches are already the retry ceiling. The third
+        # confirm moves the operation to publish_failed with retry_count=3, so
+        # the generic publish lane must terminalize BEFORE making a fourth
+        # provider call. This keeps the documented 3-attempt bound exact and
+        # lets the scheduler rotate to a fresh hypothesis ownerlessly.
+        _publish_retry_count = int(op.get("publish_retry_count") or 0)
+        _retry_ceiling_reached = bool(
+            _publish_retry_count >= 3
+            and str(op.get("publish_error") or "") in {
+                "stale_live_mismatch_autoretry",
+                "avito_publish_not_applying_after_bounded_retries",
+            }
+        )
+        if op.get("publish_provider_stalled_at") or _retry_ceiling_reached:
+            op["status"] = "publish_provider_stalled"
+            op["publish_provider_stalled_at"] = op.get("publish_provider_stalled_at") or _dt_kpub.utcnow().isoformat()
+            op["publish_error"] = "avito_publish_not_applying_after_bounded_retries"
+            effect = op.get("effect") or {}
+            effect["status"] = "provider_stalled"
+            effect["decision"] = "stop_retry_and_rotate_hypothesis"
+            effect["resolved_at"] = op["publish_provider_stalled_at"]
+            op["effect"] = effect
+            _kpi_apply_log_save(db, req.account_id, history)
+            db.commit()
+            return {
+                "status": "provider_stalled",
+                "changed_avito": False,
+                "retry_count": _publish_retry_count,
+                "reason": "Публикация остановлена после 3 доказанных несовпадений live Avito; четвёртый повтор запрещён",
+            }
+
+        if status not in (
+            "feed_applied",
+            "publish_failed",
+        ):
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": (
+                    f"Операция имеет статус {status}; "
+                    "публикация сейчас запрещена"
+                ),
+            }
+
+        # Commercial tariff is not detectable from current Avito API. External
+        # publication is capability-gated by explicit account-scoped confirmation.
+        readiness = ai_marketing_readiness(req.account_id)
+        if readiness.get("required_tariff_active") is not True:
+            return {
+                "status":"blocked", "changed_avito":False,
+                "reason":"Требуемый тариф Avito не подтверждён для внешней публикации",
+                "tariff_confirmation_state":readiness.get("tariff_confirmation_state"),
+                "required_avito_tariff":readiness.get("required_avito_tariff"),
+            }
+
+        rollback = (
+            op.get("rollback") or {}
+        )
+
+        if not rollback.get("snapshot"):
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": "Нет rollback snapshot",
+            }
+
+        # -------------------------------------------------
+        # Mark publishing BEFORE external call
+        # -------------------------------------------------
+
+        op["status"] = "publishing"
+        op["publish_started_at"] = (
+            _dt_kpub.utcnow().isoformat()
+        )
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            history,
+        )
+
+        db.commit()
+
+        # -------------------------------------------------
+        # External adapter
+        # -------------------------------------------------
+
+        try:
+            result = _kpi_publish_adapter(
+                req.account_id,
+                op,
+            )
+        except Exception as exc:
+            result = {
+                "status": "error",
+                "changed_avito": False,
+                "reason": str(exc)[:500],
+            }
+
+        # -------------------------------------------------
+        # Reload history after adapter
+        # -------------------------------------------------
+
+        history, fresh_op = _kpi_find_apply_operation(
+            db,
+            req.account_id,
+            req.operation_id,
+        )
+
+        if not fresh_op:
+            return {
+                "status": "error",
+                "changed_avito": False,
+                "reason": "Apply operation disappeared",
+            }
+
+        # Фид принят на обработку Avito, но изменение
+        # объявления ещё не подтверждено.
+        if result.get("status") == "publish_requested":
+            fresh_op["status"] = "publish_requested"
+            fresh_op["changed_avito"] = False
+            fresh_op["publish_requested_at"] = (
+                _dt_kpub.utcnow().isoformat()
+            )
+
+            fresh_op.pop("publish_error", None)
+
+            fresh_op["effect"] = {
+                "status": "waiting_avito_confirmation",
+            }
+
+            fresh_op["publish_result"] = result
+
+            _kpi_apply_log_save(
+                db,
+                req.account_id,
+                history,
+            )
+
+            db.commit()
+
+            _audit_log(
+                req.account_id,
+                "kpi_publish_requested",
+                (
+                    f"KPI отправил фид в Avito для "
+                    f"объявления {fresh_op.get('item_id')}; "
+                    f"ожидается подтверждение обработки"
+                ),
+                actor="boris_kpi_auto",
+            )
+
+            return {
+                "status": "publish_requested",
+                "operation_id": req.operation_id,
+                "changed_avito": False,
+                "result": result,
+            }
+
+        # Этот вариант оставляем для адаптеров, которые
+        # действительно способны синхронно доказать изменение.
+        if (
+            result.get("status") == "ok"
+            and result.get("changed_avito") is True
+        ):
+            fresh_op["status"] = "published"
+            fresh_op["changed_avito"] = True
+            fresh_op["published_at"] = (
+                _dt_kpub.utcnow().isoformat()
+            )
+
+            fresh_op.pop("publish_error", None)
+
+            fresh_op["effect"] = {
+                "status": "waiting_measurement",
+            }
+
+            fresh_op["publish_result"] = result
+
+            _kpi_apply_log_save(
+                db,
+                req.account_id,
+                history,
+            )
+
+            db.commit()
+
+            return {
+                "status": "published",
+                "operation_id": req.operation_id,
+                "changed_avito": True,
+                "result": result,
+            }
+
+        # FEED_VALIDATION_PENDING_LIFECYCLE_V1: a provider-side validation wait
+        # keeps the already prepared feed alive. Do not convert it to publish_failed
+        # and do not regenerate/reapply the hypothesis.
+        if str(result.get("status") or "").lower() in {"waiting", "deferred"}:
+            fresh_op["status"] = "feed_applied"
+            fresh_op["changed_avito"] = False
+            fresh_op["publish_deferred_at"] = _dt_kpub.utcnow().isoformat()
+            fresh_op["publish_deferred_reason"] = result.get("reason") or "external_validation_wait"
+            fresh_op.pop("publish_error", None)
+            fresh_op["effect"] = {"status": "waiting_publish"}
+            _kpi_apply_log_save(db, req.account_id, history)
+            db.commit()
+            return {"status":"waiting","operation_id":req.operation_id,"changed_avito":False,"result":result}
+
+        # -------------------------------------------------
+        # Publish failed
+        # -------------------------------------------------
+
+        fresh_op["status"] = "publish_failed"
+        fresh_op["changed_avito"] = False
+        fresh_op["publish_error"] = (
+            result.get("reason")
+            or result.get("status")
+        )
+        fresh_op["publish_result"] = result
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            history,
+        )
+
+        db.commit()
+
+        return {
+            "status": result.get("status") or "publish_failed",
+            "operation_id": req.operation_id,
+            "changed_avito": False,
+            "reason": (
+                result.get("reason")
+                or "Publish adapter failed"
+            ),
+        }
+
+    finally:
+        db.close()
+
+
+class KpiPublishRollbackRequest(BaseModel):
+    account_id: str
+    operation_id: str
+
+
+@router.post("/kpi_publish_rollback")
+def kpi_publish_rollback(
+    req: KpiPublishRollbackRequest,
+):
+    """
+    Откат опубликованной KPI-операции.
+
+    Сейчас:
+    - восстанавливает внутренний feed;
+    - regeneration;
+    - затем вызывает publish adapter повторно
+      с восстановленным snapshot.
+
+    Пока publish adapter не подключён — fail-closed.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kpr
+    from datetime import datetime as _dt_kpr
+
+    db = SessionLocal()
+
+    try:
+        history, op = _kpi_find_apply_operation(
+            db,
+            req.account_id,
+            req.operation_id,
+        )
+
+        if not op:
+            return {
+                "status": "not_found",
+                "changed_avito": False,
+            }
+
+        snapshot = (
+            op.get("rollback", {})
+            .get("snapshot")
+        )
+
+        if not snapshot:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": "Rollback snapshot отсутствует",
+            }
+
+        if op.get("status") == "rolled_back_published":
+            return {
+                "status": "exists",
+                "changed_avito": True,
+            }
+
+        if op.get("status") == "rollback_publish_requested":
+            # ROLLBACK_WAIT_STALE_ERROR_CLEANUP_V1: clear a legacy transient
+            # validator error once the operation is already waiting for live
+            # rollback confirmation. This is idempotent and never republishes.
+            if op.pop("rollback_publish_error", None) is not None:
+                _kpi_apply_log_save(db, req.account_id, history)
+                db.commit()
+            return {
+                "status": "waiting_confirmation",
+                "changed_avito": False,
+            }
+
+        feed_row, items = _kpi_feed_items_load(
+            db,
+            req.account_id,
+        )
+
+        if feed_row is None or items is None:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": "feed_items недоступен",
+            }
+
+        # KPI_ROLLBACK_CANONICAL_IDENTITY_V1: authoritative feed is keyed by
+        # feed_identity, while item_id is the external Avito id. Matching a feed
+        # row by Avito id strands valid rollbacks. Use exact canonical identity
+        # only; recover it from official autoload evidence when absent.
+        fid = str(op.get("feed_identity") or "").strip()
+        if not fid:
+            aid = str(op.get("avito_item_id") or op.get("item_id") or "").strip()
+            recovered = _recover_one_canonical_identity_from_autoload(req.account_id, aid) if aid else {"status":"unresolved"}
+            if recovered.get("status") in {"bound", "exists"}:
+                fid = str(recovered.get("feed_identity") or "").strip()
+                if fid:
+                    op["feed_identity"] = fid
+                    op["rollback_identity_recovery"] = recovered
+        matches = [(idx,item) for idx,item in enumerate(items)
+                   if str(item.get("id") or item.get("Id") or "").strip() == fid]
+        if len(matches) != 1:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": "canonical feed item для rollback не найден однозначно",
+                "feed_identity": fid or None,
+                "matches": len(matches),
+            }
+        idx, _item = matches[0]
+        # KPI_FIELD_SCOPED_ROLLBACK_V2: rollback only fields this operation
+        # actually mutated. Replacing the whole item with an old snapshot can
+        # resurrect stale media, prices, params or other data that were safely
+        # changed later by independent workflows.
+        restored = dict(_item)
+        _field_variants = {
+            "title": ("title", "Title"),
+            "description": ("description", "Description"),
+            "images": ("images", "Images"),
+        }
+        for _field in (op.get("changes") or {}):
+            if _field not in _field_variants:
+                continue
+            _snapshot_key = next((_k for _k in _field_variants[_field] if _k in snapshot), None)
+            if _snapshot_key is None:
+                return {"status":"blocked","changed_avito":False,
+                        "reason":"rollback_snapshot_missing_mutated_field",
+                        "field":_field,"feed_identity":fid or None}
+            _current_key = next((_k for _k in _field_variants[_field] if _k in restored), _field_variants[_field][0])
+            restored[_current_key] = snapshot.get(_snapshot_key)
+        restored["id"] = fid
+        items[idx] = restored
+
+        # ROLLBACK_MEDIA_SCOPE_V2: a title/description-only rollback does not
+        # introduce or reorder media and must not be blocked by unrelated legacy
+        # URLs already present elsewhere in the authoritative feed. Keep the
+        # strict media guard when THIS operation actually rolls images back.
+        if "images" in (op.get("changes") or {}):
+            try:
+                _assert_no_legacy_visual_urls(db, req.account_id, (restored or {}).get("images") or [])
+            except ValueError as _media_guard_exc:
+                return {
+                    "status": "blocked",
+                    "changed_avito": False,
+                    "reason": "rollback_media_quality_blocked",
+                    "detail": str(_media_guard_exc)[:300],
+                    "feed_identity": fid or None,
+                }
+        feed_row.value = _json_kpr.dumps(
+            items,
+            ensure_ascii=False,
+        )
+
+        db.commit()
+
+        regen = _kpi_regenerate_feed_internal(
+            req.account_id,
+            items,
+        )
+
+        if regen.get("status") != "ok":
+            return {
+                "status": "error",
+                "changed_avito": False,
+                "reason": "Rollback regeneration failed",
+                "regeneration": regen,
+            }
+
+        # Отмечаем feed rollback до внешнего publish.
+        op["status"] = "rollback_feed_ready"
+        op["rollback_started_at"] = (
+            _dt_kpr.utcnow().isoformat()
+        )
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            history,
+        )
+
+        db.commit()
+
+        # Здесь снова единая publish-point.
+        publish_result = _kpi_publish_adapter(
+            req.account_id,
+            op,
+        )
+
+        history, op = _kpi_find_apply_operation(
+            db,
+            req.account_id,
+            req.operation_id,
+        )
+
+        # AUTOLOAD_ROLLBACK_CONFIRMATION_V1: upload acceptance is not live proof.
+        # The normal Avito adapter deliberately returns publish_requested until a
+        # read-only live item check confirms that the rollback snapshot is visible.
+        if publish_result.get("status") == "publish_requested":
+            op["status"] = "rollback_publish_requested"
+            op["changed_avito"] = False
+            op["rollback_publish_requested_at"] = _dt_kpr.utcnow().isoformat()
+            op["rollback_publish_result"] = publish_result
+            # ROLLBACK_STALE_ERROR_CLEAR_V1: a previous transient validation
+            # error must not survive after Avito has accepted the current
+            # rollback feed for scheduled delivery.
+            op.pop("rollback_publish_error", None)
+            op["effect"] = {
+                **(op.get("effect") or {}),
+                "status": "waiting_rollback_confirmation",
+            }
+            _kpi_apply_log_save(
+                db,
+                req.account_id,
+                history,
+            )
+            db.commit()
+            return {
+                "status": "rollback_publish_requested",
+                "changed_avito": False,
+                "result": publish_result,
+            }
+
+        if (
+            publish_result.get("status") == "ok"
+            and publish_result.get("changed_avito") is True
+        ):
+            op["status"] = "rolled_back_published"
+            op["changed_feed"] = False
+            op["changed_avito"] = True
+            op["effect"] = {
+                "status": "rolled_back",
+            }
+
+            _kpi_apply_log_save(
+                db,
+                req.account_id,
+                history,
+            )
+
+            db.commit()
+
+            return {
+                "status": "rolled_back_published",
+                "changed_avito": True,
+            }
+
+        op["status"] = "rollback_publish_failed"
+        op["changed_avito"] = False
+        op["rollback_publish_error"] = (
+            publish_result.get("reason")
+            or publish_result.get("status")
+        )
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            history,
+        )
+
+        db.commit()
+
+        return {
+            "status": "rollback_publish_failed",
+            "changed_avito": False,
+            "result": publish_result,
+        }
+
+    finally:
+        db.close()
+
+
+def _kpi_compare_rollback_snapshot_with_live(operation: dict, live_item: dict) -> dict:
+    """Compare only fields mutated by this operation against its rollback snapshot."""
+    snapshot = ((operation.get("rollback") or {}).get("snapshot") or {})
+    changes = operation.get("changes") or {}
+    field_variants = {
+        "title": ("title", "Title"),
+        "description": ("description", "Description"),
+        "images": ("images", "Images"),
+    }
+    checks = []
+    all_match = True
+    for field in changes:
+        if field not in field_variants:
+            continue
+        expected = None
+        for key in field_variants[field]:
+            if key in snapshot:
+                expected = snapshot.get(key)
+                break
+        live_value = None
+        for key in field_variants[field]:
+            if key in live_item:
+                live_value = live_item.get(key)
+                break
+        if field == "images":
+            expected_images = list(expected or []) if isinstance(expected, (list, tuple)) else []
+            live_images = list(live_value or []) if isinstance(live_value, (list, tuple)) else []
+            match = bool(
+                expected_images
+                and live_images
+                and str(expected_images[0]).strip() == str(live_images[0]).strip()
+            )
+        elif field == "title":
+            match = _kpi_title_matches_expected(expected, live_value)
+        else:
+            match = str(expected or "").strip() == str(live_value or "").strip()
+        checks.append({
+            "field": field,
+            "expected": expected,
+            "live": live_value,
+            "match": match,
+        })
+        if not match:
+            all_match = False
+    return {
+        "status": "ok" if checks else "insufficient_data",
+        "all_match": bool(checks) and all_match,
+        "checks": checks,
+    }
+
+
+@router.post("/kpi_confirm_rollback")
+def kpi_confirm_rollback(req: KpiPublishRollbackRequest):
+    """Confirm rollback from live Avito evidence, never from upload acceptance."""
+    from app.db.session import SessionLocal
+    from datetime import datetime as _dt_kcr
+
+    db = SessionLocal()
+    try:
+        history, op = _kpi_find_apply_operation(
+            db,
+            req.account_id,
+            req.operation_id,
+        )
+        if not op:
+            return {"status": "not_found", "changed_avito": False}
+        if op.get("status") == "rolled_back_published":
+            return {"status": "exists", "changed_avito": True}
+        if op.get("status") != "rollback_publish_requested":
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": (
+                    "Ожидался rollback_publish_requested, "
+                    f"сейчас {op.get('status')}"
+                ),
+            }
+
+        # KPI_CONFIRM_SESSION_ISOLATION_V1: materialize the item identity,
+        # release the controller transaction before live Avito I/O, then reload
+        # the lifecycle operation before committing any confirmation transition.
+        _confirm_item_id = op.get("avito_item_id") or op.get("item_id")
+        db.close()
+        live = _kpi_fetch_live_item(req.account_id, _confirm_item_id)
+        db = SessionLocal()
+        history, op = _kpi_find_apply_operation(db, req.account_id, req.operation_id)
+        if not op:
+            return {"status":"not_found","changed_avito":False}
+        if op.get("status") == "rolled_back_published":
+            return {"status":"exists","changed_avito":True}
+        if op.get("status") != "rollback_publish_requested":
+            return {"status":"blocked","changed_avito":False,
+                    "reason":f"Состояние изменилось во время live-check: {op.get('status')}"}
+        if live.get("status") != "ok":
+            # ROLLBACK_SNAPSHOT_SELFHEAL_V1: the direct live endpoint can be
+            # temporarily unavailable while the same official Avito inventory
+            # has already been persisted by daily_stats. A recent persisted
+            # mismatch is sufficient evidence that re-submitting the SAME
+            # rollback snapshot is safe/idempotent; it is never used to falsely
+            # confirm success. Retries are bounded to prevent upload storms.
+            _snapshot_live = _kpi_latest_live_snapshot_item(
+                db, req.account_id, op.get("avito_item_id") or op.get("item_id")
+            )
+            _snapshot_cmp = (
+                _kpi_compare_rollback_snapshot_with_live(op, _snapshot_live)
+                if _snapshot_live else None
+            )
+            try:
+                from datetime import timedelta as _td_kcr_err
+                _requested_err = op.get("rollback_publish_requested_at")
+                _requested_dt_err = (
+                    _dt_kcr.fromisoformat(str(_requested_err).replace("Z", "+00:00"))
+                    if _requested_err else None
+                )
+                _now_err = (
+                    _dt_kcr.now(_requested_dt_err.tzinfo)
+                    if (_requested_dt_err and _requested_dt_err.tzinfo)
+                    else _dt_kcr.utcnow()
+                )
+                _stale_err = bool(
+                    _requested_dt_err
+                    and (_now_err - _requested_dt_err) >= _td_kcr_err(hours=2)
+                )
+            except Exception:
+                _stale_err = False
+            _retry_count = int(op.get("rollback_retry_count") or 0)
+            if (
+                _stale_err
+                and _snapshot_cmp
+                and _snapshot_cmp.get("status") == "ok"
+                and _snapshot_cmp.get("all_match") is False
+                and _retry_count < 3
+            ):
+                op["status"] = "rollback_publish_failed"
+                op["rollback_publish_error"] = "stale_snapshot_mismatch_autoretry"
+                op["rollback_retry_count"] = _retry_count + 1
+                op["rollback_retry_scheduled_at"] = _dt_kcr.utcnow().isoformat()
+                op["last_rollback_confirmation_check"] = {
+                    "ts": _dt_kcr.utcnow().isoformat(),
+                    "status": live.get("status"),
+                    "reason": live.get("reason"),
+                    "fallback_source": "daily_stats_snapshot",
+                    "snapshot_date": _snapshot_live.get("snapshot_date"),
+                    "comparison": _snapshot_cmp,
+                }
+                _kpi_apply_log_save(db, req.account_id, history)
+                db.commit()
+                _audit_log(
+                    req.account_id, "kpi_rollback_retry_scheduled",
+                    f"Live check unavailable; persisted Avito snapshot still mismatches rollback for {op.get('avito_item_id') or op.get('item_id')}. Safe retry {op['rollback_retry_count']}/3 scheduled.",
+                    actor="boris_kpi_auto",
+                )
+                return {
+                    "status": "retry_scheduled",
+                    "changed_avito": False,
+                    "live_status": live.get("status"),
+                    "proof_source": "daily_stats_snapshot",
+                    "retry_count": op["rollback_retry_count"],
+                    "comparison": _snapshot_cmp,
+                }
+            op["last_rollback_confirmation_check"] = {
+                "ts": _dt_kcr.utcnow().isoformat(),
+                "status": live.get("status"),
+                "reason": live.get("reason"),
+                "fallback_source": "daily_stats_snapshot" if _snapshot_live else None,
+                "snapshot_date": (_snapshot_live or {}).get("snapshot_date"),
+                "comparison": _snapshot_cmp,
+                "retry_count": _retry_count,
+            }
+            if (
+                _stale_err and _snapshot_cmp
+                and _snapshot_cmp.get("status") == "ok"
+                and _snapshot_cmp.get("all_match") is False
+                and _retry_count >= 3
+            ):
+                op["rollback_provider_stalled_at"] = op.get("rollback_provider_stalled_at") or _dt_kcr.utcnow().isoformat()
+                op["rollback_publish_error"] = "avito_autoload_not_applying_after_bounded_retries"
+                _kpi_apply_log_save(db, req.account_id, history)
+                db.commit()
+                return {
+                    "status": "provider_stalled", "changed_avito": False,
+                    "live_status": live.get("status"), "retry_count": _retry_count,
+                    "reason": "Avito не применил URL-фид после 3 доказанных безопасных попыток; слепые повторы остановлены",
+                    "snapshot_comparison": _snapshot_cmp,
+                }
+            _kpi_apply_log_save(db, req.account_id, history)
+            db.commit()
+            return {
+                "status": "waiting",
+                "changed_avito": False,
+                "live_status": live.get("status"),
+                "snapshot_comparison": _snapshot_cmp,
+                "retry_count": _retry_count,
+            }
+
+        comparison = _kpi_compare_rollback_snapshot_with_live(
+            op,
+            live["item"],
+        )
+        op["last_rollback_confirmation_check"] = {
+            "ts": _dt_kcr.utcnow().isoformat(),
+            "comparison": comparison,
+        }
+        if (
+            comparison.get("status") == "ok"
+            and comparison.get("all_match") is True
+        ):
+            now = _dt_kcr.utcnow().isoformat()
+            op["status"] = "rolled_back_published"
+            op["changed_feed"] = False
+            op["changed_avito"] = True
+            op["rolled_back_published_at"] = now
+            op["effect"] = {
+                **(op.get("effect") or {}),
+                "status": "rolled_back",
+                "rollback_confirmed_at": now,
+            }
+            try:
+                from app.services import campaign_identity as _CID_ROLLBACK
+                _ci = _CID_ROLLBACK.resolve(
+                    db,
+                    req.account_id,
+                    op.get("avito_item_id") or op.get("item_id"),
+                )
+                if _ci:
+                    _CID_ROLLBACK.version_effect_update(
+                        _ci,
+                        req.operation_id,
+                        result="rolled_back",
+                        decision="rollback",
+                    )
+            except Exception:
+                pass
+            _kpi_apply_log_save(db, req.account_id, history)
+            db.commit()
+            _audit_log(
+                req.account_id,
+                "kpi_rollback_confirmed",
+                (
+                    "Avito подтвердил откат KPI-изменения объявления "
+                    f"{op.get('avito_item_id') or op.get('item_id')}"
+                ),
+                actor="boris_kpi_auto",
+            )
+            return {
+                "status": "rolled_back_published",
+                "changed_avito": True,
+                "comparison": comparison,
+            }
+
+        # STALE_ROLLBACK_AUTORETRY_V1: a proven live mismatch means the rollback
+        # has not landed. Do not leave one old operation blocking the account
+        # forever. After a bounded grace period, move it back to the existing
+        # rollback_publish_failed lane; the next KPI tick will safely republish
+        # the rollback snapshot. This is not a blind retry: live Avito evidence
+        # explicitly proves the requested rollback is absent.
+        try:
+            from datetime import timedelta as _td_kcr
+            _requested = op.get("rollback_publish_requested_at")
+            _requested_dt = _dt_kcr.fromisoformat(str(_requested).replace("Z", "+00:00")) if _requested else None
+            _now_dt = _dt_kcr.now(_requested_dt.tzinfo) if (_requested_dt and _requested_dt.tzinfo) else _dt_kcr.utcnow()
+            _stale = bool(_requested_dt and (_now_dt - _requested_dt) >= _td_kcr(hours=2))
+        except Exception:
+            _stale = False
+        if _stale and comparison.get("status") == "ok" and comparison.get("all_match") is False:
+            _retry_count_live = int(op.get("rollback_retry_count") or 0)
+            if _retry_count_live >= 3:
+                op["rollback_provider_stalled_at"] = op.get("rollback_provider_stalled_at") or _dt_kcr.utcnow().isoformat()
+                op["rollback_publish_error"] = "avito_autoload_not_applying_after_bounded_retries"
+                _kpi_apply_log_save(db, req.account_id, history)
+                db.commit()
+                return {
+                    "status": "provider_stalled", "changed_avito": False,
+                    "retry_count": _retry_count_live,
+                    "reason": "Avito не применил URL-фид после 3 доказанных безопасных попыток; слепые повторы остановлены",
+                    "comparison": comparison,
+                }
+            op["status"] = "rollback_publish_failed"
+            op["rollback_publish_error"] = "stale_live_mismatch_autoretry"
+            op["rollback_retry_count"] = _retry_count_live + 1
+            op["rollback_retry_scheduled_at"] = _dt_kcr.utcnow().isoformat()
+            _kpi_apply_log_save(db, req.account_id, history)
+            db.commit()
+            _audit_log(req.account_id, "kpi_rollback_retry_scheduled",
+                       f"Rollback объявления {op.get('avito_item_id') or op.get('item_id')} не появился в live Avito за 2ч; запланирована безопасная повторная публикация {op['rollback_retry_count']}/3",
+                       actor="boris_kpi_auto")
+            return {"status":"retry_scheduled","changed_avito":False,"retry_count":op["rollback_retry_count"],"comparison":comparison}
+
+        _kpi_apply_log_save(db, req.account_id, history)
+        db.commit()
+        return {
+            "status": "waiting",
+            "changed_avito": False,
+            "comparison": comparison,
+        }
+    finally:
+        db.close()
+
+
+def _kpi_latest_live_snapshot_item(db, account_id: str, item_id: str):
+    """Return deterministic live item evidence from the latest stored Avito snapshot."""
+    from app.models.storage import Storage
+    import json as _json_identity
+    from datetime import date as _date_identity, timedelta as _td_identity
+    for back in range(0, 8):
+        day = (_kpi_marketing_today() - _td_identity(days=back)).isoformat()
+        row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "daily_stats:" + day,
+        ).first()
+        if not row:
+            continue
+        try:
+            snap = _json_identity.loads(row.value)
+        except Exception:
+            continue
+        for item in snap.get("items") or []:
+            if str(item.get("id")) == str(item_id):
+                result = dict(item)
+                result["snapshot_date"] = day
+                return result
+    return None
+
+
+def _kpi_normalize_title_collision(value) -> str:
+    """Deterministic exact-title key for duplicate mutation safety."""
+    import unicodedata as _ud_kntc
+    text = _ud_kntc.normalize("NFKC", str(value or ""))
+    return " ".join(text.casefold().split())
+
+
+def _kpi_find_active_title_conflicts(db, account_id: str, current_campaign_item_id, title: str):
+    """Find only exact normalized title collisions on another live/published item."""
+    from app.models.campaign_item import CampaignItem as _TitleConflictItem
+    import json as _json_title_conflict
+
+    normalized = _kpi_normalize_title_collision(title)
+    if not normalized:
+        return []
+    q = db.query(_TitleConflictItem).filter(
+        _TitleConflictItem.account_id == account_id,
+    )
+    if current_campaign_item_id is not None:
+        q = q.filter(_TitleConflictItem.id != int(current_campaign_item_id))
+    conflicts = []
+    for row in q.all():
+        _status = str(getattr(row, "status", "") or "").strip().lower()
+        _identity_status = str(getattr(row, "identity_status", "") or "").strip()
+        if _status not in {"active", "published"} and _identity_status != "published_identity_bound":
+            continue
+        try:
+            payload = _json_title_conflict.loads(getattr(row, "payload_json", None) or "{}")
+        except Exception:
+            payload = {}
+        if _kpi_normalize_title_collision((payload or {}).get("title")) != normalized:
+            continue
+        conflicts.append({
+            "campaign_item_id": int(row.id),
+            "avito_item_id": str(getattr(row, "avito_item_id", "") or "") or None,
+            "status": _status or None,
+        })
+    return conflicts
+
+
+@router.post("/kpi_apply_changes")
+def kpi_apply_changes(req: KpiApplyChangesRequest):
+    """
+    KPI Apply Adapter v2.
+
+    Делает:
+    1. проверяет goal_auto;
+    2. принимает пакет изменений;
+    3. разрешает только whitelisted поля;
+    4. сохраняет полный BEFORE snapshot;
+    5. атомарно изменяет feed_items;
+    6. regenerates feed;
+    7. при любой ошибке откатывает feed_items;
+    8. пишет apply-log.
+
+    НЕ отправляет изменения в Avito.
+    changed_avito всегда False в v2.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kac
+    import copy as _copy_kac
+    import uuid as _uuid_kac
+    from datetime import datetime as _dt_kac
+
+    db = SessionLocal()
+
+    try:
+        # -----------------------------------------------------
+        # 1. Mandate
+        # -----------------------------------------------------
+
+        autopilot_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == req.account_id,
+                Storage.key == "autopilot_settings",
+            )
+            .first()
+        )
+
+        mode = "always_ask"
+
+        if autopilot_row:
+            try:
+                mode = _json_kac.loads(
+                    autopilot_row.value
+                ).get("mode", "always_ask")
+            except Exception:
+                pass
+
+        # KPI_APPLY_AUTONOMOUS_MODE_UNIFIED_V1: both goal_auto and the legacy
+        # always_auto mode grant autonomous non-money content authority. Other
+        # marketer guards already treat them identically; rejecting always_auto
+        # here stranded valid proposals in an endless blocked loop.
+        if mode not in {"goal_auto", "always_auto"}:
+            return {
+                "status": "blocked",
+                "changed_feed": False,
+                "changed_avito": False,
+                "reason": f"Нужен автономный режим; сейчас {mode}",
+            }
+
+        # -----------------------------------------------------
+        # 2. Validate changes
+        # -----------------------------------------------------
+
+        if not isinstance(req.changes, dict) or not req.changes:
+            return {
+                "status": "blocked",
+                "changed_feed": False,
+                "changed_avito": False,
+                "reason": "changes пуст",
+            }
+
+        unknown = (
+            set(req.changes)
+            - KPI_APPLY_ALLOWED_FIELDS
+            - KPI_APPLY_PROTECTED_FIELDS
+        )
+
+        if unknown:
+            return {
+                "status": "blocked",
+                "changed_feed": False,
+                "changed_avito": False,
+                "reason": (
+                    "Неизвестные поля запрещены: "
+                    + ", ".join(sorted(unknown))
+                ),
+            }
+
+        protected = (
+            set(req.changes)
+            & KPI_APPLY_PROTECTED_FIELDS
+        )
+
+        if protected:
+            return {
+                "status": "blocked",
+                "changed_feed": False,
+                "changed_avito": False,
+                "reason": (
+                    "Поля требуют отдельного permission/validator: "
+                    + ", ".join(sorted(protected))
+                ),
+            }
+
+        cleaned = {}
+
+        if "title" in req.changes:
+            title = str(
+                req.changes.get("title") or ""
+            ).strip()
+
+            if not title:
+                return {
+                    "status": "blocked",
+                    "changed_feed": False,
+                    "changed_avito": False,
+                    "reason": "Title не может быть пустым",
+                }
+
+            if len(title) > 120:
+                return {
+                    "status": "blocked",
+                    "changed_feed": False,
+                    "changed_avito": False,
+                    "reason": "Title длиннее 120 символов",
+                }
+
+            cleaned["title"] = title
+
+        if "description" in req.changes:
+            description = str(
+                req.changes.get("description") or ""
+            ).strip()
+
+            if not description:
+                return {
+                    "status": "blocked",
+                    "changed_feed": False,
+                    "changed_avito": False,
+                    "reason": "Description не может быть пустым",
+                }
+
+            cleaned["description"] = description
+
+        if "images" in req.changes:
+            images = req.changes.get("images")
+            if not isinstance(images, list) or len(images) < 2:
+                return {"status":"blocked","changed_feed":False,"changed_avito":False,
+                        "reason":"First-image test требует минимум 2 существующих изображения"}
+            images = [str(x or "").strip() for x in images]
+            if any(not x for x in images) or len(set(images)) != len(images):
+                return {"status":"blocked","changed_feed":False,"changed_avito":False,
+                        "reason":"Images должны быть непустыми и уникальными"}
+            cleaned["images"] = images
+
+        # -----------------------------------------------------
+        # 3. Resolve canonical CampaignItem identity first.
+        # -----------------------------------------------------
+        from app.services import campaign_identity as _CID
+        live_item = _kpi_latest_live_snapshot_item(db, req.account_id, req.item_id)
+        campaign_row = _CID.resolve(db, req.account_id, req.item_id)
+        identity_method = "persisted" if campaign_row else None
+        if campaign_row is None and live_item:
+            _resolved = _CID.resolve_or_import_live(db, req.account_id, live_item)
+            if _resolved.get("status") == "resolved":
+                campaign_row = _resolved.get("row")
+                identity_method = _resolved.get("method")
+                db.commit()
+
+        if campaign_row is not None:
+            # KPI_ACTIVE_TITLE_COLLISION_GUARD_V1: title mutations are exact-only
+            # and must not create the same normalized title on another live /
+            # published CampaignItem in this account. Reject here at the one
+            # canonical mutation point so no upstream generator can bypass it.
+            if "title" in cleaned:
+                _title_conflicts = _kpi_find_active_title_conflicts(
+                    db,
+                    req.account_id,
+                    getattr(campaign_row, "id", None),
+                    cleaned.get("title"),
+                )
+                if _title_conflicts:
+                    return {
+                        "status": "blocked",
+                        "reason_code": "duplicate_active_title",
+                        "reason": "Новый заголовок уже используется другим активным/опубликованным объявлением этого аккаунта",
+                        "normalized_title": _kpi_normalize_title_collision(cleaned.get("title")),
+                        "conflicts": _title_conflicts,
+                        "changed_feed": False,
+                        "changed_avito": False,
+                    }
+            if "images" in cleaned:
+                try:
+                    _ci_payload_images = _CID._payload(campaign_row)
+                except Exception:
+                    _ci_payload_images = {}
+                _current_images = [str(x or "").strip() for x in (_ci_payload_images.get("images") or []) if str(x or "").strip()]
+                _new_images = list(cleaned.get("images") or [])
+                if len(_current_images) < 2 or sorted(_current_images) != sorted(_new_images):
+                    return {"status":"blocked","changed_feed":False,"changed_avito":False,
+                            "reason":"First-image test может только менять порядок уже существующей галереи"}
+                if _current_images[0] == _new_images[0]:
+                    return {"status":"blocked","changed_feed":False,"changed_avito":False,
+                            "reason":"First-image test должен реально изменить первое изображение"}
+            operation_id = req.operation_id or ("kpi-ci-apply-" + str(req.item_id) + "-" + _uuid_kac.uuid4().hex[:12])
+            _, apply_history = _kpi_apply_log_load(db, req.account_id)
+            for old_op in apply_history:
+                if old_op.get("operation_id") == operation_id:
+                    return {
+                        "status": "exists",
+                        "changed_feed": bool(old_op.get("changed_feed")),
+                        "changed_avito": False,
+                        "operation": old_op,
+                    }
+
+            kpi_before = {
+                "views": int((live_item or {}).get("views") or 0),
+                "contacts": int((live_item or {}).get("contacts") or 0),
+                "conversion": float((live_item or {}).get("conversion") or 0),
+                "snapshot_date": (live_item or {}).get("snapshot_date"),
+            }
+            observation_window = {
+                "min_complete_days": 2,
+                "status": "pending",
+                "starts_after_external_publish": True,
+            }
+            mutation = _CID.mutate_internal(
+                campaign_row,
+                cleaned,
+                operation_id=operation_id,
+                reason=req.reason,
+                kpi_before=kpi_before,
+                observation_window=observation_window,
+            )
+            if mutation.get("status") == "skipped":
+                db.rollback()
+                return {"status": "skipped", "changed_feed": False, "changed_avito": False,
+                        "reason": "Все значения уже совпадают", "campaign_item_id": campaign_row.id}
+
+            # Feed Factory safe preview: serialize the authoritative CampaignItem
+            # without invoking any external upload. Legacy live ads may not expose
+            # all original Avito fields through API, so publication readiness is
+            # represented explicitly rather than fabricated.
+            from app.services.campaign_service import item_public as _ci_public
+            preview = _ci_public(campaign_row)
+            payload = preview.get("payload") or {}
+            title_ok = bool(str(payload.get("title") or "").strip()) and len(str(payload.get("title") or "")) <= 120
+            safe_preview = {
+                "status": "ok" if title_ok else "blocked",
+                "external_upload": False,
+                "validation_scope": "internal_mutation",
+                "title_valid": title_ok,
+                "campaign_item_id": campaign_row.id,
+                "campaign_id": campaign_row.campaign_id,
+                "feed_identity": campaign_row.feed_identity,
+                "avito_item_id": campaign_row.avito_item_id,
+                "publishable_full_feed": bool(payload.get("description") and payload.get("address") and payload.get("category")),
+                "payload": payload,
+            }
+            if safe_preview["status"] != "ok":
+                db.rollback()
+                return {"status": "blocked", "changed_feed": False, "changed_avito": False,
+                        "reason": "CampaignItem mutation preview validation failed", "preview": safe_preview}
+
+            transaction = {
+                "operation_id": operation_id,
+                "ts": mutation.get("timestamp"),
+                "account_id": req.account_id,
+                "item_id": str(req.item_id),
+                "avito_item_id": str(req.item_id),
+                "campaign_id": campaign_row.campaign_id,
+                "campaign_item_id": campaign_row.id,
+                "feed_identity": campaign_row.feed_identity,
+                "identity_status": campaign_row.identity_status,
+                "identity_method": identity_method,
+                "type": "kpi_campaign_item_apply_v1",
+                "reason": req.reason,
+                "changes": mutation.get("changes") or {},
+                "version": mutation.get("version"),
+                "kpi_before": kpi_before,
+                "observation_window": observation_window,
+                "status": "safe_feed_ready",
+                "changed_feed": True,
+                "changed_avito": False,
+                "safe_feed_preview": safe_preview,
+                "effect": {"status": "waiting_publish", "external_item_id": str(req.item_id),
+                           "campaign_item_id": campaign_row.id, "version": mutation.get("version")},
+            }
+            apply_history.append(transaction)
+            _kpi_apply_log_save(db, req.account_id, apply_history)
+            db.commit()
+            _audit_log(req.account_id, "kpi_campaign_item_apply",
+                       f"KPI изменил CampaignItem {campaign_row.id} для Avito {req.item_id}; версия {mutation.get('version')}; внешняя публикация не выполнялась",
+                       actor="boris_kpi_auto")
+            return {
+                "status": "safe_feed_ready",
+                "operation_id": operation_id,
+                "changed_feed": True,
+                "changed_avito": False,
+                "campaign_item_id": campaign_row.id,
+                "campaign_id": campaign_row.campaign_id,
+                "feed_identity": campaign_row.feed_identity,
+                "avito_item_id": campaign_row.avito_item_id,
+                "identity_method": identity_method,
+                "version": mutation.get("version"),
+                "safe_feed_preview": safe_preview,
+                "next": "external_publish_requires_separate_permission",
+            }
+
+        # -----------------------------------------------------
+        # 4. Legacy feed_items fallback for already feed-managed items.
+        # -----------------------------------------------------
+
+        feed_row, items = _kpi_feed_items_load(
+            db,
+            req.account_id,
+        )
+
+        if feed_row is None or items is None:
+            return {
+                "status": "blocked",
+                "changed_feed": False,
+                "changed_avito": False,
+                "reason": "feed_items отсутствует или повреждён",
+            }
+
+        target_index = None
+
+        for idx, item in enumerate(items):
+            if str(item.get("id")) == str(req.item_id):
+                target_index = idx
+                break
+
+        if target_index is None:
+            return {
+                "status": "blocked",
+                "changed_feed": False,
+                "changed_avito": False,
+                "reason": "item_id не найден в feed_items",
+            }
+
+        # -----------------------------------------------------
+        # 4. Full snapshot
+        # -----------------------------------------------------
+
+        before_items = _copy_kac.deepcopy(items)
+        before_item = _copy_kac.deepcopy(
+            items[target_index]
+        )
+
+        after_item = _copy_kac.deepcopy(
+            before_item
+        )
+
+        # -----------------------------------------------------
+        # 5. Operation ID / idempotency
+        #
+        # Проверяем ДО сравнения значений.
+        # Если первый вызов уже применил изменения, повторный
+        # запрос естественно увидит те же значения в feed_items.
+        # Но это не "skipped" — это повтор той же операции.
+        # -----------------------------------------------------
+
+        operation_id = (
+            req.operation_id
+            or "kpi-apply-v2-"
+            + _uuid_kac.uuid4().hex[:16]
+        )
+
+        _, apply_history = _kpi_apply_log_load(
+            db,
+            req.account_id,
+        )
+
+        for old_op in apply_history:
+            if (
+                old_op.get("operation_id")
+                == operation_id
+            ):
+                return {
+                    "status": "exists",
+                    "changed_feed": bool(
+                        old_op.get("changed_feed")
+                    ),
+                    "changed_avito": bool(
+                        old_op.get("changed_avito")
+                    ),
+                    "operation": old_op,
+                }
+
+        # -----------------------------------------------------
+        # 6. Calculate actual changes
+        # -----------------------------------------------------
+
+        actual_changes = {}
+
+        for field, new_value in cleaned.items():
+            actual_key = _kpi_normalize_feed_field(
+                after_item,
+                field,
+            )
+
+            old_value = after_item.get(
+                actual_key
+            )
+
+            if old_value == new_value:
+                continue
+
+            actual_changes[field] = {
+                "storage_key": actual_key,
+                "old": old_value,
+                "new": new_value,
+            }
+
+            after_item[actual_key] = new_value
+
+        if not actual_changes:
+            return {
+                "status": "skipped",
+                "changed_feed": False,
+                "changed_avito": False,
+                "reason": "Все значения уже совпадают",
+            }
+
+        # =====================================================
+        # PRE-FLIGHT PRODUCTION FEED CONTRACT
+        # =====================================================
+        #
+        # Проверяем будущий feed ДО записи в Storage.
+        # Если хоть один item не соответствует FeedItem,
+        # KPI ничего не меняет.
+
+        _preflight_items = []
+
+        for _item in items:
+            if isinstance(_item, dict):
+                _preflight_items.append(
+                    dict(_item)
+                )
+            else:
+                _preflight_items.append(
+                    _item
+                )
+
+        _preflight_replaced = False
+
+        for _idx, _candidate in enumerate(
+            _preflight_items
+        ):
+            if isinstance(_candidate, dict):
+                _candidate_id = (
+                    _candidate.get("id")
+                    or _candidate.get("Id")
+                )
+            else:
+                _candidate_id = getattr(
+                    _candidate,
+                    "id",
+                    None,
+                )
+
+            if str(_candidate_id) == str(
+                req.item_id
+            ):
+                _preflight_items[_idx] = (
+                    after_item
+                )
+                _preflight_replaced = True
+                break
+
+        if not _preflight_replaced:
+            return {
+                "status": "blocked",
+                "changed_feed": False,
+                "changed_avito": False,
+                "reason": (
+                    "Не удалось собрать будущий feed "
+                    "для preflight"
+                ),
+                "blocked_by": "feed_preflight",
+            }
+
+        _preflight = (
+            _kpi_feed_items_to_models(
+                _preflight_items
+            )
+        )
+
+        if _preflight.get("status") != "ok":
+            return {
+                "status":
+                    "blocked_feed_item_invalid",
+
+                "changed_feed": False,
+                "changed_avito": False,
+
+                "reason": (
+                    "KPI-изменение не применено: "
+                    "feed не проходит production "
+                    "контракт FeedItem"
+                ),
+
+                "blocked_by":
+                    "feed_preflight",
+
+                "validation":
+                    _preflight,
+            }
+
+        # -----------------------------------------------------
+        # 6. Store transaction BEFORE mutation
+        # -----------------------------------------------------
+
+        now = _dt_kac.utcnow().isoformat()
+
+        transaction = {
+            "operation_id": operation_id,
+            "ts": now,
+            "account_id": req.account_id,
+            "item_id": str(req.item_id),
+
+            "type": "kpi_apply_changes_v2",
+
+            "reason": req.reason,
+
+            "changes": actual_changes,
+
+            "before_item": before_item,
+            "after_item": after_item,
+
+            "status": "prepared",
+
+            "changed_feed": False,
+            "changed_avito": False,
+
+            "rollback": {
+                "available": True,
+                "snapshot": before_item,
+            },
+
+            "effect": {
+                "status": "not_started",
+            },
+        }
+
+        apply_history.append(transaction)
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            apply_history,
+        )
+
+        db.commit()
+
+        # -----------------------------------------------------
+        # 7. Mutate feed_items
+        # -----------------------------------------------------
+
+        items[target_index] = after_item
+
+        for _feed_it in items:
+            _assert_no_legacy_visual_urls(db, req.account_id, (_feed_it or {}).get("images") or [])
+        feed_row.value = _json_kac.dumps(
+            items,
+            ensure_ascii=False,
+        )
+
+        db.commit()
+
+        # -----------------------------------------------------
+        # 8. Regenerate feed
+        # -----------------------------------------------------
+
+        regeneration = {
+            "status": "skipped",
+        }
+
+        if req.regenerate_feed:
+            regeneration = (
+                _kpi_regenerate_feed_internal(
+                    req.account_id,
+                    items,
+                )
+            )
+
+            if regeneration.get("status") != "ok":
+                # =============================================
+                # HARD ROLLBACK
+                # =============================================
+
+                db.rollback()
+
+                fresh_feed_row = (
+                    db.query(Storage)
+                    .filter(
+                        Storage.account_id == req.account_id,
+                        Storage.key == "feed_items",
+                    )
+                    .first()
+                )
+
+                if fresh_feed_row:
+                    # Rollback is not allowed to resurrect an image provider that
+                    # is now globally forbidden, even if the old snapshot predates
+                    # the quality policy.
+                    for _feed_it in before_items:
+                        _assert_no_legacy_visual_urls(db, req.account_id, (_feed_it or {}).get("images") or [])
+                    fresh_feed_row.value = (
+                        _json_kac.dumps(
+                            before_items,
+                            ensure_ascii=False,
+                        )
+                    )
+
+                    db.commit()
+
+                _, apply_history = (
+                    _kpi_apply_log_load(
+                        db,
+                        req.account_id,
+                    )
+                )
+
+                for op in apply_history:
+                    if (
+                        op.get("operation_id")
+                        == operation_id
+                    ):
+                        op["status"] = (
+                            "rolled_back_generation_error"
+                        )
+                        op["changed_feed"] = False
+                        op["generation_error"] = (
+                            regeneration
+                        )
+                        break
+
+                _kpi_apply_log_save(
+                    db,
+                    req.account_id,
+                    apply_history,
+                )
+
+                db.commit()
+
+                return {
+                    "status": "rolled_back",
+                    "operation_id": operation_id,
+                    "changed_feed": False,
+                    "changed_avito": False,
+                    "reason": (
+                        "generate_feed завершился ошибкой; "
+                        "feed_items восстановлен"
+                    ),
+                    "regeneration": regeneration,
+                }
+
+        # -----------------------------------------------------
+        # 9. Commit successful internal apply
+        # -----------------------------------------------------
+
+        _, apply_history = _kpi_apply_log_load(
+            db,
+            req.account_id,
+        )
+
+        for op in apply_history:
+            if (
+                op.get("operation_id")
+                != operation_id
+            ):
+                continue
+
+            op["status"] = "feed_applied"
+            op["changed_feed"] = True
+            op["changed_avito"] = False
+
+            op["effect"] = {
+                "status": "waiting_publish",
+            }
+
+            op["regeneration"] = regeneration
+            break
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            apply_history,
+        )
+
+        db.commit()
+
+        _audit_log(
+            req.account_id,
+            "kpi_apply_feed",
+            (
+                f"KPI подготовил изменение объявления "
+                f"{req.item_id}: "
+                + ", ".join(actual_changes.keys())
+                + ". В Avito ещё не отправлено."
+            ),
+            actor="boris_kpi_auto",
+        )
+
+        return {
+            "status": "feed_applied",
+            "operation_id": operation_id,
+            "item_id": str(req.item_id),
+
+            "changes": actual_changes,
+
+            "changed_feed": True,
+            "changed_avito": False,
+
+            "regeneration": regeneration,
+
+            "rollback_ready": True,
+
+            "next_stage": "publish_adapter",
+        }
+
+    finally:
+        db.close()
+
+
+class KpiRollbackChangesRequest(BaseModel):
+    account_id: str
+    operation_id: str
+
+
+@router.post("/kpi_rollback_changes")
+def kpi_rollback_changes(
+    req: KpiRollbackChangesRequest,
+):
+    """
+    Rollback внутреннего feed_items по сохранённому snapshot.
+
+    Пока НЕ делает Avito upload.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_krcb
+
+    db = SessionLocal()
+
+    try:
+        _, history = _kpi_apply_log_load(
+            db,
+            req.account_id,
+        )
+
+        target = None
+
+        for op in history:
+            if (
+                op.get("operation_id")
+                == req.operation_id
+            ):
+                target = op
+                break
+
+        if not target:
+            return {
+                "status": "not_found",
+                "changed_avito": False,
+            }
+
+        snapshot = (
+            target.get("rollback", {})
+            .get("snapshot")
+        )
+
+        if not snapshot:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": "Rollback snapshot отсутствует",
+            }
+
+        feed_row, items = _kpi_feed_items_load(
+            db,
+            req.account_id,
+        )
+
+        if feed_row is None or items is None:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": "feed_items недоступен",
+            }
+
+        found = False
+
+        for idx, item in enumerate(items):
+            if (
+                str(item.get("id"))
+                == str(target.get("item_id"))
+            ):
+                items[idx] = snapshot
+                found = True
+                break
+
+        if not found:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": "item для rollback не найден",
+            }
+
+        for _feed_it in items:
+            _assert_no_legacy_visual_urls(db, req.account_id, (_feed_it or {}).get("images") or [])
+        feed_row.value = _json_krcb.dumps(
+            items,
+            ensure_ascii=False,
+        )
+
+        db.commit()
+
+        regeneration = (
+            _kpi_regenerate_feed_internal(
+                req.account_id,
+                items,
+            )
+        )
+
+        if regeneration.get("status") != "ok":
+            return {
+                "status": "error",
+                "changed_avito": False,
+                "reason": (
+                    "Snapshot восстановлен, но regeneration "
+                    "завершился ошибкой"
+                ),
+                "regeneration": regeneration,
+            }
+
+        _, history = _kpi_apply_log_load(
+            db,
+            req.account_id,
+        )
+
+        for op in history:
+            if (
+                op.get("operation_id")
+                == req.operation_id
+            ):
+                op["status"] = "rolled_back"
+                op["changed_feed"] = False
+                op["changed_avito"] = False
+                op["effect"] = {
+                    "status": "rolled_back",
+                }
+                break
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            history,
+        )
+
+        db.commit()
+
+        return {
+            "status": "rolled_back",
+            "operation_id": req.operation_id,
+            "changed_feed": False,
+            "changed_avito": False,
+            "regeneration": regeneration,
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_apply_title")
+def kpi_apply_title(req: KpiApplyTitleRequest):
+    """
+    Безопасный Apply Engine для title.
+
+    Уже умеет:
+    - проверять goal_auto;
+    - валидировать новое значение;
+    - проверять item;
+    - сохранять OLD value;
+    - защищаться от дублей;
+    - соблюдать cooldown;
+    - создавать rollback snapshot;
+    - журналировать попытку;
+    - fail-closed при отсутствии write-adapter.
+
+    Пока write-adapter не подключён,
+    физическое изменение Avito невозможно.
+    """
+    from app.db.session import SessionLocal
+    import uuid as _uuid_kat
+    from datetime import datetime as _dt_kat
+
+    db = SessionLocal()
+
+    try:
+        # -----------------------------------------------------
+        # 1. Проверяем режим автопилота
+        # -----------------------------------------------------
+
+        from app.models.storage import Storage
+        import json as _json_kat
+
+        autopilot_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == req.account_id,
+                Storage.key == "autopilot_settings",
+            )
+            .first()
+        )
+
+        mode = "always_ask"
+
+        if autopilot_row:
+            try:
+                mode = _json_kat.loads(
+                    autopilot_row.value
+                ).get("mode", "always_ask")
+            except Exception:
+                mode = "always_ask"
+
+        if mode != "goal_auto":
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": (
+                    f"Для автономного apply нужен goal_auto; "
+                    f"сейчас {mode}"
+                ),
+            }
+
+        # -----------------------------------------------------
+        # 2. Валидация title
+        # -----------------------------------------------------
+
+        new_title = (req.new_title or "").strip()
+
+        if not new_title:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": "Пустой заголовок запрещён",
+            }
+
+        if len(new_title) > 120:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": (
+                    "Заголовок длиннее 120 символов — "
+                    "операция заблокирована до категории-specific "
+                    "валидации."
+                ),
+            }
+
+        # Canonical bridge: title mutations use the same CampaignItem-aware
+        # Apply Engine as all other content mutations. Legacy feed_items are
+        # no longer authoritative for KPI title identity.
+        canonical = kpi_apply_changes(
+            KpiApplyChangesRequest(
+                account_id=req.account_id,
+                item_id=str(req.item_id),
+                changes={"title": new_title},
+                reason=req.reason,
+                operation_id=req.operation_id,
+                regenerate_feed=False,
+            )
+        )
+        canonical["title_apply_bridge"] = "campaign_item_v1"
+        return canonical
+
+        # -----------------------------------------------------
+        # 3. Legacy snapshot path (unreachable for canonical v1)
+        # -----------------------------------------------------
+
+        snapshot = _kpi_find_item_snapshot(
+            db,
+            req.account_id,
+            req.item_id,
+        )
+
+        if not snapshot:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": (
+                    "Объявление не найдено в feed_items. "
+                    "Нельзя менять значение без snapshot."
+                ),
+            }
+
+        old_title = (
+            snapshot.get("title") or ""
+        ).strip()
+
+        if not old_title:
+            return {
+                "status": "blocked",
+                "changed_avito": False,
+                "reason": (
+                    "Не удалось определить старый заголовок. "
+                    "Rollback невозможен."
+                ),
+            }
+
+        if old_title == new_title:
+            return {
+                "status": "skipped",
+                "changed_avito": False,
+                "reason": "Новый title совпадает со старым",
+            }
+
+        # -----------------------------------------------------
+        # 4. Operation ID / идемпотентность
+        # -----------------------------------------------------
+
+        operation_id = (
+            req.operation_id
+            or f"kpi-title-{_uuid_kat.uuid4().hex[:16]}"
+        )
+
+        log_row, history = _kpi_apply_log_load(
+            db,
+            req.account_id,
+        )
+
+        for previous in history:
+            if (
+                previous.get("operation_id")
+                == operation_id
+            ):
+                return {
+                    "status": "exists",
+                    "changed_avito": bool(
+                        previous.get("changed_avito")
+                    ),
+                    "operation": previous,
+                }
+
+        # -----------------------------------------------------
+        # 5. Cooldown одного item/title
+        # -----------------------------------------------------
+
+        now = _dt_kat.utcnow()
+
+        for previous in reversed(history):
+            if (
+                str(previous.get("item_id"))
+                != str(req.item_id)
+            ):
+                continue
+
+            if previous.get("field") != "title":
+                continue
+
+            if previous.get("status") not in (
+                "applied",
+                "pending_effect",
+            ):
+                continue
+
+            try:
+                prev_ts = _dt_kat.fromisoformat(
+                    previous["ts"]
+                )
+            except Exception:
+                continue
+
+            age_hours = (
+                now - prev_ts
+            ).total_seconds() / 3600
+
+            if age_hours < 24:
+                return {
+                    "status": "blocked",
+                    "changed_avito": False,
+                    "reason": (
+                        "Title этого объявления уже менялся "
+                        f"{age_hours:.1f} ч назад. "
+                        "Cooldown 24 часа."
+                    ),
+                }
+
+        # -----------------------------------------------------
+        # 6. Создаём transaction snapshot ДО записи
+        # -----------------------------------------------------
+
+        transaction = {
+            "operation_id": operation_id,
+            "ts": now.isoformat(),
+
+            "account_id": req.account_id,
+            "item_id": str(req.item_id),
+
+            "field": "title",
+
+            "old_value": old_title,
+            "new_value": new_title,
+
+            "reason": req.reason,
+
+            "status": "prepared_apply",
+
+            "changed_avito": False,
+
+            "rollback": {
+                "available": True,
+                "value": old_title,
+            },
+
+            "effect": {
+                "status": "waiting_apply",
+                "before": None,
+                "after": None,
+            },
+        }
+
+        history.append(transaction)
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            history,
+        )
+
+        db.commit()
+
+        # -----------------------------------------------------
+        # 7. Единственная write-point
+        # -----------------------------------------------------
+
+        apply_result = _kpi_title_apply_adapter(
+            req.account_id,
+            req.item_id,
+            new_title,
+        )
+
+        # -----------------------------------------------------
+        # 8. Обновляем transaction
+        # -----------------------------------------------------
+
+        db.expire_all()
+
+        _, history = _kpi_apply_log_load(
+            db,
+            req.account_id,
+        )
+
+        for op in history:
+            if op.get("operation_id") != operation_id:
+                continue
+
+            if (
+                apply_result.get("status")
+                == "ok"
+                and apply_result.get(
+                    "changed_avito"
+                ) is True
+            ):
+                op["status"] = "pending_effect"
+                op["changed_avito"] = True
+                op["effect"]["status"] = (
+                    "waiting_measurement"
+                )
+
+            else:
+                op["status"] = "apply_blocked"
+                op["changed_avito"] = False
+                op["apply_error"] = (
+                    apply_result.get("reason")
+                    or apply_result.get("status")
+                )
+
+            break
+
+        _kpi_apply_log_save(
+            db,
+            req.account_id,
+            history,
+        )
+
+        db.commit()
+
+        return {
+            "status": apply_result.get("status"),
+            "operation_id": operation_id,
+
+            "item_id": str(req.item_id),
+
+            "old_title": old_title,
+            "new_title": new_title,
+
+            "changed_avito": bool(
+                apply_result.get("changed_avito")
+            ),
+
+            "adapter": apply_result,
+
+            "rollback_ready": True,
+        }
+
+    finally:
+        db.close()
+
+
+@router.get("/kpi_apply_history")
+def kpi_apply_history(
+    account_id: str,
+    limit: int = 50,
+):
+    """
+    Просмотр реальных/подготовленных KPI-изменений.
+    """
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+
+    try:
+        _, history = _kpi_apply_log_load(
+            db,
+            account_id,
+        )
+
+        limit = max(
+            1,
+            min(int(limit or 50), 200),
+        )
+
+        return {
+            "status": "ok",
+            "operations": history[-limit:][::-1],
+        }
+
+    finally:
+        db.close()
+
+
+
+def _kpi_prepare_queue_load(db, account_id: str):
+    """
+    Читает все kpi_prepare:* для аккаунта.
+    """
+    from app.models.storage import Storage
+    import json as _json_kpql
+
+    rows = (
+        db.query(Storage)
+        .filter(
+            Storage.account_id == account_id,
+            Storage.key.like("kpi_prepare:%"),
+        )
+        .all()
+    )
+
+    result = []
+
+    for row in rows:
+        try:
+            data = _json_kpql.loads(row.value)
+        except Exception:
+            continue
+
+        if not isinstance(data, dict):
+            continue
+
+        result.append({
+            "storage_key": row.key,
+            "row": row,
+            "data": data,
+        })
+
+    return result
+
+
+def _kpi_prepare_signature(
+    action: str,
+    items: list,
+):
+    """
+    Стабильная сигнатура prepare-задачи.
+
+    Нужна, чтобы каждые 10 минут не создавать одно и то же
+    AI-задание на те же объявления.
+    """
+    ids = sorted(
+        str(x.get("id"))
+        for x in (items or [])
+        if x.get("id") is not None
+    )
+
+    return (
+        str(action)
+        + ":"
+        + ",".join(ids)
+    )
+
+
+def _kpi_prepare_has_active_duplicate(
+    db,
+    account_id: str,
+    action: str,
+    items: list,
+):
+    signature = _kpi_prepare_signature(
+        action,
+        items,
+    )
+
+    active_statuses = {
+        "ready_for_ai",
+        "ai_running",
+        "proposal_ready",
+        "apply_ready",
+    }
+
+    for entry in _kpi_prepare_queue_load(
+        db,
+        account_id,
+    ):
+        data = entry["data"]
+
+        _status = str(data.get("status") or "")
+        # KPI_LEGACY_UNCHANGED_TITLE_NOOP_SELFHEAL_V1: rows created before the
+        # terminal-noop fix may still say ai_failed even though their durable
+        # evidence is the known unchanged-title no-op. Reconcile that legacy
+        # state on normal queue inspection so it cannot become owner work or a
+        # paid retry. No provider call and no content mutation happen here.
+        _legacy_ai_error = str(data.get("ai_error") or data.get("error") or "")
+        if _status == "ai_failed" and "AI не изменил title" in _legacy_ai_error:
+            data["status"] = "terminal_noop_or_unpublishable"
+            data["terminal_reason"] = "ai_unchanged_title"
+            data.pop("ai_failed_at", None)
+            data.pop("ai_error", None)
+            try:
+                entry["row"].value = __import__("json").dumps(data, ensure_ascii=False)
+                db.commit()
+            except Exception:
+                db.rollback()
+            _status = "terminal_noop_or_unpublishable"
+        _recent_terminal_duplicate = False
+        _same_input_terminal_duplicate = False
+        # KPI_PREPARE_TERMINAL_SIGNATURE_COOLDOWN_V1: keep the short cooldown
+        # for legacy rows that do not carry enough input evidence.
+        if _status == "all_proposals_submitted":
+            try:
+                from datetime import datetime as _dt_terminal, timedelta as _td_terminal
+                _done = _dt_terminal.fromisoformat(str(data.get("ai_completed_at") or data.get("ai_started_at") or "").replace("Z", "+00:00"))
+                _now = _dt_terminal.now(_done.tzinfo) if _done.tzinfo else _dt_terminal.now()
+                _recent_terminal_duplicate = (_now - _done) < _td_terminal(hours=24)
+            except Exception:
+                _recent_terminal_duplicate = False
+
+            # KPI_PREPARE_SAME_INPUT_DURABLE_DEDUPE_V1: terminal AI output is a
+            # durable cache while the candidate input is unchanged. A 24h wall
+            # clock must never buy the same title/description hypothesis again.
+            # Once the listing input actually changes, a new hypothesis can be
+            # generated. This closes repeated paid generations without blocking
+            # legitimate sequential experimentation.
+            try:
+                _old_items = data.get("items") or []
+                _old_by_id = {str(x.get("id")): x for x in _old_items if x.get("id") is not None}
+                _new_by_id = {str(x.get("id")): x for x in (items or []) if x.get("id") is not None}
+                _ids = sorted(_new_by_id)
+                if _ids and _ids == sorted(_old_by_id):
+                    _fields = ("title", "description")
+                    _same_input_terminal_duplicate = all(
+                        all(
+                            str((_old_by_id[i].get(f) or "")).strip()
+                            == str((_new_by_id[i].get(f) or "")).strip()
+                            for f in _fields
+                        )
+                        for i in _ids
+                    )
+            except Exception:
+                _same_input_terminal_duplicate = False
+        if _status not in active_statuses and not _recent_terminal_duplicate and not _same_input_terminal_duplicate:
+            continue
+
+        old_signature = (
+            data.get("signature")
+            or _kpi_prepare_signature(
+                data.get("action"),
+                data.get("items") or [],
+            )
+        )
+
+        if old_signature == signature:
+            return data
+
+    return None
+
+
+@router.get("/kpi_prepare_queue")
+def kpi_prepare_queue(account_id: str):
+    """
+    Read-only состояние prepare-очереди.
+    """
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+
+    try:
+        entries = _kpi_prepare_queue_load(
+            db,
+            account_id,
+        )
+
+        tasks = [
+            x["data"]
+            for x in entries
+        ]
+
+        counts = {}
+
+        for task in tasks:
+            status = task.get(
+                "status",
+                "unknown",
+            )
+
+            counts[status] = (
+                counts.get(status, 0)
+                + 1
+            )
+
+        return {
+            "status": "ok",
+            "count": len(tasks),
+            "by_status": counts,
+            "tasks": tasks,
+            "read_only": True,
+        }
+
+    finally:
+        db.close()
+
+
+
+def _kpi_find_prepare_task(
+    db,
+    account_id: str,
+    operation_id: str = None,
+):
+    """
+    Находит одну prepare-задачу.
+
+    Если operation_id не передан — берёт первую ready_for_ai.
+    """
+    entries = _kpi_prepare_queue_load(
+        db,
+        account_id,
+    )
+
+    if operation_id:
+        for entry in entries:
+            data = entry["data"]
+
+            if (
+                str(data.get("operation_id"))
+                == str(operation_id)
+            ):
+                return entry
+
+        return None
+
+    for entry in entries:
+        if (
+            entry["data"].get("status")
+            == "ready_for_ai"
+        ):
+            return entry
+
+    return None
+
+
+def _kpi_ai_usage_cost_by_operation(
+    account_id: str,
+    operation: str,
+):
+    """
+    Читает реальную стоимость AI-вызова из общего api_usage.
+
+    operation для KPI уникален, поэтому можем связать
+    конкретный AI-call с KPI ledger без отдельного request_id.
+    """
+    from app.db.session import SessionLocal
+    from sqlalchemy import text as _sql_text_kauc
+
+    db = SessionLocal()
+
+    try:
+        value = db.execute(
+            _sql_text_kauc("""
+                SELECT COALESCE(SUM(cost_rub), 0)
+                FROM api_usage
+                WHERE account_id = :account_id
+                  AND operation = :operation
+            """),
+            {
+                "account_id": account_id,
+                "operation": operation,
+            },
+        ).scalar()
+
+        return round(
+            float(value or 0),
+            4,
+        )
+
+    except Exception:
+        return 0.0
+
+    finally:
+        db.close()
+
+
+def _kpi_extract_json_object(raw: str):
+    """
+    Строгий, но терпимый extractor JSON.
+
+    Разрешаем модели случайно обернуть JSON в ```json,
+    но никакой semantic repair здесь не делаем.
+    """
+    import json as _json_kjo
+
+    text = str(raw or "").strip()
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+
+        if lines:
+            lines = lines[1:]
+
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+
+        text = "\n".join(lines).strip()
+
+    try:
+        data = _json_kjo.loads(text)
+    except Exception:
+        # Последняя техническая попытка:
+        # берём только внешний JSON object.
+        start = text.find("{")
+        end = text.rfind("}")
+
+        if start < 0 or end <= start:
+            raise ValueError(
+                "AI не вернул JSON object"
+            )
+
+        data = _json_kjo.loads(
+            text[start:end + 1]
+        )
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            "Корень AI-ответа должен быть object"
+        )
+
+    return data
+
+
+def _kpi_validate_title_proposals(
+    task: dict,
+    parsed: dict,
+):
+    """
+    Проверяет:
+    - все ожидаемые item_id присутствуют;
+    - лишних item_id нет;
+    - ровно один итоговый title на item;
+    - title непустой;
+    - title <= 120;
+    - нет emoji;
+    - title реально отличается от старого.
+    """
+    import re as _re_ktv
+
+    items = task.get("items") or []
+
+    expected = {
+        str(x.get("id")): x
+        for x in items
+        if x.get("id") is not None
+    }
+
+    proposals = parsed.get("proposals")
+
+    if not isinstance(proposals, list):
+        raise ValueError(
+            "Поле proposals должно быть массивом"
+        )
+
+    received = {}
+    clean = []
+
+    # Базовая блокировка emoji/symbol ranges.
+    emoji_re = _re_ktv.compile(
+        "["
+        "\U0001F300-\U0001FAFF"
+        "\U00002700-\U000027BF"
+        "\U00002600-\U000026FF"
+        "]"
+    )
+
+    for proposal in proposals:
+        if not isinstance(proposal, dict):
+            raise ValueError(
+                "Каждый proposal должен быть object"
+            )
+
+        item_id = str(
+            proposal.get("item_id") or ""
+        ).strip()
+
+        if not item_id:
+            raise ValueError(
+                "proposal без item_id"
+            )
+
+        if item_id not in expected:
+            raise ValueError(
+                f"Неожиданный item_id: {item_id}"
+            )
+
+        if item_id in received:
+            raise ValueError(
+                f"Дубликат item_id: {item_id}"
+            )
+
+        title = str(
+            proposal.get("title") or ""
+        ).strip()
+
+        reason = str(
+            proposal.get("reason") or ""
+        ).strip()
+
+        if not title:
+            raise ValueError(
+                f"{item_id}: пустой title"
+            )
+
+        if len(title) > 120:
+            raise ValueError(
+                f"{item_id}: title длиннее 120 символов"
+            )
+
+        if emoji_re.search(title):
+            raise ValueError(
+                f"{item_id}: emoji в title запрещены"
+            )
+
+        old_item = expected[item_id]
+
+        old_title = str(
+            old_item.get("title")
+            or old_item.get("Title")
+            or ""
+        ).strip()
+
+        if old_title and old_title == title:
+            raise ValueError(
+                f"{item_id}: AI не изменил title"
+            )
+
+        received[item_id] = True
+
+        clean.append({
+            "item_id": item_id,
+            "old_title": old_title,
+            "new_title": title,
+            "reason": reason,
+        })
+
+    missing = (
+        set(expected)
+        - set(received)
+    )
+
+    if missing:
+        raise ValueError(
+            "AI пропустил item_id: "
+            + ", ".join(sorted(missing))
+        )
+
+    return clean
+
+
+
+
+def _kpi_validate_description_proposals(task: dict, parsed: dict):
+    """Strict prepare-only validation for description hypotheses."""
+    items = task.get("items") or []
+    expected = {str(x.get("id")): x for x in items if x.get("id") is not None}
+    proposals = parsed.get("proposals")
+    if not isinstance(proposals, list):
+        raise ValueError("Поле proposals должно быть массивом")
+    received, clean = set(), []
+    for proposal in proposals:
+        if not isinstance(proposal, dict):
+            raise ValueError("Каждый proposal должен быть object")
+        item_id = str(proposal.get("item_id") or "").strip()
+        if not item_id or item_id not in expected:
+            raise ValueError(f"Неожиданный item_id: {item_id}")
+        if item_id in received:
+            raise ValueError(f"Дубликат item_id: {item_id}")
+        description = str(proposal.get("description") or "").strip()
+        reason = str(proposal.get("reason") or "").strip()
+        if not description:
+            raise ValueError(f"{item_id}: пустой description")
+        if len(description) > 4000:
+            raise ValueError(f"{item_id}: description длиннее 4000 символов")
+        old_item = expected[item_id]
+        facts = old_item.get("source_facts") or {}
+        old_description = str(facts.get("description") or old_item.get("description") or old_item.get("Description") or "").strip()
+        if old_description and old_description == description:
+            raise ValueError(f"{item_id}: AI не изменил description")
+        received.add(item_id)
+        clean.append({"item_id": item_id, "old_description": old_description,
+                      "new_description": description, "reason": reason})
+    missing = set(expected) - received
+    if missing:
+        raise ValueError("AI пропустил item_id: " + ", ".join(sorted(missing)))
+    return clean
+
+
+def _kpi_enrich_prepare_items_from_feed(
+    db,
+    account_id: str,
+    items: list,
+):
+    """
+    Добавляет к слабым объявлениям реальные данные из feed_items.
+
+    Это источник истины для Fact Guard.
+    Никаких изменений не делает.
+    """
+    _, feed_items = _kpi_feed_items_load(
+        db,
+        account_id,
+    )
+
+    if not feed_items:
+        return items
+
+    by_id = {
+        str(x.get("id")): x
+        for x in feed_items
+        if x.get("id") is not None
+    }
+
+    enriched = []
+
+    for item in items or []:
+        item_id = str(
+            item.get("id") or ""
+        )
+
+        src = by_id.get(item_id)
+
+        row = dict(item)
+
+        if src:
+            # Не отдаём модели внутренний мусор без необходимости.
+            row["source_facts"] = {
+                "title":
+                    src.get("title")
+                    or src.get("Title"),
+
+                "description":
+                    src.get("description")
+                    or src.get("Description"),
+
+                "price":
+                    src.get("price")
+                    or src.get("Price"),
+
+                "category":
+                    src.get("category")
+                    or src.get("Category"),
+
+                "params":
+                    src.get("params")
+                    or {},
+            }
+
+        enriched.append(row)
+
+    return enriched
+
+
+def _kpi_build_fact_guard_prompt(
+    enriched_items: list,
+    proposals: list,
+):
+    """
+    Второй, независимый контроль фактов.
+
+    Проверяет только:
+    может ли новый title утверждать то,
+    чего нет в исходных данных объявления.
+    """
+    import json as _json_kfgp
+
+    return (
+        "Ты проверяешь фактическую достоверность новых "
+        "заголовков объявлений Avito.\n\n"
+
+        "Твоя задача НЕ улучшать текст и НЕ переписывать его.\n"
+        "Только проверить: появились ли в новом заголовке "
+        "факты, которых нельзя подтвердить исходными данными.\n\n"
+
+        "ФАКТОМ считаются, в частности:\n"
+        "- новое/б/у/состояние;\n"
+        "- размер, материал, комплектация;\n"
+        "- аренда или продажа;\n"
+        "- назначение товара;\n"
+        "- доставка;\n"
+        "- наличие;\n"
+        "- гарантия;\n"
+        "- срок;\n"
+        "- год;\n"
+        "- цена/скидка;\n"
+        "- география;\n"
+        "- любые характеристики товара.\n\n"
+
+        "Нельзя считать факт подтверждённым только потому, "
+        "что он есть в другом, сильном объявлении.\n\n"
+
+        "ИСХОДНЫЕ ОБЪЯВЛЕНИЯ:\n"
+        + _json_kfgp.dumps(
+            enriched_items,
+            ensure_ascii=False,
+        )
+        + "\n\n"
+
+        "ПРЕДЛОЖЕННЫЕ ЗАГОЛОВКИ:\n"
+        + _json_kfgp.dumps(
+            proposals,
+            ensure_ascii=False,
+        )
+        + "\n\n"
+
+        "Верни ТОЛЬКО JSON:\n"
+        "{"
+        "\"checks\":["
+        "{"
+        "\"item_id\":\"...\","
+        "\"safe\":true,"
+        "\"unsupported_claims\":[],"
+        "\"reason\":\"...\""
+        "}"
+        "]"
+        "}"
+    )
+
+
+def _kpi_validate_fact_guard_result(
+    proposals: list,
+    parsed: dict,
+):
+    """
+    Fail-closed:
+    каждый proposal обязан получить safe=true.
+    """
+    checks = parsed.get("checks")
+
+    if not isinstance(checks, list):
+        raise ValueError(
+            "Fact Guard не вернул массив checks"
+        )
+
+    expected = {
+        str(x.get("item_id"))
+        for x in proposals
+    }
+
+    received = set()
+    unsafe = []
+
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ValueError(
+                "Fact Guard check должен быть object"
+            )
+
+        item_id = str(
+            check.get("item_id") or ""
+        ).strip()
+
+        if item_id not in expected:
+            raise ValueError(
+                f"Fact Guard: неожиданный item_id {item_id}"
+            )
+
+        if item_id in received:
+            raise ValueError(
+                f"Fact Guard: duplicate item_id {item_id}"
+            )
+
+        received.add(item_id)
+
+        safe = check.get("safe")
+
+        # Только настоящий bool True принимаем.
+        if safe is not True:
+            unsafe.append({
+                "item_id": item_id,
+                "unsupported_claims":
+                    check.get("unsupported_claims")
+                    or [],
+                "reason":
+                    check.get("reason")
+                    or "Неподтверждённый факт",
+            })
+
+    missing = expected - received
+
+    if missing:
+        raise ValueError(
+            "Fact Guard пропустил item_id: "
+            + ", ".join(sorted(missing))
+        )
+
+    return {
+        "safe": len(unsafe) == 0,
+        "unsafe": unsafe,
+        "checks": checks,
+    }
+
+
+def _kpi_run_title_fact_guard(
+    db,
+    account_id: str,
+    operation_id: str,
+    task: dict,
+    proposals: list,
+):
+    """
+    Один batched Fact Guard на весь proposal.
+
+    Возвращает:
+        safe
+        usage_operation
+        result
+
+    Никаких изменений feed/Avito.
+    """
+    from gigachat.models import (
+        Messages,
+        MessagesRole,
+    )
+    from gigachat_pool import (
+        chat_with_fallback,
+    )
+
+    enriched = _kpi_enrich_prepare_items_from_feed(
+        db,
+        account_id,
+        task.get("items") or [],
+    )
+
+    usage_operation = (
+        "kpi_fact_guard_titles:"
+        + str(operation_id)
+    )
+
+    prompt = _kpi_build_fact_guard_prompt(
+        enriched,
+        proposals,
+    )
+
+    raw = chat_with_fallback(
+        messages=[
+            Messages(
+                role=MessagesRole.SYSTEM,
+                content=(
+                    "Ты независимый контролёр фактов. "
+                    "Если факт нельзя подтвердить исходными "
+                    "данными — safe=false."
+                ),
+            ),
+            Messages(
+                role=MessagesRole.USER,
+                content=prompt,
+            ),
+        ],
+
+        temperature=0,
+
+        max_tokens=1400,
+
+        timeout=60,
+
+        account_id=account_id,
+
+        operation=usage_operation,
+    )
+
+    parsed = _kpi_extract_json_object(
+        raw
+    )
+
+    result = _kpi_validate_fact_guard_result(
+        proposals,
+        parsed,
+    )
+
+    return {
+        "safe": result["safe"],
+        "usage_operation": usage_operation,
+        "result": result,
+    }
+
+
+
+def _kpi_build_description_fact_guard_prompt(enriched_items: list, proposals: list):
+    import json as _json_kdfg
+    return (
+        "Ты независимый контролёр фактической достоверности описаний Avito.\n\n"
+        "Не улучшай текст. Для каждого item_id проверь только, что новый description не добавляет фактов, которых нет в source_facts этого же item_id.\n"
+        "Особенно проверяй цену/скидку, наличие, гарантию, сроки, доставку, материал, размеры, комплектацию, географию, опыт, документы, характеристики и обещания.\n"
+        "Факт из другого объявления не подтверждает факт этого item_id.\n\n"
+        "ИСХОДНЫЕ ОБЪЯВЛЕНИЯ:\n" + _json_kdfg.dumps(enriched_items, ensure_ascii=False) + "\n\n"
+        "ПРЕДЛОЖЕННЫЕ ОПИСАНИЯ:\n" + _json_kdfg.dumps(proposals, ensure_ascii=False) + "\n\n"
+        "Верни ТОЛЬКО JSON: {\"checks\":[{\"item_id\":\"...\",\"safe\":true,\"unsupported_claims\":[],\"reason\":\"...\"}]}"
+    )
+
+
+def _kpi_run_description_fact_guard(db, account_id: str, operation_id: str, task: dict, proposals: list):
+    from gigachat.models import Messages, MessagesRole
+    from gigachat_pool import chat_with_fallback
+    enriched = _kpi_enrich_prepare_items_from_feed(db, account_id, task.get("items") or [])
+    usage_operation = "kpi_fact_guard_descriptions:" + str(operation_id)
+    raw = chat_with_fallback(
+        messages=[
+            Messages(role=MessagesRole.SYSTEM, content="Ты независимый контролёр фактов. Если утверждение нельзя подтвердить исходными данными этого item_id — safe=false."),
+            Messages(role=MessagesRole.USER, content=_kpi_build_description_fact_guard_prompt(enriched, proposals)),
+        ],
+        temperature=0, max_tokens=1800, timeout=60, account_id=account_id, operation=usage_operation,
+    )
+    parsed = _kpi_extract_json_object(raw)
+    result = _kpi_validate_fact_guard_result(proposals, parsed)
+    return {"safe": result["safe"], "usage_operation": usage_operation, "result": result}
+
+
+def _kpi_build_descriptions_prompt(task: dict):
+    import json as _json_kbd
+    weak = task.get("items") or []
+    best = task.get("reference_items") or []
+    rejected = task.get("last_fact_guard_rejection") or []
+    repair = ""
+    if rejected:
+        repair = ("\nПРЕДЫДУЩАЯ ПОПЫТКА БЫЛА ОТКЛОНЕНА FACT GUARD. Не повторяй эти неподтверждённые утверждения:\n"
+                  + _json_kbd.dumps(rejected, ensure_ascii=False) + "\n")
+    return (
+        "Ты оптимизируешь описания слабых объявлений Avito после того, как гипотеза заголовка уже не дала доказанного результата.\n\n"
+        "ЦЕЛЬ: повысить конверсию в обращение за счёт ясного, продающего и конкретного описания, не выдумывая факты.\n"
+        "ПРАВИЛА: для каждого item_id фактическая база только его source_facts; не добавляй неподтверждённые цены, скидки, наличие, сроки, гарантии, доставку, материал, размеры, опыт, документы и характеристики; сильные объявления используй только как ориентир структуры; без #, звёздочек и CAPS LOCK; максимум 4000 символов; один новый description на каждый item_id.\n\n"
+        "СЛАБЫЕ ОБЪЯВЛЕНИЯ:\n" + _json_kbd.dumps(weak, ensure_ascii=False) + "\n\n"
+        "СИЛЬНЫЕ ОБЪЯВЛЕНИЯ-ОРИЕНТИРЫ:\n" + _json_kbd.dumps(best, ensure_ascii=False) + "\n" + repair +
+        "\nВерни ТОЛЬКО JSON без markdown: {\"proposals\":[{\"item_id\":\"...\",\"description\":\"...\",\"reason\":\"...\"}]}"
+    )
+
+
+def _kpi_build_titles_prompt(task: dict):
+    """
+    Один batch prompt на все слабые позиции задачи.
+    """
+    import json as _json_kbtp
+
+    weak = task.get("items") or []
+    best = task.get("reference_items") or []
+
+    rejected = (
+        task.get("last_fact_guard_rejection")
+        or []
+    )
+
+    repair_text = ""
+
+    if rejected:
+        repair_text = (
+            "\nПРЕДЫДУЩАЯ ПОПЫТКА БЫЛА ОТКЛОНЕНА FACT GUARD.\n"
+            "НЕ повторяй следующие неподтверждённые утверждения:\n"
+            + _json_kbtp.dumps(
+                rejected,
+                ensure_ascii=False,
+            )
+            + "\n"
+            "Исправь заголовки, используя только доказанные "
+            "source_facts соответствующего item_id.\n\n"
+        )
+
+    return (
+        "Ты оптимизируешь заголовки объявлений Avito.\n\n"
+
+        "ЦЕЛЬ:\n"
+        "Улучшить конверсию слабых объявлений в контакт, "
+        "не выдумывая факты.\n\n"
+
+        "ЖЁСТКИЕ ПРАВИЛА:\n"
+        "1. Не добавляй факты, которых нет в исходных данных.\n"
+        "2. Не добавляй цены, скидки, сроки, наличие, гарантии "
+        "или характеристики, если они не переданы.\n"
+        "3. Не используй emoji.\n"
+        "4. Не используй CAPS LOCK ради привлечения внимания.\n"
+        "5. Не делай кликбейт.\n"
+        "6. Максимум 120 символов.\n"
+        "7. Для каждого item_id верни РОВНО ОДИН новый title.\n"
+        "8. Не пропускай ни один item_id.\n"
+        "9. Сильные объявления — ориентир по структуре спроса и формулировке. "
+        "Если слабое объявление продаёт тот же товар/услугу, переноси ПАТТЕРН "
+        "успешного заголовка: главное поисковое слово, порядок слов, конкретность "
+        "и понятный объект предложения. Факты и характеристики из другого "
+        "объявления переносить нельзя.\n"
+
+        "10. Для КАЖДОГО item_id фактической базой являются ТОЛЬКО "
+        "его собственные source_facts.title и "
+        "source_facts.description.\n"
+
+        "11. Нельзя додумывать материал: металлическая, деревянная, "
+        "сэндвич и т.п., если этого нет в source_facts.\n"
+
+        "12. Нельзя додумывать состояние: новая, Б/У, после ремонта "
+        "и т.п., если этого нет в source_facts.\n"
+
+        "13. Нельзя додумывать продажу/аренду/назначение/доставку/"
+        "наличие/размер/комплектацию.\n"
+
+        "14. Если конкретный факт нельзя подтвердить исходными "
+        "source_facts этого item_id — НЕ используй его. "
+        "Лучше более простой, но достоверный заголовок.\n\n"
+
+        "СЛАБЫЕ ОБЪЯВЛЕНИЯ:\n"
+        + _json_kbtp.dumps(
+            weak,
+            ensure_ascii=False,
+        )
+        + "\n\n"
+
+        "СИЛЬНЫЕ ОБЪЯВЛЕНИЯ-ОРИЕНТИРЫ:\n"
+        + _json_kbtp.dumps(
+            best,
+            ensure_ascii=False,
+        )
+        + "\n\n"
+
+        + repair_text
+
+        + "Верни ТОЛЬКО JSON без markdown:\n"
+        "{"
+        "\"proposals\":["
+        "{"
+        "\"item_id\":\"...\","
+        "\"title\":\"...\","
+        "\"reason\":\"кратко, почему этот вариант лучше\""
+        "}"
+        "]"
+        "}"
+    )
+
+
+class KpiAiPrepareExecuteRequest(BaseModel):
+    account_id: str
+    operation_id: str | None = None
+
+
+
+class KpiProposalApplyRequest(BaseModel):
+    account_id: str
+    prepare_operation_id: str | None = None
+
+
+def _kpi_find_proposal_ready_task(
+    db,
+    account_id: str,
+    operation_id: str = None,
+):
+    entries = _kpi_prepare_queue_load(
+        db,
+        account_id,
+    )
+
+    for entry in entries:
+        data = entry["data"]
+
+        if (
+            operation_id
+            and str(data.get("operation_id"))
+            != str(operation_id)
+        ):
+            continue
+
+        if data.get("status") not in {
+            "proposal_ready",
+            "apply_in_progress",
+        }:
+            continue
+
+        proposals = (
+            data.get("proposal")
+            or []
+        )
+
+        # Ищем хотя бы одно ещё не переданное
+        # в Apply Engine предложение.
+        pending = [
+            p
+            for p in proposals
+            if not p.get("apply_status")
+        ]
+
+        if pending:
+            return entry
+
+    return None
+
+
+@router.post("/kpi_proposal_apply_next")
+def kpi_proposal_apply_next(
+    req: KpiProposalApplyRequest,
+):
+    """
+    Передаёт РОВНО ОДИН безопасный AI proposal
+    в существующий KPI Apply Engine.
+
+    Не публикует сам.
+    После этого обычная state machine:
+        feed_applied
+        -> publish
+        -> confirm
+        -> measure
+        -> resolve
+    """
+    from app.db.session import SessionLocal
+    import json as _json_kpan
+    from datetime import datetime as _dt_kpan
+
+    db = SessionLocal()
+
+    try:
+        entry = _kpi_find_proposal_ready_task(
+            db,
+            req.account_id,
+            req.prepare_operation_id,
+        )
+
+        if not entry:
+            return {
+                "status": "empty",
+                "changed_feed": False,
+                "changed_avito": False,
+            }
+
+        row = entry["row"]
+        task = entry["data"]
+
+        prepare_op = str(
+            task.get("operation_id")
+        )
+
+        proposals = (
+            task.get("proposal")
+            or []
+        )
+
+        target = None
+
+        for proposal in proposals:
+            if not proposal.get("apply_status"):
+                target = proposal
+                break
+
+        if not target:
+            return {
+                "status": "empty",
+                "changed_feed": False,
+                "changed_avito": False,
+            }
+
+        item_id = str(
+            target.get("item_id")
+        )
+
+        _prepare_action = str(task.get("action") or "prepare_weak_titles")
+        if _prepare_action == "prepare_weak_descriptions":
+            _proposal_field, _proposal_key = "description", "new_description"
+            _proposal_value = str(target.get(_proposal_key) or "").strip()
+        elif _prepare_action == "prepare_first_image_test":
+            _proposal_field, _proposal_key = "images", "new_images"
+            _proposal_value = target.get(_proposal_key)
+        else:
+            _proposal_field, _proposal_key = "title", "new_title"
+            _proposal_value = str(target.get(_proposal_key) or "").strip()
+
+        if not _proposal_value:
+            return {
+                "status": "blocked",
+                "reason": f"proposal не содержит {_proposal_key}",
+                "changed_feed": False,
+                "changed_avito": False,
+            }
+
+        # Детерминированный operation_id.
+        # Повтор runner не сможет применить одно
+        # предложение дважды.
+        apply_operation_id = (
+            f"{prepare_op}:apply:{item_id}"
+        )
+
+        apply_result = kpi_apply_changes(
+            KpiApplyChangesRequest(
+                account_id=req.account_id,
+                item_id=item_id,
+                changes={_proposal_field: _proposal_value},
+                reason=(
+                    "KPI goal_auto: "
+                    + str(
+                        target.get("reason")
+                        or "оптимизация слабого объявления"
+                    )
+                ),
+                operation_id=apply_operation_id,
+                regenerate_feed=True,
+            )
+        )
+
+        apply_status = (
+            apply_result.get("status")
+        )
+
+        # ---------------------------------------------
+        # SUCCESS / IDEMPOTENT SUCCESS
+        # ---------------------------------------------
+
+        # KPI_PROPOSAL_SAFE_FEED_READY_SUCCESS_V1: kpi_apply_changes on a
+        # campaign-backed item intentionally returns safe_feed_ready after the
+        # local mutation + validation. That is a successful proposal submission;
+        # treating it as blocked caused the same proposal to loop forever.
+        if apply_status in {
+            "safe_feed_ready",
+            "feed_applied",
+            "exists",
+        }:
+            target["apply_status"] = "submitted"
+            target["apply_operation_id"] = (
+                apply_operation_id
+            )
+            target["apply_submitted_at"] = (
+                _dt_kpan.utcnow().isoformat()
+            )
+
+            remaining = [
+                p
+                for p in proposals
+                if not p.get("apply_status")
+            ]
+
+            task["status"] = (
+                "apply_in_progress"
+                if remaining
+                else "all_proposals_submitted"
+            )
+
+            task["proposal"] = proposals
+
+            row.value = _json_kpan.dumps(
+                task,
+                ensure_ascii=False,
+            )
+
+            db.commit()
+
+            _audit_log(
+                req.account_id,
+                "kpi_proposal_apply",
+                (
+                    f"Безопасное KPI-предложение "
+                    f"для объявления {item_id} "
+                    f"передано в Apply Engine"
+                ),
+                actor="boris_kpi_auto",
+            )
+
+            return {
+                "status": "submitted",
+
+                "prepare_operation_id":
+                    prepare_op,
+
+                "apply_operation_id":
+                    apply_operation_id,
+
+                "item_id":
+                    item_id,
+
+                "apply_result":
+                    apply_result,
+
+                "remaining_proposals":
+                    len(remaining),
+
+                "changed_feed":
+                    bool(
+                        apply_result.get(
+                            "changed_feed",
+                            False,
+                        )
+                    ),
+
+                "changed_avito":
+                    False,
+
+                "next_stage":
+                    "publish",
+            }
+
+        # ---------------------------------------------
+        # NO-OP
+        # ---------------------------------------------
+
+        if apply_status == "skipped":
+            target["apply_status"] = "skipped"
+            target["apply_operation_id"] = (
+                apply_operation_id
+            )
+            target["apply_reason"] = (
+                apply_result.get("reason")
+            )
+
+            task["proposal"] = proposals
+
+            remaining = [
+                p
+                for p in proposals
+                if not p.get("apply_status")
+            ]
+
+            task["status"] = (
+                "apply_in_progress"
+                if remaining
+                else "all_proposals_submitted"
+            )
+
+            row.value = _json_kpan.dumps(
+                task,
+                ensure_ascii=False,
+            )
+
+            db.commit()
+
+            return {
+                "status": "skipped",
+                "item_id": item_id,
+                "reason": apply_result.get("reason"),
+                "changed_feed": False,
+                "changed_avito": False,
+            }
+
+        # ---------------------------------------------
+        # DUPLICATE TITLE -> ROTATE, DO NOT LOOP
+        # ---------------------------------------------
+        if (
+            apply_status == "blocked"
+            and str(apply_result.get("reason_code") or "") == "duplicate_active_title"
+        ):
+            target["apply_status"] = "skipped_duplicate_title"
+            target["apply_operation_id"] = apply_operation_id
+            target["apply_reason"] = apply_result.get("reason")
+            target["apply_reason_code"] = "duplicate_active_title"
+            target["apply_conflicts"] = apply_result.get("conflicts") or []
+            target["apply_submitted_at"] = _dt_kpan.utcnow().isoformat()
+            remaining = [
+                p for p in proposals
+                if not p.get("apply_status")
+            ]
+            task["status"] = (
+                "apply_in_progress"
+                if remaining
+                else "all_proposals_submitted"
+            )
+            task["proposal"] = proposals
+            row.value = _json_kpan.dumps(task, ensure_ascii=False)
+            db.commit()
+            return {
+                "status": "skipped_duplicate_title",
+                "item_id": item_id,
+                "reason": apply_result.get("reason"),
+                "reason_code": "duplicate_active_title",
+                "conflicts": apply_result.get("conflicts") or [],
+                "remaining_proposals": len(remaining),
+                "rotated_to_next_proposal": bool(remaining),
+                "changed_feed": False,
+                "changed_avito": False,
+            }
+
+        # ---------------------------------------------
+        # FAIL CLOSED
+        # ---------------------------------------------
+
+        target["apply_last_error"] = (
+            apply_result
+        )
+
+        task["proposal"] = proposals
+
+        row.value = _json_kpan.dumps(
+            task,
+            ensure_ascii=False,
+        )
+
+        db.commit()
+
+        return {
+            "status": "blocked",
+            "item_id": item_id,
+            "apply_result": apply_result,
+            "changed_feed": False,
+            "changed_avito": False,
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_ai_prepare_execute")
+def kpi_ai_prepare_execute(
+    req: KpiAiPrepareExecuteRequest,
+):
+    """
+    Выполняет максимум ОДНО prepare AI-задание.
+
+    v1:
+        prepare_weak_titles
+
+    Один batch = несколько слабых объявлений.
+
+    НИЧЕГО не меняет:
+    - feed_items
+    - Avito
+
+    Результат:
+        proposal_ready
+    """
+    from app.db.session import SessionLocal
+    import json as _json_kape
+    from datetime import datetime as _dt_kape
+
+    db = SessionLocal()
+
+    entry = None
+    operation_id = None
+
+    try:
+        entry = _kpi_find_prepare_task(
+            db,
+            req.account_id,
+            req.operation_id,
+        )
+
+        if not entry:
+            return {
+                "status": "empty",
+                "ai_calls_made": 0,
+                "changed_avito": False,
+            }
+
+        row = entry["row"]
+        task = entry["data"]
+
+        operation_id = task.get(
+            "operation_id"
+        )
+
+        current_status = task.get(
+            "status"
+        )
+
+        # ---------------------------------------------
+        # IDEMPOTENCY
+        # ---------------------------------------------
+
+        if current_status == "proposal_ready":
+            return {
+                "status": "exists",
+                "operation_id": operation_id,
+                "proposal": task.get("proposal"),
+                "ai_calls_made": 0,
+                "changed_avito": False,
+            }
+
+        if current_status == "ai_running":
+            return {
+                "status": "busy",
+                "operation_id": operation_id,
+                "ai_calls_made": 0,
+                "changed_avito": False,
+            }
+
+        if current_status != "ready_for_ai":
+            return {
+                "status": "blocked",
+                "operation_id": operation_id,
+                "reason": (
+                    f"Нельзя исполнять prepare "
+                    f"со статусом {current_status}"
+                ),
+                "ai_calls_made": 0,
+                "changed_avito": False,
+            }
+
+        action = task.get("action")
+
+        # One authoritative content executor: title first, description only as
+        # the next evidence-backed hypothesis after title did not work.
+        if action not in {"prepare_weak_titles", "prepare_weak_descriptions"}:
+            return {
+                "status": "blocked",
+                "operation_id": operation_id,
+                "reason": (
+                    f"AI executor v1 не поддерживает {action}"
+                ),
+                "ai_calls_made": 0,
+                "changed_avito": False,
+            }
+
+        # ---------------------------------------------
+        # MARK RUNNING BEFORE EXTERNAL CALL
+        # ---------------------------------------------
+
+        task["status"] = "ai_running"
+        task["ai_started_at"] = (
+            _dt_kape.utcnow().isoformat()
+        )
+
+        row.value = _json_kape.dumps(
+            task,
+            ensure_ascii=False,
+        )
+
+        db.commit()
+
+        # Уникальное имя в общем api_usage.
+        _content_kind = "descriptions" if action == "prepare_weak_descriptions" else "titles"
+        usage_operation = (
+            "kpi_prepare_" + _content_kind + ":" + str(operation_id)
+        )
+
+        try:
+            from gigachat.models import (
+                Messages,
+                MessagesRole,
+            )
+            from gigachat_pool import (
+                chat_with_fallback,
+            )
+
+            # Генератор должен видеть тот же источник фактов,
+            # относительно которого его затем проверяет Fact Guard.
+            #
+            # Раньше генератор видел в основном title/views/contacts,
+            # а Fact Guard видел полный feed_items. Из-за этой
+            # асимметрии модель начинала додумывать материал,
+            # состояние и другие характеристики.
+
+            _generation_items_full = (
+                _kpi_enrich_prepare_items_from_feed(
+                    db,
+                    req.account_id,
+                    task.get("items") or [],
+                )
+            )
+
+            # Для генерации TITLE намеренно передаём только
+            # title + description как фактологическую базу.
+            #
+            # Price/category/params остаются доступны Fact Guard,
+            # но не провоцируют генератор вставлять их в заголовок.
+            _generation_items = []
+
+            for _src_item in _generation_items_full:
+                _clean_item = dict(_src_item)
+
+                _facts = (
+                    _clean_item.get("source_facts")
+                    or {}
+                )
+
+                _clean_item["source_facts"] = {
+                    "title":
+                        _facts.get("title"),
+
+                    "description":
+                        _facts.get("description"),
+                }
+
+                _generation_items.append(
+                    _clean_item
+                )
+
+            _generation_task = dict(task)
+
+            _generation_task["items"] = (
+                _generation_items
+            )
+
+            prompt = (
+                _kpi_build_descriptions_prompt(_generation_task)
+                if action == "prepare_weak_descriptions"
+                else _kpi_build_titles_prompt(_generation_task)
+            )
+
+            messages = [
+                Messages(
+                    role=MessagesRole.SYSTEM,
+                    content=(
+                        "Ты аккуратный Avito-копирайтер. "
+                        "Следуй контракту JSON буквально."
+                    ),
+                ),
+                Messages(
+                    role=MessagesRole.USER,
+                    content=prompt,
+                ),
+            ]
+
+            # =========================================
+            # РОВНО ОДИН AI CALL
+            # =========================================
+
+            raw = chat_with_fallback(
+                messages=messages,
+
+                # Низкая температура — это рабочая
+                # оптимизация, а не креатив ради креатива.
+                temperature=0.2,
+
+                # Для 5 коротких заголовков этого
+                # более чем достаточно.
+                max_tokens=1800,
+
+                timeout=60,
+
+                account_id=req.account_id,
+                operation=usage_operation,
+            )
+
+            parsed = _kpi_extract_json_object(
+                raw
+            )
+
+            proposal = (
+                _kpi_validate_description_proposals(task, parsed)
+                if action == "prepare_weak_descriptions"
+                else _kpi_validate_title_proposals(task, parsed)
+            )
+
+            # =========================================
+            # SECOND INDEPENDENT FACT GUARD
+            # =========================================
+            # Генератор предлагает текст.
+            # Независимый второй проход проверяет,
+            # что новый title не добавляет фактов,
+            # которых нет в исходном объявлении.
+            fact_guard = (
+                _kpi_run_description_fact_guard(db, req.account_id, operation_id, task, proposal)
+                if action == "prepare_weak_descriptions"
+                else _kpi_run_title_fact_guard(db, req.account_id, operation_id, task, proposal)
+            )
+
+            # Fact Guard работает ПОЭЛЕМЕНТНО.
+            #
+            # Один плохой title не должен уничтожать весь batch:
+            # безопасные предложения сохраняем,
+            # неподтверждённые отклоняем.
+            _fg_result = (
+                fact_guard.get("result")
+                or {}
+            )
+
+            _fg_checks = (
+                _fg_result.get("checks")
+                or []
+            )
+
+            _fg_safe_ids = {
+                str(x.get("item_id"))
+                for x in _fg_checks
+                if x.get("safe") is True
+            }
+
+            _fg_rejected = (
+                _fg_result.get("unsafe")
+                or []
+            )
+
+            _safe_proposal = [
+                x
+                for x in proposal
+                if str(x.get("item_id"))
+                in _fg_safe_ids
+            ]
+
+            if not _safe_proposal:
+                # Это НЕ технический сбой AI.
+                # Модель ответила, JSON валиден, Fact Guard штатно
+                # забраковал контент по фактам.
+                #
+                # Передаём структурированный контекст в общий
+                # failure-path; там статус станет proposal_rejected,
+                # а не ai_failed.
+                task["_fact_guard_all_rejected"] = True
+                task["_fact_guard_rejected"] = _fg_rejected
+
+                raise ValueError(
+                    "FACT_GUARD_ALL_REJECTED"
+                )
+
+            # Дальше в Apply попадут только доказанно
+            # безопасные предложения.
+            proposal = _safe_proposal
+
+            fact_guard_summary = {
+                "safe_count":
+                    len(_safe_proposal),
+
+                "rejected_count":
+                    len(_fg_rejected),
+
+                "rejected":
+                    _fg_rejected,
+
+                "checks":
+                    _fg_checks,
+            }
+
+        except Exception as exc:
+            # KPI_FACT_GUARD_REJECTION_NOT_AI_FAILURE_V1
+            # A valid AI response that is rejected by the independent fact guard
+            # is a normal safety outcome, not a provider/AI technical failure.
+            # Persist it as proposal_rejected so the state machine can finalize
+            # the hypothesis and avoid repeatedly paying for the same unsafe idea.
+            _fact_guard_rejected_final = (
+                str(exc) == "FACT_GUARD_ALL_REJECTED"
+                or bool(task.get("_fact_guard_all_rejected"))
+            )
+            # KPI_UNCHANGED_TITLE_TERMINAL_NOOP_V1: unchanged valid title is a content no-op.
+            _unchanged_title_noop = ("AI не изменил title" in str(exc))
+
+            db.expire_all()
+
+            fresh = _kpi_find_prepare_task(
+                db,
+                req.account_id,
+                operation_id,
+            )
+
+            if fresh:
+                failed_task = fresh["data"]
+
+                if _unchanged_title_noop:
+                    failed_task["status"] = "terminal_noop_or_unpublishable"
+                    failed_task["terminal_at"] = _dt_kape.utcnow().isoformat()
+                    failed_task["terminal_reason"] = "ai_unchanged_title"
+                    failed_task.pop("ai_failed_at", None)
+                    failed_task.pop("ai_error", None)
+                elif _fact_guard_rejected_final:
+                    failed_task["status"] = "proposal_rejected"
+                    failed_task["proposal_rejected_at"] = (
+                        _dt_kape.utcnow().isoformat()
+                    )
+                    failed_task["proposal_rejected_reason"] = "fact_guard_all_rejected"
+                    failed_task["fact_guard_rejected"] = task.get("_fact_guard_rejected") or []
+                    failed_task.pop("ai_failed_at", None)
+                    failed_task.pop("ai_error", None)
+                else:
+                    failed_task["status"] = "ai_failed"
+                    failed_task["ai_failed_at"] = (
+                        _dt_kape.utcnow().isoformat()
+                    )
+                    failed_task["ai_error"] = (
+                        str(exc)[:500]
+                    )
+
+                fresh["row"].value = (
+                    _json_kape.dumps(
+                        failed_task,
+                        ensure_ascii=False,
+                    )
+                )
+
+                db.commit()
+
+            # -----------------------------------------
+            # ECONOMICS ON FAILURE
+            # -----------------------------------------
+            # Если генератор или Fact Guard уже сделали
+            # внешний AI-вызов, расход нельзя считать нулевым.
+
+            _failure_generation_operation = (
+                "kpi_prepare_" + _content_kind + ":" + str(operation_id)
+            )
+
+            _failure_fact_guard_operation = (
+                "kpi_fact_guard_" + _content_kind + ":" + str(operation_id)
+            )
+
+            _failure_generation_cost = (
+                _kpi_ai_usage_cost_by_operation(
+                    req.account_id,
+                    _failure_generation_operation,
+                )
+            )
+
+            _failure_fact_guard_cost = (
+                _kpi_ai_usage_cost_by_operation(
+                    req.account_id,
+                    _failure_fact_guard_operation,
+                )
+            )
+
+            _failure_actual_cost = round(
+                _failure_generation_cost
+                + _failure_fact_guard_cost,
+                4,
+            )
+
+            if _failure_actual_cost > 0:
+                try:
+                    _failure_ledger = (
+                        _kpi_ai_commit_internal(
+                            db,
+                            req.account_id,
+                            operation_id,
+                            _failure_actual_cost,
+                        )
+                    )
+                except Exception as _ledger_exc:
+                    _failure_ledger = {
+                        "status": "commit_error",
+                        "reason": str(_ledger_exc)[:300],
+                    }
+
+                _failure_cost_source = "api_usage"
+
+            else:
+                try:
+                    _failure_ledger = (
+                        _kpi_ai_release_internal(
+                            db,
+                            req.account_id,
+                            operation_id,
+                        )
+                    )
+                except Exception as _release_exc:
+                    _failure_ledger = {
+                        "status": "release_error",
+                        "reason": str(_release_exc)[:300],
+                    }
+
+                _failure_cost_source = "no_usage_release"
+
+            # Сохраняем экономику даже у отклонённой задачи.
+            try:
+                db.expire_all()
+
+                _fresh_failed = _kpi_find_prepare_task(
+                    db,
+                    req.account_id,
+                    operation_id,
+                )
+
+                if _fresh_failed:
+                    _failed_data = _fresh_failed["data"]
+
+                    _failed_data["ai_cost"] = {
+                        "actual_api_usage_rub":
+                            _failure_actual_cost,
+
+                        "generation_rub":
+                            _failure_generation_cost,
+
+                        "fact_guard_rub":
+                            _failure_fact_guard_cost,
+
+                        "source":
+                            _failure_cost_source,
+
+                        "ledger_result":
+                            _failure_ledger.get("status"),
+                    }
+
+                    _fresh_failed["row"].value = (
+                        _json_kape.dumps(
+                            _failed_data,
+                            ensure_ascii=False,
+                        )
+                    )
+
+                    db.commit()
+
+            except Exception:
+                pass
+
+            return {
+                "status": ("terminal_noop_or_unpublishable" if _unchanged_title_noop else ("proposal_rejected" if _fact_guard_rejected_final else "ai_failed")),
+                "operation_id": operation_id,
+                "reason": ("Все предложения отклонены Fact Guard как неподтверждённые" if _fact_guard_rejected_final else str(exc)[:500]),
+
+                "ai_calls_made": 1,
+
+                "ai_cost_rub":
+                    _failure_actual_cost,
+
+                "cost_source":
+                    _failure_cost_source,
+
+                "changed_avito": False,
+            }
+
+        # =====================================================
+        # COST
+        # =====================================================
+
+        generation_cost = (
+            _kpi_ai_usage_cost_by_operation(
+                req.account_id,
+                usage_operation,
+            )
+        )
+
+        fact_guard_operation = (
+            "kpi_fact_guard_" + _content_kind + ":" + str(operation_id)
+        )
+
+        fact_guard_cost = (
+            _kpi_ai_usage_cost_by_operation(
+                req.account_id,
+                fact_guard_operation,
+            )
+        )
+
+        actual_cost = round(
+            generation_cost
+            + fact_guard_cost,
+            4,
+        )
+
+        reserved_cost = float(
+            task.get("estimated_ai_rub")
+            or 0
+        )
+
+        # Если provider не оставил usage-запись,
+        # НЕЛЬЗЯ считать запрос бесплатным.
+        #
+        # Для защитного KPI-лимита фиксируем резерв.
+        if actual_cost > 0:
+            ledger_cost = actual_cost
+            cost_source = "api_usage"
+        else:
+            ledger_cost = reserved_cost
+            cost_source = "reserved_fallback"
+
+        # =====================================================
+        # COMMIT KPI LEDGER
+        # =====================================================
+
+        ledger_result = (
+            _kpi_ai_commit_internal(
+                db,
+                req.account_id,
+                operation_id,
+                ledger_cost,
+            )
+        )
+
+        # =====================================================
+        # SAVE PROPOSAL
+        # =====================================================
+
+        db.expire_all()
+
+        fresh = _kpi_find_prepare_task(
+            db,
+            req.account_id,
+            operation_id,
+        )
+
+        if not fresh:
+            return {
+                "status": "error",
+                "operation_id": operation_id,
+                "reason": (
+                    "Prepare task исчезла после AI-вызова"
+                ),
+                "ai_calls_made": 1,
+                "changed_avito": False,
+            }
+
+        task = fresh["data"]
+
+        task["status"] = "proposal_ready"
+
+        task["proposal"] = proposal
+
+        task["fact_guard"] = (
+            fact_guard_summary
+        )
+
+        task["ai_completed_at"] = (
+            _dt_kape.utcnow().isoformat()
+        )
+
+        task["ai_usage_operation"] = (
+            usage_operation
+        )
+
+        task["ai_cost"] = {
+            "actual_api_usage_rub":
+                actual_cost,
+
+            "generation_rub":
+                generation_cost,
+
+            "fact_guard_rub":
+                fact_guard_cost,
+
+            "ledger_committed_rub":
+                round(ledger_cost, 4),
+
+            "source":
+                cost_source,
+
+            "ledger_result":
+                ledger_result.get("status"),
+        }
+
+        # Сам raw ответ не сохраняем целиком:
+        # меньше мусора в Storage.
+        task["ai_response_validated"] = True
+
+        fresh["row"].value = (
+            _json_kape.dumps(
+                task,
+                ensure_ascii=False,
+            )
+        )
+
+        db.commit()
+
+        _audit_log(
+            req.account_id,
+            "kpi_ai_prepare",
+            (
+                f"BORIS подготовил новые заголовки "
+                f"для {len(proposal)} слабых объявлений; "
+                f"стоимость KPI-ledger "
+                f"{ledger_cost:.4f} ₽"
+            ),
+            actor="boris_kpi_auto",
+        )
+
+        return {
+            "status": "proposal_ready",
+
+            "operation_id":
+                operation_id,
+
+            "action":
+                action,
+
+            "proposal":
+                proposal,
+
+            "ai_calls_made":
+                1,
+
+            "ai_cost_rub":
+                round(ledger_cost, 4),
+
+            "cost_source":
+                cost_source,
+
+            "changed_feed":
+                False,
+
+            "changed_avito":
+                False,
+
+            "next_stage":
+                "proposal_to_apply",
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_prepare_dispatch")
+def kpi_prepare_dispatch(account_id: str):
+    """
+    Один тик prepare-dispatcher.
+
+    ПОКА НЕ ВЫЗЫВАЕТ AI.
+
+    Его задача сейчас:
+    - найти одно ready_for_ai;
+    - вернуть точное задание следующему AI-слою;
+    - не дать очереди бесконтрольно расти.
+
+    Один вызов = максимум одно prepare-задание.
+    """
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+
+    try:
+        entries = _kpi_prepare_queue_load(
+            db,
+            account_id,
+        )
+
+        ready = [
+            x
+            for x in entries
+            if x["data"].get("status")
+            == "ready_for_ai"
+        ]
+
+        if not ready:
+            return {
+                "status": "empty",
+                "action": "none",
+                "ai_calls_made": 0,
+            }
+
+        # Старейшее/первое задание.
+        task = ready[0]["data"]
+
+        return {
+            "status": "ready",
+            "operation_id":
+                task.get("operation_id"),
+
+            "action":
+                task.get("action"),
+
+            "items":
+                task.get("items") or [],
+
+            "reference_items":
+                task.get(
+                    "reference_items"
+                ) or [],
+
+            "estimated_ai_rub":
+                task.get(
+                    "estimated_ai_rub",
+                    0,
+                ),
+
+            "ai_calls_made": 0,
+
+            "next_stage":
+                "ai_prepare_executor",
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_prepare_cycle")
+def kpi_prepare_cycle(
+    account_id: str,
+    actions=None,
+):
+    """
+    Prepare-only AI слой.
+
+    Никаких публикаций и изменений Avito.
+
+    ВАЖНО:
+    Если actions переданы Goal Runner-ом, используем именно
+    этот уже разрешённый Runtime Guard план.
+
+    НЕ вызываем Runtime Guard повторно.
+
+    Причина:
+    Goal Runner уже получил разрешение на действие, а повторный
+    вызов Guard в том же тике может увидеть только что сработавший
+    cooldown и заблокировать собственное действие.
+
+    Пока умеет:
+    - подготовить новые заголовки слабым объявлениям;
+    - подготовить новые описания слабым объявлениям.
+
+    AI вызывается только после локального отбора слабых позиций.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kpc
+    import uuid as _uuid_kpc
+
+    db = SessionLocal()
+
+    try:
+        # Goal Runner уже передал сюда разрешённый план.
+        #
+        # НЕ вызываем kpi_runtime_guard() повторно:
+        # второй вызов в том же тике может увидеть cooldown
+        # действия, которое только что было разрешено первым
+        # вызовом Guard.
+        actions = actions or []
+
+        root = kpi_root_cause(account_id)
+
+        weak = root.get("worst_items") or []
+        best = root.get("best_items") or []
+
+        weak_by_id = {
+            str(x.get("id")): x
+            for x in weak
+            if x.get("id") is not None
+        }
+
+        # KPI_PREPARE_PUBLISHABLE_MAPPING_PREFLIGHT_V1:
+        # Do not spend AI/content work on an Avito item that cannot possibly be
+        # published through this account's authoritative feed. Exact persisted
+        # CampaignItem -> feed_identity evidence is mandatory; no fuzzy matching.
+        from app.models.campaign_item import CampaignItem as _KpiPrepareCampaignItem
+        from app.services.campaign_identity import is_canonical_writable as _is_prepare_writable
+        _feed_row_pre = db.query(Storage).filter(
+            Storage.account_id == account_id, Storage.key == "feed_items"
+        ).first()
+        _feed_ids_pre = set()
+        if _feed_row_pre and _feed_row_pre.value:
+            try:
+                for _raw_pre in (_json_kpc.loads(_feed_row_pre.value) or []):
+                    _fid_pre = str(_raw_pre.get("id") or _raw_pre.get("Id") or "").strip()
+                    if _fid_pre:
+                        _feed_ids_pre.add(_fid_pre)
+            except Exception:
+                _feed_ids_pre = set()
+        _mapped_rows_pre = db.query(_KpiPrepareCampaignItem).filter(
+            _KpiPrepareCampaignItem.account_id == account_id
+        ).all()
+        _publishable_avito_ids_pre = {
+            str(_row_pre.avito_item_id).strip()
+            for _row_pre in _mapped_rows_pre
+            if str(_row_pre.avito_item_id or "").strip()
+            and str(_row_pre.feed_identity or "").strip() in _feed_ids_pre
+            and _is_prepare_writable(_row_pre)
+        }
+
+        # KPI_PREPARE_MAPPING_SELF_HEAL_V1:
+        # Candidate selection must not dead-end on a missing persisted mapping.
+        # Before blocking a content hypothesis, ask Avito's official autoload
+        # report for the exact avito_id <-> ad_id pair once per item in this
+        # prepare cycle. No fuzzy matching and no AI call is involved.
+        _mapping_recovery_attempted_ids_pre = set()
+        _mapping_recovery_results_pre = {}
+
+        registry = _kpi_prepare_registry()
+
+        prepared = []
+        blocked = []
+
+        # Пока переводим только нужные actions
+        # в prepare-операции.
+        requested_prepare = []
+
+        for action_data in actions:
+            action = action_data.get("action")
+
+            # KPI_FIRST_IMAGE_INTENT_PRESERVATION_V1: a planner request to test
+            # the first image is a deterministic zero-cost gallery reorder only.
+            # Never broaden it into title/description AI work.
+            if action == "test_first_image":
+                requested_prepare.append({
+                    "action": "prepare_first_image_test",
+                    "candidate_items": action_data.get("candidate_items") or [],
+                })
+                continue
+
+            if action == "optimize_weak_items":
+                requested_prepare.append({
+                    "action": "prepare_weak_titles",
+                    "candidate_items":
+                        action_data.get("candidate_items")
+                        or [],
+                })
+
+                # The second content hypothesis is description, but only for
+                # items whose title hypothesis already completed without a proven
+                # positive effect. The per-item history guard below enforces this.
+                requested_prepare.append({
+                    "action": "prepare_weak_descriptions",
+                    "candidate_items": action_data.get("candidate_items") or [],
+                })
+                # Third sequential hypothesis: change only the first image by
+                # reordering the already-authoritative gallery. No image generation,
+                # no new facts, and never in parallel with title/description.
+                requested_prepare.append({
+                    "action": "prepare_first_image_test",
+                    "candidate_items": action_data.get("candidate_items") or [],
+                })
+
+        for req in requested_prepare:
+            action = req["action"]
+            spec = registry.get(action)
+
+            if not spec:
+                blocked.append({
+                    "action": action,
+                    "reason": "Неизвестная prepare-операция",
+                })
+                continue
+
+            candidate_ids = [
+                str(x.get("id"))
+                for x in req.get("candidate_items", [])
+                if x.get("id") is not None
+            ]
+
+            items = [
+                weak_by_id[x]
+                for x in candidate_ids
+                if x in weak_by_id
+            ][:spec["max_items"]]
+
+            _preflight_candidate_ids = {str(x.get("id")) for x in items if x.get("id") is not None}
+            _unpublishable_mapping_ids = sorted(_preflight_candidate_ids - _publishable_avito_ids_pre)
+
+            # Self-heal exact canonical identity before giving up. This reuses
+            # the same official autoload evidence already required by the later
+            # publish lifecycle. Each item is attempted at most once per prepare
+            # cycle so title/description/image hypotheses cannot hammer Avito.
+            _recovery_new_ids = sorted(
+                set(_unpublishable_mapping_ids) - _mapping_recovery_attempted_ids_pre
+            )
+            if _recovery_new_ids:
+                _mapping_recovery_attempted_ids_pre.update(_recovery_new_ids)
+                try:
+                    _recovery_result = _recover_canonical_identities_batch_from_autoload(
+                        account_id,
+                        _recovery_new_ids,
+                    )
+                except Exception as _mapping_recovery_exc:
+                    _recovery_result = {
+                        "status": "blocked",
+                        "reason": "prepare_mapping_recovery_error",
+                        "detail": f"{type(_mapping_recovery_exc).__name__}:{_mapping_recovery_exc}"[:240],
+                        "bound": [],
+                        "exists": [],
+                    }
+                for _rid in _recovery_new_ids:
+                    _mapping_recovery_results_pre[_rid] = _recovery_result
+
+                # Recovery commits in an isolated DB session. Re-read exact
+                # CampaignItem identities and intersect them with this account's
+                # authoritative feed IDs; never accept a mapping without both.
+                if (
+                    str((_recovery_result or {}).get("status") or "") == "ok"
+                    and (
+                        (_recovery_result or {}).get("bound")
+                        or (_recovery_result or {}).get("exists")
+                    )
+                ):
+                    _mapped_rows_pre = db.query(_KpiPrepareCampaignItem).filter(
+                        _KpiPrepareCampaignItem.account_id == account_id
+                    ).all()
+                    _publishable_avito_ids_pre = {
+                        str(_row_pre.avito_item_id).strip()
+                        for _row_pre in _mapped_rows_pre
+                        if str(_row_pre.avito_item_id or "").strip()
+                        and str(_row_pre.feed_identity or "").strip() in _feed_ids_pre
+                        and _is_prepare_writable(_row_pre)
+                    }
+                    _unpublishable_mapping_ids = sorted(
+                        _preflight_candidate_ids - _publishable_avito_ids_pre
+                    )
+
+            items = [x for x in items if str(x.get("id")) in _publishable_avito_ids_pre]
+            if not items and _unpublishable_mapping_ids:
+                blocked.append({
+                    "action": action,
+                    "reason": "Нет доказанной связи объявления с рабочим фидом; BORIS выполнил безопасную попытку точного self-heal и не тратит AI на непубликуемое изменение",
+                    "blocked_by": "publishable_mapping_preflight",
+                    "mapping_recovery_required": True,
+                    "mapping_recovery_attempted": True,
+                    "mapping_recovery": {
+                        _rid: _mapping_recovery_results_pre.get(_rid)
+                        for _rid in _unpublishable_mapping_ids
+                    },
+                    "item_ids": _unpublishable_mapping_ids,
+                })
+                continue
+
+            # Learning / concurrency guard. A waiting/published-observing item must
+            # not receive a second mutation, and a title hypothesis that already
+            # proved worse/no-clear-effect is not generated again for the same item.
+            _, _apply_history_for_prepare = _kpi_apply_log_load(db, account_id)
+            _active_item_ids = set()
+            _failed_title_item_ids = set()
+            _failed_description_item_ids = set()
+            _failed_first_image_item_ids = set()
+            _active_states_for_item = {
+                "prepared", "safe_feed_ready", "feed_applied", "publishing",
+                "publish_requested", "publish_failed", "published",
+                "effect_rollback_requested", "rollback_feed_ready",
+                "rollback_publish_failed",
+            }
+            for _old_op in _apply_history_for_prepare:
+                _old_iid = str(_old_op.get("avito_item_id") or _old_op.get("item_id") or "")
+                if not _old_iid:
+                    continue
+                _old_status = str(_old_op.get("status") or "")
+                _old_effect = str((_old_op.get("effect") or {}).get("status") or "")
+                if _old_status in _active_states_for_item and not (
+                    _old_status == "published" and _old_effect in {"improved", "worse", "insufficient_data", "no_clear_effect", "kept", "try_next_action"}
+                ):
+                    _active_item_ids.add(_old_iid)
+                if "title" in (_old_op.get("changes") or {}) and (
+                    _old_effect in {"worse", "rollback_requested", "try_next_action"}
+                    or _old_status in {"effect_no_clear_result", "effect_rollback_requested"}
+                ):
+                    _failed_title_item_ids.add(_old_iid)
+                if "description" in (_old_op.get("changes") or {}) and (
+                    _old_effect in {"worse", "rollback_requested", "try_next_action"}
+                    or _old_status in {"effect_no_clear_result", "effect_rollback_requested"}
+                ):
+                    _failed_description_item_ids.add(_old_iid)
+                if "images" in (_old_op.get("changes") or {}) and (
+                    _old_effect in {"worse", "rollback_requested", "try_next_action"}
+                    or _old_status in {"effect_no_clear_result", "effect_rollback_requested"}
+                ):
+                    _failed_first_image_item_ids.add(_old_iid)
+
+            _before_guard_ids = {str(x.get("id")) for x in items}
+            if action == "prepare_weak_titles":
+                items = [x for x in items if str(x.get("id")) not in _active_item_ids and str(x.get("id")) not in _failed_title_item_ids]
+                _removed_failed = sorted(_before_guard_ids & _failed_title_item_ids)
+            elif action == "prepare_weak_descriptions":
+                # Description is a second hypothesis, never a parallel first move.
+                items = [x for x in items if str(x.get("id")) not in _active_item_ids
+                         and str(x.get("id")) in _failed_title_item_ids
+                         and str(x.get("id")) not in _failed_description_item_ids]
+                _removed_failed = sorted(_before_guard_ids & _failed_description_item_ids)
+            elif action == "prepare_first_image_test":
+                # First image is the third hypothesis and is allowed only after
+                # title AND description both completed without proven improvement.
+                items = [x for x in items if str(x.get("id")) not in _active_item_ids
+                         and str(x.get("id")) in _failed_title_item_ids
+                         and str(x.get("id")) in _failed_description_item_ids
+                         and str(x.get("id")) not in _failed_first_image_item_ids]
+                _removed_failed = sorted(_before_guard_ids & _failed_first_image_item_ids)
+            else:
+                _removed_failed = []
+            _removed_active = sorted(_before_guard_ids & _active_item_ids)
+
+            if not items:
+                _why = "Нет подходящих слабых объявлений"
+                if _removed_active:
+                    _why = "По подходящим объявлениям уже идёт публикация/наблюдение; второе изменение запрещено"
+                elif _removed_failed:
+                    _why = "Та же контент-стратегия уже не дала эффекта; BORIS не повторяет её без нового доказательства"
+                elif action == "prepare_weak_descriptions":
+                    _why = "Description-гипотеза запускается только после завершённой неуспешной title-гипотезы"
+                elif action == "prepare_first_image_test":
+                    _why = "First-image тест запускается только после завершённых неуспешных title и description гипотез"
+                blocked.append({
+                    "action": action,
+                    "reason": _why,
+                    "blocked_by": "active_item_or_failed_strategy" if (_removed_active or _removed_failed) else "no_items",
+                    "active_item_ids": _removed_active,
+                    "failed_strategy_item_ids": _removed_failed,
+                })
+                continue
+
+            # Не создаём одинаковое prepare-задание каждые
+            # 10 минут на те же item_id.
+            duplicate = _kpi_prepare_has_active_duplicate(
+                db,
+                account_id,
+                action,
+                items,
+            )
+
+            if duplicate:
+                blocked.append({
+                    "action": action,
+                    "reason": "Такое prepare-задание уже существует",
+                    "blocked_by": "prepare_duplicate",
+                    "existing_operation_id":
+                        duplicate.get("operation_id"),
+                })
+                continue
+
+            operation_id = (
+                f"kpi-ai-{action}-"
+                f"{_uuid_kpc.uuid4().hex[:12]}"
+            )
+
+            if action == "prepare_first_image_test":
+                # Deterministic, zero-cost first-image experiment. The source is
+                # the exact authoritative feed row mapped to this Avito item.
+                proposals = []
+                usable_items = []
+                for _candidate in items[:1]:
+                    _iid = str(_candidate.get("id") or "")
+                    from app.services import campaign_identity as _CID_IMG
+                    _ci = _CID_IMG.resolve(db, account_id, _iid)
+                    if not _ci or not str(getattr(_ci, "feed_identity", "") or "").strip():
+                        continue
+                    _feed_row_img, _feed_items_img = _kpi_feed_items_load(db, account_id)
+                    _fid_img = str(_ci.feed_identity or "").strip()
+                    _matches_img = [x for x in (_feed_items_img or []) if str(x.get("id") or x.get("Id") or "").strip() == _fid_img]
+                    if len(_matches_img) != 1:
+                        continue
+                    _gallery = list((_matches_img[0].get("images") or _matches_img[0].get("Images") or []))
+                    _gallery = [str(x or "").strip() for x in _gallery if str(x or "").strip()]
+                    if len(_gallery) < 2 or len(set(_gallery)) != len(_gallery):
+                        continue
+                    _new_gallery = list(_gallery)
+                    _new_gallery[0], _new_gallery[1] = _new_gallery[1], _new_gallery[0]
+                    proposals.append({"item_id":_iid,"old_images":_gallery,"new_images":_new_gallery,
+                                      "reason":"Тестируем другое уже существующее фото первым; состав галереи не меняется"})
+                    usable_items.append(_candidate)
+                if not proposals:
+                    blocked.append({"action":action,"reason":"Нет canonical объявления с минимум двумя уникальными изображениями в authoritative feed","blocked_by":"no_safe_gallery"})
+                    continue
+                payload = {
+                    "operation_id":operation_id,"action":action,"items":usable_items,
+                    "reference_items":[],"signature":_kpi_prepare_signature(action,usable_items),
+                    "status":"proposal_ready","estimated_ai_rub":0.0,"proposal":proposals,
+                    "deterministic":True,"ai_calls_made":0,
+                }
+                row = Storage(account_id=account_id,key=f"kpi_prepare:{operation_id}",
+                              value=_json_kpc.dumps(payload,ensure_ascii=False))
+                db.add(row); db.commit(); prepared.append(payload)
+                continue
+
+            reserve = _kpi_ai_reserve_internal(
+                db,
+                account_id,
+                operation_id,
+                action,
+                spec["estimated_ai_rub"],
+            )
+
+            if reserve.get("status") != "reserved":
+                blocked.append({
+                    "action": action,
+                    "reason": reserve.get("reason")
+                    or reserve.get("status"),
+                })
+                continue
+
+            try:
+                # На этом этапе ещё НЕ вызываем GPT.
+                # Создаём структурированное AI-задание,
+                # чтобы следующим патчем подключить один
+                # батч-вызов модели на несколько объявлений.
+
+                payload = {
+                    "operation_id": operation_id,
+                    "action": action,
+                    "items": items,
+                    "reference_items": best[:5],
+
+                    "signature":
+                        _kpi_prepare_signature(
+                            action,
+                            items,
+                        ),
+
+                    "status": "ready_for_ai",
+
+                    "estimated_ai_rub":
+                        spec["estimated_ai_rub"],
+                }
+
+                key = (
+                    f"kpi_prepare:{operation_id}"
+                )
+
+                row = Storage(
+                    account_id=account_id,
+                    key=key,
+                    value=_json_kpc.dumps(
+                        payload,
+                        ensure_ascii=False,
+                    ),
+                )
+
+                db.add(row)
+                db.commit()
+
+                prepared.append(payload)
+
+            except Exception as exc:
+                _kpi_ai_release_internal(
+                    db,
+                    account_id,
+                    operation_id,
+                )
+
+                blocked.append({
+                    "action": action,
+                    "reason": str(exc)[:300],
+                })
+
+        return {
+            "status": "ok",
+            "prepared": prepared,
+            "blocked": blocked,
+            "changed_avito": False,
+            "ai_calls_made": 0,
+        }
+
+    finally:
+        db.close()
+
+
+@router.post("/kpi_execute_cycle")
+def kpi_execute_cycle(account_id: str, allow_stale_non_money: bool = False):
+    """
+    KPI Executor v1.
+
+    Берёт разрешённый Runtime Guard план и исполняет
+    только операции, зарегистрированные в SAFE registry.
+
+    Любое неизвестное действие блокируется.
+    """
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+
+    try:
+        guarded = kpi_runtime_guard(account_id, allow_stale_non_money=allow_stale_non_money)
+
+        if guarded.get("status") != "ok":
+            return {
+                "status": "blocked",
+                "reason": guarded.get("reason")
+                or "Runtime Guard заблокировал цикл",
+                "executed": [],
+                "blocked": [],
+            }
+
+        if not guarded.get("execute"):
+            return {
+                "status": "ok",
+                "executed": [],
+                "blocked": [],
+                "reason": "В этом цикле действий не требуется",
+                "next_check_minutes": guarded.get(
+                    "next_check_minutes",
+                    60,
+                ),
+            }
+
+        registry = _kpi_executor_registry()
+
+        handlers = {
+            "_kpi_exec_deep_item_analysis":
+                _kpi_exec_deep_item_analysis,
+
+            "_kpi_exec_deep_conversion_analysis":
+                _kpi_exec_deep_conversion_analysis,
+
+            "_kpi_exec_recover_canonical_mapping":
+                _kpi_exec_recover_canonical_mapping,
+
+            "_kpi_exec_cpx_adjust_bid":
+                _kpi_exec_cpx_adjust_bid,
+
+
+            "_kpi_exec_increase_reach": _kpi_exec_increase_reach,
+            "_kpi_exec_reduce_cpl": _kpi_exec_reduce_cpl,
+            "_kpi_exec_optimize_weak_items":
+                _kpi_exec_optimize_weak_items,
+            "_kpi_exec_expand_inventory":
+                _kpi_exec_expand_inventory,
+        }
+
+        executed = []
+        blocked = []
+
+        for action_data in guarded.get("actions", []):
+
+            action = action_data.get("action")
+
+            spec = registry.get(action)
+
+            # Fail closed.
+            if not spec:
+                blocked.append({
+                    "action": action,
+                    "reason": "Операция отсутствует в Executor Registry",
+                })
+                continue
+
+            # v1 вообще не разрешает visible-change операции.
+            if spec.get("visible_change"):
+                blocked.append({
+                    "action": action,
+                    "reason": "Visible change запрещён Executor v1",
+                })
+                continue
+
+            handler = handlers.get(spec.get("handler"))
+
+            if not handler:
+                blocked.append({
+                    "action": action,
+                    "reason": "Handler операции не найден",
+                })
+                continue
+
+            try:
+                result = handler(
+                    account_id,
+                    action_data,
+                )
+            except Exception as exc:
+                result = {
+                    "status": "error",
+                    "action": action,
+                    "message": str(exc)[:300],
+                    "changed_avito": False,
+                }
+
+            item_ids = [
+                x.get("id")
+                for x in (
+                    action_data.get("candidate_items")
+                    or []
+                )
+                if x.get("id") is not None
+            ]
+
+            _kpi_action_history_append(
+                db,
+                account_id,
+                action,
+                result,
+                item_ids=item_ids,
+            )
+
+            executed.append({
+                "action": action,
+                "result": result,
+            })
+
+        db.commit()
+
+        # Контрольная защита:
+        # v1 не должен изменить Avito ни при каком результате.
+        any_changed = any(
+            x.get("result", {}).get(
+                "changed_avito",
+                False,
+            )
+            for x in executed
+        )
+
+        return {
+            "status": "ok",
+            "executed": executed,
+            "blocked": blocked,
+            "changed_avito": any_changed,
+            "next_check_minutes": guarded.get(
+                "next_check_minutes",
+                60,
+            ),
+            "economics": guarded.get(
+                "economics",
+                {},
+            ),
+        }
+
+    finally:
+        db.close()
+
+@router.get("/kpi_runtime_guard")
+def kpi_runtime_guard(account_id: str, allow_stale_non_money: bool = False):
+    """
+    Read-only финальный предохранитель перед Executor.
+
+    Фильтрует план Orchestrator по:
+    - дневному AI-бюджету;
+    - AI-бюджету текущего цикла;
+    - cooldown действий;
+    - повторной обработке тех же item_id;
+    - конфликтующим действиям.
+
+    Ничего не выполняет.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_krg
+    from datetime import datetime as _dt_krg, date as _date_krg
+
+    db = SessionLocal()
+
+    try:
+        plan = kpi_orchestrate(account_id, allow_stale_non_money=allow_stale_non_money)
+
+        if plan.get("status") != "ok":
+            return {
+                "status": "blocked",
+                "reason": plan.get("reason") or "Orchestrator недоступен",
+                "actions": [],
+                "read_only": True,
+            }
+
+        if not plan.get("execute"):
+            return {
+                "status": "ok",
+                "execute": False,
+                "reason": plan.get("reason") or "Действия не требуются",
+                "actions": [],
+                "blocked_actions": [],
+                "read_only": True,
+            }
+
+        runtime_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "kpi_runtime_settings",
+            )
+            .first()
+        )
+
+        runtime = {}
+
+        if runtime_row:
+            try:
+                runtime = _json_krg.loads(runtime_row.value)
+            except Exception:
+                runtime = {}
+
+        ai_daily_limit = float(
+            runtime.get(
+                "ai_daily_limit_rub",
+                plan.get("economics", {}).get("ai_daily_limit_rub", 30),
+            )
+            or 30
+        )
+
+        # Cooldown в минутах.
+        cooldowns = {
+            # KPI_ACTION_OVER_ANALYSIS_V1: repeated read-only diagnosis must not
+            # consume every hourly cycle while the lead goal is missed. One deep
+            # diagnosis per 6h is enough unless a mutation/result creates new evidence.
+            "deep_item_analysis": 360,
+            "deep_conversion_analysis": 360,
+            "optimize_weak_items": 360,
+            "rewrite_weak_titles": 1440,
+            "test_first_image": 1440,
+            "increase_reach": 60,
+            "reduce_cpl": 60,
+            "expand_inventory": 1440,
+        }
+
+        custom_cooldowns = runtime.get("action_cooldowns_minutes") or {}
+
+        for k, v in custom_cooldowns.items():
+            try:
+                cooldowns[str(k)] = max(int(v), 0)
+            except Exception:
+                pass
+
+        _, history = _kpi_action_history_load(
+            db,
+            account_id,
+        )
+
+        day = _kpi_marketing_today().isoformat()
+
+        _, ai_data = _kpi_ai_ledger_load(
+            db,
+            account_id,
+            day,
+        )
+
+        ai_spent, ai_reserved = _kpi_ai_totals(ai_data)
+
+        ai_available = max(
+            ai_daily_limit - ai_spent - ai_reserved,
+            0,
+        )
+
+        now = _dt_krg.utcnow()
+
+        selected = []
+        blocked = []
+
+        # Item IDs уже заняты более приоритетным действием
+        # в ЭТОМ ЖЕ цикле.
+        claimed_item_ids = set()
+
+        # Некоторые действия поглощают более узкие.
+        #
+        # optimize_weak_items — общий сценарий оптимизации,
+        # поэтому отдельный rewrite_weak_titles на тех же item_id
+        # в одном цикле запускать не надо.
+        dominating_actions = {
+            "optimize_weak_items": {
+                "rewrite_weak_titles",
+            }
+        }
+
+        selected_action_names = set()
+
+        # KPI_MUTATION_BUDGET_BY_URGENCY_V1: urgency may shorten observation
+        # cadence, but it must not turn a recovery cycle into a burst of many
+        # simultaneous mutations. One primary mutation per cycle keeps causal
+        # attribution intact; read-only diagnosis may still run in parallel.
+        _mutation_actions_guard = {
+            "increase_reach", "reduce_cpl", "cpx_adjust_bid",
+            "optimize_weak_items", "rewrite_weak_titles",
+            "test_first_image", "expand_inventory",
+        }
+        _max_mutations_per_cycle = 1
+        _selected_mutations = 0
+
+        for candidate in plan.get("actions", []):
+
+            action = candidate.get("action")
+
+            ai_estimate = float(
+                candidate.get("ai_estimate_rub") or 0
+            )
+
+            # KPI_NON_MONEY_PARALLEL_CONTENT_BUDGET_V1: in the explicitly
+            # non-money lane, a blocked money-saving hypothesis must not consume
+            # the only mutation slot and starve disjoint prepare-only content work.
+            # Monetary execution remains fenced later in kpi_goal_tick; this guard
+            # only permits the already-disjoint optimize cohort to coexist in plan.
+            _non_money_parallel_content = bool(allow_stale_non_money and action in {"optimize_weak_items", "rewrite_weak_titles"})
+            if action in _mutation_actions_guard and _selected_mutations >= _max_mutations_per_cycle and not _non_money_parallel_content:
+                blocked.append({
+                    **candidate,
+                    "blocked_reason": "В этом цикле уже выбрана одна измеримая гипотеза; остальные изменения ждут следующего окна.",
+                    "blocked_by": "mutation_budget_per_cycle",
+                })
+                continue
+
+            item_ids = {
+                str(x.get("id"))
+                for x in candidate.get("candidate_items", [])
+                if x.get("id") is not None
+            }
+
+            # --------------------------------------------------
+            # 1. Конфликт с более сильным действием этого цикла.
+            # --------------------------------------------------
+
+            conflict = False
+            conflict_reason = None
+
+            for dominant, children in dominating_actions.items():
+                if (
+                    action in children
+                    and dominant in selected_action_names
+                    and item_ids
+                    and item_ids & claimed_item_ids
+                ):
+                    conflict = True
+                    conflict_reason = (
+                        f"{action} поглощается действием "
+                        f"{dominant} для тех же объявлений"
+                    )
+                    break
+
+            if conflict:
+                blocked.append({
+                    **candidate,
+                    "blocked_reason": conflict_reason,
+                    "blocked_by": "same_cycle_conflict",
+                })
+                continue
+
+            # --------------------------------------------------
+            # 2. Cooldown.
+            # --------------------------------------------------
+
+            cooldown_minutes = cooldowns.get(action, 60)
+
+            relevant_history = [
+                h for h in history
+                if h.get("action") == action
+            ]
+
+            cooldown_hit = None
+
+            for h in reversed(relevant_history):
+
+                try:
+                    ts = _dt_krg.fromisoformat(
+                        str(h.get("ts"))
+                    )
+                except Exception:
+                    continue
+
+                age_minutes = (
+                    now - ts
+                ).total_seconds() / 60
+
+                if age_minutes >= cooldown_minutes:
+                    continue
+
+                old_ids = {
+                    str(x)
+                    for x in (h.get("item_ids") or [])
+                }
+
+                # Для кабинетных действий cooldown общий.
+                if not item_ids:
+                    cooldown_hit = {
+                        "age_minutes": age_minutes,
+                        "remaining_minutes": (
+                            cooldown_minutes - age_minutes
+                        ),
+                    }
+                    break
+
+                # Для item-действий блокируем только пересечение.
+                if item_ids & old_ids:
+                    cooldown_hit = {
+                        "age_minutes": age_minutes,
+                        "remaining_minutes": (
+                            cooldown_minutes - age_minutes
+                        ),
+                    }
+                    break
+
+            if cooldown_hit:
+                blocked.append({
+                    **candidate,
+                    "blocked_reason": (
+                        f"Cooldown {action}: осталось примерно "
+                        f"{round(cooldown_hit['remaining_minutes'])} мин."
+                    ),
+                    "blocked_by": "cooldown",
+                })
+                continue
+
+            # --------------------------------------------------
+            # 3. Дневная AI-себестоимость.
+            # --------------------------------------------------
+
+            if ai_estimate > ai_available:
+                blocked.append({
+                    **candidate,
+                    "blocked_reason": (
+                        f"Недостаточно AI-бюджета: "
+                        f"нужно {ai_estimate:.2f} ₽, "
+                        f"доступно {ai_available:.2f} ₽"
+                    ),
+                    "blocked_by": "ai_daily_limit",
+                })
+                continue
+
+            selected.append(candidate)
+
+            ai_available -= ai_estimate
+
+            selected_action_names.add(action)
+            if action in _mutation_actions_guard and not _non_money_parallel_content:
+                _selected_mutations += 1
+
+            if item_ids:
+                claimed_item_ids.update(item_ids)
+
+        return {
+            "status": "ok",
+            "execute": bool(selected),
+            "urgency": plan.get("urgency"),
+
+            "economics": {
+                "ai_daily_limit_rub": round(
+                    ai_daily_limit,
+                    2,
+                ),
+                "ai_spent_today_rub": round(
+                    ai_spent,
+                    4,
+                ),
+                "ai_reserved_today_rub": round(
+                    ai_reserved,
+                    4,
+                ),
+                "ai_available_before_cycle_rub": round(
+                    max(
+                        ai_daily_limit
+                        - ai_spent
+                        - ai_reserved,
+                        0,
+                    ),
+                    4,
+                ),
+                "ai_planned_after_guard_rub": round(
+                    sum(
+                        float(x.get("ai_estimate_rub") or 0)
+                        for x in selected
+                    ),
+                    4,
+                ),
+            },
+
+            "actions": selected,
+            "blocked_actions": blocked,
+
+            "next_check_minutes": (
+                plan.get("time", {}).get(
+                    "next_check_minutes",
+                    60,
+                )
+            ),
+
+            "read_only": True,
+        }
+
+    finally:
+        db.close()
+
+
+@router.get("/kpi_orchestrate")
+def kpi_orchestrate(account_id: str, allow_stale_non_money: bool = False):
+    """
+    Read-only KPI Orchestrator.
+
+    Ничего не выполняет.
+
+    Решает:
+    - достигнута ли цель;
+    - срочность;
+    - когда проверить KPI снова;
+    - какой набор действий разумно запускать параллельно;
+    - сколько действий разрешить за цикл;
+    - сколько AI-себестоимости разрешить за цикл.
+
+    Идея:
+    BORIS должен быть манёвренным, но не бесконечным и не дорогим.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_ko
+    from datetime import datetime as _dt_ko
+
+    db = SessionLocal()
+
+    try:
+        # ---------------------------------------------------------
+        # 1. Базовые данные
+        # ---------------------------------------------------------
+
+        check = kpi_check(account_id, refresh_live=not allow_stale_non_money)
+
+        if check.get("status") != "ok":
+            return {
+                "status": "blocked",
+                "reason": check.get("message") or "KPI недоступен",
+                "execute": False,
+                "read_only": True,
+            }
+        _money_lane_allowed = bool(check.get("money_actions_allowed")) and not allow_stale_non_money
+        # KPI_MONEY_ENTITLEMENT_PLANNER_GUARD_V1: fresh spend + configured budget
+        # prove economics, not a current BORIS marketing service entitlement.
+        # Planner must share the same paid-period boundary as the money executor;
+        # otherwise expired/unknown clients appear money-ready and only fail later.
+        try:
+            from app.services.control_plane_adapters_ext import marketing_service_entitlement as _marketing_entitlement_ko
+            _marketing_entitlement = _marketing_entitlement_ko(db, account_id) or {}
+        except Exception as _entitlement_exc_ko:
+            _marketing_entitlement = {"state":"unknown","source":"entitlement_check_failed","reason":type(_entitlement_exc_ko).__name__}
+        _marketing_entitlement_state_ko = str(
+            _marketing_entitlement.get("state") or "unknown"
+        ).lower()
+        _money_lane_allowed = bool(
+            _money_lane_allowed
+            and _marketing_entitlement_state_ko == "active"
+        )
+
+        # KPI_PLANNER_SERVICE_PERIOD_FAIL_CLOSED_V1:
+        # Planner/read-model must share the same commercial boundary as executor.
+        # Unknown/expired service may still finish an already-submitted/published
+        # safety tail in kpi_goal_tick, but planner must not offer NEW actions.
+        if _marketing_entitlement_state_ko != "active":
+            try:
+                _service_tail_ko = _kpi_latest_active_operation(db, account_id)
+            except Exception:
+                _service_tail_ko = None
+            _service_tail_status_ko = str(
+                (_service_tail_ko or {}).get("status") or ""
+            ) or None
+            return {
+                "status": "ok",
+                "execute": False,
+                "state": "service_period",
+                "control_state": (
+                    "service_period_expired"
+                    if _marketing_entitlement_state_ko == "expired"
+                    else "service_period_unknown"
+                ),
+                "urgency": "commercial_boundary",
+                "actions": [],
+                "blocked_actions": [],
+                "next_check_minutes": 60,
+                "service_entitlement": _marketing_entitlement,
+                "existing_lifecycle_status": _service_tail_status_ko,
+                "existing_lifecycle_operation_id": (
+                    (_service_tail_ko or {}).get("operation_id")
+                ),
+                "owner_action_required": (
+                    _marketing_entitlement_state_ko == "unknown"
+                ),
+                "next_action": (
+                    "record_explicit_marketing_paid_period"
+                    if _marketing_entitlement_state_ko == "unknown"
+                    else "wait_for_new_paid_period"
+                ),
+                "reason": (
+                    "Оплаченный период AI-маркетолога завершён; новые действия "
+                    "не планируются. Уже опубликованный safety-tail при наличии "
+                    "доводится до безопасного результата."
+                    if _marketing_entitlement_state_ko == "expired"
+                    else
+                    "Нет явного текущего оплаченного периода AI-маркетолога. "
+                    "BORIS не угадывает дату оплаты и не планирует новые AI, feed, "
+                    "публикации или деньги; уже внешний safety-tail при наличии "
+                    "может только безопасно завершиться."
+                ),
+                "read_only": True,
+            }
+
+        # KPI_PROVIDER_STATS_PLANNER_FENCE_V1:
+        # Planning must share the same factual day boundary as execution. If
+        # contact counters lag, current-day spend may remain visible but no new
+        # KPI/content/reach hypothesis is selected from an invented zero.
+        _provider_current_ko = check.get("provider_stats_current")
+        _provider_date_ko = check.get("provider_stats_date")
+        _provider_observed_ko = check.get("observed_contacts")
+        if _provider_current_ko is None:
+            _provider_today_ko = _kpi_marketing_today().isoformat()
+            try:
+                _provider_row_ko = (
+                    db.query(Storage)
+                    .filter(
+                        Storage.account_id == account_id,
+                        Storage.key == f"daily_stats:{_provider_today_ko}",
+                    )
+                    .order_by(Storage.id.desc())
+                    .first()
+                )
+                _provider_data_ko = (
+                    _json_ko.loads(_provider_row_ko.value or "{}")
+                    if _provider_row_ko else {}
+                )
+            except Exception:
+                _provider_data_ko = {}
+            _provider_date_ko = str(
+                _provider_data_ko.get("stats_date")
+                or _provider_data_ko.get("date")
+                or ""
+            )[:10] or None
+            _provider_current_ko = bool(
+                _provider_date_ko
+                and _provider_date_ko == _provider_today_ko
+            )
+            _provider_observed_ko = sum(
+                float(x.get("contacts") or 0)
+                for x in (_provider_data_ko.get("items") or [])
+                if isinstance(x, dict)
+            )
+        if _provider_current_ko is False:
+            return {
+                "status": "ok",
+                "execute": False,
+                "state": "provider_stats_lagging",
+                "control_state": "provider_stats_lagging",
+                "urgency": "waiting_for_fact",
+                "actions": [],
+                "blocked_actions": [],
+                "next_check_minutes": 60,
+                "target_leads": check.get("target_leads_per_day"),
+                "actual_leads": None,
+                "spent_today_rub": check.get("spent_today_rub"),
+                "provider_stats_date": _provider_date_ko,
+                "observed_contacts": _provider_observed_ko,
+                "owner_action_required": False,
+                "next_action": "automatic_provider_stats_recheck",
+                "reason": (
+                    "Площадка ещё не отдала статистику контактов за текущий день. "
+                    "BORIS показывает подтверждённый расход отдельно, но не строит "
+                    "новые KPI-действия до свежего факта."
+                ),
+                "read_only": True,
+            }
+
+        # FULL_CAMPAIGN_REVISION_PLAN_GUARD_V1: the planner must expose the same
+        # clean measurement window that the executor enforces. Otherwise the UI
+        # says "raise/rewrite now" while the executor correctly waits.
+        _campaign_observation = _campaign_revision_observation_state(account_id, db=db)
+        # KPI_CAMPAIGN_OBSERVATION_MONEY_SAFETY_PRECEDENCE_V1:
+        # A clean experiment window must never outrank the owner's red-CPL safety.
+        # If CPL is already proven above the owner limit, BORIS may run only
+        # defensive/economic recovery while still blocking new growth/content
+        # hypotheses that would confound the campaign-revision measurement.
+        _obs_cpl = check.get("cost_per_lead_today")
+        try:
+            _obs_cpl = float(_obs_cpl) if _obs_cpl is not None else None
+        except Exception:
+            _obs_cpl = None
+        _obs_max_cpl = check.get("max_cost_per_lead_rub")
+        try:
+            _obs_max_cpl = float(_obs_max_cpl) if _obs_max_cpl is not None else 0.0
+        except Exception:
+            _obs_max_cpl = 0.0
+        _observation_red_cpl = bool(_obs_cpl is not None and _obs_max_cpl > 0 and _obs_cpl > _obs_max_cpl)
+        if _campaign_observation.get("active") and not _observation_red_cpl:
+            return {
+                "status": "ok",
+                "execute": False,
+                "state": "campaign_revision_observation",
+                "control_state": "measure_campaign_revision",
+                "urgency": "measurement",
+                "actions": [],
+                "blocked_actions": [],
+                "next_check_minutes": 60,
+                "campaign_revision_observation": _campaign_observation,
+                "reason": (
+                    "Полная версия кампании уже опубликована. BORIS собирает чистый "
+                    "полный день результата и не запускает новую гипотезу раньше срока."
+                ),
+                "read_only": True,
+            }
+
+        target = float(check.get("target_leads_per_day") or 0)
+        actual = float(check.get("contacts_today") or 0)
+        gap = max(target - actual, 0)
+
+        progress_pct = (
+            round(actual / target * 100, 1)
+            if target > 0
+            else 0
+        )
+
+        # ---------------------------------------------------------
+        # 2. Настройки оркестратора
+        #
+        # Можно потом управлять ими из UI для каждого клиента.
+        # Пока безопасные defaults.
+        # ---------------------------------------------------------
+
+        runtime_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "kpi_runtime_settings",
+            )
+            .first()
+        )
+
+        runtime = {}
+
+        if runtime_row:
+            try:
+                runtime = _json_ko.loads(runtime_row.value)
+            except Exception:
+                runtime = {}
+
+        # ВАЖНО:
+        # это лимит ВАШЕЙ себестоимости AI, а не бюджета Avito.
+        ai_daily_limit_rub = float(
+            runtime.get("ai_daily_limit_rub", 30)
+        )
+
+        ai_cycle_limit_rub = float(
+            runtime.get("ai_cycle_limit_rub", 7)
+        )
+        # KPI_CRITICAL_LEAD_RECOVERY_AI_CAPACITY_V1: when the account is
+        # materially behind the owner KPI, do not let a tiny default AI cap turn
+        # a large active analysis into one token content action. The bounded
+        # recovery ceiling applies only to non-money content/diagnostic planning;
+        # paid traffic guards remain independent and unchanged.
+        _critical_recovery_ai_cycle_ceiling = float(runtime.get("critical_recovery_ai_cycle_limit_rub", 12))
+
+        max_actions_normal = int(
+            runtime.get("max_actions_normal", 2)
+        )
+
+        max_actions_high = int(
+            runtime.get("max_actions_high", 4)
+        )
+
+        max_actions_critical = int(
+            runtime.get("max_actions_critical", 6)
+        )
+
+        # ---------------------------------------------------------
+        # 3. Если цель выполнена — стоп.
+        #
+        # Не оптимизируем работающий кабинет ради самой оптимизации.
+        # ---------------------------------------------------------
+
+                # =========================================================
+        # ECONOMIC OVERRIDE V4
+        #
+        # Дневной KPI и экономика — разные сигналы.
+        #
+        # Пример:
+        #   max CPL = 400 ₽
+        #   threshold = 440 ₽
+        #   spent = 500 ₽
+        #   contacts = 0
+        #
+        # В таком случае нельзя просто вернуть goal_met/stop.
+        # Runtime должен продолжить формирование действий.
+        #
+        # Если контакты уже есть — emergency не включаем.
+        # =========================================================
+        max_cpl = float(
+            check.get("max_cost_per_lead_rub") or 0
+        )
+
+        spent_today = float(
+            check.get("spent_today_rub") or 0
+        )
+
+        emergency_threshold = (
+            max_cpl * 1.10
+            if max_cpl > 0
+            else 0
+        )
+
+        economic_emergency = (
+            target > 0
+            and max_cpl > 0
+            and actual <= 0
+            and spent_today >= emergency_threshold
+        )
+
+        # KPI_PLAN_GOAL_MET_ECONOMICS_GUARD_V1:
+        # A met lead-count target is not a stop condition when today's confirmed
+        # CPL is above the owner's red line. Keep planning in cpl_recovery.
+        _goal_actual_cpl_raw = check.get("cost_per_lead_today")
+        try:
+            _goal_actual_cpl = (
+                float(_goal_actual_cpl_raw)
+                if _goal_actual_cpl_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            _goal_actual_cpl = None
+        _goal_cpl_over_red = bool(
+            max_cpl > 0
+            and _goal_actual_cpl is not None
+            and _goal_actual_cpl > max_cpl + 1e-9
+        )
+
+        # Lead volume may stop new work only while economics is also inside
+        # the owner's red line (or CPL is not yet provably breached).
+        if (
+            target > 0
+            and actual >= target
+            and not economic_emergency
+            and not _goal_cpl_over_red
+        ):
+            return {
+                "status": "ok",
+                "execute": False,
+                "state": "goal_met",
+                "urgency": "none",
+                "target_leads": target,
+                "actual_leads": actual,
+                "progress_pct": progress_pct,
+                "gap": 0,
+                "expected_leads_by_now": actual,
+                "hourly_lead_gap": 0,
+                "leads_remaining_today": 0,
+                "remaining_hours": None,
+                "required_leads_per_remaining_hour": 0,
+                "pace_state": "AHEAD",
+                "next_check_minutes": 60,
+                "max_actions_this_cycle": 0,
+                "ai_cycle_limit_rub": 0,
+                "actions": [],
+                "reason": (
+                    f"KPI выполнен: {actual:g}/{target:g}. "
+                    "Новые изменения не требуются."
+                ),
+                "read_only": True,
+            }
+
+        # ---------------------------------------------------------
+        # 4. Определяем время суток и срочность
+        #
+        # Пока серверное время.
+        # Позже добавим timezone аккаунта.
+        # ---------------------------------------------------------
+
+        # FACTORY_G_RUNTIME_TIME_V1
+        # Account-local timezone read-through.
+        # Explicit config wins; validated Factory-derived value is fallback.
+        # If unresolved/invalid, preserve previous server-time behavior.
+        from app.factory.runtime_config import local_now as _factory_local_now
+        _factory_fallback_now = _dt_ko.now()
+        now, _factory_time_meta = _factory_local_now(
+            db,
+            account_id,
+            _factory_fallback_now,
+        )
+
+        hour = now.hour
+
+        # KPI_DAILY_CONTROL_FORMULA_V1
+        # Canonical pace comes from the same historical demand curve used by
+        # the money lane, so planning, execution and UI share one definition
+        # of how many leads should have arrived by this account-local moment.
+        # KPI_DAILY_CONTROL_POOL_ISOLATION_V1: intraday pace opens its own
+        # account-scoped reads. Release this orchestrator transaction first so
+        # the production QueuePool(size=1) cannot self-deadlock.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            from app.services.intraday import kpi_pace as _kpi_pace_formula
+            _pace_db = SessionLocal()
+            try:
+                _pace_formula = _kpi_pace_formula(_pace_db, account_id, now=now) or {}
+            finally:
+                _pace_db.close()
+        except Exception:
+            _pace_formula = {}
+        _demand_share = float(
+            _pace_formula.get("demand_share")
+            if _pace_formula.get("demand_share") is not None
+            else min(1.0, max(0.0, (hour * 60 + now.minute) / 1440.0))
+        )
+        expected_leads_by_now = round(target * _demand_share, 2) if target > 0 else 0.0
+        hourly_lead_gap = round(max(expected_leads_by_now - actual, 0.0), 2)
+        expected_progress = round(_demand_share * 100.0, 1)
+        lag_pct = round(expected_progress - progress_pct, 1)
+        remaining_hours = max((24 * 60 - (hour * 60 + now.minute)) / 60.0, 0.25)
+        leads_remaining_today = round(max(target - actual, 0.0), 2)
+        required_leads_per_remaining_hour = round(leads_remaining_today / remaining_hours, 3)
+        # KPI_RECOVERY_MULTIPLIER_V1: compare the leads still required with the
+        # account's historically remaining demand, not just wall-clock hours.
+        # 1.0 means normal remaining demand is enough; >1 means BORIS must recover
+        # faster than baseline, and the multiplier grows as the day runs out.
+        remaining_demand_share = max(0.0, 1.0 - _demand_share)
+        expected_future_leads_at_baseline = max(target * remaining_demand_share, 0.0)
+        if leads_remaining_today <= 0:
+            recovery_multiplier = 0.0
+        elif expected_future_leads_at_baseline > 0.05:
+            recovery_multiplier = round(leads_remaining_today / expected_future_leads_at_baseline, 3)
+        else:
+            recovery_multiplier = 99.0
+        projected_finish_at_baseline = round(actual + expected_future_leads_at_baseline, 2)
+        # KPI_RECOVERY_CAPACITY_TRUTH_V1: operational feasibility signal, not a
+        # promise. It tells the controller whether historical remaining demand
+        # is enough to close today's lead gap without acceleration.
+        if leads_remaining_today <= 0:
+            recovery_capacity_state = "goal_met"
+        elif recovery_multiplier <= 1.0:
+            recovery_capacity_state = "baseline_sufficient"
+        elif recovery_multiplier < 1.5:
+            recovery_capacity_state = "recoverable_with_acceleration"
+        elif recovery_multiplier < 3.0:
+            recovery_capacity_state = "hard_recovery"
+        else:
+            recovery_capacity_state = "baseline_insufficient"
+
+        # KPI_URGENCY_FROM_LEAD_GAP_V1: urgency is based on the concrete lead
+        # deficit against the learned demand curve, not only a percentage.
+        # Missing 1 lead on a target of 1 is operationally critical even though
+        # generic percentage heuristics can be misleading early/late in the day.
+        _gap_ratio = (hourly_lead_gap / target) if target > 0 else 0.0
+        if (
+            recovery_multiplier >= 1.50
+            or hourly_lead_gap >= max(1.5, target * 0.30)
+            or (hour >= 19 and leads_remaining_today >= 1)
+        ):
+            urgency = "critical"
+        elif (
+            recovery_multiplier >= 1.15
+            or hourly_lead_gap >= max(0.5, target * 0.15)
+            or _gap_ratio >= 0.15
+        ):
+            urgency = "high"
+        else:
+            urgency = "normal"
+
+        # ---------------------------------------------------------
+        # 5. Диагностика
+        # ---------------------------------------------------------
+
+        diagnosis = kpi_diagnose(account_id)
+        root = kpi_root_cause(account_id)
+
+        diagnosis_code = diagnosis.get("diagnosis")
+        root_code = root.get("root_cause")
+
+        # KPI_ECONOMICS_FIRST_V1: economics outranks reach/content diagnosis.
+        # If live CPL is already above the owner's red line, buying more reach
+        # is forbidden even when the portfolio also has low-view items.
+        _actual_cpl_now = check.get("cost_per_lead_today")
+        try: _actual_cpl_now = float(_actual_cpl_now) if _actual_cpl_now is not None else None
+        except Exception: _actual_cpl_now = None
+        _cpl_over_limit = bool(_actual_cpl_now is not None and max_cpl > 0 and _actual_cpl_now > max_cpl)
+        if _cpl_over_limit:
+            diagnosis_code = "cpl_problem"
+
+        weak_items = root.get("worst_items") or []
+        best_items = root.get("best_items") or []
+        # KPI_CANONICAL_MUTATION_AUTHORITY_V3:
+        # Snapshot labels are advisory only. A content mutation receives write
+        # authority from the live DB identity contract: exactly one CampaignItem
+        # for this account+Avito id and is_canonical_writable(row)==True. This
+        # prevents stale snapshots, live-import placeholders and generated
+        # feed_identity values from being mistaken for permission to edit Avito.
+        from app.models.campaign_item import CampaignItem as _MutationCampaignItem
+        from app.services.campaign_identity import is_canonical_writable as _is_mutation_writable
+        _weak_ids=[str((x or {}).get("id") or "").strip() for x in weak_items if str((x or {}).get("id") or "").strip()]
+        _mutation_rows=(db.query(_MutationCampaignItem).filter(
+            _MutationCampaignItem.account_id==account_id,
+            _MutationCampaignItem.avito_item_id.in_(_weak_ids or ["__none__"]),
+        ).all())
+        _mutation_rows_by_id={}
+        for _mr in _mutation_rows:
+            _mutation_rows_by_id.setdefault(str(_mr.avito_item_id or ""),[]).append(_mr)
+        _strict_writable_ids={
+            _iid for _iid,_rows in _mutation_rows_by_id.items()
+            if len(_rows)==1 and _is_mutation_writable(_rows[0])
+        }
+        canonical_weak_items=[
+            x for x in weak_items
+            if str((x or {}).get("id") or "").strip() in _strict_writable_ids
+        ]
+        _mutation_weak_items=list(canonical_weak_items)
+        _unwritable_weak_ids=sorted(set(_weak_ids)-_strict_writable_ids)
+        # KPI_CONTENT_PREPARE_MAPPING_RECOVERY_CANDIDATES_V1: prepare may inspect
+        # weak live items whose exact feed mapping is not proven yet; the prepare
+        # preflight must recover exact canonical identity before AI/publication.
+        _prepare_weak_items=list(weak_items)
+
+        # KPI_TITLE_ACTIVE_COHORT_EXACT20_V2: keep a bounded content-learning
+        # cohort sized from the real active inventory. Mutation still requires
+        # canonical write proof and one-hypothesis isolation below.
+        from math import ceil
+        from datetime import date as _date_title_cohort
+        from app.models.storage import Storage as _TitleStorage
+        _active_items=[]; _ds={}
+        try:
+            _dsrow=(db.query(_TitleStorage).filter(_TitleStorage.account_id==account_id,
+                    _TitleStorage.key==f"daily_stats:{_kpi_marketing_today().isoformat()}").order_by(_TitleStorage.id.desc()).first())
+            _ds=_json_ko.loads(_dsrow.value or '{}') if _dsrow else {}
+            _active_items=[x for x in (_ds.get('items') or []) if isinstance(x,dict) and x.get('status')=='active']
+        except Exception:
+            _active_items=[]
+        _title_active_cohort_min_pct = 20
+        _title_cohort_raw_target=max(1,ceil(len(_active_items)*_title_active_cohort_min_pct/100.0)) if _active_items else 1
+        _title_cohort_target=_title_cohort_raw_target
+        # KPI_TITLE_MANAGED_SUPPLY_CAP_V1: 20% is a desired cohort, not a
+        # license to invent write authority for historical/native Avito ads.
+        # A fresh exact Autoload recovery may prove that the currently active
+        # managed feed supply is structurally smaller than 20% of all live ads.
+        # Cache the local feed fingerprint now; the supply proof is validated
+        # against it after exact active identities are known below.
+        _title_feed_ids=set()
+        _title_feed_fingerprint=None
+        try:
+            _title_feed_row=(db.query(_TitleStorage).filter(
+                _TitleStorage.account_id==account_id,
+                _TitleStorage.key=="feed_items",
+            ).order_by(_TitleStorage.id.desc()).first())
+            _title_feed_raw=_json_ko.loads(_title_feed_row.value or "[]") if _title_feed_row else []
+            if isinstance(_title_feed_raw,list):
+                _title_feed_ids={
+                    str((x or {}).get("id") or (x or {}).get("Id") or "").strip()
+                    for x in _title_feed_raw if isinstance(x,dict)
+                    and str((x or {}).get("id") or (x or {}).get("Id") or "").strip()
+                }
+            _title_feed_fingerprint=__import__("hashlib").sha256(
+                "\n".join(sorted(_title_feed_ids)).encode("utf-8")
+            ).hexdigest()
+        except Exception:
+            _title_feed_ids=set(); _title_feed_fingerprint=None
+        # KPI_TITLE_WRITABLE_CAPACITY_REFILL_V1 compatibility; extended by V2 below.
+        # KPI_TITLE_WRITABLE_CAPACITY_REFILL_V2: the 20% title cohort is drawn from
+        # ALL active listings with exact canonical write authority, not only from the
+        # small diagnostic weak-items sample. Weak items stay first, then BORIS fills
+        # the remaining cohort from other active writable listings.
+        _active_ids_for_title=[str((x or {}).get("id") or "").strip() for x in _active_items if str((x or {}).get("id") or "").strip()]
+        _active_title_rows=(db.query(_MutationCampaignItem).filter(
+            _MutationCampaignItem.account_id==account_id,
+            _MutationCampaignItem.avito_item_id.in_(_active_ids_for_title or ["__none__"]),
+        ).all())
+        _active_title_rows_by_id={}
+        for _atr in _active_title_rows:
+            _active_title_rows_by_id.setdefault(str(_atr.avito_item_id or ""),[]).append(_atr)
+        _active_title_writable_ids={
+            _iid for _iid,_rows in _active_title_rows_by_id.items()
+            if len(_rows)==1 and _is_mutation_writable(_rows[0])
+        }
+
+        # KPI_TITLE_IDENTITY_VS_MUTATION_CAPACITY_V1:
+        # Exact Avito<->feed identity and permission to mutate the CURRENT
+        # revision are different facts. publication_rejected_bound deliberately
+        # stays non-writable, but it must not be diagnosed as a missing mapping
+        # when the exact pair is already proven in the durable identity payload.
+        def _title_exact_identity_known(_row):
+            if _row is None:
+                return False
+            _fid=str(getattr(_row,"feed_identity","") or "").strip()
+            _aid=str(getattr(_row,"avito_item_id","") or "").strip()
+            if not _fid or not _aid:
+                return False
+            if str(getattr(_row,"identity_status","") or "") not in {
+                "published_identity_bound",
+                "publication_rejected_bound",
+            }:
+                return False
+            try:
+                _payload=_json_ko.loads(getattr(_row,"payload_json","") or "{}")
+            except Exception:
+                return False
+            _ident=(_payload or {}).get("identity") or {}
+            if str(_ident.get("feed_identity") or "").strip()!=_fid:
+                return False
+            if str(_ident.get("avito_item_id") or "").strip()!=_aid:
+                return False
+            _resolution=str(_ident.get("resolution") or "").strip()
+            if _resolution=="publication_result":
+                return True
+            if _resolution=="autoload_report":
+                try:
+                    return int(_ident.get("upload_id") or 0)>0
+                except (TypeError,ValueError):
+                    return False
+            return False
+
+        _active_title_exact_identity_ids={
+            _iid for _iid,_rows in _active_title_rows_by_id.items()
+            if len(_rows)==1 and _title_exact_identity_known(_rows[0])
+        }
+        _active_title_revision_hold_ids={
+            _iid for _iid,_rows in _active_title_rows_by_id.items()
+            if (
+                len(_rows)==1
+                and _iid in _active_title_exact_identity_ids
+                and str(getattr(_rows[0],"identity_status","") or "")
+                    =="publication_rejected_bound"
+            )
+        }
+        _weak_title_ids={str((x or {}).get("id") or "").strip() for x in _mutation_weak_items}
+        _active_title_by_id={str((x or {}).get("id") or "").strip():x for x in _active_items if str((x or {}).get("id") or "").strip()}
+        _canonical_active_refill=list(_mutation_weak_items)
+        for _iid in _active_ids_for_title:
+            if _iid in _active_title_writable_ids and _iid not in _weak_title_ids:
+                _canonical_active_refill.append(_active_title_by_id[_iid])
+        _title_exact_writable_active=len(_canonical_active_refill)
+        _title_exact_identity_active=len(_active_title_exact_identity_ids)
+
+        # KPI_TITLE_MANAGED_SUPPLY_CAP_PROOF_V1:
+        # Validate a previously observed official Autoload supply proof against
+        # BOTH current feed contents and the exact current active Avito-id set.
+        # If either changed (or proof is old), ignore the cap and schedule a new
+        # exact recovery instead of trusting stale capacity.
+        _title_managed_supply_cap=None
+        _title_managed_supply_proof_valid=False
+        _title_managed_supply_evidence={}
+        try:
+            _map_state_row=(db.query(_TitleStorage).filter(
+                _TitleStorage.account_id==account_id,
+                _TitleStorage.key=="kpi_mapping_recovery_state",
+            ).order_by(_TitleStorage.id.desc()).first())
+            _map_state=_json_ko.loads(_map_state_row.value or "{}") if _map_state_row else {}
+            _ms=(_map_state or {}).get("managed_supply") or {}
+            _active_ids_fingerprint=__import__("hashlib").sha256(
+                "\n".join(sorted(_active_ids_for_title)).encode("utf-8")
+            ).hexdigest()
+            _checked_raw=str((_map_state or {}).get("checked_at") or "").strip()
+            _checked_dt=_dt_ko.fromisoformat(_checked_raw.replace("Z","+00:00")) if _checked_raw else None
+            if _checked_dt is not None and _checked_dt.tzinfo is None:
+                from datetime import timezone as _tz_title_supply
+                _checked_dt=_checked_dt.replace(tzinfo=_tz_title_supply.utc)
+            if _checked_dt is not None:
+                from datetime import timezone as _tz_title_supply
+                _proof_age=max(0.0,(_dt_ko.now(_tz_title_supply.utc)-_checked_dt).total_seconds())
+            else:
+                _proof_age=None
+            _supply_n=max(0,int(_ms.get("recoverable_active_exact_pairs") or 0))
+            _title_managed_supply_proof_valid=bool(
+                str(_ms.get("policy_version") or "")=="AUTOLOAD_EXACT_MANAGED_SUPPLY_SNAPSHOT_V1"
+                and _title_feed_fingerprint
+                and str(_ms.get("feed_fingerprint") or "")==_title_feed_fingerprint
+                and str(_ms.get("active_ids_fingerprint") or "")==_active_ids_fingerprint
+                and int(_ms.get("source_active_items") or -1)==len(_active_ids_for_title)
+                and _proof_age is not None and _proof_age <= 8*3600
+            )
+            if _title_managed_supply_proof_valid:
+                # Never cap below exact identities already proven in the same
+                # active snapshot. This keeps the policy monotonic if a provider
+                # report omits an already durable exact identity transiently.
+                _title_managed_supply_cap=max(_supply_n,_title_exact_identity_active)
+                _title_cohort_target=min(_title_cohort_raw_target,_title_managed_supply_cap)
+            _title_managed_supply_evidence={
+                "valid":_title_managed_supply_proof_valid,
+                "recoverable_active_exact_pairs":_supply_n,
+                "effective_cap":_title_managed_supply_cap,
+                "proof_age_sec":round(_proof_age,1) if _proof_age is not None else None,
+                "feed_fingerprint_match":bool(
+                    _title_feed_fingerprint
+                    and str(_ms.get("feed_fingerprint") or "")==_title_feed_fingerprint
+                ),
+                "active_ids_fingerprint_match":bool(
+                    str(_ms.get("active_ids_fingerprint") or "")==_active_ids_fingerprint
+                ),
+            }
+        except Exception as _managed_supply_exc:
+            _title_managed_supply_cap=None
+            _title_managed_supply_proof_valid=False
+            _title_managed_supply_evidence={
+                "valid":False,
+                "reason":"managed_supply_proof_unavailable",
+                "detail":type(_managed_supply_exc).__name__,
+            }
+
+        _title_mapping_capacity_gap=max(0,_title_cohort_target-_title_exact_identity_active)
+        _title_mutation_capacity_gap=max(0,_title_cohort_target-_title_exact_writable_active)
+        # Compatibility: capacity_gap historically drove mapping recovery.
+        # Keep that meaning, but base it on exact identity rather than write
+        # authority so a rejected/held revision cannot create a fake map-repair.
+        _title_cohort_capacity_gap=_title_mapping_capacity_gap
+        title_cohort_capacity_gap=_title_cohort_capacity_gap
+        title_exact_writable_active=_title_exact_writable_active
+        _title_cohort_preview=_prepare_weak_items[:_title_cohort_target]
+        _title_mapping_recovery_candidates=[
+            x for x in _title_cohort_preview
+            if str((x or {}).get("id") or "").strip()
+                not in _active_title_exact_identity_ids
+        ]
+        # KPI_TITLE_COHORT_ACTUAL_COVERAGE_V3: 20% is an execution target, not metadata.
+        # Count only a real changed proposal or an in-flight title hypothesis as covered.
+        # Failed/no-op/rejected tasks do not consume cohort capacity, so the next cycle
+        # automatically rotates to another active listing instead of getting stuck on
+        # the same first batch forever.
+        _title_cohort_final_ids=set()
+        _title_cohort_inflight_ids=set()
+        _title_cohort_attempted_ids=set()
+        try:
+            _active_ids_title={str((x or {}).get("id") or "").strip() for x in _active_items if str((x or {}).get("id") or "").strip()}
+            for _entry_title in _kpi_prepare_queue_load(db, account_id):
+                _task_title=_entry_title.get("data") or {}
+                if str(_task_title.get("action") or "") != "prepare_weak_titles":
+                    continue
+                _st_title=str(_task_title.get("status") or "")
+                for _it_title in (_task_title.get("items") or []):
+                    _iid_title=str((_it_title or {}).get("id") or "").strip()
+                    if _iid_title in _active_ids_title:
+                        _title_cohort_attempted_ids.add(_iid_title)
+                        if _st_title in {"ready_for_ai","ai_running","proposal_ready","apply_in_progress"}:
+                            _title_cohort_inflight_ids.add(_iid_title)
+                for _pr_title in (_task_title.get("proposal") or []):
+                    _iid_title=str((_pr_title or {}).get("item_id") or "").strip()
+                    _old_title=str((_pr_title or {}).get("old_title") or "").strip()
+                    _new_title=str((_pr_title or {}).get("new_title") or "").strip()
+                    if _iid_title in _active_ids_title and _new_title and _new_title != _old_title:
+                        _title_cohort_final_ids.add(_iid_title)
+        except Exception:
+            _title_cohort_final_ids=set()
+            _title_cohort_inflight_ids=set()
+            _title_cohort_attempted_ids=set()
+        _title_cohort_covered_ids=_title_cohort_final_ids | _title_cohort_inflight_ids
+        _title_cohort_refill_need=max(0,_title_cohort_target-len(_title_cohort_covered_ids))
+        def _title_uncovered_first(_pool):
+            def _rank(_x):
+                _iid=str((_x or {}).get("id") or "").strip()
+                if _iid in _title_cohort_covered_ids: return 2
+                if _iid in _title_cohort_attempted_ids: return 1
+                return 0
+            return sorted(list(_pool or []), key=_rank)
+        if _title_cohort_refill_need > 0:
+            # Fresh exact-writable active cards first. Failed/no-op attempts remain
+            # eligible only after never-tested cards are exhausted.
+            _canonical_active_refill=_title_uncovered_first(_canonical_active_refill)
+            _prepare_weak_items=list(_canonical_active_refill)
+            _mutation_weak_items=list(_canonical_active_refill)
+        # KPI_TITLE_COHORT_BATCH_ROTATION_V1 compatibility contract: V2 below
+        # preserves the V1 fair bounded batch-rotation invariant and extends it
+        # with a per-business-day cap for content-only placement packages.
+        # KPI_TITLE_COHORT_BATCH_ROTATION_V2: full weak pool is eligible for
+        # fair bounded batches. Content-only placement packages can additionally
+        # cap how many distinct listings receive content mutations per business
+        # day so BORIS changes them gradually instead of rewriting the whole pack.
+        _content_cohort_target = len(_prepare_weak_items)
+        _content_only_plan = bool(
+            check.get("placement_package_content_only")
+            or check.get("bid_autopilot") is False
+        )
+        try:
+            _content_daily_limit = max(0, int(check.get("content_daily_max_items") or 0))
+        except Exception:
+            _content_daily_limit = 0
+        if _content_only_plan and _content_daily_limit <= 0:
+            _content_daily_limit = 3
+        _content_changed_today_ids=set()
+        if _content_only_plan:
+            try:
+                _, _content_history_today = _kpi_apply_log_load(db, account_id)
+                _content_day = _kpi_marketing_today().isoformat()
+                for _content_op in (_content_history_today or []):
+                    if str(_content_op.get("ts") or "")[:10] != _content_day:
+                        continue
+                    _content_changes = _content_op.get("changes") or {}
+                    if not isinstance(_content_changes, dict):
+                        continue
+                    if set(_content_changes).intersection({"title","description","images","banner"}):
+                        _content_iid = str(
+                            _content_op.get("avito_item_id")
+                            or _content_op.get("item_id")
+                            or ""
+                        ).strip()
+                        if _content_iid:
+                            _content_changed_today_ids.add(_content_iid)
+            except Exception:
+                _content_changed_today_ids=set()
+        _content_remaining_today = (
+            max(0, _content_daily_limit-len(_content_changed_today_ids))
+            if _content_only_plan else 25
+        )
+        _content_batch_cap = (
+            min(25, _content_remaining_today)
+            if _content_only_plan else 25
+        )
+        _content_cohort_size=(
+            min(_content_batch_cap,_content_cohort_target,max(1,(_title_cohort_refill_need or _title_cohort_target)))
+            if _content_cohort_target and _content_batch_cap>0 else 0
+        )
+
+        # KPI_RECENT_PUBLICATION_CONTENT_COOLDOWN_V1: a just-submitted campaign
+        # needs a clean observation window before another title/photo/content
+        # mutation. Otherwise BORIS can rewrite the same card minutes after Avito
+        # accepted it and destroy causal attribution. This guard is campaign-level,
+        # exact-identity only and does not block read-only analysis or money-saving
+        # bid reductions on separately proven waste.
+        _recent_revision_mutation_excluded=set()
+        try:
+            from datetime import datetime as _dt_recent_pub, timezone as _tz_recent_pub
+            from app.models.campaign_item import CampaignItem as _RecentCampaignItem
+            from app.models.campaign import Campaign as _RecentCampaign
+            _weak_live_ids=[str((x or {}).get("id") or "").strip() for x in _mutation_weak_items if str((x or {}).get("id") or "").strip()]
+            if _weak_live_ids:
+                _recent_rows=(db.query(_RecentCampaignItem,_RecentCampaign)
+                    .join(_RecentCampaign,_RecentCampaign.id==_RecentCampaignItem.campaign_id)
+                    .filter(_RecentCampaignItem.account_id==account_id,
+                            _RecentCampaignItem.avito_item_id.in_(_weak_live_ids),
+                            _RecentCampaignItem.identity_status=="published_identity_bound").all())
+                _now_recent=_dt_recent_pub.now(_tz_recent_pub.utc)
+                for _ci,_campaign in _recent_rows:
+                    try:
+                        _root_recent=_json_ko.loads(_campaign.settings_json or "{}")
+                    except Exception:
+                        _root_recent={}
+                    _ff_recent=_root_recent.get("feed_factory") or {}
+                    _act_recent=_ff_recent.get("owner_activation") or {}
+                    _sent_recent=str(_act_recent.get("sent_at") or "").strip()
+                    _status_recent=str(_act_recent.get("status") or "").lower()
+                    if not _sent_recent or _status_recent not in {"processing","pending_review","completed","partial"}:
+                        continue
+                    try:
+                        _ts_recent=_dt_recent_pub.fromisoformat(_sent_recent.replace("Z","+00:00"))
+                        if _ts_recent.tzinfo is None: _ts_recent=_ts_recent.replace(tzinfo=_tz_recent_pub.utc)
+                        _age_recent=max(0.0,(_now_recent-_ts_recent).total_seconds())
+                    except Exception:
+                        continue
+                    if _age_recent < 120*60:
+                        _recent_revision_mutation_excluded.add(str(_ci.avito_item_id or ""))
+            if _recent_revision_mutation_excluded:
+                _mutation_weak_items=[x for x in _mutation_weak_items if str((x or {}).get("id") or "") not in _recent_revision_mutation_excluded]
+        except Exception:
+            # Fail closed for content mutations if recent-publication state cannot
+            # be proven. Read-only diagnosis below remains available.
+            _recent_revision_mutation_excluded={str((x or {}).get("id") or "") for x in _mutation_weak_items if str((x or {}).get("id") or "")}
+            _mutation_weak_items=[]
+
+        # KPI_CRITICAL_RECOVERY_COHORT_V1: urgency changes how many independent
+        # weak items may enter the sequential content queue, not how many fields
+        # we mutate on one item. This lets a badly-behind account recover faster
+        # without destroying attribution.
+
+        # ---------------------------------------------------------
+        # 6. Формируем НЕ ОДНО действие, а портфель.
+        #
+        # Самые дешёвые аналитические действия могут идти вместе
+        # с конкретными изменениями.
+        # ---------------------------------------------------------
+
+        candidates = []
+
+        def add_action(
+            action,
+            priority,
+            ai_estimate_rub=0.0,
+            requires_budget=False,
+            reason="",
+            candidate_items=None,
+        ):
+            if any(x["action"] == action for x in candidates):
+                return
+
+            candidates.append({
+                "action": action,
+                "priority": priority,
+                "ai_estimate_rub": round(
+                    float(ai_estimate_rub or 0), 2
+                ),
+                "requires_budget": bool(requires_budget),
+                "reason": reason,
+                "candidate_items": candidate_items or [],
+            })
+
+        # KPI_MAPPING_RECOVERY_ACTIVE_OBLIGATION_V1:
+        # A material writable-capacity gap while KPI is behind is active BORIS
+        # work, not a healthy no-action state. Recovery is bounded, exact-only,
+        # free of AI and cannot mutate Avito.
+        if _title_feed_ids and _title_cohort_capacity_gap > 0 and _title_mapping_recovery_candidates:
+            # KPI_MAPPING_RECOVERY_PLANNER_REQUIRES_FEED_V1: native/legacy
+            # accounts without authoritative BORIS feed cannot be recovered by
+            # current Autoload ad_id evidence. Do not create an impossible
+            # mapping obligation; keep CPX/read-only diagnosis available.
+            add_action(
+                "recover_canonical_mapping",
+                109,
+                ai_estimate_rub=0,
+                requires_budget=False,
+                reason=(
+                    f"Для 20% title-программы не хватает {_title_cohort_capacity_gap} "
+                    "exact writable объявлений. BORIS сначала восстанавливает только "
+                    "доказуемые Avito↔feed identity по официальному Autoload-отчёту."
+                ),
+                candidate_items=_title_mapping_recovery_candidates[:25],
+            )
+
+        # Дешёвый deep-анализ запускаем только если
+    # root cause ещё не определён.
+    #
+    # Если причина уже известна, сразу переходим
+        # к конкретному управленческому действию.
+        if root_code not in {
+            "insufficient_item_traffic",
+            "zero_contact_items",
+            "low_conversion_items",
+            "hidden_from_search",
+            "low_search_position",
+        }:
+            add_action(
+                "deep_item_analysis",
+                60,
+                ai_estimate_rub=0,
+                reason=(
+                    "Подтверждённой причины недостаточно. "
+                    "Уточняем картину по объявлениям."
+                ),
+            )
+
+        if diagnosis_code == "cpl_problem":
+            # KPI_CPL_RECOVERY_PARALLEL_TITLE_V1: expensive traffic blocks NEW reach, not free disjoint content recovery.
+            add_action(
+                "reduce_cpl", 110, ai_estimate_rub=0, requires_budget=False,
+                reason=(
+                    f"Фактический CPL {_actual_cpl_now:.0f} ₽ выше лимита {max_cpl:.0f} ₽. "
+                    "Новый разгон охвата запрещён; сначала снижаем стоимость трафика/ставку на доказанно неэффективных позициях и улучшаем конверсию."
+                ),
+                candidate_items=weak_items[:10],
+            )
+            add_action(
+                "deep_conversion_analysis", 100, ai_estimate_rub=0, requires_budget=False,
+                reason="Параллельно ищем, какие объявления создают дорогой трафик и где теряется конверсия.",
+                candidate_items=weak_items[:10],
+            )
+            # Parallel free conversion work on a disjoint weak listing.
+            _cpl_content_pool=list(_prepare_weak_items)
+            if _cpl_content_pool:
+                add_action(
+                    "optimize_weak_items", 105, ai_estimate_rub=0.50, requires_budget=False,
+                    reason="CPL выше красной линии: параллельно улучшаем заголовок/контент отдельной слабой карточки без покупки нового охвата.",
+                    candidate_items=_cpl_content_pool[:_content_cohort_size],
+                )
+
+        elif root_code == "hidden_from_search":
+            add_action(
+                "deep_item_analysis",
+                100,
+                ai_estimate_rub=0,
+                requires_budget=False,
+                reason=(
+                    "Avito Pro подтвердил скрытие объявлений из поиска. "
+                    "Сначала диагностируем причину видимости; повышение ставки вслепую запрещено."
+                ),
+                candidate_items=(root.get("position_hidden_items") or [])[:10],
+            )
+
+        elif root_code == "low_search_position":
+            add_action(
+                "increase_reach",
+                96,
+                ai_estimate_rub=0,
+                requires_budget=True,
+                reason=(
+                    "Avito Pro подтвердил позицию ниже 30 места. Reach-разгон разрешён только "
+                    "существующему CPX executor, который сам требует доказанную конверсию, "
+                    "экономическую выполнимость и hard_max_bid."
+                ),
+                candidate_items=(root.get("position_low_items") or [])[:10],
+            )
+            add_action(
+                "deep_conversion_analysis",
+                90,
+                ai_estimate_rub=0,
+                requires_budget=False,
+                reason="Параллельно проверяем, что низкая позиция не маскирует слабую конверсию карточки.",
+                candidate_items=(root.get("position_low_items") or [])[:10],
+            )
+
+        elif root_code == "insufficient_item_traffic":
+
+            add_action(
+                "increase_reach",
+                100,
+                ai_estimate_rub=0,
+                requires_budget=True,
+                reason=(
+                    "Недостаточно просмотров по объявлениям для "
+                    "доказательного сравнения. Сначала увеличиваем "
+                    "охват, затем оцениваем сильные и слабые позиции."
+                ),
+            )
+            # KPI_EXECUTION_LANES_V2: when money is unavailable we still owe the
+            # tenant useful work. Low traffic is not permission to invent a
+            # winner/loser, but deterministic account-level conversion analysis
+            # can continue and produce the next non-money hypothesis.
+            if not _money_lane_allowed:
+                add_action(
+                    "deep_conversion_analysis",
+                    80,
+                    ai_estimate_rub=0,
+                    requires_budget=False,
+                    reason=(
+                        "Денежный контур временно закрыт, поэтому BORIS продолжает "
+                        "бесплатную диагностику конверсии и контента вместо простоя."
+                    ),
+                )
+
+        else:
+
+            # Есть доказанно слабые объявления —
+            # работаем именно с ними.
+            if root_code in (
+                "zero_contact_items",
+                "low_conversion_items",
+            ) and weak_items and _mutation_weak_items:
+
+                add_action(
+                    "optimize_weak_items",
+                    95,
+                    ai_estimate_rub=0.50,
+                    reason=(
+                        f"Найдено {len(weak_items)} доказанно "
+                        "слабых объявлений."
+                    ),
+                    candidate_items=_prepare_weak_items[:_content_cohort_size],
+                )
+
+            # Проблему конверсии анализируем только тогда,
+            # когда трафика уже достаточно для осмысленного вывода.
+            if diagnosis_code == "contact_conversion_problem":
+
+                add_action(
+                    "deep_conversion_analysis",
+                    90,
+                    ai_estimate_rub=0,
+                    reason=(
+                        "Просмотры есть, конверсия в контакт "
+                        "недостаточна."
+                    ),
+                )
+
+            # Генерация текстов только для отобранных слабых,
+            # а не для всего кабинета.
+            if weak_items and _mutation_weak_items:
+                add_action(
+                    "rewrite_weak_titles",
+                    85,
+                    ai_estimate_rub=min(
+                        1.0,
+                        0.10 * len(_mutation_weak_items[:_content_cohort_size])
+                    ),
+                    reason="Подготовить новые заголовки только слабым позициям.",
+                    candidate_items=_mutation_weak_items[:_content_cohort_size],
+                )
+
+        if diagnosis_code == "reach_problem" and not _cpl_over_limit:
+
+            add_action(
+                "increase_reach",
+                90,
+                ai_estimate_rub=0,
+                requires_budget=True,
+                reason="Недостаточно охвата для выполнения KPI.",
+            )
+
+        if diagnosis_code == "inventory_problem":
+
+            add_action(
+                "expand_inventory",
+                85,
+                ai_estimate_rub=1.0,
+                reason="Недостаточно активного покрытия относительно цели.",
+            )
+
+        # =========================================================
+        # EMERGENCY CPX BID V1
+        #
+        # В аварийном экономическом режиме подключаем
+        # существующий CPX Advisor.
+        #
+        # Только одно объявление за цикл.
+        # Только raise/lower.
+        # Архивирование здесь запрещено.
+        #
+        # Реальное изменение всё равно проходит через:
+        # KPI Guard -> executor -> apply_one().
+        # =========================================================
+
+        if economic_emergency:
+            # Берём уже рассчитанную CPX-рекомендацию.
+            # Никаких новых расчётов и AI-вызовов здесь нет.
+            cpx_candidate = None
+            cpx_load_error = None
+
+            try:
+                # Читаем уже сохранённый CPX advice напрямую из Storage.
+                # Не импортируем внутренний _load_json из cpx_advisor.
+                cpx_row = (
+                    db.query(Storage)
+                    .filter(
+                        Storage.account_id == account_id,
+                        Storage.key == "cpx_advice",
+                    )
+                    .first()
+                )
+
+                cpx_advice = (
+                    _json_ko.loads(cpx_row.value)
+                    if cpx_row and cpx_row.value
+                    else {}
+                )
+
+                cpx_recommendations = (
+                    cpx_advice.get("recommendations") or {}
+                )
+
+                cpx_raises = (
+                    cpx_recommendations.get("raise") or []
+                )
+
+                cpx_lowers = (
+                    cpx_recommendations.get("lower_or_archive") or []
+                )
+
+                # Для emergency сначала выбираем работающий
+                # raise-кандидат.
+                if cpx_raises:
+                    cpx_candidate = cpx_raises[0]
+
+                # Если raise нет — разрешаем только безопасный lower.
+                if cpx_candidate is None:
+                    for candidate in cpx_lowers:
+                        suggest = str(
+                            candidate.get("suggest") or ""
+                        ).lower()
+
+                        if "сниз" in suggest:
+                            cpx_candidate = candidate
+                            break
+
+            except Exception as exc:
+                # Не скрываем причину полностью:
+                # она попадёт в reason действия ниже.
+                cpx_candidate = None
+                cpx_load_error = str(exc)[:300]
+
+
+            add_action(
+                "cpx_adjust_bid",
+                100,
+                ai_estimate_rub=0,
+                requires_budget=True,
+                reason=(
+                    "Экономический emergency: расход превысил "
+                    "допустимый CPL без контактов. Нужна "
+                    "ограниченная корректировка CPX."
+                ),
+                candidate_items=(
+                    [cpx_candidate]
+                    if cpx_candidate
+                    else []
+                ),
+            )
+
+        if diagnosis_code == "performance_gap":
+
+            add_action(
+                "deep_conversion_analysis",
+                80,
+                ai_estimate_rub=0,
+                reason="Нужен более глубокий анализ причины отставания.",
+            )
+
+        # При высокой срочности разрешаем параллельный визуальный тест.
+        # Но не генерируем десятки картинок.
+        if urgency in ("high", "critical") and canonical_weak_items:
+
+            _visual_test_n = 1
+            if recovery_capacity_state in {"hard_recovery", "baseline_insufficient"} and leads_remaining_today >= 2:
+                # KPI_CRITICAL_VISUAL_COHORT_V1: severe lead deficit needs more
+                # than one visual hypothesis, but keep it bounded and disjoint.
+                _visual_test_n = min(3, len(canonical_weak_items))
+            add_action(
+                "test_first_image",
+                70,
+                # KPI_FIRST_IMAGE_ZERO_AI_ACCOUNTING_V1: this action only reorders
+                # already-authoritative gallery images; it must consume neither AI
+                # budget nor AI planning capacity. Keep planner accounting aligned
+                # with prepare_first_image_test (ai=False, estimated_ai_rub=0).
+                ai_estimate_rub=0,
+                reason=(
+                    "При отставании от KPI запускаем ограниченный визуальный "
+                    "тест на независимых слабых карточках."
+                ),
+                candidate_items=canonical_weak_items[:_visual_test_n],
+            )
+
+        # ---------------------------------------------------------
+        # 7. Сортировка и лимит количества действий
+        # ---------------------------------------------------------
+
+        candidates.sort(
+            key=lambda x: x["priority"],
+            reverse=True
+        )
+
+        if urgency == "critical":
+            max_actions = max_actions_critical
+            next_check_minutes = 10
+
+        elif urgency == "high":
+            max_actions = max_actions_high
+            next_check_minutes = 20
+
+        else:
+            max_actions = max_actions_normal
+            next_check_minutes = 60
+
+        # KPI_LEAD_GAP_ACTION_CAPACITY_V1: when a large active inventory is
+        # materially behind today's lead target, analysis must not collapse
+        # execution to only 2/4 generic actions. Raise the bounded action slots
+        # from the real lead deficit and inventory size; the existing AI daily/
+        # cycle budget, single-hypothesis, money and publication guards still
+        # independently fail closed. This changes action capacity, not bid size.
+        _active_inventory_n = len(_active_items)
+        _material_lead_gap = max(0, int(ceil(max(0.0, leads_remaining_today))))
+        if urgency == "critical" and _material_lead_gap >= 2:
+            ai_cycle_limit_rub = max(ai_cycle_limit_rub, min(_critical_recovery_ai_cycle_ceiling, 12.0))
+        if _active_inventory_n >= 20 and _material_lead_gap >= 2:
+            _gap_action_floor = min(10, max(4, _material_lead_gap * 2))
+            max_actions = max(max_actions, _gap_action_floor)
+            next_check_minutes = min(next_check_minutes, 20 if urgency != "critical" else 10)
+        elif _active_inventory_n >= 10 and _material_lead_gap >= 3:
+            # A small placement package can still be badly behind target.
+            max_actions = max(max_actions, min(8, max(4, _material_lead_gap * 2)))
+            next_check_minutes = min(next_check_minutes, 20 if urgency != "critical" else 10)
+
+        # ---------------------------------------------------------
+        # 8. Лимит собственной AI-себестоимости.
+        #
+        # Даже critical не имеет права бесконечно генерировать AI.
+        # ---------------------------------------------------------
+
+        selected = []
+        ai_planned = 0.0
+        # PLACEMENT_PACKAGE_CONTENT_ONLY_V2: data-driven package policy.
+        # Any account with bid_autopilot=false or explicit content-only placement
+        # may improve title/text/banner/image conversion, but never bid/reach money.
+        _content_only_placement_account = bool(
+            check.get("placement_package_content_only")
+            or check.get("bid_autopilot") is False
+        )
+        if _content_only_placement_account:
+            candidates = [
+                c for c in candidates
+                if str(c.get("action") or "") not in {
+                    "increase_reach", "reduce_cpl", "cpx_adjust_bid",
+                    "expand_inventory",
+                }
+            ]
+        # KPI_SINGLE_HYPOTHESIS_PER_ITEM_V1: one listing gets at most one
+        # mutation/prepare hypothesis per measurement window. Read-only analysis
+        # may run in parallel, but title/photo/content/reach experiments must not
+        # overlap on the same item or BORIS cannot attribute the result.
+        _claimed_mutation_items = set()
+        _mutation_actions = {
+            "increase_reach", "reduce_cpl", "cpx_adjust_bid",
+            "optimize_weak_items", "rewrite_weak_titles", "test_first_image",
+        }
+        _recent_publication_content_actions = {
+            "optimize_weak_items", "rewrite_weak_titles", "test_first_image",
+        }
+
+        # KPI_ACTIVE_EXPERIMENT_PLAN_EXCLUSION_V1: the planner itself excludes
+        # listings that already have a publication/measurement/rollback obligation.
+        # Do not rely on a later executor guard to discover the same conflict.
+        _, _formula_history = _kpi_apply_log_load(db, account_id)
+        _formula_active_states = {
+            "prepared", "safe_feed_ready", "mapping_wait", "feed_applied",
+            "publishing", "publish_requested", "publish_failed", "published",
+            "effect_rollback_requested", "rollback_feed_ready", "rollback_publish_failed",
+        }
+        _formula_terminal_effects = {
+            "improved", "worse", "insufficient_data", "no_clear_effect", "kept", "try_next_action"
+        }
+        _active_experiment_item_ids = set()
+        for _old in (_formula_history or []):
+            _iid = str(_old.get("avito_item_id") or _old.get("item_id") or "").strip()
+            if not _iid:
+                continue
+            _st = str(_old.get("status") or "")
+            _eff = str((_old.get("effect") or {}).get("status") or "")
+            if _st in _formula_active_states and not (_st == "published" and _eff in _formula_terminal_effects):
+                _active_experiment_item_ids.add(_iid)
+
+        # LATE_DAY_SPEND_CONTENT_ISOLATION_V1: a temporary evening bid boost is
+        # itself a live hypothesis. Until nightly compensation completes, do not
+        # start title/photo/content experiments on the same listing.
+        try:
+            _late_boost_row = db.query(Storage).filter(
+                Storage.account_id == account_id,
+                Storage.key == "late_day_spend_boost_state",
+            ).order_by(Storage.id.desc()).first()
+            _late_boost_state = json.loads(_late_boost_row.value or "{}") if _late_boost_row else {}
+            if str((_late_boost_state or {}).get("status") or "") in {"active", "reset_pending"}:
+                for _boost_iid, _boost_meta in ((_late_boost_state or {}).get("items") or {}).items():
+                    if isinstance(_boost_meta, dict) and str(_boost_meta.get("status") or "") not in {"reset", "skipped_below_baseline"}:
+                        _active_experiment_item_ids.add(str(_boost_iid))
+        except Exception:
+            pass
+
+        def _candidate_item_ids(_candidate):
+            out = set()
+            for _item in (_candidate.get("candidate_items") or []):
+                if isinstance(_item, dict):
+                    _iid = _item.get("id") or _item.get("item_id") or _item.get("avito_item_id")
+                else:
+                    _iid = _item
+                if _iid is not None and str(_iid).strip():
+                    out.add(str(_iid).strip())
+            return out
+
+        # KPI_PUBLISHED_OBSERVATION_PARALLEL_PREPARE_V1: an observation on one
+        # published listing excludes that exact item only. Disjoint exact candidates
+        # may continue through parallel_prepare; never serialize the whole account.
+        parallel_prepare = True
+        exclude_active_item_ids = set(_active_experiment_item_ids)
+
+        for candidate in candidates:
+
+            if len(selected) >= max_actions:
+                break
+            _action_name = str(candidate.get("action") or "")
+            _candidate_ids = _candidate_item_ids(candidate)
+            # KPI_RECENT_PUBLICATION_CONTENT_SELECTOR_GUARD_V1: apply the same
+            # fresh-revision exclusion at the common selector so side lanes such
+            # as test_first_image cannot bypass the weak-item prefilter.
+            if _action_name in _recent_publication_content_actions and _candidate_ids:
+                _before_recent=list(candidate.get("candidate_items") or [])
+                _after_recent=[]
+                for _it in _before_recent:
+                    _ids_recent=_candidate_item_ids({"candidate_items":[_it]})
+                    if not (_ids_recent & _recent_revision_mutation_excluded):
+                        _after_recent.append(_it)
+                if len(_after_recent)!=len(_before_recent):
+                    candidate={**candidate,"candidate_items":_after_recent,
+                               "excluded_recent_publication_items":sorted(_candidate_ids & _recent_revision_mutation_excluded)}
+                    _candidate_ids=_candidate_item_ids(candidate)
+                if _before_recent and not _after_recent:
+                    candidate["selection_blocked_by"]="recent_publication_observation_window"
+                    continue
+            if _action_name in _mutation_actions and _candidate_ids:
+                _before_items = list(candidate.get("candidate_items") or [])
+                _filtered_items = []
+                for _it in _before_items:
+                    _one = {"candidate_items":[_it]}
+                    _ids = _candidate_item_ids(_one)
+                    if not (_ids & _active_experiment_item_ids):
+                        _filtered_items.append(_it)
+                if len(_filtered_items) != len(_before_items):
+                    candidate = {**candidate, "candidate_items":_filtered_items,
+                                 "excluded_active_experiment_items":sorted(_candidate_ids & _active_experiment_item_ids)}
+                    _candidate_ids = _candidate_item_ids(candidate)
+                if _before_items and not _filtered_items:
+                    candidate["selection_blocked_by"] = "active_experiment_measurement"
+                    continue
+                # KPI_CRITICAL_RECOVERY_COHORT_V2: active-experiment exclusion may
+                # shrink the original cohort. Refill it from the next proven weak
+                # items so critical recovery does not collapse to a single card.
+                if _action_name in {"optimize_weak_items", "rewrite_weak_titles"} and len(_filtered_items) < _content_cohort_size:
+                    _seen = set(_candidate_ids) | set(_active_experiment_item_ids)
+                    for _extra in _mutation_weak_items:
+                        _eid = str((_extra or {}).get("id") or "").strip() if isinstance(_extra, dict) else ""
+                        if not _eid or _eid in _seen:
+                            continue
+                        _filtered_items.append(_extra)
+                        _seen.add(_eid)
+                        if len(_filtered_items) >= _content_cohort_size:
+                            break
+                    candidate = {**candidate, "candidate_items":_filtered_items}
+                    _candidate_ids = _candidate_item_ids(candidate)
+            # KPI_PARALLEL_TITLE_DISJOINT_REFILL_V1: content may run beside a
+            # money hypothesis only on different listings. Refill from the weak
+            # pool instead of dropping the whole content lane after one overlap.
+            if _action_name in {"optimize_weak_items", "rewrite_weak_titles"} and _candidate_ids & _claimed_mutation_items:
+                _filtered_claimed=[_it for _it in (candidate.get('candidate_items') or [])
+                                   if not (_candidate_item_ids({'candidate_items':[_it]}) & _claimed_mutation_items)]
+                _content_pool=_prepare_weak_items if _action_name=="optimize_weak_items" else _mutation_weak_items
+                _seen_claimed=set(_claimed_mutation_items)|_candidate_item_ids({'candidate_items':_filtered_claimed})
+                if _action_name=="optimize_weak_items":
+                    for _extra in _prepare_weak_items:
+                        _eidset=_candidate_item_ids({'candidate_items':[_extra]})
+                        if not _eidset or _eidset & _seen_claimed or _eidset & _active_experiment_item_ids: continue
+                        _filtered_claimed.append(_extra); _seen_claimed |= _eidset
+                        if len(_filtered_claimed)>=_content_cohort_size: break
+                else:
+                    for _extra in _mutation_weak_items:
+                        _eidset=_candidate_item_ids({'candidate_items':[_extra]})
+                        if not _eidset or _eidset & _seen_claimed or _eidset & _active_experiment_item_ids: continue
+                        _filtered_claimed.append(_extra); _seen_claimed |= _eidset
+                        if len(_filtered_claimed)>=_content_cohort_size: break
+                candidate={**candidate,'candidate_items':_filtered_claimed,
+                           'excluded_claimed_items':sorted(_candidate_ids & _claimed_mutation_items),
+                           'single_hypothesis_per_item':True}
+                _candidate_ids=_candidate_item_ids(candidate)
+                if not _candidate_ids: continue
+            if _action_name in _mutation_actions and _candidate_ids & _claimed_mutation_items:
+                candidate["selection_blocked_by"] = "single_hypothesis_per_item"
+                continue
+            # KPI_EXECUTION_LANES_V1: stale spend/provider state may block
+            # monetary reach/CPX actions, but it must never suppress free
+            # diagnosis/content work. Money remains fail-closed independently.
+            # KPI_MONEY_LANE_BLOCK_REASON_V1: keep blocked money actions in
+            # diagnostics instead of silently deleting them.  Selection remains
+            # fail-closed; the workspace can still explain why BORIS did not buy
+            # reach in this cycle.
+            if candidate.get("requires_budget") and not _money_lane_allowed:
+                continue
+
+            estimated = float(
+                candidate.get("ai_estimate_rub") or 0
+            )
+
+            if (
+                estimated > 0
+                and ai_planned + estimated > ai_cycle_limit_rub
+            ):
+                continue
+
+            # KPI_ACTION_OUTCOME_CONTRACT_V1: every selected action carries
+            # an explicit expected outcome, measurement window and next branch.
+            # This keeps planner, executor and owner UI on the same closed loop.
+            _outcome_contracts = {
+                "increase_reach": {
+                    "success":"views_or_contacts_improve_without_CPL_breach",
+                    "measure_minutes":60,
+                    "if_success":"keep_and_measure_next_cohort",
+                    "if_no_effect":"stop_repeat_and_test_conversion",
+                    "if_worse":"rollback_or_lower_bid",
+                },
+                "reduce_cpl": {
+                    "success":"CPL_moves_toward_owner_limit_without_losing_required_lead_pace",
+                    "measure_minutes":60,
+                    "if_success":"keep_saving_action",
+                    "if_no_effect":"diagnose_conversion_and_spend_distribution",
+                    "if_worse":"rollback_reduction_if_lead_pace_breaks",
+                },
+                "optimize_weak_items": {
+                    "success":"contact_conversion_improves_on_the_changed_item",
+                    "measure_minutes":120,
+                    "if_success":"keep_and_scale_only_to_similar_proven_items",
+                    "if_no_effect":"try_next_single_hypothesis",
+                    "if_worse":"rollback_change",
+                },
+                "rewrite_weak_titles": {
+                    "success":"CTR_or_contact_conversion_improves",
+                    "measure_minutes":120,
+                    "if_success":"keep_title_and_learn_pattern",
+                    "if_no_effect":"do_not_repeat_title_hypothesis",
+                    "if_worse":"rollback_title",
+                },
+                "test_first_image": {
+                    "success":"CTR_or_contact_conversion_improves",
+                    "measure_minutes":120,
+                    "if_success":"keep_first_image_and_learn_pattern",
+                    "if_no_effect":"try_next_single_hypothesis",
+                    "if_worse":"restore_previous_first_image",
+                },
+                "expand_inventory": {
+                    "success":"active_inventory_coverage_increases_and_new_items_get_measurable_traffic",
+                    "measure_minutes":180,
+                    "if_success":"continue_until_inventory_gap_closed",
+                    "if_no_effect":"diagnose_category_region_or_publication_block",
+                    "if_worse":"stop_expansion_and_review_quality",
+                },
+                "deep_conversion_analysis": {
+                    "success":"root_cause_becomes_specific_and_actionable",
+                    "measure_minutes":0,
+                    "if_success":"execute_highest_impact_safe_action",
+                    "if_no_effect":"collect_more_evidence",
+                    "if_worse":"not_applicable_read_only",
+                },
+                "recover_canonical_mapping": {
+                    "success":"exact_writable_capacity_increases_from_official_identity_evidence",
+                    "measure_minutes":0,
+                    "if_success":"replan_title_cohort_with_new_canonical_capacity",
+                    "if_no_effect":"durable_backoff_then_retry_when_official_evidence_changes",
+                    "if_worse":"not_applicable_no_avito_mutation",
+                },
+                "deep_item_analysis": {
+                    "success":"root_cause_becomes_specific_and_actionable",
+                    "measure_minutes":0,
+                    "if_success":"execute_highest_impact_safe_action",
+                    "if_no_effect":"collect_more_evidence",
+                    "if_worse":"not_applicable_read_only",
+                },
+            }
+            candidate["outcome_contract"] = _outcome_contracts.get(_action_name, {
+                "success":"measurable_KPI_improvement",
+                "measure_minutes":60,
+                "if_success":"keep_and_continue_monitoring",
+                "if_no_effect":"choose_next_root_cause_action",
+                "if_worse":"rollback_if_mutation",
+            })
+            selected.append(candidate)
+            if _action_name in _mutation_actions:
+                _claimed_mutation_items.update(_candidate_ids)
+            ai_planned += estimated
+
+        # KPI_CAMPAIGN_OBSERVATION_RED_CPL_ISOLATION_V1:
+        # During a full-campaign observation window, a proven red CPL may trigger
+        # defensive bid reduction and read-only diagnosis, but no new title/image/
+        # reach hypothesis is allowed to contaminate the measurement window.
+        if _campaign_observation.get("active") and _observation_red_cpl:
+            _observation_allowed_actions={"reduce_cpl","deep_conversion_analysis","deep_item_analysis"}
+            selected=[x for x in selected if str(x.get("action") or "") in _observation_allowed_actions]
+            ai_planned=sum(float(x.get("ai_estimate_rub") or 0) for x in selected)
+
+        blocked_money_actions = [
+            {**x, "blocked_by":"money_lane_unavailable",
+             "blocked_reason":(
+                 "Нет активного подтверждённого BORIS marketing paid-period для денежного действия"
+                 if _marketing_entitlement.get("state") != "active" else
+                 "Нет свежего подтверждённого spend/budget authority для денежного действия"
+             ),
+             "service_entitlement":_marketing_entitlement}
+            for x in candidates if x.get("requires_budget") and not _money_lane_allowed
+        ]
+
+        # KPI_CONTROL_STATE_MACHINE_V1: one canonical human/business state for
+        # planner, executor and owner workspace. The state is derived from the
+        # highest-priority selected action; if every mutation is waiting on an
+        # active experiment, the cabinet is explicitly in measurement_wait.
+        _primary_action = str((selected[0] if selected else {}).get("action") or "")
+        if _cpl_over_limit or _primary_action == "reduce_cpl":
+            control_state = "cpl_recovery"
+            control_reason = "Цена лида выше лимита: сначала восстанавливаем экономику, новый дорогой охват запрещён"
+        elif _primary_action == "recover_canonical_mapping":
+            control_state = "mapping_recovery"
+            control_reason = "KPI ниже цели, но части активных объявлений не хватает exact canonical mapping; BORIS восстанавливает только доказуемые связи"
+        elif _primary_action == "increase_reach" or root_code in {"insufficient_item_traffic", "low_search_position"} or diagnosis_code == "reach_problem":
+            control_state = "reach_recovery"
+            control_reason = "Лидов не хватает из-за недостаточного доказанного охвата"
+        elif _primary_action in {"optimize_weak_items", "rewrite_weak_titles", "test_first_image"} or root_code in {"zero_contact_items", "low_conversion_items"} or diagnosis_code == "contact_conversion_problem":
+            control_state = "conversion_recovery"
+            control_reason = "Трафик есть, но карточки недостаточно хорошо превращают просмотры в контакты"
+        elif _primary_action == "expand_inventory" or diagnosis_code == "inventory_problem":
+            control_state = "inventory_recovery"
+            control_reason = "Для дневного KPI недостаточно активного покрытия/ассортимента"
+        elif _active_experiment_item_ids and not any(str(x.get("action") or "") in _mutation_actions for x in selected):
+            control_state = "measurement_wait"
+            control_reason = "Предыдущее изменение уже опубликовано или публикуется; ждём доказательство эффекта и не накладываем вторую гипотезу"
+        else:
+            control_state = "diagnosis"
+            control_reason = "Подтверждаем корневую причину до следующего изменения"
+
+        primary_outcome_contract = (selected[0].get("outcome_contract") if selected else None)
+
+        # ---------------------------------------------------------
+        # 9. Guard + рекламный budget ledger
+        # ---------------------------------------------------------
+
+        ledger = kpi_budget_ledger(account_id)
+
+        available_ad_budget = (
+            float(ledger.get("available_rub") or 0)
+            if ledger.get("status") == "ok"
+            else 0
+        )
+
+        # ---------------------------------------------------------
+        # 10. Возвращаем готовый план цикла
+        # ---------------------------------------------------------
+
+        return {
+            "status": "ok",
+            "execute": bool(selected),
+            "state": "behind_plan",
+            "control_state": control_state,
+            "control_reason": control_reason,
+            "primary_action": _primary_action or None,
+            "primary_outcome_contract": primary_outcome_contract,
+            "urgency": urgency,
+
+            "time": {
+                "server_hour": hour,
+                "expected_progress_pct": expected_progress,
+                "actual_progress_pct": progress_pct,
+                "lag_pct": lag_pct,
+                "next_check_minutes": next_check_minutes,
+            },
+
+            "goal": {
+                "target_leads": target,
+                "actual_leads": actual,
+                "gap": gap,
+                "expected_leads_by_now": expected_leads_by_now,
+                "hourly_lead_gap": hourly_lead_gap,
+                "leads_remaining_today": leads_remaining_today,
+                "remaining_hours": round(remaining_hours, 2),
+                "required_leads_per_remaining_hour": required_leads_per_remaining_hour,
+                "remaining_demand_share": round(remaining_demand_share, 4),
+                "expected_future_leads_at_baseline": round(expected_future_leads_at_baseline, 2),
+                "recovery_multiplier": recovery_multiplier,
+                "projected_finish_at_baseline": projected_finish_at_baseline,
+                "recovery_capacity_state": recovery_capacity_state,
+                "pace_state": _pace_formula.get("state"),
+                "pace_source": ((_pace_formula.get("demand_curve") or {}).get("source")
+                                if isinstance(_pace_formula.get("demand_curve"), dict) else None),
+            },
+
+            "diagnosis": {
+                "code": diagnosis_code,
+                "root_cause": root_code,
+                "reason": diagnosis.get("reason"),
+            },
+
+            "economics": {
+                "ai_daily_limit_rub": ai_daily_limit_rub,
+                "ai_cycle_limit_rub": ai_cycle_limit_rub,
+                "ai_planned_this_cycle_rub": round(
+                    ai_planned, 2
+                ),
+                "ad_budget_available_rub": round(
+                    available_ad_budget, 2
+                ),
+            },
+
+            "limits": {
+                "max_actions_this_cycle": max_actions,
+                "selected_actions": len(selected),
+            },
+
+            "title_cohort": {
+                "target_active_pct": _title_active_cohort_min_pct,
+                "active_items": len(_active_items),
+                "raw_target_items": _title_cohort_raw_target,
+                "target_items": _title_cohort_target,
+                "managed_supply_cap": _title_managed_supply_cap,
+                "managed_supply_proof": _title_managed_supply_evidence,
+                "exact_identity_active": _title_exact_identity_active,
+                "exact_writable_active": _title_exact_writable_active,
+                "capacity_gap": _title_cohort_capacity_gap,
+                "mapping_capacity_gap": _title_mapping_capacity_gap,
+                "mutation_capacity_gap": _title_mutation_capacity_gap,
+                "revision_hold_active": len(_active_title_revision_hold_ids),
+                "capacity_sufficient": _title_cohort_capacity_gap == 0,
+                "mapping_recovery_required": bool(_title_cohort_capacity_gap > 0),
+                "mapping_recovery_candidates": len(_title_mapping_recovery_candidates),
+                "mutation_blocked_by_revision_state": bool(
+                    _title_mutation_capacity_gap > 0
+                    and _title_mapping_capacity_gap == 0
+                    and _active_title_revision_hold_ids
+                ),
+                "batch_cap": _content_batch_cap,
+            },
+
+            "actions": selected,
+            "blocked_actions": blocked_money_actions,
+
+            "reference_items": best_items[:5],
+
+            "read_only": True,
+        }
+
+    finally:
+        db.close()
+
+
+@router.get("/kpi_guard")
+def kpi_guard(account_id: str):
+    """
+    Read-only предохранитель KPI-автопилота.
+    Ничего не исполняет.
+    Проверяет:
+    - выбранное действие;
+    - режим автопилота;
+    - класс риска;
+    - дневной бюджет.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kg
+
+    db = SessionLocal()
+    try:
+        selected = kpi_choose_action(account_id)
+
+        if selected.get("status") != "ok":
+            return {
+                "status": "blocked",
+                "allowed": False,
+                "reason": selected.get("reason") or "Action Selector недоступен",
+                "read_only": True,
+            }
+
+        action = selected.get("action")
+
+        if action == "none_goal_met":
+            return {
+                "status": "ok",
+                "allowed": True,
+                "action": action,
+                "risk_class": "NONE",
+                "requires_confirmation": False,
+                "requires_budget": False,
+                "reason": "KPI выполнен — действий не требуется",
+                "read_only": True,
+            }
+
+        kpi_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "kpi_settings",
+            )
+            .first()
+        )
+
+        autopilot_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "autopilot_settings",
+            )
+            .first()
+        )
+
+        kpi = _json_kg.loads(kpi_row.value) if kpi_row else {}
+        autopilot = _json_kg.loads(autopilot_row.value) if autopilot_row else {}
+
+        mode = autopilot.get("mode", "always_ask")
+        daily_budget_limit = float(kpi.get("daily_budget_limit_rub") or 0)
+
+        # Классы действий.
+        #
+        # FREE_AUTO:
+        # бесплатные read-only/аналитические действия.
+        #
+        # BUDGET_AUTO:
+        # потенциально денежные действия. Пока только разрешаем по мандату,
+        # но реальный расход ещё НЕ выполняем.
+        #
+        # CONFIRM:
+        # видимые изменения объявлений требуют отдельного подтверждения,
+        # пока goal_auto не реализован до конца.
+        #
+        # FORBIDDEN_AUTO:
+        # никогда не исполняются автоматически.
+
+        FREE_AUTO = {
+            "collect_fresh_stats",
+            "deep_conversion_analysis",
+            "deep_item_analysis",
+        }
+
+        # KPI_REDUCE_CPL_GUARD_V1: lowering an existing CPX bid is a
+        # money-saving autonomous action. It never needs positive budget
+        # headroom, but it still requires autonomous mode and the canonical
+        # apply_one money mandate.
+        MONEY_SAVING_AUTO = {"reduce_cpl"}
+
+        CONFIRM = {
+            "optimize_weak_items",
+            "expand_inventory",
+        }
+
+        BUDGET_AUTO = {
+            "increase_reach",
+        }
+
+        FORBIDDEN_AUTO = {
+            "delete_data",
+            "change_account_credentials",
+            "change_unverified_price",
+            "change_unverified_stock",
+        }
+
+        if action in FORBIDDEN_AUTO:
+            return {
+                "status": "blocked",
+                "allowed": False,
+                "action": action,
+                "risk_class": "FORBIDDEN_AUTO",
+                "requires_confirmation": True,
+                "requires_budget": False,
+                "reason": "Действие запрещено для автоматического исполнения",
+                "mode": mode,
+                "read_only": True,
+            }
+
+        if action in FREE_AUTO:
+            return {
+                "status": "ok",
+                "allowed": True,
+                "action": action,
+                "risk_class": "FREE_AUTO",
+                "requires_confirmation": False,
+                "requires_budget": False,
+                "reason": "Бесплатное аналитическое действие разрешено",
+                "mode": mode,
+                "daily_budget_limit_rub": daily_budget_limit,
+                "read_only": True,
+            }
+
+        autonomous_mode = str(mode or "") in {"goal_auto", "always_auto"}
+
+        if action in MONEY_SAVING_AUTO:
+            return {
+                "status":"ok" if autonomous_mode else "blocked",
+                "allowed":autonomous_mode,"action":action,"risk_class":"MONEY_SAVING_AUTO",
+                "requires_confirmation":not autonomous_mode,"requires_budget":False,
+                "reason":"Разрешено автономное снижение неэффективной ставки" if autonomous_mode else "Нужен автономный режим BORIS",
+                "mode":mode,"daily_budget_limit_rub":daily_budget_limit,"read_only":True,
+            }
+
+        if action in CONFIRM:
+            return {
+                "status": "ok",
+                "allowed": autonomous_mode,
+                "action": action,
+                "risk_class": "CONFIRM",
+                "requires_confirmation": not autonomous_mode,
+                "requires_budget": False,
+                "reason": (
+                    "Разрешено автономным режимом BORIS"
+                    if autonomous_mode
+                    else "Нужно подтверждение владельца"
+                ),
+                "mode": mode,
+                "daily_budget_limit_rub": daily_budget_limit,
+                "read_only": True,
+            }
+
+        if action in BUDGET_AUTO:
+            ledger = kpi_budget_ledger(account_id)
+
+            available_rub = (
+                float(ledger.get("available_rub") or 0)
+                if ledger.get("status") == "ok"
+                else 0
+            )
+
+            budget_ok = daily_budget_limit > 0 and available_rub > 0
+            allowed = budget_ok and autonomous_mode
+
+            if not daily_budget_limit:
+                reason = "Дневной бюджет не задан"
+            elif ledger.get("status") != "ok":
+                reason = "Не удалось получить состояние дневного бюджета"
+            elif available_rub <= 0:
+                reason = "Дневной бюджет исчерпан"
+            elif not autonomous_mode:
+                reason = "Для денежного автодействия нужен автономный режим BORIS"
+            else:
+                reason = "Разрешено в пределах свободного остатка дневного бюджета"
+
+            return {
+                "status": "ok" if allowed else "blocked",
+                "allowed": allowed,
+                "action": action,
+                "risk_class": "BUDGET_AUTO",
+                "requires_confirmation": not autonomous_mode,
+                "requires_budget": True,
+                "daily_budget_limit_rub": daily_budget_limit,
+                "spent_today_rub": ledger.get("spent_rub"),
+                "reserved_today_rub": ledger.get("reserved_rub"),
+                "available_today_rub": ledger.get("available_rub"),
+                "budget_exhausted": ledger.get("budget_exhausted"),
+                "reason": reason,
+                "mode": mode,
+                "read_only": True,
+            }
+
+        return {
+            "status": "blocked",
+            "allowed": False,
+            "action": action,
+            "risk_class": "UNKNOWN",
+            "requires_confirmation": True,
+            "requires_budget": selected.get("requires_budget", False),
+            "reason": "Действие не классифицировано в KPI Guard",
+            "mode": mode,
+            "daily_budget_limit_rub": daily_budget_limit,
+            "read_only": True,
+        }
+
+    finally:
+        db.close()
+
+
+@router.get("/kpi_choose_action")
+def kpi_choose_action(account_id: str):
+    """
+    Read-only выбор следующего действия для достижения KPI.
+    Ничего на Avito не меняет.
+    """
+
+    check = kpi_check(account_id)
+
+    if check.get("status") != "ok":
+        return {
+            "status": "blocked",
+            "action": "none",
+            "reason": check.get("message") or "KPI недоступен",
+            "read_only": True,
+        }
+
+    target = check.get("target_leads_per_day", 0)
+    actual = check.get("contacts_today", 0)
+    gap = check.get("leads_gap", 0)
+
+    # Если цель уже выполнена — главный приоритет ничего не испортить
+    # и не тратить бюджет дальше.
+    if check.get("suggested_action") == "none_goal_met" or actual >= target:
+        return {
+            "status": "ok",
+            "action": "none_goal_met",
+            "reason": f"Цель уже достигнута: {actual}/{target}",
+            "priority": 0,
+            "requires_budget": False,
+            "candidate_items": [],
+            "read_only": True,
+        }
+
+    diagnosis = kpi_diagnose(account_id)
+    root = kpi_root_cause(account_id)
+
+    diagnosis_code = diagnosis.get("diagnosis")
+    root_code = root.get("root_cause")
+
+    weak = root.get("worst_items") or []
+    best = root.get("best_items") or []
+
+    # 0. Explicit position evidence has priority over guessed reach causes.
+    if root_code == "hidden_from_search":
+        action = "deep_item_analysis"
+        reason = (
+            "Avito Pro прямо показывает, что часть объявлений скрыта из поисковой выдачи. "
+            "BORIS сначала диагностирует причину и не покупает трафик вслепую."
+        )
+        requires_budget = False
+        priority = 100
+
+    elif root_code == "low_search_position":
+        action = "increase_reach"
+        reason = (
+            "Avito Pro подтвердил позицию ниже 30 места при недостаточном органическом трафике. "
+            "Пробуем улучшить охват только через существующий защищённый CPX-контур: "
+            "он разрешит деньги лишь доказанному конвертеру и только внутри CPL/бюджета/hard_max_bid."
+        )
+        requires_budget = True
+        priority = 95
+
+    # 1. Нет нормальных данных — сначала обновляем измерение,
+    # а не меняем объявления вслепую.
+    elif diagnosis_code == "insufficient_data" or root_code in (
+        "insufficient_data",
+        "insufficient_item_traffic",
+    ):
+        action = "collect_fresh_stats"
+        reason = "Недостаточно данных для безопасного изменения объявлений."
+        requires_budget = False
+        priority = 100
+
+    # 2. Есть доказанно слабые объявления:
+    # сначала работаем точечно с ними, а не трогаем весь кабинет.
+    elif root_code in ("zero_contact_items", "low_conversion_items") and weak:
+        action = "optimize_weak_items"
+        reason = (
+            f"Найдено {len(weak)} доказанно слабых объявлений. "
+            "Сначала нужно улучшить именно их, используя сильные позиции как эталон."
+        )
+        requires_budget = False
+        priority = 90
+
+    # 3. Общая проблема конверсии.
+    elif diagnosis_code == "contact_conversion_problem":
+        action = "deep_conversion_analysis"
+        reason = (
+            "Просмотры есть, но конверсия в контакт недостаточна. "
+            "Нужен разбор цены, заголовка, первого фото и предложения."
+        )
+        requires_budget = False
+        priority = 80
+
+    # 4. Недостаточный охват.
+    #
+    # kpi_root_cause() может возвращать:
+    # - reach_problem
+    # - insufficient_item_traffic
+    #
+    # Оба случая означают одно:
+    # объявлений/показов недостаточно для нормальной оценки
+    # и прежде чем оптимизировать конверсию, нужно дать трафик.
+    elif diagnosis_code in {
+        "reach_problem",
+        "insufficient_item_traffic",
+    }:
+        action = "increase_reach"
+        reason = (
+            "Недостаточно просмотров. Нужно увеличить охват прежде, "
+            "чем оптимизировать конверсию."
+        )
+        requires_budget = True
+        priority = 70
+
+    # 5. Недостаточно активных объявлений.
+    elif diagnosis_code == "inventory_problem":
+        action = "expand_inventory"
+        reason = (
+            "Количество активных объявлений недостаточно относительно "
+            "заданной цели по лидам."
+        )
+        requires_budget = True
+        priority = 70
+
+    # 6. CPL выше ограничения, но план по лидам ещё не выполнен.
+    # Новый owner-policy: не останавливать разгон только ради экономии бюджета.
+    # Увеличиваем охват постепенно на доказанно работающих объявлениях; слабые
+    # позиции продолжают идти в отдельную conversion/content оптимизацию.
+    elif diagnosis_code == "cpl_problem":
+        # P0 MONEY SAFETY: expensive leads are evidence against buying more
+        # traffic. A KPI gap does not override economics. Diagnose/repair
+        # conversion or reduce cost first; never raise bids from this branch.
+        action = "reduce_cpl"
+        reason = (
+            f"CPL выше допустимого уровня; до плана не хватает {gap:g} лид(ов). "
+            "Дополнительный разгон ставок запрещён: сначала снижаем стоимость "
+            "контакта и устраняем причину дорогого трафика."
+        )
+        requires_budget = False
+        priority = 98
+
+    else:
+        action = "deep_item_analysis"
+        reason = (
+            "KPI не достигнут, но одной подтверждённой причины недостаточно. "
+            "Нужен углублённый анализ объявлений."
+        )
+        requires_budget = False
+        priority = 60
+
+    return {
+        "status": "ok",
+        "action": action,
+        "priority": priority,
+        "reason": reason,
+        "requires_budget": requires_budget,
+        "goal": {
+            "target_leads_per_day": target,
+            "contacts_today": actual,
+            "leads_gap": gap,
+        },
+        "diagnosis": diagnosis_code,
+        "root_cause": root_code,
+        "candidate_items": weak[:10],
+        "reference_items": best[:5],
+        "read_only": True,
+    }
+
+
+@router.get("/kpi_diagnose")
+def kpi_diagnose(account_id: str):
+    """
+    Read-only диагностика причины отклонения от KPI по лидам.
+    Никаких действий на Avito не выполняет.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json_kd
+    from datetime import date as _date_kd
+    import httpx as _httpx_kd
+
+    db = SessionLocal()
+    try:
+        kpi_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == "kpi_settings",
+            )
+            .first()
+        )
+        if not kpi_row:
+            return {
+                "status": "no_goal",
+                "diagnosis": "insufficient_data",
+                "reason": "Цель по лидам не задана",
+            }
+
+        kpi = _json_kd.loads(kpi_row.value)
+        target = float(kpi.get("target_leads_per_day") or 0)
+        max_cpl = float(kpi.get("max_cost_per_lead_rub") or 0)
+
+        today = _kpi_marketing_today().isoformat()
+        stats_row = (
+            db.query(Storage)
+            .filter(
+                Storage.account_id == account_id,
+                Storage.key == f"daily_stats:{today}",
+            )
+            .first()
+        )
+
+        if not stats_row:
+            return {
+                "status": "ok",
+                "diagnosis": "insufficient_data",
+                "confidence": "high",
+                "evidence": {
+                    "target_leads_per_day": target,
+                    "stats_date": today,
+                },
+                "reason": "Нет daily_stats за сегодня",
+                "recommended_actions": [
+                    "Собрать свежую статистику Avito",
+                    "Не выполнять изменения объявлений до получения данных",
+                ],
+            }
+
+        stats = _json_kd.loads(stats_row.value)
+
+        items = stats.get("items") or []
+
+        views = 0
+        contacts = 0
+        active_items = 0
+
+        for item in items:
+            views += int(item.get("views") or item.get("uniqViews") or 0)
+            contacts += int(item.get("contacts") or item.get("uniqContacts") or 0)
+
+            status = str(item.get("status") or "").lower()
+            if not status or status == "active":
+                active_items += 1
+
+        # На случай снапшота с уже агрегированными значениями.
+        if not items:
+            views = int(stats.get("views") or stats.get("uniqViews") or 0)
+            contacts = int(stats.get("contacts") or stats.get("uniqContacts") or 0)
+            active_items = int(
+                stats.get("active_items")
+                or stats.get("items_count")
+                or 0
+            )
+
+        conversion = round((contacts / views) * 100, 2) if views > 0 else None
+
+        # CPL берём тем же способом, которым уже пользуется KPI-контур:
+        # при отсутствии надёжных данных не выдумываем значение.
+        cpl = None
+
+        evidence = {
+            "target_leads_per_day": target,
+            "contacts_today": contacts,
+            "views_today": views,
+            "active_items": active_items,
+            "view_to_contact_conversion_pct": conversion,
+            "cost_per_lead_today": cpl,
+            "max_cost_per_lead_rub": max_cpl,
+        }
+
+        if target <= 0:
+            diagnosis = "insufficient_data"
+            reason = "Цель по лидам равна нулю или задана некорректно"
+            actions = ["Уточнить целевое количество лидов"]
+
+        elif contacts >= target:
+            diagnosis = "goal_met"
+            reason = f"Цель выполняется: {contacts} из {target:g} лидов"
+            actions = []
+
+        elif views <= 0:
+            diagnosis = "reach_problem"
+            reason = "Сегодня нет просмотров — проблема находится выше конверсии в контакт"
+            actions = [
+                "Проверить наличие и статус активных объявлений",
+                "Проверить охват и публикацию объявлений",
+            ]
+
+        elif contacts == 0:
+            diagnosis = "contact_conversion_problem"
+            reason = f"Есть {views} просмотров, но нет контактов"
+            actions = [
+                "Проверить цену и предложение",
+                "Проверить заголовки и первые изображения",
+                "Проверить описание и доверие к объявлению",
+            ]
+
+        elif conversion is not None and conversion > 0:
+            # KPI_DYNAMIC_CONVERSION_DIAGNOSIS_V1
+            _root_for_conversion = kpi_root_cause(account_id) or {}
+            _thr = (((_root_for_conversion.get("account") or {}).get("evidence_thresholds") or {}).get("loser_conversion_threshold_pct"))
+            try: _thr = float(_thr) if _thr is not None else None
+            except Exception: _thr = None
+            if _thr is not None and conversion < _thr:
+                diagnosis = "contact_conversion_problem"
+                reason = f"Конверсия {conversion}% ({contacts}/{views}) ниже динамического порога аккаунта {_thr:.2f}%."
+                actions = ["Найти объявления с достаточным трафиком и слабой конверсией", "Сравнить их с лидерами этого аккаунта", "Проверить одну точечную гипотезу и измерить эффект"]
+            else:
+                diagnosis = "performance_gap"
+                reason = f"Цель не достигнута: {contacts} из {target:g}; конверсия не доказана как слабая относительно нормы аккаунта."
+                actions = ["Проверить темп лидов к текущему часу", "Разобрать охват и сильные/слабые объявления", "Выбрать следующее доказательное действие"]
+
+        elif cpl is not None and max_cpl > 0 and cpl > max_cpl:
+            diagnosis = "cpl_problem"
+            reason = f"CPL {cpl} ₽ выше лимита {max_cpl:g} ₽"
+            actions = [
+                "Найти объявления с дорогими контактами",
+                "Не увеличивать расходы до диагностики слабых позиций",
+            ]
+            try:
+                # Diagnosis has fully materialized its evidence. Close the read
+                # transaction before CPX advisor work and call the canonical function
+                # directly instead of self-HTTP to :8000.
+                db.rollback()
+                from app.api.cpx_advisor import run_advisor
+                advisor_data = run_advisor(account_id) or {}
+                advice = advisor_data.get("advice", {})
+                if advice:
+                    actions.append(f"Советник: {advice}")
+            except Exception:
+                pass
+
+        elif active_items > 0 and active_items < max(3, int(target)):
+            diagnosis = "inventory_problem"
+            reason = (
+                f"Активных объявлений {active_items}, "
+                f"что мало относительно цели {target:g} лидов/день"
+            )
+            actions = [
+                "Оценить необходимое количество активных объявлений",
+                "Подготовить расширение покрытия без дублирования слабых позиций",
+            ]
+
+        else:
+            diagnosis = "performance_gap"
+            reason = (
+                f"Цель не достигнута: {contacts} из {target:g}; "
+                "одной причины по текущим данным не выявлено"
+            )
+            actions = [
+                "Разобрать статистику по каждому объявлению",
+                "Выделить лидеров и слабые позиции",
+                "Сформировать точечный план улучшений",
+            ]
+
+        return {
+            "status": "ok",
+            "diagnosis": diagnosis,
+            "confidence": "medium",
+            "reason": reason,
+            "evidence": evidence,
+            "recommended_actions": actions,
+            "read_only": True,
+        }
+
     finally:
         db.close()
 
@@ -4677,3 +22678,1007 @@ def set_seller_defaults(req: SellerDefaultsRequest):
         return {"status": "ok", "saved": clean, "count": len(clean)}
     finally:
         db.close()
+
+
+@router.get("/items_overview")
+def items_overview(account_id: str, days: int = 7):
+    """Объявления для нового экрана — из суточных снимков.
+
+    Ключ active_avito_items никто не наполняет, поэтому берём daily_stats:
+    там есть заголовок, цена, статус, категория и показатели, и на них же
+    работает советник продвижения — цифры на двух экранах совпадут.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from datetime import date, timedelta
+    import json as _json
+
+    db = SessionLocal()
+    try:
+        last, snap_date = None, None
+        for back in range(0, 8):
+            d = (date.today() - timedelta(days=back)).isoformat()
+            row = db.query(Storage).filter(Storage.account_id == account_id,
+                                           Storage.key == "daily_stats:" + d).first()
+            if row:
+                try:
+                    last, snap_date = _json.loads(row.value), d
+                    break
+                except Exception:
+                    continue
+        if not last:
+            return {"status": "empty", "items": [], "message": "Статистика ещё не собрана"}
+
+        window = {}
+        for back in range(1, int(days) + 1):
+            d = (date.today() - timedelta(days=back)).isoformat()
+            row = db.query(Storage).filter(Storage.account_id == account_id,
+                                           Storage.key == "daily_stats:" + d).first()
+            if not row:
+                continue
+            try:
+                snap = _json.loads(row.value)
+            except Exception:
+                continue
+            for it in (snap.get("items") or []):
+                iid = it.get("id")
+                if iid is None:
+                    continue
+                cur = window.setdefault(iid, {"views": 0, "contacts": 0})
+                cur["views"] += int(it.get("views") or 0)
+                cur["contacts"] += int(it.get("contacts") or 0)
+
+        # Рекомендации советника лежат рядом — подтягиваем, чтобы список
+        # был не отчётом, а инструментом: видно проблему и что делать.
+        _advice_map = {}
+        arow = db.query(Storage).filter(Storage.account_id == account_id,
+                                        Storage.key == "cpx_advice").first()
+        if arow:
+            try:
+                adv = _json.loads(arow.value) or {}
+                for grp in ("raise", "lower_or_archive", "watching"):
+                    for e in (adv.get("recommendations", {}).get(grp) or []):
+                        _advice_map[e.get("id")] = {
+                            "ставка": e.get("bid_rub"),
+                            "почему": e.get("why") or "",
+                            "совет": e.get("suggest") or "",
+                            "группа": grp,
+                        }
+            except Exception:
+                pass
+
+        out = []
+        for it in (last.get("items") or []):
+            iid = it.get("id")
+            w = window.get(iid) or {"views": 0, "contacts": 0}
+            v7, c7 = w["views"], w["contacts"]
+            out.append({
+                "id": iid,
+                "заголовок": it.get("title") or "",
+                "цена": it.get("price"),
+                "статус": it.get("status") or "",
+                "категория": it.get("category") or "",
+                "просмотры_7д": v7,
+                "обращения_7д": c7,
+                "конверсия_7д": round(c7 / v7 * 100, 1) if v7 else None,
+                "ставка": (_advice_map.get(iid) or {}).get("ставка"),
+                "почему": (_advice_map.get(iid) or {}).get("почему", ""),
+                "совет": (_advice_map.get(iid) or {}).get("совет", ""),
+                "recommendation_group": (_advice_map.get(iid) or {}).get("группа", ""),
+                "recommendation_actionable": (
+                    ((_advice_map.get(iid) or {}).get("группа") == "raise" and bool((_advice_map.get(iid) or {}).get("совет")))
+                    or (((_advice_map.get(iid) or {}).get("группа") in {"lower", "lower_or_archive", "archive_candidates"})
+                        and "сниз" in str((_advice_map.get(iid) or {}).get("совет") or "").lower())
+                ),
+                "recommendation_measurement": None,
+            })
+
+        # Показываем владельцу lifecycle уже применённой рекомендации.
+        # Это только projection существующего cpx_measure; новых состояний не создаём.
+        for projected in out:
+            try:
+                _iid = int(projected.get("id"))
+            except Exception:
+                continue
+            _measure_rows = (
+                db.query(Storage)
+                .filter(
+                    Storage.account_id == account_id,
+                    Storage.key.like(f"cpx_measure:{_iid}:%"),
+                )
+                .all()
+            )
+            _states = []
+            for _mr in _measure_rows:
+                try:
+                    _ms = _json.loads(_mr.value or "{}")
+                except Exception:
+                    continue
+                if _ms.get("status") in {"waiting_measurement", "measured"}:
+                    _states.append(_ms)
+            if _states:
+                _states.sort(key=lambda x: str(x.get("started_at") or x.get("finished_at") or ""), reverse=True)
+                _ms = _states[0]
+                projected["recommendation_measurement"] = {
+                    "status": _ms.get("status"),
+                    "action": _ms.get("action"),
+                    "started_at": _ms.get("started_at"),
+                    "finished_at": _ms.get("finished_at"),
+                    "old_bid_rub": _ms.get("old_bid_rub"),
+                    "new_bid_rub": _ms.get("new_bid_rub"),
+                    "effect": _ms.get("effect"),
+                    "required_days": _ms.get("required_days", 7),
+                }
+                if _ms.get("status") == "waiting_measurement":
+                    projected["recommendation_actionable"] = False
+
+
+        active = [i for i in out if i["статус"] == "active"]
+        _runtime = None
+        _runtime_row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "virtual_marketer_runtime").order_by(Storage.id.desc()).first()
+        if _runtime_row and _runtime_row.value:
+            try:
+                _runtime = _json.loads(_runtime_row.value)
+            except Exception:
+                _runtime = None
+        return {
+            "status": "ok",
+            "automation": _runtime,
+            "дата_снимка": snap_date,
+            "всего": len(out),
+            "активных": len(active),
+            "без_просмотров": len([i for i in active if i["просмотры_7д"] == 0]),
+            "с_обращениями": len([i for i in active if i["обращения_7д"] > 0]),
+            "items": out,
+        }
+    finally:
+        db.close()
+
+
+class AiMarketingApplyRecommendationsBody(BaseModel):
+    account_id: str
+    item_ids: list[int]
+
+
+@router.post("/ai_marketing_apply_recommendations")
+def ai_marketing_apply_recommendations(req: AiMarketingApplyRecommendationsBody):
+    """Owner-approved bridge from Analytics recommendations into the existing CPX engine.
+
+    No second marketer/queue is created. Every item is revalidated against the latest
+    cpx_advice, then delegated to cpx_advisor.apply_one(), which owns live-money guards,
+    idempotency, cooldowns, audit logging and effect measurement.
+    """
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from app.api.cpx_advisor import ApplyOneBody, apply_one
+    import json as _json_amar
+    import re as _re_amar
+
+    ids=[]
+    for raw in (req.item_ids or []):
+        try: iid=int(raw)
+        except Exception: continue
+        if iid not in ids: ids.append(iid)
+    if not ids:
+        return {"status":"blocked","message":"Не выбраны рекомендации","results":[],"changed_avito":False}
+    if len(ids) > 100:
+        return {"status":"blocked","message":"За один запуск можно применить не более 100 рекомендаций","results":[],"changed_avito":False}
+
+    db=SessionLocal()
+    try:
+        row=db.query(Storage).filter(Storage.account_id==req.account_id,Storage.key=="cpx_advice").order_by(Storage.id.desc()).first()
+        if not row or not row.value:
+            return {"status":"blocked","message":"Нет свежих рекомендаций AI-маркетолога","results":[],"changed_avito":False}
+        try: advice=_json_amar.loads(row.value) or {}
+        except Exception:
+            return {"status":"blocked","message":"Не удалось прочитать рекомендации AI-маркетолога","results":[],"changed_avito":False}
+        recs={}
+        for group, values in (advice.get("recommendations") or {}).items():
+            for rec in (values or []):
+                rid=rec.get("item_id") if rec.get("item_id") is not None else rec.get("id")
+                try: rid=int(rid)
+                except Exception: continue
+                recs.setdefault(rid, {"group":str(group), **rec})
+        generated_at=str(advice.get("generated_at") or "")
+    finally:
+        db.close()
+
+    results=[]
+    any_changed=False
+    for iid in ids:
+        rec=recs.get(iid)
+        if not rec:
+            results.append({"item_id":iid,"status":"blocked","message":"Текущая рекомендация для объявления отсутствует","changed_avito":False})
+            continue
+        group=str(rec.get("group") or "")
+        suggest=str(rec.get("suggest") or "")
+        action=None
+        if group == "raise": action="raise"
+        elif group in {"lower","lower_or_archive","archive_candidates"} and "сниз" in suggest.lower(): action="lower"
+        if not action:
+            results.append({"item_id":iid,"status":"blocked","message":"Эта рекомендация пока не имеет безопасного автоматического действия","recommendation":suggest,"changed_avito":False})
+            continue
+        m=_re_amar.search(r"(\d+(?:[.,]\d+)?)\s*%", suggest)
+        step=int(float(m.group(1).replace(',', '.'))) if m else None
+        try:
+            result=apply_one(ApplyOneBody(account_id=req.account_id,item_id=iid,action=action,max_bid_delta_pct=step,actor_type="user",source="analytics_ai_marketing_apply",trigger="owner_apply_recommendation",request_id=f"analytics:{req.account_id}:{generated_at}:{iid}:{action}"))
+        except Exception as exc:
+            result={"status":"error","message":str(exc)[:240],"changed_avito":False}
+        changed=bool(isinstance(result,dict) and (result.get("changed_avito") or result.get("status")=="ok"))
+        any_changed=any_changed or changed
+        results.append({"item_id":iid,"action":action,"recommendation":suggest,"status":result.get("status") if isinstance(result,dict) else "error","changed_avito":changed,"result":result})
+    ok=sum(1 for x in results if x.get("status")=="ok")
+    blocked=sum(1 for x in results if x.get("status") in {"blocked","skipped"})
+    errors=len(results)-ok-blocked
+    return {"status":"ok" if errors==0 else "partial","requested":len(ids),"applied":ok,"blocked":blocked,"errors":errors,"changed_avito":any_changed,"results":results,"engine":"existing_cpx_apply_one"}
+
+
+class AdsRunBody(BaseModel):
+    account_id: str
+    run_id: str
+
+
+@router.get("/ads_proposals")
+def ads_proposals(account_id: str):
+    """Предложенные заголовки: что BORIS хочет изменить и почему."""
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    import json as _json
+    db = SessionLocal()
+    try:
+        row = db.query(Storage).filter(Storage.account_id == account_id,
+                                       Storage.key == "ads_proposals").first()
+        items = _json.loads(row.value) if row and row.value else []
+        runs = {}
+        for p in items:
+            r = str(p.get("запуск") or "")
+            runs.setdefault(r, {"запуск": r, "создано": p.get("создано"),
+                                "ожидает": 0, "применено": 0, "откачено": 0,
+                                "предложения": []})
+            st = p.get("статус") or "ожидает"
+            if st in runs[r]:
+                runs[r][st] += 1
+            runs[r]["предложения"].append(p)
+        return {"status": "ok", "всего": len(items),
+                "запуски": sorted(runs.values(), key=lambda x: x["запуск"], reverse=True)}
+    finally:
+        db.close()
+
+
+@router.post("/ads_publish")
+def ads_publish(body: AdsRunBody):
+    """Публикация запуска после подтверждения человеком."""
+    import sys as _s
+    if "/root/BORIS/backend" not in _s.path:
+        _s.path.insert(0, "/root/BORIS/backend")
+    from ads_autopilot import apply_run
+    apply_run(body.account_id, body.run_id, dry=False)
+    return {"status": "ok"}
+
+
+@router.post("/ads_rollback")
+def ads_rollback(body: AdsRunBody):
+    """Откат запуска одной кнопкой."""
+    import sys as _s
+    if "/root/BORIS/backend" not in _s.path:
+        _s.path.insert(0, "/root/BORIS/backend")
+    from ads_autopilot import rollback_run
+    rollback_run(body.account_id, body.run_id, dry=False)
+    return {"status": "ok"}
+
+
+def _ai_marketing_human_operation(op: dict) -> dict:
+    """Pure projection of existing action memory into owner language."""
+    status = str(op.get("status") or "")
+    effect = op.get("effect") or {}
+    effect_status = str(effect.get("status") or "")
+    changes = op.get("changes") or {}
+    item_id = str(op.get("avito_item_id") or op.get("item_id") or "")
+    title_change = changes.get("title") or {}
+    problem = str(op.get("reason") or "BORIS обнаружил отклонение от KPI")
+    if effect_status in {"improved", "kept"}:
+        group = "Стало лучше"; now_text = "Изменение доказанно улучшило целевой результат"
+    elif effect_status in {"worse", "rollback_requested", "try_next_action"} or status in {"effect_no_clear_result", "effect_rollback_requested"}:
+        group = "Не помогло"; now_text = "Изменение не дало нужного результата; BORIS не будет бесконечно повторять ту же гипотезу"
+    elif effect_status in {"insufficient_data", "waiting_more_data"}:
+        group = "Измеряем результат"; now_text = "Данных пока недостаточно — BORIS не делает вывод и продолжает наблюдение"
+    elif status == "published":
+        group = "Измеряем результат"; now_text = "Новая версия уже опубликована; BORIS собирает только статистику после публикации"
+    elif effect_status == "waiting_budget_policy":
+        group = "Ждём Avito"
+        now_text = (
+            "Avito пока не применил новую редакцию из-за денежного ограничения; "
+            "BORIS остановил повторные отправки и сам ждёт снятия ограничения"
+        )
+    elif effect_status == "waiting_owner_funds":
+        group = "Нужно решение владельца"
+        now_text = (
+            "Avito подтвердил, что для применения редакции нужно пополнить аванс/баланс. "
+            "BORIS остановил повторные отправки; после пополнения сам увидит снятие блока "
+            "и продолжит цикл без ручного перезапуска"
+        )
+    elif status == "publish_requested":
+        group = "Ждём Avito"; now_text = "Avito принял обновлённую выгрузку; BORIS ждёт появления новой версии объявления"
+    elif status in {"safe_feed_ready", "mapping_wait", "feed_applied", "publishing", "prepared"}:
+        group = "BORIS работает"; now_text = "BORIS подготовил безопасное изменение и ведёт его по штатному циклу"
+    else:
+        group = "Нужно улучшить"; now_text = "BORIS анализирует следующее безопасное действие"
+    if title_change.get("new"):
+        what_changed = f"Заголовок: «{title_change.get('new')}»"
+    elif changes:
+        what_changed = "; ".join(f"{k}: {v.get('new') if isinstance(v, dict) else v}" for k,v in changes.items())
+    else:
+        what_changed = None
+    win = op.get("observation_window") or {}
+    if effect_status == "waiting_budget_policy":
+        wait_text = (
+            "BORIS сам перепроверяет денежную политику; после снятия ограничения "
+            "штатный цикл продолжит подтверждение публикации"
+        )
+    elif effect_status == "waiting_owner_funds":
+        wait_text = (
+            "После пополнения BORIS сам перепроверит Avito и продолжит публикацию; "
+            "нажимать «проверить» или запускать операцию заново не нужно"
+        )
+    elif status == "publish_requested":
+        wait_text = "Проверка live-версии — в следующем штатном цикле BORIS"
+    elif status == "published":
+        wait_text = f"Результат после полного окна: {win.get('end_date') or 'после накопления данных'}"
+    elif status in {"safe_feed_ready","mapping_wait","feed_applied","publishing"}:
+        wait_text = "Следующий переход — по штатному циклу BORIS"
+    else:
+        wait_text = None
+    return {
+        "group": group,
+        "item_id": item_id or None,
+        "problem": problem,
+        "kpi_before": op.get("kpi_before") or effect.get("before"),
+        "what_changed": what_changed,
+        "current_status": now_text,
+        "when_result": wait_text,
+        "kpi_after": effect.get("after"),
+        "result": effect_status or None,
+        "decision": effect.get("decision"),
+        "next_step": (
+            "Оставить доказанно эффективное изменение и продолжить мониторинг" if effect_status in {"improved","kept"}
+            else "Откатить/сменить стратегию по safety-contract; ту же неудачную гипотезу не повторять" if effect_status in {"worse","rollback_requested","try_next_action"}
+            else "Продолжить наблюдение до достаточного evidence" if effect_status in {"insufficient_data","waiting_more_data"}
+            else "Ничего от владельца не требуется: BORIS сам ждёт снятия денежного ограничения и продолжит штатный цикл без повторных отправок" if effect_status == "waiting_budget_policy"
+            else "Пополнить аванс/баланс Avito. После пополнения BORIS сам перепроверит снятие блока и продолжит — вручную перезапускать ничего не нужно" if effect_status == "waiting_owner_funds"
+            else "Сравнить новую версию за полные дни и решить: оставить, откатить или попробовать другой манёвр" if status in {"publish_requested","published"}
+            else "Продолжить штатный KPI-цикл с учётом истории"
+        ),
+        "technical": {"operation_id":op.get("operation_id"),"status":status,"version":op.get("version")},
+    }
+
+
+@router.get("/ai_marketing_daily_workspace")
+def ai_marketing_daily_workspace(account_id: str):
+    """Read-only daily virtual marketer projection. No second engine/storage."""
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from sqlalchemy import text as _sql_text_amw
+    import json as _json_amw
+    from datetime import date as _date_amw
+    db = SessionLocal()
+    try:
+        readiness = ai_marketing_readiness(account_id)
+        check = readiness.get("current_kpi") or kpi_check(account_id)
+        root = kpi_root_cause(account_id)
+        plan = kpi_orchestrate(account_id)
+        _, history = _kpi_apply_log_load(db, account_id)
+        human_ops = [_ai_marketing_human_operation(x) for x in history if str(x.get("type") or "").startswith("kpi_")]
+        groups = {k: [] for k in ["Нужно улучшить","BORIS работает","Ждём Avito","Измеряем результат","Стало лучше","Не помогло","Нужно решение владельца"]}
+        for item in reversed(human_ops):
+            groups.setdefault(item["group"], []).append(item)
+
+        active_item_ids = {
+            str(x.get("avito_item_id") or x.get("item_id")) for x in history
+            if str(x.get("status") or "") in {"prepared","safe_feed_ready","mapping_wait","feed_applied","publishing","publish_requested","published","effect_rollback_requested","rollback_feed_ready","rollback_publish_failed"}
+            and not (str(x.get("status") or "") == "published" and str((x.get("effect") or {}).get("status") or "") in {"improved","worse","insufficient_data","no_clear_effect","kept","try_next_action"})
+        }
+        failed_title_ids = {
+            str(x.get("avito_item_id") or x.get("item_id")) for x in history
+            if "title" in (x.get("changes") or {}) and (
+                str((x.get("effect") or {}).get("status") or "") in {"worse","rollback_requested","try_next_action"}
+                or str(x.get("status") or "") in {"effect_no_clear_result","effect_rollback_requested"}
+            )
+        }
+        failed_description_ids = {
+            str(x.get("avito_item_id") or x.get("item_id")) for x in history
+            if "description" in (x.get("changes") or {}) and (
+                str((x.get("effect") or {}).get("status") or "") in {"worse","rollback_requested","try_next_action"}
+                or str(x.get("status") or "") in {"effect_no_clear_result","effect_rollback_requested"}
+            )
+        }
+        threshold = ((root.get("account") or {}).get("evidence_thresholds") or {}).get("min_views")
+        _target_now = float(check.get("target_leads_per_day") or 0) if isinstance(check,dict) else 0
+        _actual_now = float(check.get("contacts_today") or 0) if isinstance(check,dict) else 0
+        # KPI_OWNER_WORKSPACE_GOAL_ECONOMICS_PARITY_V1:
+        # The owner workspace must use the same business-safe definition of
+        # "goal met" as the orchestrator. Lead volume alone is insufficient
+        # when today's confirmed CPL is already above the owner's red line.
+        _lead_goal_met_now = _target_now > 0 and _actual_now >= _target_now
+        try:
+            _owner_actual_cpl_now = float(check.get("cost_per_lead_today")) if check.get("cost_per_lead_today") is not None else None
+        except Exception:
+            _owner_actual_cpl_now = None
+        try:
+            _owner_red_cpl_now = float(check.get("max_cost_per_lead_rub") or 0)
+        except Exception:
+            _owner_red_cpl_now = 0.0
+        _owner_cpl_over_red_now = bool(
+            _owner_actual_cpl_now is not None
+            and _owner_red_cpl_now > 0
+            and _owner_actual_cpl_now > _owner_red_cpl_now + 1e-9
+        )
+        goal_met_now = bool(_lead_goal_met_now and not _owner_cpl_over_red_now)
+        _owner_provider_stats_current = not (
+            check.get("provider_stats_current") is False
+            or plan.get("control_state") == "provider_stats_lagging"
+        )
+        next_candidate = None
+        from app.services import campaign_identity as _CID_AMW
+        for cand in ([] if (goal_met_now or not _owner_provider_stats_current) else (root.get("worst_items") or [])):
+            iid = str(cand.get("id") or "")
+            if not iid or iid in active_item_ids:
+                continue
+            # Candidate must have deterministic canonical identity before we call it executable.
+            _mapped_ci = _CID_AMW.resolve(db, account_id, iid)
+            if not _mapped_ci or not str(getattr(_mapped_ci, "feed_identity", "") or "").strip():
+                continue
+            # Content learning is sequential: title first, then description if
+            # title produced no proven effect. Never repeat a failed description.
+            if iid in failed_description_ids:
+                continue
+            _next_field = "description" if iid in failed_title_ids else "title"
+            next_candidate = {
+                "item_id": iid,
+                "title": cand.get("title"),
+                "views": cand.get("views"),
+                "contacts": cand.get("contacts"),
+                "conversion": cand.get("conversion"),
+                "decision": "eligible_for_decision",
+                "reason": f"Объявление прошло текущий динамический порог доказательности ({threshold or '—'} просмотров) и входит в список доказанно слабых",
+                "next_strategy": (
+                    "Проверить новую гипотезу описания через существующий Feed Factory/Fact Guard"
+                    if _next_field == "description" else
+                    "Проверить новую гипотезу заголовка через существующий Feed Factory/Fact Guard"
+                ),
+                "next_field": _next_field,
+            }
+            break
+
+        # Explicitly expose the known second candidate decision if it exists in current stats.
+        second_id = (
+            "8253233731"
+            if account_id == "prodazha_bytovok_25677" and _owner_provider_stats_current
+            else None
+        )
+        second_candidate = None
+        if second_id:
+            today_items = {str(x.get("id")):x for x in (root.get("worst_items") or [])}
+            current = today_items.get(second_id)
+            if current:
+                second_candidate = {"item_id":second_id,"decision":"eligible_for_decision","reason":"Текущая статистика уже прошла динамический evidence threshold; решение допускается, если item не занят другой операцией","facts":current}
+            else:
+                # Historical totals are context only, never an activation threshold.
+                rows = db.query(Storage).filter(Storage.account_id==account_id,Storage.key.like("daily_stats:%")).all()
+                by_day={}
+                for row in rows:
+                    try:d=_json_amw.loads(row.value)
+                    except Exception:continue
+                    day=str(d.get("stats_date") or d.get("date") or "")[:10]
+                    for it in d.get("items") or []:
+                        if str(it.get("id"))==second_id:
+                            by_day[day]={"views":int(it.get("views") or 0),"contacts":int(it.get("contacts") or 0)}
+                            break
+                hv=sum(x["views"] for x in by_day.values()); hc=sum(x["contacts"] for x in by_day.values())
+                second_candidate={
+                    "item_id":second_id,"decision":"wait_for_evidence",
+                    "reason":f"Исторически есть {hv} просмотров / {hc} обращений за {len(by_day)} source-day snapshots, но текущий KPI engine допускает item-action только когда объявление проходит account-relative threshold в актуальном snapshot. Сейчас оно не в доказанно слабом списке.",
+                    "becomes_eligible_when":f"Когда актуальный snapshot даст не меньше динамического порога {threshold or '—'} просмотров и подтвердит 0 контактов/низкую конверсию, либо появится другое deterministic evidence существующего engine.",
+                }
+
+        if next_candidate:
+            groups["Нужно улучшить"].append({
+                "item_id":next_candidate.get("item_id"),
+                "problem":next_candidate.get("reason"),
+                "kpi_before":{"views":next_candidate.get("views"),"contacts":next_candidate.get("contacts"),"conversion":next_candidate.get("conversion")},
+                "current_status":"BORIS доказал слабость объявления, но ещё не создавал новую операцию",
+                "next_step":next_candidate.get("next_strategy"),
+            })
+        # KPI_OWNER_WORKSPACE_FUNDING_HEALTH_BRIDGE_V1:
+        # Execution already trusts guardian_balance_funding_health as the durable
+        # source for a real Avito-wallet pause. The owner workspace must project
+        # the same truth instead of continuing to show an unrelated mapping/content
+        # action while the whole KPI mutation lane is paused.
+        try:
+            _funding_owner_row = (
+                db.query(Storage)
+                .filter(
+                    Storage.account_id == account_id,
+                    Storage.key == "guardian_balance_funding_health",
+                )
+                .order_by(Storage.id.desc())
+                .first()
+            )
+            _funding_owner_health = (
+                _json_amw.loads(_funding_owner_row.value or "{}")
+                if _funding_owner_row and _funding_owner_row.value
+                else {}
+            )
+        except Exception:
+            _funding_owner_health = {}
+        _funding_work_pause = bool(
+            not goal_met_now
+            and _funding_owner_health.get("work_pause_required") is True
+        )
+        _funding_owner_required = bool(
+            _funding_work_pause
+            and _funding_owner_health.get("owner_action_required") is True
+        )
+        _funding_suppressed_by_money_guard = bool(
+            _funding_owner_health.get("funding_suppressed_by_money_guard")
+        )
+        _funding_owner_action_text = (
+            "Пополнить аванс/баланс Avito; после пополнения BORIS "
+            "перепроверит состояние автоматически"
+        )
+
+        # KPI_OWNER_WORKSPACE_SERVICE_PERIOD_BRIDGE_V1:
+        # Commercial entitlement is an irreducible owner/business boundary, not
+        # a technical operator task. Unknown means BORIS has no evidence of the
+        # current paid period and therefore must show one precise escalation.
+        _service_period_control_state = str(
+            plan.get("control_state") or ""
+        )
+        _service_period_unknown_ui = (
+            _service_period_control_state == "service_period_unknown"
+        )
+        _service_period_expired_ui = (
+            _service_period_control_state == "service_period_expired"
+        )
+        _service_period_owner_action_text = (
+            "Зафиксировать текущий оплаченный период AI-маркетолога "
+            "или подтвердить, что продления нет"
+        )
+        _held_prepublication_statuses_ui = {
+            "prepared",
+            "safe_feed_ready",
+            "mapping_wait",
+            "feed_applied",
+            "publish_failed",
+            "publishing",
+        }
+        _held_prepublication_items_ui = [
+            x for x in (groups.get("BORIS работает") or [])
+            if str(((x.get("technical") or {}).get("status") or ""))
+            in _held_prepublication_statuses_ui
+        ]
+        if _service_period_unknown_ui or _service_period_expired_ui:
+            groups["BORIS работает"] = [
+                x for x in (groups.get("BORIS работает") or [])
+                if str(((x.get("technical") or {}).get("status") or ""))
+                not in _held_prepublication_statuses_ui
+            ]
+
+        # KPI_OWNER_MAPPING_RECOVERY_TRUTH_V1:
+        # The strict planner may fail closed on a transient/incomplete Avito
+        # stats read while a durable exact-mapping recovery is still active.
+        # Owner truth must project that durable autonomous recovery instead of
+        # falling back to an unrelated stale last-action description. This is
+        # reporting only and grants no AI, money, feed or publication authority.
+        try:
+            _mapping_owner_row = (
+                db.query(Storage)
+                .filter(
+                    Storage.account_id == account_id,
+                    Storage.key == "kpi_mapping_recovery_state",
+                )
+                .order_by(Storage.id.desc())
+                .first()
+            )
+            _mapping_owner_state = (
+                _json_amw.loads(_mapping_owner_row.value or "{}")
+                if _mapping_owner_row and _mapping_owner_row.value
+                else {}
+            )
+        except Exception:
+            _mapping_owner_state = {}
+        _mapping_owner_status = str(
+            _mapping_owner_state.get("status") or ""
+        )
+        _mapping_owner_next_retry = str(
+            _mapping_owner_state.get("next_retry_at") or ""
+        ).strip()
+        _mapping_owner_active_ui = bool(
+            not goal_met_now
+            and not (_service_period_unknown_ui or _service_period_expired_ui)
+            and _mapping_owner_status in {
+                "waiting_official_mapping_evidence",
+                "provider_deferred",
+                "recovered",
+            }
+        )
+
+        # KPI_OWNER_ACTION_ONLY_IF_REQUIRED_V1: distinguish a real owner blocker
+        # from a capability that only blocks one optional lane.  If BORIS still
+        # has an executable non-money strategy, the owner is not made operator.
+        _raw_owner_actions = [] if goal_met_now else list(readiness.get("human_blockers") or [])
+        _strategy_now = plan.get("actions") or []
+        _has_autonomous_nonmoney = any(not bool(x.get("requires_budget")) for x in _strategy_now if isinstance(x,dict))
+        _has_active_autonomous_work = bool(
+            groups.get("Ждём Avito")
+            or groups.get("Измеряем результат")
+            or groups.get("BORIS работает")
+            or _mapping_owner_active_ui
+        )
+        _money_strategy = [x for x in _strategy_now if isinstance(x,dict) and x.get("requires_budget")]
+        _money_can_run_now = bool(_money_strategy and readiness.get("money_autopilot_ready") and not (plan.get("blocked_actions") or []))
+        _money_lane_optional_blocked = bool(plan.get("blocked_actions")) and _has_autonomous_nonmoney
+        owner_actions = [] if (_has_autonomous_nonmoney or _has_active_autonomous_work or _money_can_run_now or _money_lane_optional_blocked) else _raw_owner_actions
+        # OWNER_BUDGET_BLOCKER_TRUTH_V1: free/content work may continue, but it
+        # must never hide a real owner money decision while KPI is unmet. This
+        # is reporting/UX only; it does not grant or infer any spending budget.
+        _budget_owner_actions = [
+            x for x in _raw_owner_actions
+            if any(token in str(x).lower() for token in ("бюджет", "суточн", "дневн"))
+        ]
+        if (not goal_met_now) and _budget_owner_actions and not readiness.get("money_autopilot_ready"):
+            owner_actions = list(dict.fromkeys(_budget_owner_actions + owner_actions))
+        if _funding_owner_required:
+            owner_actions = list(
+                dict.fromkeys([_funding_owner_action_text] + owner_actions)
+            )
+        if _service_period_unknown_ui:
+            owner_actions = list(
+                dict.fromkeys(
+                    [_service_period_owner_action_text] + owner_actions
+                )
+            )
+        for text_value in owner_actions:
+            groups["Нужно решение владельца"].append({"problem":text_value,"current_status":"BORIS не обходит этот safety gate","next_step":text_value})
+
+        # Existing MOP/CRM account-scoped context. Context only: no invented causal attribution.
+        sales = {"source":"existing_mop_crm","attribution":"context_only","mop_dialogs_today":0,"lead_records_today":0,"crm_deals_today":0,"won_deals_today":0}
+        try:
+            sales["mop_dialogs_today"] = int(db.execute(_sql_text_amw("select count(*) from mop_drafts where account_id=:a and created_at::date=current_date"),{"a":account_id}).scalar() or 0)
+            sales["lead_records_today"] = int(db.execute(_sql_text_amw("select count(*) from leads where account_id=:a and created_at::date=current_date"),{"a":account_id}).scalar() or 0)
+            sales["crm_deals_today"] = int(db.execute(_sql_text_amw("select count(*) from boris_crm_deals where avito_account_id=:a and created_at::date=current_date"),{"a":account_id}).scalar() or 0)
+            sales["won_deals_today"] = int(db.execute(_sql_text_amw("select count(*) from boris_crm_deals where avito_account_id=:a and created_at::date=current_date and lower(coalesce(status,'')) in ('won','success','closed_won')"),{"a":account_id}).scalar() or 0)
+        except Exception:
+            db.rollback()
+
+        today = _kpi_marketing_today().isoformat()
+        today_ops=[x for x in history if str(x.get("ts") or "")[:10]==today]
+        report={
+            "problems_found":len(root.get("worst_items") or []),
+            "solutions_prepared":sum(1 for x in today_ops if str(x.get("status") or "") in {"prepared","safe_feed_ready","feed_applied","publishing","publish_requested","published","effect_kept","effect_no_clear_result"}),
+            "sent_or_published":sum(1 for x in today_ops if str(x.get("status") or "") in {"publish_requested","published","effect_kept","effect_no_clear_result"}),
+            "measuring":sum(1 for x in history if str(x.get("status") or "")=="published" and str((x.get("effect") or {}).get("status") or "") not in {"improved","worse","insufficient_data","no_clear_effect","kept","try_next_action"}),
+            "results_received":sum(1 for x in today_ops if str((x.get("effect") or {}).get("status") or "") in {"improved","worse","insufficient_data","no_clear_effect","kept","try_next_action"}),
+            "owner_actions_required":len(owner_actions),
+        }
+        last_result = next((x for x in reversed(human_ops) if x.get("result") in {"improved","worse","insufficient_data","no_clear_effect","kept","try_next_action"}),None)
+        learning_provenance = []
+        for _op in history:
+            _eff = _op.get("effect") or {}; _res = str(_eff.get("status") or "")
+            if _res not in {"improved","worse","insufficient_data","no_clear_effect","kept","try_next_action"}: continue
+            learning_provenance.append({
+                "account_id":account_id,"category":readiness.get("category"),
+                "item_id":str(_op.get("avito_item_id") or _op.get("item_id") or ""),
+                "change_fields":sorted((_op.get("changes") or {}).keys()),
+                "reason":_op.get("reason"),"kpi_before":_op.get("kpi_before") or _eff.get("before"),
+                "kpi_after":_eff.get("after"),"result":_res,"decision":_eff.get("decision"),
+                "provenance":"same_account_same_item_same_version_only",
+                "generalization":"not_universal",
+            })
+        _waiting = groups.get("Ждём Avito") or []
+        _measuring = groups.get("Измеряем результат") or []
+        if plan.get("control_state") == "provider_stats_lagging":
+            bottleneck = (
+                "Площадка ещё не отдала свежий факт контактов за текущий день. "
+                "Сегодняшний подтверждённый расход показывается отдельно."
+            )
+            current_work_human = (
+                "BORIS ждёт автоматического обновления статистики и не запускает "
+                "новые KPI-изменения по вчерашним контактам"
+            )
+        elif _lead_goal_met_now and _owner_cpl_over_red_now:
+            bottleneck = (
+                f"Лиды выполнены: {_actual_now:g} из {_target_now:g}, но CPL "
+                f"{_owner_actual_cpl_now:.2f} ₽ выше лимита {_owner_red_cpl_now:.2f} ₽."
+            )
+            _plan_action_names = [
+                str(x.get("action") or "")
+                for x in (plan.get("actions") or [])
+                if isinstance(x, dict)
+            ]
+            if plan.get("status") == "ok" and "reduce_cpl" in _plan_action_names:
+                current_work_human = (
+                    "BORIS сохраняет выполненный план по лидам и снижает стоимость "
+                    "неэффективного трафика без нового дорогого охвата"
+                )
+            else:
+                current_work_human = (
+                    "Лиды выполнены, но CPL выше лимита. BORIS ждёт свежего "
+                    "подтверждения Avito и не меняет ставки вслепую"
+                )
+        elif goal_met_now:
+            bottleneck = f"План выполнен: {_actual_now:g} из {_target_now:g}. Новые изменения не требуются."
+            current_work_human = "BORIS контролирует KPI и не меняет работающий кабинет ради самой оптимизации"
+        else:
+            bottleneck = root.get("reason") or (check.get("recommendation") if isinstance(check,dict) else None)
+            _working = groups.get("BORIS работает") or []
+            current_work_human = (_waiting[0].get("current_status") if _waiting else (_measuring[0].get("current_status") if _measuring else (_working[0].get("current_status") if _working else readiness.get("current_work"))))
+            # KPI_CURRENT_WORK_ACTION_TRUTH_V1: when no lifecycle mutation is
+            # active, tell the owner the concrete next action selected by the
+            # formula instead of generic "ищет безопасное действие".
+            if not (_waiting or _measuring or _working):
+                _action_names = [str(x.get("action")) for x in (plan.get("actions") or []) if isinstance(x,dict)]
+                _blocked_names = [str(x.get("action")) for x in (plan.get("blocked_actions") or []) if isinstance(x,dict)]
+                if _mapping_owner_active_ui:
+                    if _mapping_owner_next_retry:
+                        current_work_human = (
+                            "BORIS ждёт официальные данные Avito для точного сопоставления "
+                            "объявлений с feed и сам повторит проверку после "
+                            f"{_mapping_owner_next_retry}. AI, публикации и деньги для "
+                            "этого ожидания не расходуются"
+                        )
+                    else:
+                        current_work_human = (
+                            "BORIS восстанавливает только доказуемые связи Avito↔feed "
+                            "по официальным данным; неподтверждённые связи не записывает"
+                        )
+                elif "reduce_cpl" in _action_names:
+                    current_work_human = "BORIS снижает стоимость неэффективного трафика: CPL выше заданного лимита"
+                elif "increase_reach" in _action_names and "increase_reach" not in _blocked_names:
+                    current_work_human = "BORIS увеличивает охват допустимых объявлений и затем измерит прирост просмотров/лидов"
+                elif "increase_reach" in _blocked_names:
+                    current_work_human = "Охват нужно увеличить, но денежный шаг сейчас заблокирован; BORIS продолжает бесплатную диагностику и не тратит бюджет вслепую"
+                elif "optimize_weak_items" in _action_names or "rewrite_weak_titles" in _action_names:
+                    current_work_human = "BORIS готовит точечную контент-гипотезу для доказанно слабого объявления"
+                elif "deep_conversion_analysis" in _action_names:
+                    current_work_human = "BORIS бесплатно анализирует конверсию и ищет доказанно слабую карточку для следующего изменения"
+                elif _blocked_names:
+                    current_work_human = "Денежное действие заблокировано safety-правилом; BORIS не тратит бюджет вслепую"
+
+        if _funding_work_pause:
+            _fund_balance = _funding_owner_health.get("real_balance_rub")
+            _fund_red_cpl = _funding_owner_health.get("max_cpl_rub")
+            if _funding_owner_required:
+                bottleneck = (
+                    f"Реальный баланс Avito {_fund_balance} ₽ ниже рабочего порога "
+                    f"{_fund_red_cpl} ₽. Требуется пополнение внешнего баланса."
+                )
+                current_work_human = (
+                    "BORIS остановил новые оптимизации, AI, публикации и денежные "
+                    "действия; после пополнения Avito автоматически перепроверит "
+                    "состояние и продолжит работу"
+                )
+            elif _waiting or _measuring:
+                # KPI_OWNER_FUNDING_SAFE_TAIL_PRECEDENCE_V1:
+                # Funding pause constrains NEW work, but must not hide the real
+                # lifecycle step already being handled autonomously. If an
+                # external publication is waiting or a published experiment is
+                # being measured, that concrete work is the owner's primary
+                # progress truth. No owner action is invented.
+                _funding_live_item = (
+                    _waiting[0] if _waiting else _measuring[0]
+                )
+                bottleneck = (
+                    _funding_live_item.get("problem")
+                    or _funding_live_item.get("current_status")
+                    or (
+                        f"Баланс Avito {_fund_balance} ₽ ниже рабочего порога "
+                        f"{_fund_red_cpl} ₽; новые действия поставлены на паузу."
+                    )
+                )
+                current_work_human = (
+                    _funding_live_item.get("current_status")
+                    or _funding_live_item.get("next_step")
+                    or "BORIS сам ведёт уже начатую операцию до безопасного результата"
+                )
+            else:
+                bottleneck = (
+                    f"BORIS сам держит внешнее финансирование на паузе: баланс Avito "
+                    f"{_fund_balance} ₽ ниже рабочего порога {_fund_red_cpl} ₽, но "
+                    "внутренний budget/presence guard имеет приоритет."
+                )
+                current_work_human = (
+                    "Новых действий владельца не требуется. BORIS не повторяет "
+                    "публикации, AI или денежные изменения вслепую и автоматически "
+                    "перепроверит условия в следующем штатном цикле"
+                )
+
+        if _service_period_unknown_ui or _service_period_expired_ui:
+            _held_count_ui = len(_held_prepublication_items_ui)
+            bottleneck = plan.get("reason") or check.get("recommendation")
+            if _service_period_unknown_ui:
+                current_work_human = (
+                    f"BORIS заморозил {_held_count_ui} подготовленных pre-publication "
+                    "операций без удаления данных. Новые AI, feed, публикации и деньги "
+                    "не запускаются, пока текущий оплаченный период не зафиксирован."
+                )
+            else:
+                current_work_human = (
+                    f"Оплаченный период завершён. {_held_count_ui} подготовленных "
+                    "pre-publication операций сохранены, но не публикуются; уже "
+                    "внешний safety-tail при наличии доводится безопасно."
+                )
+
+        return {
+            "status":"ok","account_id":account_id,
+            # KPI_OWNER_WORKSPACE_FORMULA_V1: owner sees the same daily pace
+            # facts that drive the orchestrator, not a separate dashboard guess.
+            "summary":{
+                "target_leads":check.get("target_leads_per_day"),"actual_leads":check.get("contacts_today"),
+                "expected_leads_by_now":(plan.get("goal") or {}).get("expected_leads_by_now"),
+                "hourly_lead_gap":(plan.get("goal") or {}).get("hourly_lead_gap"),
+                "leads_remaining_today":(plan.get("goal") or {}).get("leads_remaining_today"),
+                "required_leads_per_remaining_hour":(plan.get("goal") or {}).get("required_leads_per_remaining_hour"),
+                "remaining_demand_share":(plan.get("goal") or {}).get("remaining_demand_share"),
+                "recovery_multiplier":(plan.get("goal") or {}).get("recovery_multiplier"),
+                "projected_finish_at_baseline":(plan.get("goal") or {}).get("projected_finish_at_baseline"),
+                "recovery_capacity_state":(plan.get("goal") or {}).get("recovery_capacity_state"),
+                "pace_state":(plan.get("goal") or {}).get("pace_state"),
+                "urgency":plan.get("urgency"),
+                "control_state":(
+                    _service_period_control_state
+                    if (_service_period_unknown_ui or _service_period_expired_ui)
+                    else (
+                        "external_funding_pause"
+                        if _funding_work_pause
+                        else (
+                            plan.get("control_state")
+                            or (
+                                "mapping_recovery"
+                                if _mapping_owner_active_ui
+                                else None
+                            )
+                        )
+                    )
+                ),
+                "control_reason":(
+                    bottleneck
+                    if (
+                        _funding_work_pause
+                        or _service_period_unknown_ui
+                        or _service_period_expired_ui
+                    )
+                    else (
+                        plan.get("control_reason")
+                        or (
+                            "BORIS восстанавливает exact Avito↔feed mapping по официальным данным и не создаёт неподтверждённые связи"
+                            if _mapping_owner_active_ui
+                            else None
+                        )
+                    )
+                ),
+                "primary_action":(
+                    None
+                    if _funding_work_pause
+                    else (
+                        plan.get("primary_action")
+                        or (
+                            "recover_canonical_mapping"
+                            if _mapping_owner_active_ui
+                            else None
+                        )
+                    )
+                ),
+                "primary_outcome_contract":(
+                    None
+                    if _funding_work_pause
+                    else plan.get("primary_outcome_contract")
+                ),
+                "current_hour":(plan.get("time") or {}).get("server_hour"),
+                "expected_progress_pct":(plan.get("time") or {}).get("expected_progress_pct"),
+                "actual_progress_pct":(plan.get("time") or {}).get("actual_progress_pct"),
+                "lag_pct":(plan.get("time") or {}).get("lag_pct"),
+                "next_check_minutes":(plan.get("time") or {}).get("next_check_minutes"),
+                "raw_contacts_today":check.get("raw_contacts_today"),
+                "excluded_job_seekers_today":check.get("excluded_job_seekers_today"),
+                "lead_quality_status":check.get("lead_quality_status"),
+                "red_cpl":check.get("max_cost_per_lead_rub"),"actual_cpl":check.get("cost_per_lead_today"),
+                "spent_today_rub":check.get("spent_today_rub"),
+                "bottleneck":bottleneck,"current_work":current_work_human,
+                "last_result":last_result,
+                "owner_action":owner_actions[0] if owner_actions else None,
+                "held_prepublication_count":len(_held_prepublication_items_ui),
+            },
+            "groups":groups,"daily_report":report,"sales_funnel_context":sales,"learning_provenance":learning_provenance,
+            "next_candidate":next_candidate,"second_candidate_decision":second_candidate,
+            "strategy_plan":plan.get("actions") or [],
+            "blocked_strategy_actions":plan.get("blocked_actions") or [],
+            "active_item_ids":sorted(x for x in active_item_ids if x),
+            "failed_title_strategy_item_ids":sorted(x for x in failed_title_ids if x),
+            "parallel_analysis_allowed":True,"mutations_on_active_items_allowed":False,"real_data_only":True,
+        }
+    finally:
+        db.close()
+
+
+@router.get("/kpi_action_memory")
+def kpi_action_memory(account_id: str, limit: int = 20):
+    """UI/read-only view of AI Marketing mutation memory."""
+    from app.db.session import SessionLocal
+    db = SessionLocal()
+    try:
+        _, history = _kpi_apply_log_load(db, account_id)
+        out = []
+        for op in list(history)[-max(1, min(int(limit or 20), 100)):][::-1]:
+            if not str(op.get("type") or "").startswith("kpi_"):
+                continue
+            out.append({
+                "operation_id": op.get("operation_id"),
+                "timestamp": op.get("ts"),
+                "account_id": op.get("account_id") or account_id,
+                "avito_item_id": op.get("avito_item_id") or op.get("item_id"),
+                "campaign_id": op.get("campaign_id"),
+                "campaign_item_id": op.get("campaign_item_id"),
+                "feed_identity": op.get("feed_identity"),
+                "identity_status": op.get("identity_status"),
+                "reason": op.get("reason"),
+                "changes": op.get("changes") or {},
+                "version": op.get("version"),
+                "kpi_before": op.get("kpi_before") or (op.get("effect") or {}).get("before"),
+                "kpi_after": (op.get("effect") or {}).get("after"),
+                "observation_window": op.get("observation_window") or {},
+                "status": op.get("status"),
+                "effect_status": (op.get("effect") or {}).get("status"),
+                "changed_avito": bool(op.get("changed_avito")),
+                "safe_feed_status": (op.get("safe_feed_preview") or {}).get("status"),
+            })
+        return {"status": "ok", "account_id": account_id, "items": out, "count": len(out)}
+    finally:
+        db.close()
+
+
+# ==================== AVITO POSITION MONITOR ====================
+# Read-only position evidence from identity-verified Avito Pro Browser Gateway.
+# Official core/v1/items inventory does not expose the cabinet search-position
+# chip, so this endpoint never fabricates it from views or promotion spend.
+@router.get("/position_monitor")
+def get_position_monitor(account_id: str, history_limit: int = 100):
+    from app.services.avito_position_monitor import get_position_status
+    return get_position_status(account_id, history_limit=history_limit)
+
+
+@router.post("/position_monitor/refresh")
+def refresh_position_monitor(account_id: str):
+    from app.services.avito_position_monitor import active_ai_accounts, monitor_tick
+    if account_id not in set(active_ai_accounts()):
+        return {"status": "blocked", "reason": "AI marketer is not active for this account"}
+    return monitor_tick(account_id)
+
+
+@router.get("/position_monitor/fleet")
+def get_position_monitor_fleet():
+    """Fleet readiness for every account where AI marketer autopilot is active."""
+    from app.services.avito_position_monitor import active_ai_accounts, get_position_status
+    out = []
+    for _aid in active_ai_accounts():
+        try:
+            _st = get_position_status(_aid, history_limit=1) or {}
+            _h = _st.get("health") if isinstance(_st.get("health"), dict) else {}
+            _l = _st.get("latest") if isinstance(_st.get("latest"), dict) else {}
+            _c = _l.get("coverage") if isinstance(_l.get("coverage"), dict) else {}
+            out.append({
+                "account_id": _aid,
+                "state": _h.get("state") or "unknown",
+                "reason": _h.get("reason") or "",
+                "measured_at": _l.get("measured_at"),
+                "matched": _h.get("matched", _c.get("matched")),
+                "inventory": _h.get("inventory", _c.get("inventory")),
+                "coverage_pct": _h.get("coverage_pct", _c.get("coverage_pct")),
+                "coverage_complete": bool(_h.get("coverage_complete", _c.get("complete", False))),
+            })
+        except Exception as _exc:
+            out.append({"account_id": _aid, "state": "incident", "reason": str(_exc)[:180]})
+    counts = {}
+    for _row in out:
+        _state = str(_row.get("state") or "unknown")
+        counts[_state] = int(counts.get(_state, 0)) + 1
+    return {"status": "ok", "accounts": len(out), "counts": counts, "items": out}
