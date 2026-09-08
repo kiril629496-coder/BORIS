@@ -255,6 +255,70 @@ def main() -> int:
     if "from app.api.payments import PACKAGES" in wallet_src:
         failures.append("wallet_static_phone_catalog_forbidden")
 
+    billing_page = (
+        ROOT.parent / "frontend" / "app" / "dashboard" / "billing" / "page.tsx"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "/api/payments/phone-commercial-settings",
+        "phoneCommercial",
+        "phonePriceDraft",
+        "savePhoneCommercial",
+        "Сохранить и включить",
+        "Продажа сейчас выключена",
+        "Без заданной цены Phone не продаётся",
+    ):
+        if required not in billing_page:
+            failures.append(f"phone_commercial_owner_ui_missing:{required}")
+    if "BORIS_PHONE_MONTHLY_PRICE_RUB" in billing_page:
+        failures.append("phone_commercial_ui_env_edit_forbidden")
+
+    repeat_card_src = inspect.getsource(guardian._mcn_company_card_auto_resend_if_authorized)
+    for required in (
+        "_mcn_repeat_card_auto_resend_enabled",
+        'sender_domain") or "").strip().lower() != "mcn.ru"',
+        "fresh_request_evidence_missing",
+        "repeat_request_not_fresh",
+        "prior_exact_delivery_missing",
+        "prior_delivery_not_reusable",
+        "current_card_not_prepared",
+        "--confirm-share-banking",
+        "mcn.company_card.auto_resend",
+        "same_current_card_previously_delivered_to_mcn",
+        "recipient_domain_verified",
+        "send_state_persisted",
+        "retry_blocked",
+    ):
+        if required not in repeat_card_src:
+            failures.append(f"mcn_repeat_card_autonomy_guard_missing:{required}")
+    repeat_gate_src = inspect.getsource(guardian._mcn_repeat_card_auto_resend_enabled)
+    for required in (
+        "mcn_repeat_card_auto_resend_v1",
+        "enabled",
+        "return False",
+    ):
+        if required not in repeat_gate_src:
+            failures.append(f"mcn_repeat_card_fail_closed_gate_missing:{required}")
+
+    sent_evidence_src = inspect.getsource(guardian._mcn_company_card_sent_evidence)
+    for required in (
+        "prior_current_card_sent_to_provider",
+        "prior_current_card_sent_at",
+        "current_card_match",
+    ):
+        if required not in sent_evidence_src:
+            failures.append(f"mcn_repeat_card_prior_evidence_missing:{required}")
+
+    progress_src = inspect.getsource(guardian._mcn_company_card_progress)
+    for required in (
+        "_mcn_company_card_auto_resend_if_authorized",
+        "mcn_company_card_auto_resend_verifying",
+        "mcn_company_card_auto_resend_retry",
+        "mcn_company_card_sent_waiting_reply",
+        "mcn_company_card_delivery_verify",
+    ):
+        if required not in progress_src:
+            failures.append(f"mcn_repeat_card_progress_contract_missing:{required}")
+
     sig = inspect.signature(guardian.real_mcn_acceptance_watch_once)
     param = sig.parameters.get("include_synthetic")
     if param is None or param.default is not False:

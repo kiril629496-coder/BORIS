@@ -247,6 +247,7 @@ class PhoneCommercialSettingsBody(BaseModel):
 @router.get("/phone-commercial-settings")
 def phone_commercial_settings(_owner=Depends(_require_private_platform_owner)):
     """Private platform-owner view. Never invents a price."""
+    _require_private_platform_owner(_owner)
     return _phone_commercial_settings_status()
 
 
@@ -256,6 +257,7 @@ def set_phone_commercial_settings(
     _owner=Depends(_require_private_platform_owner),
 ):
     """Persist the one global BORIS Phone monthly sale price without editing .env."""
+    _require_private_platform_owner(_owner)
     if not body.confirm:
         raise HTTPException(status_code=409, detail="explicit_confirmation_required")
     if body.enabled:

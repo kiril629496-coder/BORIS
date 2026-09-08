@@ -185,14 +185,30 @@ class PhonePaymentCommercialPathTests(unittest.TestCase):
         self.assertTrue(phone_entitlement_status(self.account_id)["active"])
 
     def test_phone_price_change_requires_explicit_confirmation(self):
+        from app.services.platform_roles import (
+            PLATFORM_OWNER_EMAIL, PLATFORM_OWNER_ID, PLATFORM_OWNER_ROLE,
+        )
+        private_owner = SimpleNamespace(
+            id=PLATFORM_OWNER_ID, role=PLATFORM_OWNER_ROLE, email=PLATFORM_OWNER_EMAIL
+        )
         with self.assertRaises(HTTPException) as ctx:
             PAY.set_phone_commercial_settings(
                 PAY.PhoneCommercialSettingsBody(
                     enabled=True, price_rub=1777, confirm=False
                 ),
-                _owner=object(),
+                _owner=private_owner,
             )
         self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_phone_price_setter_rechecks_private_owner(self):
+        with self.assertRaises(HTTPException) as ctx:
+            PAY.set_phone_commercial_settings(
+                PAY.PhoneCommercialSettingsBody(
+                    enabled=True, price_rub=1777, confirm=True
+                ),
+                _owner=SimpleNamespace(id=self.user_id, role="owner", email=self.email),
+            )
+        self.assertEqual(ctx.exception.status_code, 403)
 
     def test_wallet_purchase_charges_once_and_uses_account_owner_wallet(self):
         PAY.PACKAGES["__qa_phone_wallet"] = {

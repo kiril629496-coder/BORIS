@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -637,6 +637,11 @@ _MCN_MAILBOX_AUTONBOARD_REFRESH_SECONDS = 300
 _MCN_COMPANY_CARD_SEND_STATE_KEY = "mcn_company_card_send_v1"
 _MCN_OWNER_ALERT_STORAGE_KEY = "mcn_phone_owner_alert_v1"
 _MCN_OWNER_ALERT_RETRY_SECONDS = 3600
+_MCN_FOLLOWUP_STORAGE_KEY = "mcn_company_card_followup_v1"
+_MCN_FOLLOWUP_FIRST_DELAY_SECONDS = 48 * 3600
+_MCN_FOLLOWUP_REPEAT_DELAY_SECONDS = 72 * 3600
+_MCN_FOLLOWUP_SAFE_RETRY_SECONDS = 3600
+_MCN_FOLLOWUP_MAX_ATTEMPTS = 2
 
 
 def _single_active_phone_account() -> dict:
@@ -1105,16 +1110,29 @@ def _mcn_company_card_sent_evidence(
     trusted_newest: datetime | None = None
     content_newest: datetime | None = None
     manual_newest: datetime | None = None
+    prior_content_newest: datetime | None = None
     for item in result.get("items") or []:
         if not isinstance(item, dict) or not item.get("company_card_signal"):
             continue
         item_dt = _parse_mail_time(str(item.get("date") or ""))
+        content_ok = item.get("current_card_match") is True
+        if (
+            content_ok
+            and item_dt is not None
+            and req_dt is not None
+            and item_dt < req_dt
+            and (prior_content_newest is None or item_dt > prior_content_newest)
+        ):
+            # Discovery already filters Sent by recipient domain mcn.ru and
+            # current_card_match compares every required field with today's
+            # server-side card. This is safe evidence of prior disclosure of
+            # the same document to the same provider.
+            prior_content_newest = item_dt
         if req_dt is not None and (item_dt is None or item_dt < req_dt):
             continue
         if item_dt is not None and (manual_newest is None or item_dt > manual_newest):
             manual_newest = item_dt
         action_ok = bool(item.get("boris_action_signal"))
-        content_ok = item.get("current_card_match") is True
         reply_ok = (not request_mid) or str(item.get("in_reply_to") or "").strip() == request_mid
         if content_ok and item_dt is not None and (content_newest is None or item_dt > content_newest):
             content_newest = item_dt
@@ -1149,12 +1167,146 @@ def _mcn_company_card_sent_evidence(
             "sent_at": manual_newest.isoformat(),
             "delivery_ambiguous": True,
         }
-    return {
+    out = {
         "sent": False,
         "source": "sent_folder",
         "reason": "no_company_card_after_request",
     }
+    if prior_content_newest is not None:
+        out["prior_current_card_sent_to_provider"] = True
+        out["prior_current_card_sent_at"] = prior_content_newest.isoformat()
+    return out
 
+
+
+def _mcn_repeat_card_auto_resend_enabled() -> bool:
+    """Fail closed until the narrow repeat-card policy has passed production QA."""
+    db = SessionLocal()
+    try:
+        raw = db.execute(text("""
+            SELECT value FROM storage
+            WHERE account_id='__mcn_mailbox_watch__'
+              AND key='mcn_repeat_card_auto_resend_v1'
+            ORDER BY id DESC LIMIT 1
+        """)).scalar()
+    except Exception:
+        return False
+    finally:
+        db.close()
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except Exception:
+        return False
+    return bool(isinstance(payload, dict) and payload.get("enabled") is True)
+
+
+def _mcn_company_card_auto_resend_if_authorized(
+    mailbox_id: int,
+    operational_reply: dict | None,
+    prior_evidence: dict | None,
+    draft: dict | None,
+) -> dict:
+    """Resend only the same current card to the same verified provider on a fresh repeat request."""
+    if not _mcn_repeat_card_auto_resend_enabled():
+        return {"authorized": False, "reason": "repeat_card_autonomy_disabled"}
+    op = operational_reply if isinstance(operational_reply, dict) else {}
+    prior = prior_evidence if isinstance(prior_evidence, dict) else {}
+    prepared = draft if isinstance(draft, dict) else {}
+    if str(op.get("code") or "") != "mcn_company_card_required":
+        return {"authorized": False, "reason": "not_company_card_request"}
+    if str(op.get("sender_domain") or "").strip().lower() != "mcn.ru":
+        return {"authorized": False, "reason": "provider_domain_not_exact"}
+    request_mid = str(op.get("message_id") or "").strip()
+    request_dt = _parse_mail_time(str(op.get("date") or ""))
+    prior_dt = _parse_mail_time(str(prior.get("prior_current_card_sent_at") or ""))
+    now = datetime.now(timezone.utc)
+    if not request_mid or request_dt is None:
+        return {"authorized": False, "reason": "fresh_request_evidence_missing"}
+    if request_dt.tzinfo is None:
+        request_dt = request_dt.replace(tzinfo=timezone.utc)
+    if request_dt > now + timedelta(minutes=5) or now - request_dt > timedelta(days=14):
+        return {"authorized": False, "reason": "repeat_request_not_fresh"}
+    if not prior.get("prior_current_card_sent_to_provider") or prior_dt is None:
+        return {"authorized": False, "reason": "prior_exact_delivery_missing"}
+    if prior_dt.tzinfo is None:
+        prior_dt = prior_dt.replace(tzinfo=timezone.utc)
+    if prior_dt >= request_dt or request_dt - prior_dt > timedelta(days=180):
+        return {"authorized": False, "reason": "prior_delivery_not_reusable"}
+    fingerprint = str(prepared.get("card_fingerprint") or "").strip().lower()
+    if (
+        not prepared.get("ready")
+        or len(fingerprint) != 64
+        or any(ch not in "0123456789abcdef" for ch in fingerprint)
+    ):
+        return {"authorized": False, "reason": "current_card_not_prepared"}
+
+    script = ROOT / "scripts" / "phone-mcn-company-card-send.py"
+    python_bin = ROOT / "venv" / "bin" / "python"
+    try:
+        cp = subprocess.run(
+            [
+                str(python_bin), str(script),
+                "--mailbox-id", str(int(mailbox_id)),
+                "--apply", "--confirm-share-banking",
+            ],
+            cwd=str(ROOT),
+            text=True,
+            capture_output=True,
+            timeout=45,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        safe = {
+            "authorized": True,
+            "status": "delivery_ambiguous",
+            "reason": "sender_timeout",
+            "retry_blocked": True,
+        }
+    except Exception as exc:
+        safe = {
+            "authorized": True,
+            "status": "send_runner_error",
+            "reason": type(exc).__name__[:120],
+            "retry_blocked": True,
+        }
+    else:
+        try:
+            raw = json.loads((cp.stdout or "").strip() or "{}")
+        except Exception:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        safe = {
+            "authorized": True,
+            "status": str(raw.get("status") or "invalid_sender_result")[:80],
+            "reason": str(raw.get("reason") or "")[:120] or None,
+            "recipient_domain_verified": bool(raw.get("recipient_domain_verified")),
+            "sent_copy_saved": bool(raw.get("sent_copy_saved")),
+            "send_state_persisted": bool(raw.get("send_state_persisted")),
+            "retry_blocked": bool(raw.get("retry_blocked")),
+        }
+
+    try:
+        from app.services.telephony_core import _audit
+        _audit(
+            "__mcn_mailbox_watch__",
+            "mcn.company_card.auto_resend",
+            result=str(safe.get("status") or "unknown")[:80],
+            actor_user_id=None,
+            provider="mcn",
+            metadata={
+                "authorization_basis": "same_current_card_previously_delivered_to_mcn",
+                "provider_reply_date": str(op.get("date") or "")[:160],
+                "prior_sent_at": str(prior.get("prior_current_card_sent_at") or "")[:80],
+                "card_fingerprint": fingerprint,
+                "recipient_domain_verified": bool(safe.get("recipient_domain_verified")),
+                "send_state_persisted": bool(safe.get("send_state_persisted")),
+                "retry_blocked": bool(safe.get("retry_blocked")),
+            },
+        )
+    except Exception:
+        pass
+    return safe
 
 
 def _cleanup_mcn_company_card_draft_after_sent(mailbox_id: int) -> dict:
@@ -1187,6 +1339,281 @@ def _cleanup_mcn_company_card_draft_after_sent(mailbox_id: int) -> dict:
         }
 
 
+def _mcn_company_card_followup(
+    mailbox_id: int,
+    operational_reply: dict | None,
+    sent_evidence: dict | None,
+    now: datetime | None = None,
+) -> dict:
+    """Bounded, exactly-once-ish MCN follow-up after a verified company-card send.
+
+    This path never sends attachments, banking data, SIP secrets, commercial
+    promises or paid calls. A durable pre-send claim blocks duplicate retries
+    whenever delivery may be ambiguous.
+    """
+    op = operational_reply if isinstance(operational_reply, dict) else {}
+    evidence = sent_evidence if isinstance(sent_evidence, dict) else {}
+    if not bool(evidence.get("sent")):
+        return {"status": "not_needed", "sent": False}
+
+    recipient = str(op.get("sender_email") or "").strip().lower()
+    if "@" not in recipient:
+        return {"status": "waiting_recipient_evidence", "sent": False}
+    domain = recipient.rsplit("@", 1)[-1].strip(".")
+    if domain != "mcn.ru" and not domain.endswith(".mcn.ru"):
+        return {"status": "blocked_recipient_domain", "sent": False}
+
+    request_message_id = str(op.get("message_id") or "").strip()[:500]
+    if not request_message_id:
+        return {"status": "waiting_thread_evidence", "sent": False}
+
+    sent_at = _parse_mail_time(str(evidence.get("sent_at") or ""))
+    if sent_at is None:
+        return {"status": "waiting_sent_time_evidence", "sent": False}
+
+    now_dt = now or datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    now_dt = now_dt.astimezone(timezone.utc)
+
+    signature_material = json.dumps(
+        {
+            "mailbox_id": int(mailbox_id),
+            "request_message_id": request_message_id,
+            "recipient": recipient,
+            "company_card_sent_at": sent_at.isoformat(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    signature = hashlib.sha256(signature_material.encode("utf-8")).hexdigest()
+    lock_key = f"mcn-company-card-followup|{signature}"
+    state_account = "__mcn_mailbox_watch__"
+
+    def _parse_dt(value) -> datetime | None:
+        return _parse_mail_time(str(value or ""))
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
+        row = db.execute(text("""
+            SELECT id,value FROM storage
+            WHERE account_id=:a AND key=:k
+            ORDER BY id DESC LIMIT 1
+            FOR UPDATE
+        """), {"a": state_account, "k": _MCN_FOLLOWUP_STORAGE_KEY}).first()
+        current = {}
+        if row and row[1]:
+            try:
+                parsed = json.loads(str(row[1]))
+                if isinstance(parsed, dict) and str(parsed.get("signature") or "") == signature:
+                    current = parsed
+            except Exception:
+                current = {}
+
+        status = str(current.get("status") or "")
+        attempts = max(0, int(current.get("attempts") or 0))
+        if status in {"sending", "ambiguous"}:
+            db.commit()
+            return {
+                "status": "delivery_ambiguous",
+                "sent": False,
+                "attempts": attempts,
+                "auto_retry_blocked": True,
+            }
+        if attempts >= _MCN_FOLLOWUP_MAX_ATTEMPTS:
+            db.commit()
+            return {
+                "status": "max_attempts_reached",
+                "sent": False,
+                "attempts": attempts,
+                "auto_retry_blocked": True,
+            }
+
+        if status == "retry":
+            retry_at = _parse_dt(current.get("retry_at"))
+            if retry_at is not None and now_dt < retry_at:
+                db.commit()
+                return {
+                    "status": "retry_wait",
+                    "sent": False,
+                    "attempts": attempts,
+                    "next_due_at": retry_at.isoformat(),
+                }
+
+        if status == "accepted":
+            base = _parse_dt(current.get("last_sent_at")) or sent_at
+            due_at = _parse_dt(current.get("next_due_at")) or (
+                base + timedelta(seconds=_MCN_FOLLOWUP_REPEAT_DELAY_SECONDS)
+            )
+        else:
+            due_at = sent_at + timedelta(seconds=_MCN_FOLLOWUP_FIRST_DELAY_SECONDS)
+
+        if now_dt < due_at:
+            db.commit()
+            return {
+                "status": "not_due",
+                "sent": False,
+                "attempts": attempts,
+                "next_due_at": due_at.isoformat(),
+            }
+
+        claim_id = hashlib.sha256(
+            f"{signature}|{now_dt.isoformat()}|{attempts + 1}".encode("utf-8")
+        ).hexdigest()[:24]
+        claim = {
+            "signature": signature,
+            "status": "sending",
+            "attempts": attempts,
+            "attempt_number": attempts + 1,
+            "claim_id": claim_id,
+            "request_message_id": request_message_id,
+            "recipient_hash": hashlib.sha256(recipient.encode("utf-8")).hexdigest()[:16],
+            "updated_at": now_dt.isoformat(),
+        }
+        raw = json.dumps(claim, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if row:
+            db.execute(text("UPDATE storage SET value=:v WHERE id=:i"), {
+                "v": raw, "i": int(row[0]),
+            })
+        else:
+            db.execute(text("""
+                INSERT INTO storage(account_id,key,value) VALUES(:a,:k,:v)
+            """), {"a": state_account, "k": _MCN_FOLLOWUP_STORAGE_KEY, "v": raw})
+        db.commit()
+    except Exception:
+        db.rollback()
+        return {"status": "state_error", "sent": False}
+    finally:
+        db.close()
+
+    subject = str(op.get("subject") or "Подключение телефонии MCN").strip()[:300]
+    if not subject.lower().startswith("re:"):
+        subject = "Re: " + subject
+    body = (
+        "Добрый день!\n\n"
+        "Уточняем статус оформления по ранее отправленной карточке компании. "
+        "Если договоры или SIP-параметры уже готовы, пожалуйста, пришлите их "
+        "ответным письмом в этой переписке.\n\nСпасибо!"
+    )
+    headers = {
+        "In-Reply-To": request_message_id,
+        "References": request_message_id,
+        "X-BORIS-Auto-Followup": f"mcn-company-card-v1-{attempts + 1}",
+    }
+    try:
+        from app.services.client_mailboxes import send_outbound
+        ok, reason, message_id = send_outbound(
+            int(mailbox_id),
+            recipient,
+            subject,
+            body,
+            headers=headers,
+            attachments=None,
+        )
+        reason = str(reason or "")[:160]
+        delivery_unknown = (not ok) and reason.startswith("delivery_unknown:")
+    except Exception as exc:
+        ok = False
+        delivery_unknown = True
+        reason = ("delivery_unknown:" + type(exc).__name__)[:160]
+        message_id = ""
+
+    final_now = datetime.now(timezone.utc) if now is None else now_dt
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
+        row = db.execute(text("""
+            SELECT id,value FROM storage
+            WHERE account_id=:a AND key=:k
+            ORDER BY id DESC LIMIT 1
+            FOR UPDATE
+        """), {"a": state_account, "k": _MCN_FOLLOWUP_STORAGE_KEY}).first()
+        current = {}
+        if row and row[1]:
+            try:
+                current = json.loads(str(row[1]))
+            except Exception:
+                current = {}
+        if (
+            not row
+            or str(current.get("signature") or "") != signature
+            or str(current.get("claim_id") or "") != claim_id
+            or str(current.get("status") or "") != "sending"
+        ):
+            db.rollback()
+            return {
+                "status": "state_changed",
+                "sent": bool(ok),
+                "attempts": attempts,
+            }
+
+        current["updated_at"] = final_now.isoformat()
+        current["transport_reason"] = reason
+        current["message_id_hash"] = (
+            hashlib.sha256(str(message_id or "").encode("utf-8")).hexdigest()[:16]
+            if message_id else None
+        )
+        if ok:
+            current["status"] = "accepted"
+            current["attempts"] = attempts + 1
+            current["last_sent_at"] = final_now.isoformat()
+            current["next_due_at"] = (
+                final_now + timedelta(seconds=_MCN_FOLLOWUP_REPEAT_DELAY_SECONDS)
+            ).isoformat()
+            current.pop("retry_at", None)
+        elif delivery_unknown:
+            current["status"] = "ambiguous"
+            current["attempts"] = attempts
+            current.pop("retry_at", None)
+        else:
+            current["status"] = "retry"
+            current["attempts"] = attempts
+            current["retry_at"] = (
+                final_now + timedelta(seconds=_MCN_FOLLOWUP_SAFE_RETRY_SECONDS)
+            ).isoformat()
+
+        db.execute(
+            text("UPDATE storage SET value=:v WHERE id=:i"),
+            {
+                "v": json.dumps(current, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                "i": int(row[0]),
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        return {
+            "status": "finalize_error",
+            "sent": bool(ok),
+            "attempts": attempts + (1 if ok else 0),
+        }
+    finally:
+        db.close()
+
+    if ok:
+        return {
+            "status": "sent",
+            "sent": True,
+            "attempts": attempts + 1,
+            "next_due_at": current.get("next_due_at"),
+        }
+    if delivery_unknown:
+        return {
+            "status": "delivery_ambiguous",
+            "sent": False,
+            "attempts": attempts,
+            "auto_retry_blocked": True,
+        }
+    return {
+        "status": "retry",
+        "sent": False,
+        "attempts": attempts,
+        "next_due_at": current.get("retry_at"),
+    }
+
+
 def _mcn_company_card_progress(mailbox_id: int, operational_reply: dict | None = None) -> dict:
     op = operational_reply if isinstance(operational_reply, dict) else {}
     evidence = _mcn_company_card_sent_evidence(
@@ -1200,14 +1627,22 @@ def _mcn_company_card_progress(mailbox_id: int, operational_reply: dict | None =
         "reason": str(evidence.get("reason") or "")[:120] or None,
         "sent_at": str(evidence.get("sent_at") or "")[:80] or None,
         "delivery_ambiguous": bool(evidence.get("delivery_ambiguous")),
+        "prior_current_card_sent_to_provider": bool(
+            evidence.get("prior_current_card_sent_to_provider")
+        ),
+        "prior_current_card_sent_at": (
+            str(evidence.get("prior_current_card_sent_at") or "")[:80] or None
+        ),
     }
     if evidence_safe["sent"]:
         draft_cleanup = _cleanup_mcn_company_card_draft_after_sent(int(mailbox_id))
+        followup = _mcn_company_card_followup(int(mailbox_id), op, evidence_safe)
         return {
             "status": "waiting_mcn_response",
             "owner_action_required": False,
             "company_card_sent_evidence": evidence_safe,
             "company_card_draft_cleanup": draft_cleanup,
+            "company_card_followup": followup,
             "primary_next_action": {
                 "code": "mcn_company_card_sent_waiting_reply",
                 "actor": "boris",
@@ -1258,6 +1693,78 @@ def _mcn_company_card_progress(mailbox_id: int, operational_reply: dict | None =
             },
         }
     if draft.get("ready"):
+        auto_resend = _mcn_company_card_auto_resend_if_authorized(
+            int(mailbox_id), op, evidence_safe, draft
+        )
+        if auto_resend.get("authorized"):
+            base["company_card_auto_resend"] = auto_resend
+            auto_status = str(auto_resend.get("status") or "")
+            if auto_status in {"sent", "already_sent", "sent_state_pending"}:
+                refreshed = _mcn_company_card_sent_evidence(
+                    mailbox_id,
+                    request_date=str(op.get("date") or "") or None,
+                    request_message_id=str(op.get("message_id") or "") or None,
+                )
+                refreshed_safe = {
+                    "sent": bool(refreshed.get("sent")),
+                    "source": str(refreshed.get("source") or "")[:80] or None,
+                    "reason": str(refreshed.get("reason") or "")[:120] or None,
+                    "sent_at": str(refreshed.get("sent_at") or "")[:80] or None,
+                    "delivery_ambiguous": bool(refreshed.get("delivery_ambiguous")),
+                }
+                if refreshed_safe["sent"]:
+                    cleanup = _cleanup_mcn_company_card_draft_after_sent(int(mailbox_id))
+                    followup = _mcn_company_card_followup(
+                        int(mailbox_id), op, refreshed_safe
+                    )
+                    return {
+                        **base,
+                        "status": "waiting_mcn_response",
+                        "owner_action_required": False,
+                        "company_card_sent_evidence": refreshed_safe,
+                        "company_card_draft_cleanup": cleanup,
+                        "company_card_followup": followup,
+                        "primary_next_action": {
+                            "code": "mcn_company_card_sent_waiting_reply",
+                            "actor": "boris",
+                            "owner_action_required": False,
+                            "text": "MCN повторно запросил ту же неизменившуюся карточку. BORIS безопасно отправил её один раз и сам ждёт следующий ответ.",
+                        },
+                    }
+                return {
+                    **base,
+                    "status": "recovering",
+                    "owner_action_required": False,
+                    "primary_next_action": {
+                        "code": "mcn_company_card_auto_resend_verifying",
+                        "actor": "boris",
+                        "owner_action_required": False,
+                        "text": "BORIS отправил повторно ранее уже раскрытую MCN карточку и сам проверяет подтверждение доставки.",
+                    },
+                }
+            if auto_status == "delivery_ambiguous":
+                return {
+                    **base,
+                    "status": "owner_action",
+                    "owner_action_required": True,
+                    "primary_next_action": {
+                        "code": "mcn_company_card_delivery_verify",
+                        "actor": "owner",
+                        "owner_action_required": True,
+                        "text": "Повторная отправка той же карточки могла дойти до MCN, но подтверждение доставки неоднозначно. BORIS заблокировал повтор, чтобы не отправить документ дважды.",
+                    },
+                }
+            return {
+                **base,
+                "status": "recovering",
+                "owner_action_required": False,
+                "primary_next_action": {
+                    "code": "mcn_company_card_auto_resend_retry",
+                    "actor": "boris",
+                    "owner_action_required": False,
+                    "text": "BORIS сам повторит безопасную отправку той же ранее раскрытой карточки после восстановления почтового контура.",
+                },
+            }
         return {
             **base,
             "status": "owner_action",
@@ -1328,6 +1835,7 @@ def mcn_mailbox_autoonboard_once(force_refresh: bool=False) -> dict:
                 "mcn_company_card_send_approval",
                 "mcn_company_card_sent_waiting_reply",
                 "mcn_company_card_delivery_verify",
+                "mcn_company_card_auto_resend_verifying",
             }
             and recent.get("mailbox_id")
         ):
@@ -1448,6 +1956,7 @@ def mcn_mailbox_autoonboard_once(force_refresh: bool=False) -> dict:
         "message_id": str(operational.get("message_id") or "")[:500] or None,
         "subject": str(operational.get("subject") or "")[:300] or None,
         "sender_domain": str(operational.get("sender_domain") or "")[:120] or None,
+        "sender_email": str(operational.get("sender_email") or "")[:320] or None,
         "requirements": [str(x)[:80] for x in (operational.get("requirements") or [])[:10]],
         "provider_path": [str(x)[:80] for x in (operational.get("provider_path") or [])[:10]],
     } if operational else None
