@@ -910,16 +910,25 @@ def _owner_company_card_readiness() -> dict:
     }
 
 
-def _prepare_mcn_company_card_draft(mailbox_id: int) -> dict:
+def _prepare_mcn_company_card_draft(
+    mailbox_id: int,
+    request_message_id: str | None = None,
+    request_date: str | None = None,
+) -> dict:
     script = ROOT / "scripts" / "phone-mcn-company-card-send.py"
     python_bin = ROOT / "venv" / "bin" / "python"
+    argv = [
+        str(python_bin), str(script),
+        "--mailbox-id", str(int(mailbox_id)),
+        "--save-draft",
+    ]
+    if str(request_message_id or "").strip():
+        argv += ["--request-message-id", str(request_message_id).strip()]
+    if str(request_date or "").strip():
+        argv += ["--request-date", str(request_date).strip()]
     try:
         cp = subprocess.run(
-            [
-                str(python_bin), str(script),
-                "--mailbox-id", str(int(mailbox_id)),
-                "--save-draft",
-            ],
+            argv,
             cwd=str(ROOT),
             text=True,
             capture_output=True,
@@ -1130,11 +1139,24 @@ def _mcn_company_card_sent_evidence(
             prior_content_newest = item_dt
         if req_dt is not None and (item_dt is None or item_dt < req_dt):
             continue
-        if item_dt is not None and (manual_newest is None or item_dt > manual_newest):
-            manual_newest = item_dt
         action_ok = bool(item.get("boris_action_signal"))
         reply_ok = (not request_mid) or str(item.get("in_reply_to") or "").strip() == request_mid
-        if content_ok and item_dt is not None and (content_newest is None or item_dt > content_newest):
+
+        # MCN_SENT_EVIDENCE_THREAD_BOUND_V1:
+        # Evidence for a specific provider request must be bound to that exact
+        # Message-ID. A matching company-card attachment sent after the request
+        # but in reply to another MCN message is only provider-level disclosure
+        # evidence, not proof that this request was answered.
+        if reply_ok and item_dt is not None and (
+            manual_newest is None or item_dt > manual_newest
+        ):
+            manual_newest = item_dt
+        if (
+            content_ok
+            and reply_ok
+            and item_dt is not None
+            and (content_newest is None or item_dt > content_newest)
+        ):
             content_newest = item_dt
         if action_ok and reply_ok:
             if item_dt is not None and (trusted_newest is None or item_dt > trusted_newest):
@@ -1247,6 +1269,8 @@ def _mcn_company_card_auto_resend_if_authorized(
             [
                 str(python_bin), str(script),
                 "--mailbox-id", str(int(mailbox_id)),
+                "--request-message-id", request_mid,
+                "--request-date", str(op.get("date") or "").strip(),
                 "--apply", "--confirm-share-banking",
             ],
             cwd=str(ROOT),
@@ -1663,7 +1687,11 @@ def _mcn_company_card_progress(mailbox_id: int, operational_reply: dict | None =
             },
         }
 
-    draft = _prepare_mcn_company_card_draft(int(mailbox_id))
+    draft = _prepare_mcn_company_card_draft(
+        int(mailbox_id),
+        request_message_id=str(op.get("message_id") or "") or None,
+        request_date=str(op.get("date") or "") or None,
+    )
     base = {
         "company_card_draft": draft,
         "company_card_sent_evidence": evidence_safe,

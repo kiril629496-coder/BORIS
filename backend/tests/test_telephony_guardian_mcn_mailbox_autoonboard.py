@@ -820,7 +820,7 @@ class McnMailboxAutoonboardGuardianTests(unittest.TestCase):
                     "current_card_match": True,
                     "boris_action_signal": False,
                     "action_id": "",
-                    "in_reply_to": "",
+                    "in_reply_to": "<request@mcn.ru>",
                 }],
             }),
             stderr="",
@@ -837,6 +837,36 @@ class McnMailboxAutoonboardGuardianTests(unittest.TestCase):
         self.assertEqual(out["source"], "sent_folder")
         self.assertEqual(out["reason"], "current_card_content_verified_after_request")
 
+
+    def test_sent_folder_current_card_wrong_thread_after_request_is_not_delivery(self):
+        cp = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "status": "ok",
+                "items": [{
+                    "date": "Mon, 7 Sep 2026 17:00:00 +0300",
+                    "company_card_signal": True,
+                    "current_card_match": True,
+                    "boris_action_signal": True,
+                    "action_id": "boris-mcn-company-card-v4",
+                    "in_reply_to": "<other-request@mcn.ru>",
+                }],
+            }),
+            stderr="",
+        )
+        with patch.object(G, "_company_card_send_state_evidence", return_value={
+            "sent": False, "source": "send_state", "reason": "state_not_found",
+        }), patch.object(G.subprocess, "run", return_value=cp):
+            out = G._mcn_company_card_sent_evidence(
+                2,
+                request_date="Mon, 7 Sep 2026 16:07:30 +0300",
+                request_message_id="<request@mcn.ru>",
+            )
+        self.assertFalse(out["sent"])
+        self.assertEqual(out["source"], "sent_folder")
+        self.assertEqual(out["reason"], "no_company_card_after_request")
+        self.assertFalse(out.get("delivery_ambiguous", False))
+
     def test_sent_folder_manual_card_after_request_is_not_trusted(self):
         cp = SimpleNamespace(
             returncode=0,
@@ -847,7 +877,7 @@ class McnMailboxAutoonboardGuardianTests(unittest.TestCase):
                     "company_card_signal": True,
                     "boris_action_signal": False,
                     "action_id": "",
-                    "in_reply_to": "",
+                    "in_reply_to": "<request@mcn.ru>",
                 }],
             }),
             stderr="",
