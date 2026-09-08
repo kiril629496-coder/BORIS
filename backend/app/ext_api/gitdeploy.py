@@ -1244,9 +1244,21 @@ def roundtrip(cleanup=True):
         return {"ok": False, "step": "push", "detail": o[-300:]}
 
     res = tick(notify_result=False)
-    delivered = os.path.isfile(os.path.join(repo.ROOT, marker))
+    production_marker = os.path.join(repo.ROOT, marker)
+    delivered = os.path.isfile(production_marker)
     ok = bool(res.get("ok")) and delivered
+    marker_cleaned = False
     if cleanup:
+        # The marker is evidence, not runtime state. Remove it after delivery
+        # has been proven so a successful transport self-test leaves production
+        # byte-for-byte free of test artifacts. The remote branch keeps the
+        # history/evidence and the next roundtrip writes a new marker commit.
+        if ok and os.path.isfile(production_marker):
+            try:
+                os.unlink(production_marker)
+                marker_cleaned = not os.path.exists(production_marker)
+            except OSError:
+                marker_cleaned = False
         try:
             db.q("DELETE FROM ext_a2a_messages WHERE order_id=:i", i=order["order_id"])
             db.q("DELETE FROM ext_a2a_orders WHERE id=:i", i=order["order_id"])
@@ -1254,8 +1266,8 @@ def roundtrip(cleanup=True):
             db.q("DELETE FROM ext_dev_jobs WHERE id=:i", i=job["id"])
         except Exception:
             pass
-    return {"ok": ok, "delivered": delivered, "deploy": res,
-            "dev_job_id": job["dev_job_id"]}
+    return {"ok": ok, "delivered": delivered, "marker_cleaned": marker_cleaned,
+            "deploy": res, "dev_job_id": job["dev_job_id"]}
 
 
 def remote_branches(url=None):
