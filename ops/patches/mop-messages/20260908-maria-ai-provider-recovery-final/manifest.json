@@ -1,0 +1,32 @@
+[
+  {
+    "path": "backend/app/services/sales_ai_router.py",
+    "sha256": "35be733458979fc20c3216318f9ea9ad1a96d76ca47fc9b3c5bdf8c15bf801e5",
+    "bytes": 38544,
+    "baseline_backup": "backend/backups/sales_ai_router.py.bak.20260908-094341-592315"
+  },
+  {
+    "path": "backend/app/services/reliability.py",
+    "sha256": "f830c55749a5a54e861b0584929885407f92048895e452061a09b5dc2ead6435",
+    "bytes": 72965,
+    "baseline_backup": "backend/backups/reliability.py.bak.20260908-152810-220074"
+  },
+  {
+    "path": "backend/tests/test_sales_ai_router.py",
+    "sha256": "52f09e5bdb5c08f25949e3cb271c6472e9adebd1075ab7e96bd6b3b6a24671ea",
+    "bytes": 24387,
+    "baseline_backup": "backend/backups/test_sales_ai_router.py.bak.20260908-120814-582681"
+  },
+  {
+    "path": "backend/tests/test_realtime_ai_guard_http_status.py",
+    "sha256": "1ac5ad48c070939266c993558fdf388ebcc3f37f5b0530bfec8e04d906d5b807",
+    "bytes": 6668,
+    "baseline_backup": "backend/backups/test_realtime_ai_guard_http_status.py.bak.20260908-152834-737116"
+  },
+  {
+    "path": "backend/tests/test_tenant_circuit_isolation.py",
+    "sha256": "39eecc9012d3d99e6e588b9ac4dcdecbf762bb738faa3a80589cbbee52708b8d",
+    "bytes": 5432,
+    "baseline_backup": "backend/backups/test_tenant_circuit_isolation.py.bak.20260908-153220-367955"
+  }
+]

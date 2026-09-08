@@ -1,0 +1,533 @@
+--- a/backend/app/services/sales_ai_router.py
++++ b/backend/app/services/sales_ai_router.py
+@@ -37,9 +37,11 @@
+ from app.services.reliability import CircuitOpen, ProviderDeferred, dependency_call
+ 
+ 
+ class SalesAIUnavailable(RuntimeError):
+-    pass
++    def __init__(self, message: str, *, chain: list[dict] | None = None):
++        super().__init__(message)
++        self.chain = list(chain or [])
+ 
+ 
+ class SalesAIProviderUnavailable(SalesAIUnavailable):
+     pass
+@@ -206,8 +208,9 @@
+     order: list[str] = []
+     if (
+         _truthy("BORIS_SALES_OPENAI_ENABLED", True)
+         and str(os.getenv("OPENAI_API_KEY") or "").strip()
++        and not _openai_billing_blocked()
+         and not _circuit_blocks("openai.text", account_id)
+     ):
+         order.append("openai")
+ 
+@@ -262,15 +265,34 @@
+ def _provider_error_kind(status: int, code: str = "") -> str:
+     code = str(code or "").lower()
+     if status in (401, 403):
+         return "authentication"
++    # OPENAI_BILLING_BEFORE_429_V1:
++    # credit_balance_exhausted is returned with HTTP 429, but it is not a
++    # seconds/minutes rate window. Classify durable billing evidence before the
++    # generic 429 branch so BORIS does not hammer an empty paid balance every
++    # short circuit cooldown.
++    if status == 402 or "billing" in code or "credit" in code:
++        return "billing"
+     if status == 429 or "quota" in code or "rate" in code:
+         return "quota"
+     if status >= 500:
+         return "provider_5xx"
+-    if status == 402 or "billing" in code or "credit" in code:
+-        return "billing"
+     return "request"
++
++
++def _openai_billing_blocked() -> bool:
++    """Read-only durable billing latch shared with the external provider state."""
++    try:
++        from app.ext_api import aiprov
++        row = aiprov.state("openai") or {}
++        return (
++            row.get("state") == aiprov.UNAVAILABLE_BILLING
++            and bool(row.get("cooling"))
++        )
++    except Exception:
++        # A broken state reader must not silently disable the primary provider.
++        return False
+ 
+ 
+ def _openai_default_call(
+     *,
+@@ -357,8 +379,27 @@
+                 code = str(((response.json() or {}).get("error") or {}).get("code") or "")
+             except Exception:
+                 code = ""
+             kind = _provider_error_kind(status, code)
++            if kind == "billing":
++                # OPENAI_BILLING_LATCH_V1:
++                # A proven credit/billing failure is durable enough to skip
++                # repeated paid probes for a bounded long cooldown. Gemini/local
++                # take traffic immediately; after retry_at the normal provider
++                # order automatically admits one new OpenAI probe.
++                try:
++                    from app.ext_api import aiprov as _aiprov
++                    _aiprov.mark(
++                        "openai",
++                        _aiprov.UNAVAILABLE_BILLING,
++                        "sales OpenAI billing unavailable: " + (code or str(status)),
++                        retry_after=max(
++                            3600,
++                            int(os.getenv("BORIS_SALES_OPENAI_BILLING_RETRY_SEC", "21600") or 21600),
++                        ),
++                    )
++                except Exception:
++                    pass
+             try:
+                 ai_budget.release(run_id)
+             except Exception:
+                 pass
+@@ -487,9 +528,15 @@
+                 raise SalesAIProviderUnavailable("gemini timeout") from exc
+ 
+             if int(proc.returncode or 0) != 0:
+                 detail = ((proc.stderr or "") + "\n" + (proc.stdout or "")).lower()
+-                marker = "quota" if ("429" in detail or "quota" in detail or "rate" in detail) else "cli_error"
++                if "user location is not supported" in detail or "unsupported location" in detail:
++                    marker = "shared_unsupported_location_400"
++                elif "429" in detail or "quota" in detail or "rate limit" in detail:
++                    marker = "shared_quota_429"
++                else:
++                    marker = "cli_error"
++                # Do not include raw CLI output here: it may contain customer text.
+                 raise SalesAIProviderUnavailable("gemini " + marker)
+ 
+             try:
+                 envelope = json.loads(proc.stdout or "{}")
+@@ -653,9 +700,9 @@
+ ) -> dict:
+     from app.usage import log_usage
+ 
+     # LOCAL_AI_PRODUCTION_PRESSURE_FENCE_V1:
+-    # qwen3:4b can consume most CPU cores on this production host. Never start
++    # Even the emergency local model can consume significant CPU on this host. Never start
+     # a local fallback while the scheduler already sees real CPU/RAM pressure;
+     # fail fast into the normal provider/retry path instead of starving
+     # messaging, CRM, telephony and autonomous recovery.
+     try:
+@@ -691,9 +738,19 @@
+                 _pressure = _confirmed_pressure
+             else:
+                 _pressure = _confirmed_pressure
+ 
+-    if _pressure.get("under_pressure"):
++    # LOCAL_AI_HISTORICAL_LOAD_RECOVERY_FLOOR_V1:
++    # Use the same recovery-floor semantics as sched.admission(): a stale/high
++    # load average alone must not block a small local fallback when the current
++    # CPU/RAM sample proves immediate headroom. Real iowait/CPU/RAM/swap
++    # pressure stays fail-closed.
++    _historical_headroom = bool(
++        _pressure.get("under_pressure")
++        and _pressure.get("historical_load_only")
++        and _pressure.get("instant_headroom")
++    )
++    if _pressure.get("under_pressure") and not _historical_headroom:
+         reasons = ", ".join(_pressure.get("reasons") or [])
+         raise SalesAIProviderUnavailable(
+             "local ollama deferred: server under pressure" +
+             (": " + reasons if reasons else "")
+@@ -831,10 +888,13 @@
+     gigachat_model = str(
+         gigachat_model or os.getenv("BORIS_SALES_GIGACHAT_MODEL")
+         or os.getenv("GIGACHAT_MODEL") or "GigaChat-Max"
+     )
++    # SALES_LOCAL_EMERGENCY_MODEL_V1:
++    # Live sales fallback must stay on the lightweight model by default; slower
++    # analysis callers may still override local_model explicitly.
+     local_model = str(
+-        local_model or os.getenv("BORIS_SALES_LOCAL_MODEL") or "qwen3:4b"
++        local_model or os.getenv("BORIS_SALES_LOCAL_MODEL") or "qwen3:1.7b"
+     )
+ 
+     adapters = {
+         "openai": openai_call or _openai_default_call,
+@@ -938,9 +998,10 @@
+             continue
+ 
+     raise SalesAIUnavailable(
+         "all sales AI providers unavailable: "
+-        + ", ".join(str(x.get("provider")) for x in chain)
++        + ", ".join(str(x.get("provider")) for x in chain),
++        chain=chain,
+     )
+ 
+ 
+ def readiness(account_id: str | None = None) -> dict:
+@@ -1013,8 +1074,8 @@
+         "gemini_circuit": _circuit_snapshot("gemini.sales", account_id),
+         "models": {
+             "openai": str(os.getenv("BORIS_SALES_OPENAI_MODEL") or "gpt-5.4-mini"),
+             "gemini": str(os.getenv("BORIS_SALES_GEMINI_MODEL") or "gemini-2.5-flash"),
+-            "ollama": str(os.getenv("BORIS_SALES_LOCAL_MODEL") or "qwen3:4b"),
++            "ollama": str(os.getenv("BORIS_SALES_LOCAL_MODEL") or "qwen3:1.7b"),
+         },
+         "policy": "openai_if_usable_then_free_gemini_then_local",
+     }
+
+--- a/backend/app/services/reliability.py
++++ b/backend/app/services/reliability.py
+@@ -175,8 +175,26 @@
+     real provider outage cannot stampede once per tenant.
+     """
+     name = type(exc).__name__.lower()
+     text_value = (repr(exc) + " " + str(exc)).lower()
++    # GEMINI_TENANT_TIMEOUT_ISOLATION_V1:
++    # Gemini sales runs through a bounded CLI subprocess. A single account can
++    # time out because of prompt/runtime variance while another account succeeds
++    # seconds earlier. Treat a plain Gemini timeout as tenant-local; shared
++    # rate-limit/5xx/network evidence below can still open the global circuit.
++    if str(dependency or "").startswith("gemini.sales"):
++        if "shared_quota_429" in text_value or "shared_unsupported_location_400" in text_value:
++            return True
++    if str(dependency or "").startswith("gemini.sales") and "timeout" in text_value:
++        shared_non_timeout = (
++            "connecterror", "connectionerror", "remoteprotocol",
++            "networkerror", "serverdisconnected", "service unavailable",
++            "connection reset", "name resolution", "dns", "502", "503", "504",
++            "ratelimit", "rate limit", "too many requests", "429",
++        )
++        if not any(token in name or token in text_value for token in shared_non_timeout):
++            return False
++
+     shared_tokens = (
+         "timeout", "connecterror", "connectionerror", "remoteprotocol",
+         "networkerror", "serverdisconnected", "service unavailable",
+         "connection reset", "name resolution", "dns", "502", "503", "504",
+
+--- a/backend/tests/test_sales_ai_router.py
++++ b/backend/tests/test_sales_ai_router.py
+@@ -13,8 +13,9 @@
+ def _isolate_live_gemini_daily_quota(monkeypatch):
+     # Unit tests must not inherit today's production provider credentials/quota.
+     # Runtime provider behavior is verified separately against real services.
+     monkeypatch.setattr(R, "_gemini_daily_quota_blocks", lambda: False)
++    monkeypatch.setattr(R, "_openai_billing_blocked", lambda: False)
+     monkeypatch.setenv("BORIS_SALES_GIGACHAT_ENABLED", "0")
+ 
+ 
+ def _ok(provider):
+@@ -97,8 +98,28 @@
+             gemini_call=g, local_call=_ok("ollama"),
+         )
+     assert out["provider"] == "ollama"
+     assert out["fallback_chain"][0]["provider"] == "gemini"
++
++
++def test_all_provider_outage_preserves_diagnostic_chain(monkeypatch):
++    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
++    monkeypatch.setenv("BORIS_SALES_GEMINI_ENABLED", "1")
++    monkeypatch.setenv("BORIS_SALES_LOCAL_ENABLED", "1")
++    with patch.object(R, "_circuit_blocks", return_value=False):
++        def g(**kw):
++            raise R.SalesAIProviderUnavailable("gemini quota/circuit")
++        def local(**kw):
++            raise R.SalesAIProviderUnavailable("local MOP inference busy; retry via provider recovery")
++        with pytest.raises(R.SalesAIUnavailable) as exc:
++            R.generate_text(
++                account_id="a", operation="mop_messenger_reply", prompt="p",
++                gemini_call=g, local_call=local,
++            )
++    assert [x["provider"] for x in exc.value.chain] == ["gemini", "ollama"]
++    assert exc.value.chain[0]["reason"] == "SalesAIProviderUnavailable"
++    assert "quota/circuit" in exc.value.chain[0]["detail"]
++    assert "inference busy" in exc.value.chain[1]["detail"]
+ 
+ 
+ def test_gigachat_credentials_never_change_sales_fallback_policy(monkeypatch):
+     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+@@ -177,8 +198,69 @@
+     with patch.object(R, "_circuit_snapshot", side_effect=snap):
+         assert R.provider_order("a")[0] == "gemini"
+ 
+ 
++def test_openai_credit_balance_429_is_billing_not_short_quota():
++    assert R._provider_error_kind(429, "credit_balance_exhausted") == "billing"
++
++
++def test_provider_order_skips_openai_while_billing_latch_cools(monkeypatch):
++    monkeypatch.setenv("OPENAI_API_KEY", "x")
++    monkeypatch.setenv("BORIS_SALES_GEMINI_ENABLED", "1")
++    monkeypatch.setenv("BORIS_SALES_LOCAL_ENABLED", "1")
++    with patch.object(R, "_openai_billing_blocked", return_value=True),          patch.object(R, "_circuit_blocks", return_value=False):
++        assert R.provider_order("a") == ["gemini", "ollama"]
++
++
++def test_openai_credit_balance_failure_sets_long_billing_latch(monkeypatch):
++    monkeypatch.setenv("OPENAI_API_KEY", "x")
++    monkeypatch.setenv("BORIS_SALES_OPENAI_BILLING_RETRY_SEC", "21600")
++
++    class Resp:
++        status_code = 429
++        headers = {}
++        def json(self):
++            return {"error": {"code": "credit_balance_exhausted"}}
++
++    monkeypatch.setattr("requests.post", lambda *a, **k: Resp())
++    monkeypatch.setattr(R, "dependency_call", lambda dep, fn, **kw: fn())
++
++    from app.services import ai_budget
++    monkeypatch.setattr(ai_budget, "reserve", lambda **kw: {"status": "reserved"})
++    monkeypatch.setattr(ai_budget, "allow_next", lambda run_id: {"allowed": True})
++    monkeypatch.setattr(ai_budget, "release", lambda *a, **k: None)
++    monkeypatch.setattr(ai_budget, "stop", lambda *a, **k: None)
++
++    from app.ext_api import aiprov
++    marks = []
++    monkeypatch.setattr(
++        aiprov,
++        "mark",
++        lambda provider, state, note=None, retry_after=None: marks.append(
++            (provider, state, note, retry_after)
++        ) or {"provider": provider, "state": state},
++    )
++
++    with pytest.raises(R.SalesAIProviderUnavailable) as exc:
++        R._openai_default_call(
++            account_id="a",
++            operation="mop_messenger_reply",
++            prompt="p",
++            model="gpt-test",
++            max_output_tokens=32,
++            idempotency_key="billing-test",
++            module="mop",
++            timeout=5,
++        )
++
++    assert "billing" in str(exc.value)
++    assert marks
++    assert marks[-1][0] == "openai"
++    assert marks[-1][1] == aiprov.UNAVAILABLE_BILLING
++    assert "credit_balance_exhausted" in str(marks[-1][2])
++    assert int(marks[-1][3]) >= 3600
++
++
+ def test_one_paid_call_only(monkeypatch):
+     monkeypatch.setenv("OPENAI_API_KEY", "x")
+     with patch.object(R, "_circuit_blocks", return_value=False):
+         count = {"openai": 0}
+@@ -217,8 +299,29 @@
+     assert out["provider"] == "gemini"
+     assert out["json"] == {"x": 9}
+     assert out["fallback_chain"][0]["provider"] == "openai"
+     assert out["fallback_chain"][0]["reason"] == "invalid_output"
++
++
++def test_gemini_cli_quota_error_is_safe_shared_marker(monkeypatch):
++    class Proc:
++        returncode = 1
++        stdout = ""
++        stderr = "HTTP 429 quota exceeded"
++
++    monkeypatch.setattr(R.subprocess, "run", lambda *a, **k: Proc())
++    monkeypatch.setattr(R, "dependency_call", lambda dep, fn, **kw: fn())
++
++    with pytest.raises(R.SalesAIProviderUnavailable) as exc:
++        R._gemini_default_call(
++            account_id="a",
++            operation="mop_messenger_reply",
++            prompt="SECRET CUSTOMER PROMPT",
++            model="gemini-test",
++            timeout=5,
++        )
++    assert str(exc.value) == "gemini shared_quota_429"
++    assert "SECRET CUSTOMER PROMPT" not in str(exc.value)
+ 
+ 
+ def test_gemini_cli_uses_deny_all_admin_policy(monkeypatch, tmp_path):
+     captured = {}
+@@ -337,8 +440,109 @@
+     assert seen["format_schema"] == schema
+     assert seen["temperature"] == 0.1
+     assert seen["num_ctx"] == 2048
+     assert seen["num_predict"] == 180
++
++
++def test_local_historical_load_only_uses_recovery_floor(monkeypatch, tmp_path):
++    monkeypatch.setenv("BORIS_SALES_LOCAL_LOCK_PATH", str(tmp_path / "mop-local.lock"))
++    monkeypatch.setattr(
++        "app.ext_api.sched.pressure",
++        lambda: {
++            "under_pressure": True,
++            "reasons": ["load average выше безопасного порога"],
++            "instant_headroom": True,
++            "historical_load_only": True,
++            "facts": {},
++        },
++    )
++    monkeypatch.setattr("app.usage.log_usage", lambda *a, **k: 0.0)
++
++    class Response:
++        def __enter__(self):
++            return self
++        def __exit__(self, *args):
++            return False
++        def read(self):
++            return b'{"response":"ok"}'
++
++    monkeypatch.setattr(R.urllib.request, "urlopen", lambda *a, **k: Response())
++    out = R._ollama_default_call(
++        account_id="a",
++        operation="mop_messenger_reply",
++        prompt="p",
++        model="qwen3:1.7b",
++        timeout=10,
++        num_ctx=1024,
++        num_predict=32,
++    )
++    assert out["provider"] == "ollama"
++    assert out["model"] == "qwen3:1.7b"
++
++
++def test_local_real_iowait_pressure_stays_fail_closed(monkeypatch):
++    monkeypatch.setattr(
++        "app.ext_api.sched.pressure",
++        lambda: {
++            "under_pressure": True,
++            "reasons": [
++                "load average выше безопасного порога",
++                "слишком высокий CPU iowait",
++            ],
++            "instant_headroom": True,
++            "historical_load_only": False,
++            "facts": {},
++        },
++    )
++    with pytest.raises(R.SalesAIProviderUnavailable):
++        R._ollama_default_call(
++            account_id="a",
++            operation="mop_messenger_reply",
++            prompt="p",
++            model="qwen3:1.7b",
++            timeout=10,
++            num_ctx=1024,
++            num_predict=32,
++        )
++
++
++def test_local_default_model_is_lightweight_emergency_fallback(monkeypatch):
++    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
++    monkeypatch.setenv("BORIS_SALES_GEMINI_ENABLED", "0")
++    monkeypatch.setenv("BORIS_SALES_LOCAL_ENABLED", "1")
++    monkeypatch.delenv("BORIS_SALES_LOCAL_MODEL", raising=False)
++    seen = {}
++
++    def local(**kw):
++        seen.update(kw)
++        return {"text": "ok", "provider": "ollama", "model": kw.get("model")}
++
++    with patch.object(R, "_circuit_blocks", return_value=False):
++        out = R.generate_text(
++            account_id="a", operation="mop_messenger_reply", prompt="p",
++            local_call=local,
++        )
++    assert out["provider"] == "ollama"
++    assert seen["model"] == "qwen3:1.7b"
++
++
++def test_local_model_override_is_preserved(monkeypatch):
++    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
++    monkeypatch.setenv("BORIS_SALES_GEMINI_ENABLED", "0")
++    monkeypatch.setenv("BORIS_SALES_LOCAL_ENABLED", "1")
++    monkeypatch.setenv("BORIS_SALES_LOCAL_MODEL", "qwen3:4b")
++    seen = {}
++
++    def local(**kw):
++        seen.update(kw)
++        return {"text": "ok", "provider": "ollama", "model": kw.get("model")}
++
++    with patch.object(R, "_circuit_blocks", return_value=False):
++        R.generate_text(
++            account_id="a", operation="mop_training_client_turn", prompt="p",
++            local_call=local,
++        )
++    assert seen["model"] == "qwen3:4b"
+ 
+ 
+ def test_local_ollama_refuses_real_production_pressure(monkeypatch):
+     monkeypatch.setattr(
+
+--- a/backend/tests/test_realtime_ai_guard_http_status.py
++++ b/backend/tests/test_realtime_ai_guard_http_status.py
+@@ -38,8 +38,48 @@
+     def test_503_is_shared_provider_failure(self):
+         with self.assertRaises(guard.OpenAIHTTPError) as ctx:
+             guard._checked_openai_response(FakeResponse(503), account_id="acct")
+         self.assertTrue(_shared_provider_failure("openai.text", ctx.exception))
++
++    def test_plain_gemini_sales_timeout_is_tenant_scoped(self):
++        self.assertFalse(
++            _shared_provider_failure(
++                "gemini.sales",
++                RuntimeError("gemini timeout"),
++            )
++        )
++
++    def test_gemini_sales_503_timeout_is_still_shared(self):
++        self.assertTrue(
++            _shared_provider_failure(
++                "gemini.sales",
++                RuntimeError("gemini timeout service unavailable 503"),
++            )
++        )
++
++    def test_gemini_shared_quota_marker_is_global(self):
++        self.assertTrue(
++            _shared_provider_failure(
++                "gemini.sales",
++                RuntimeError("gemini shared_quota_429"),
++            )
++        )
++
++    def test_gemini_shared_location_marker_is_global(self):
++        self.assertTrue(
++            _shared_provider_failure(
++                "gemini.sales",
++                RuntimeError("gemini shared_unsupported_location_400"),
++            )
++        )
++
++    def test_gemini_plain_cli_error_is_tenant_scoped(self):
++        self.assertFalse(
++            _shared_provider_failure(
++                "gemini.sales",
++                RuntimeError("gemini cli_error"),
++            )
++        )
+ 
+     def test_400_is_tenant_local_request_failure(self):
+         with self.assertRaises(guard.OpenAIHTTPError) as ctx:
+             guard._checked_openai_response(FakeResponse(400), account_id="acct")
+
+--- a/backend/tests/test_tenant_circuit_isolation.py
++++ b/backend/tests/test_tenant_circuit_isolation.py
+@@ -67,13 +67,18 @@
+         self.assertEqual(out, "account-b-ok")
+ 
+         db = SessionLocal()
+         try:
++            # Do not assert the whole production reliability state here: this
++            # test owns only its unique qa.circuit.* dependency, while unrelated
++            # live provider circuits may legitimately be degraded.
+             health = dependency_health(db)
+-            self.assertEqual(health["state"], "ok")
+             scoped = [x for x in health["tenant_items"] if x["dependency"] == dep]
+             self.assertTrue(scoped)
+             self.assertEqual(scoped[0]["state"], "open")
++            global_owned = [x for x in health["items"] if x["dependency"] == dep]
++            self.assertTrue(global_owned)
++            self.assertEqual(global_owned[0]["state"], "closed")
+         finally:
+             db.close()
+ 
+     def test_expired_half_open_lease_allows_exactly_one_new_probe(self):
