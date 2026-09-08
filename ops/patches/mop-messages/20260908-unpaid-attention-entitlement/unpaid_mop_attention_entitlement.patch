@@ -1,0 +1,55 @@
+--- a/backend/app/api/inbox_slots.py
++++ b/backend/app/api/inbox_slots.py
+@@ -794,6 +794,22 @@
+         if not ids:
+             return {"status": "ok", "items": [], "counts": {}}
+ 
++        # MOP_ATTENTION_ENTITLEMENT_FILTER_V1:
++        # Historical MOP cards stay in DB for audit, but an unpaid/inactive MOP
++        # account must not keep generating operator work in the owner's attention
++        # queue. Unread inbox/CRM/reactivation evidence remains visible; only
++        # actionable MOP states are suppressed until entitlement becomes active.
++        _mop_entitled = {}
++        try:
++            from app.api.messenger import get_manager_balance as _attention_mop_balance
++            for _aid in ids:
++                try:
++                    _mop_entitled[str(_aid)] = bool((_attention_mop_balance(str(_aid)) or {}).get("active"))
++                except Exception:
++                    _mop_entitled[str(_aid)] = False
++        except Exception:
++            _mop_entitled = {str(_aid): False for _aid in ids}
++
+         items = {}
+         def add(acc, chat, kind, label, priority=50, detail=""):
+             if not acc or not chat:
+@@ -829,6 +845,8 @@
+         ).bindparams(bindparam("ids", expanding=True))
+         try:
+             for acc, chat, st, err, ai_summary in db.execute(q_drafts, {"ids": ids}).all():
++                if not _mop_entitled.get(str(acc), False):
++                    continue
+                 if st == "human_required":
+                     handoff_reason = ""
+                     try:
+@@ -874,6 +892,8 @@
+                 acc, chat, st = d.get("account_id"), d.get("avito_chat_id"), d.get("status")
+                 if acc not in ids or not chat:
+                     continue
++                if not _mop_entitled.get(str(acc), False):
++                    continue
+                 if st == "send_failed":
+                     add(acc, chat, "send_failed", "Не удалось отправить", 100, d.get("send_error") or "Проверьте отправку")
+                 elif st == "pending":
+--- a/backend/tests/test_mop_attention_qa_isolation.py
++++ b/backend/tests/test_mop_attention_qa_isolation.py
+@@ -13,6 +13,9 @@
+         self.assertIn("Просроченный вопрос клиента", src)
+         self.assertIn("business_partnership_request", src)
+         self.assertIn("Партнёрское предложение", src)
++        self.assertIn("MOP_ATTENTION_ENTITLEMENT_FILTER_V1", src)
++        self.assertIn("_mop_entitled", src)
++        self.assertIn("get_manager_balance", src)
+ 
+ 
+ if __name__ == '__main__':

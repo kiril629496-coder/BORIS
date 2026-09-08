@@ -1,0 +1,9 @@
+scope=MOP owner attention entitlement filter for unpaid/inactive accounts
+created_utc=2026-09-08T21:51:42Z
+patch_sha256=c7c34ef10ec03da6e5a2e878b6f68c97f25750da9580cc41095e53533427e0e7
+patch_lines=55
+targeted_regression=24/24 PASS
+direct_production_projection=human_visible_6 unpaid_bytovki_human_visible_0
+history_preserved=true
+unread_crm_reactivation_preserved=true
+runtime_deploy=pending canonical shared-worktree quiet window
