@@ -1,0 +1,11 @@
+scope=Guardian bid-cap missing/stale runtime ownerless lower-only self-heal
+created_utc=2026-09-08T17:10:28Z
+patch_sha256=c29d85941a74867b9445b09dbb8e6f3b606419e13f57d26fc8b27fcea1a3a934
+patch_lines=196
+guardian_policy_tests=10/10 PASS
+natural_marketer_retry_1705_utc=SUCCESS fail=0
+guardian_post_retry=success exit=0
+marketer_failure_state=reset_to_0
+bid_cap_fleet=configured_21 seen_21 missing_0 stale_0 hard_bad_0
+production_contract=PASS 21/21
+mop_provider_outage_human=0

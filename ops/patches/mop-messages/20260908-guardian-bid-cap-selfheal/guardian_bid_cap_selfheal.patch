@@ -1,0 +1,196 @@
+--- a/backend/boris_guardian.py
++++ b/backend/boris_guardian.py
+@@ -76,8 +76,8 @@
+                )
+              ORDER BY s.account_id,s.id DESC
+         """)).fetchall()
+-        configured=db.execute(text("""
+-            SELECT COUNT(DISTINCT a.account_id)
++        configured_rows=db.execute(text("""
++            SELECT DISTINCT a.account_id
+               FROM accounts a
+              WHERE a.avito_client_id IS NOT NULL
+                AND a.avito_client_secret IS NOT NULL
+@@ -86,8 +86,11 @@
+                     WHERE r.account_id=a.account_id AND r.blocked=true
+                       AND r.module IN ('actions','marketing','background')
+                )
+-        """)).scalar() or 0
+-        bad=[]; seen=set(); newest=None; stale_accounts=[]
++             ORDER BY a.account_id
++        """)).fetchall()
++        configured_ids=[str(r[0]) for r in configured_rows]
++        configured=len(configured_ids)
++        bad=[]; hard_bad=[]; repair_accounts=set(); seen=set(); newest=None; stale_accounts=[]
+         now=dt.datetime.now(dt.timezone.utc)
+ 
+         # FUNDING_PAUSE_BID_CAP_STALE_SUPPRESSION_V1:
+@@ -115,15 +118,17 @@
+             funding_paused=set()
+ 
+         for account_id,raw in rows:
++            account_id=str(account_id); seen.add(account_id)
+             try:data=json.loads(raw or '{}')
+             except Exception:
+-                bad.append('Не удалось прочитать данные проверки ставок по одному аккаунту'); continue
+-            account_id=str(account_id); seen.add(account_id)
++                msg='Не удалось прочитать данные проверки ставок по одному аккаунту'
++                bad.append(msg); hard_bad.append(msg); repair_accounts.add(account_id); continue
+             status=str(data.get('status') or '')
+             remaining=int(data.get('remaining_over_cap') or 0)
+             auto_remaining=int(data.get('auto_promotions_remaining') or 0)
+             if status in {'fail','error','blocked','needs_retry'} or remaining>0 or auto_remaining>0:
+-                bad.append('По одному аккаунту не завершена корректировка ставок')
++                msg='По одному аккаунту не завершена корректировка ставок'
++                bad.append(msg); hard_bad.append(msg); repair_accounts.add(account_id)
+             stamp=data.get('finished_at') or data.get('started_at')
+             if stamp:
+                 try:
+@@ -132,12 +137,14 @@
+                     newest=t if newest is None or t>newest else newest
+                     age_minutes=int(max(0,(now-t).total_seconds())//60)
+                     if age_minutes>120 and account_id not in funding_paused:
+-                        stale_accounts.append((account_id,age_minutes))
++                        stale_accounts.append((account_id,age_minutes)); repair_accounts.add(account_id)
+                 except Exception:
+-                    bad.append('По одному аккаунту повреждено время последней проверки ставок')
++                    bad.append('По одному аккаунту повреждено время последней проверки ставок'); repair_accounts.add(account_id)
+             else:
+-                bad.append('По одному аккаунту нет времени последней проверки ставок')
+-        missing=max(0,int(configured)-len(seen))
++                bad.append('По одному аккаунту нет времени последней проверки ставок'); repair_accounts.add(account_id)
++        missing_accounts=sorted(set(configured_ids)-seen)
++        missing=len(missing_accounts)
++        repair_accounts.update(missing_accounts)
+         stale_minutes=None if newest is None else int(max(0,(now-newest).total_seconds())//60)
+         if missing>0: bad.append(f'Не запущена проверка ставок по {missing} аккаунтам')
+         for account_id,age_minutes in stale_accounts[:5]:
+@@ -145,13 +152,62 @@
+         if len(stale_accounts)>5:
+             bad.append(f'Ещё аккаунтов без свежей проверки ставок: {len(stale_accounts)-5}')
+         return {'configured':int(configured),'seen':len(seen),'stale_minutes':stale_minutes,
+-                'stale_accounts':len(stale_accounts),
++                'stale_accounts':len(stale_accounts),'missing_accounts':missing_accounts,
++                'repair_accounts':sorted(repair_accounts),'hard_bad':hard_bad,
+                 'funding_paused_stale_suppressed':len(funding_paused),
+                 'bad':bad}
+     except Exception as e:
+-        return {'configured':0,'seen':0,'stale_minutes':None,'bad':[f'health query: {type(e).__name__}']}
++        return {'configured':0,'seen':0,'stale_minutes':None,'missing_accounts':[],
++                'repair_accounts':[],'hard_bad':[f'health query: {type(e).__name__}'],
++                'bad':[f'health query: {type(e).__name__}']}
+     finally: db.close()
+ 
++
++def heal_bid_cap_accounts(accounts, state, max_accounts=2):
++    """Bounded ownerless lower-only recovery for missing/stale cap runtime.
++
++    The canonical reconciler has its own singleton flock and can only lower or
++    remove promotion; it never increases spend. Guardian therefore may repair a
++    small number of stale/missing tenants when the hourly marketer is not active.
++    """
++    results=[]; now=time.time(); attempted=0
++    for account_id in list(dict.fromkeys(str(x) for x in (accounts or []) if x)):
++        key='bid_cap_heal:'+account_id
++        if now-float(state.get(key,0) or 0)<300:
++            results.append({'account_id':account_id,'status':'backoff'}); continue
++        if attempted>=max(1,int(max_accounts)): break
++        attempted+=1; state[key]=now
++        try:
++            p=subprocess.run(
++                [str(B/'venv/bin/python'), str(B/'cpx_cap_reconciler.py'), '--apply', '--account', account_id],
++                cwd=str(B), text=True, capture_output=True, timeout=120,
++            )
++            out=(p.stdout or '')+(p.stderr or '')
++            results.append({
++                'account_id':account_id,
++                'status':'attempted' if p.returncode==0 else 'error',
++                'returncode':int(p.returncode),
++                'overlap':'CPX_CAP_RECONCILE_SKIP overlap' in out,
++            })
++        except subprocess.TimeoutExpired:
++            results.append({'account_id':account_id,'status':'timeout'})
++        except Exception as exc:
++            results.append({'account_id':account_id,'status':'error','error_type':type(exc).__name__})
++    return results
++
++
++def bid_cap_recovery_mode(cap_health, marketer_cycle_running: bool) -> str:
++    if not (cap_health or {}).get('bad'):
++        return 'ok'
++    if (cap_health or {}).get('hard_bad'):
++        return 'critical'
++    if marketer_cycle_running:
++        return 'wait_hourly'
++    if (cap_health or {}).get('repair_accounts'):
++        return 'repair'
++    return 'critical'
++
++
+ def budget_brake_health():
+     """Read-only per-account daily-budget safety state."""
+     from app.services.marketing_money_policy import effective_daily_budget_limit
+@@ -937,7 +993,20 @@
+     if ph.get('state')=='critical' and ph.get('error'):
+         bad.append('Reliability control plane: '+str(ph.get('error')))
+     cap_health=bid_cap_health()
+-    if cap_health.get('bad'):
++    _mk_rc,_mk_state=sh("systemctl show boris-ai-marketer.service -p ActiveState --value")
++    _marketer_cycle_running=(str(_mk_state or '').strip() in {'active','activating'})
++    cap_mode=bid_cap_recovery_mode(cap_health,_marketer_cycle_running)
++    if cap_mode=='wait_hourly':
++        warnings.append('Контроль ставок: новый/устаревший runtime уже обновляется текущим часовым циклом ИИ-маркетолога')
++    elif cap_mode=='repair':
++        cap_recovery=heal_bid_cap_accounts(cap_health.get('repair_accounts'),s,max_accounts=2)
++        cap_health=bid_cap_health()
++        cap_mode=bid_cap_recovery_mode(cap_health,False)
++        if cap_mode=='ok':
++            healed.append('контроль ставок')
++        elif any(x.get('status')=='attempted' for x in cap_recovery):
++            warnings.append('BORIS выполнил lower-only повторную проверку ставок; часть аккаунтов ещё требует следующего безопасного retry')
++    if cap_mode=='critical' and cap_health.get('bad'):
+         bad.append('Контроль ставок: '+'; '.join(cap_health.get('bad')[:5]))
+     budget_health=budget_brake_health()
+     # BUDGET_GUARDIAN_SELF_HEAL_V1: do not make the owner the operator.
+--- a/backend/tests/test_guardian_marketer_retry_policy.py
++++ b/backend/tests/test_guardian_marketer_retry_policy.py
+@@ -80,5 +80,39 @@
+         self.assertFalse(out["retry_ready"])
+ 
+ 
++class GuardianBidCapRecoveryPolicyTests(unittest.TestCase):
++    def test_clean_cap_health_is_ok(self):
++        self.assertEqual(
++            guardian.bid_cap_recovery_mode({'bad': [], 'hard_bad': [], 'repair_accounts': []}, False),
++            'ok',
++        )
++
++    def test_hard_cap_violation_is_never_hidden_by_hourly_cycle(self):
++        health={'bad':['violation'],'hard_bad':['violation'],'repair_accounts':['a']}
++        self.assertEqual(guardian.bid_cap_recovery_mode(health, True), 'critical')
++
++    def test_missing_runtime_waits_for_already_running_hourly_owner(self):
++        health={'bad':['missing'],'hard_bad':[],'repair_accounts':['a']}
++        self.assertEqual(guardian.bid_cap_recovery_mode(health, True), 'wait_hourly')
++
++    def test_missing_runtime_repairs_when_hourly_owner_is_idle(self):
++        health={'bad':['missing'],'hard_bad':[],'repair_accounts':['a']}
++        self.assertEqual(guardian.bid_cap_recovery_mode(health, False), 'repair')
++
++    def test_bid_cap_heal_uses_targeted_lower_only_cli_and_backoff(self):
++        state={}
++        fake=type('P',(),{'returncode':0,'stdout':'CPX_CAP_RECONCILE_DONE failures=[]','stderr':''})()
++        with patch.object(guardian.subprocess, 'run', return_value=fake) as run:
++            out=guardian.heal_bid_cap_accounts(['acct_1'],state,max_accounts=2)
++        self.assertEqual(out[0]['status'],'attempted')
++        args=run.call_args.args[0]
++        self.assertIn('cpx_cap_reconciler.py', args[1])
++        self.assertEqual(args[-3:], ['--apply','--account','acct_1'])
++        with patch.object(guardian.subprocess, 'run') as run2:
++            out2=guardian.heal_bid_cap_accounts(['acct_1'],state,max_accounts=2)
++        self.assertEqual(out2[0]['status'],'backoff')
++        run2.assert_not_called()
++
++
+ if __name__ == "__main__":
+     unittest.main()
