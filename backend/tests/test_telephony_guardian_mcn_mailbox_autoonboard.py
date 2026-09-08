@@ -329,6 +329,69 @@ class McnMailboxAutoonboardGuardianTests(unittest.TestCase):
             "same_current_card_previously_delivered_to_mcn",
         )
 
+    def test_repeat_card_auto_resend_suppresses_rapid_duplicate(self):
+        now = G.datetime.now(G.timezone.utc)
+        prior = now - G.timedelta(minutes=30)
+        with patch.object(G, "_mcn_repeat_card_auto_resend_enabled", return_value=True), \
+             patch.object(G.subprocess, "run") as run:
+            out = G._mcn_company_card_auto_resend_if_authorized(
+                2,
+                {
+                    "code": "mcn_company_card_required",
+                    "sender_domain": "mcn.ru",
+                    "date": now.isoformat(),
+                    "message_id": "<new@mcn.ru>",
+                },
+                {
+                    "prior_current_card_sent_to_provider": True,
+                    "prior_current_card_sent_at": prior.isoformat(),
+                },
+                {"ready": True, "card_fingerprint": "a" * 64},
+            )
+        self.assertFalse(out["authorized"])
+        self.assertEqual(out["reason"], "repeat_request_too_soon")
+        self.assertEqual(out["cooldown_hours"], 6)
+        run.assert_not_called()
+
+    def test_rapid_repeat_request_waits_without_owner_or_resend(self):
+        now = G.datetime.now(G.timezone.utc)
+        prior = now - G.timedelta(minutes=30)
+        before = {
+            "sent": False,
+            "source": "sent_folder",
+            "reason": "no_company_card_after_request",
+            "prior_current_card_sent_to_provider": True,
+            "prior_current_card_sent_at": prior.isoformat(),
+        }
+        op = {
+            "code": "mcn_company_card_required",
+            "sender_domain": "mcn.ru",
+            "date": now.isoformat(),
+            "message_id": "<new@mcn.ru>",
+        }
+        with patch.object(G, "_mcn_company_card_sent_evidence", return_value=before), \
+             patch.object(G, "_prepare_mcn_company_card_draft", return_value={
+                 "status": "draft_exists", "ready": True, "sent": False,
+                 "delivery_ambiguous": False, "card_fingerprint": "a" * 64,
+             }), \
+             patch.object(G, "_mcn_company_card_auto_resend_if_authorized", return_value={
+                 "authorized": False,
+                 "reason": "repeat_request_too_soon",
+                 "prior_sent_at": prior.isoformat(),
+                 "cooldown_hours": 6,
+             }) as resend, \
+             patch.object(G, "_mcn_company_card_followup", return_value={"status":"not_due"}) as followup:
+            out = G._mcn_company_card_progress(2, op)
+        resend.assert_called_once()
+        followup.assert_called_once()
+        self.assertEqual(out["status"], "waiting_mcn_response")
+        self.assertFalse(out["owner_action_required"])
+        self.assertEqual(out["primary_next_action"]["actor"], "boris")
+        self.assertEqual(
+            out["primary_next_action"]["code"],
+            "mcn_company_card_recently_sent_waiting_reply",
+        )
+
     def test_repeat_request_same_card_becomes_ownerless_waiting_after_auto_resend(self):
         now = G.datetime.now(G.timezone.utc)
         prior = now - G.timedelta(days=1)
@@ -820,7 +883,7 @@ class McnMailboxAutoonboardGuardianTests(unittest.TestCase):
                     "current_card_match": True,
                     "boris_action_signal": False,
                     "action_id": "",
-                    "in_reply_to": "",
+                    "in_reply_to": "<request@mcn.ru>",
                 }],
             }),
             stderr="",
@@ -837,6 +900,36 @@ class McnMailboxAutoonboardGuardianTests(unittest.TestCase):
         self.assertEqual(out["source"], "sent_folder")
         self.assertEqual(out["reason"], "current_card_content_verified_after_request")
 
+
+    def test_sent_folder_current_card_wrong_thread_after_request_is_provider_level_delivery(self):
+        cp = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "status": "ok",
+                "items": [{
+                    "date": "Mon, 7 Sep 2026 17:00:00 +0300",
+                    "company_card_signal": True,
+                    "current_card_match": True,
+                    "boris_action_signal": True,
+                    "action_id": "boris-mcn-company-card-v4",
+                    "in_reply_to": "<other-request@mcn.ru>",
+                }],
+            }),
+            stderr="",
+        )
+        with patch.object(G, "_company_card_send_state_evidence", return_value={
+            "sent": False, "source": "send_state", "reason": "state_not_found",
+        }), patch.object(G.subprocess, "run", return_value=cp):
+            out = G._mcn_company_card_sent_evidence(
+                2,
+                request_date="Mon, 7 Sep 2026 16:07:30 +0300",
+                request_message_id="<request@mcn.ru>",
+            )
+        self.assertTrue(out["sent"])
+        self.assertEqual(out["source"], "sent_folder")
+        self.assertEqual(out["reason"], "current_card_content_verified_after_request")
+        self.assertFalse(out.get("delivery_ambiguous", False))
+
     def test_sent_folder_manual_card_after_request_is_not_trusted(self):
         cp = SimpleNamespace(
             returncode=0,
@@ -847,7 +940,7 @@ class McnMailboxAutoonboardGuardianTests(unittest.TestCase):
                     "company_card_signal": True,
                     "boris_action_signal": False,
                     "action_id": "",
-                    "in_reply_to": "",
+                    "in_reply_to": "<request@mcn.ru>",
                 }],
             }),
             stderr="",
@@ -1015,6 +1108,9 @@ class McnCompanyCardAutoFollowupTests(unittest.TestCase):
         self._key_patcher = patch.object(G, "_MCN_FOLLOWUP_STORAGE_KEY", self.storage_key)
         self._key_patcher.start()
         self.addCleanup(self._key_patcher.stop)
+        self._policy_patcher = patch.object(G, "_mcn_company_card_followup_enabled", return_value=True)
+        self._policy_patcher.start()
+        self.addCleanup(self._policy_patcher.stop)
         self.op = {
             "sender_email": "manager@mcn.ru",
             "sender_domain": "mcn.ru",
@@ -1036,6 +1132,17 @@ class McnCompanyCardAutoFollowupTests(unittest.TestCase):
             db.commit()
         finally:
             db.close()
+
+    def test_followup_policy_disabled_never_calls_smtp(self):
+        now = G.datetime(2026, 9, 10, 1, 0, tzinfo=G.timezone.utc)
+        with patch.object(G, "_mcn_company_card_followup_enabled", return_value=False), \
+             patch("app.services.client_mailboxes.send_outbound") as send:
+            out = G._mcn_company_card_followup(2, self.op, self.evidence, now=now)
+        self.assertEqual(out["status"], "disabled_by_policy")
+        self.assertFalse(out["sent"])
+        self.assertTrue(out["auto_retry_blocked"])
+        self.assertFalse(out["owner_action_required"])
+        send.assert_not_called()
 
     def test_followup_waits_full_48_hours(self):
         now = G.datetime(2026, 9, 2, 23, 59, tzinfo=G.timezone.utc)

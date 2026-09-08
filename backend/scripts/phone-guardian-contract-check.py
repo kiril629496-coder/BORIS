@@ -299,6 +299,25 @@ def main() -> int:
         if required not in repeat_gate_src:
             failures.append(f"mcn_repeat_card_fail_closed_gate_missing:{required}")
 
+    followup_gate_src = inspect.getsource(guardian._mcn_company_card_followup_enabled)
+    for required in (
+        "_MCN_FOLLOWUP_POLICY_STORAGE_KEY",
+        "enabled",
+        "return False",
+    ):
+        if required not in followup_gate_src:
+            failures.append(f"mcn_followup_fail_closed_gate_missing:{required}")
+
+    followup_src = inspect.getsource(guardian._mcn_company_card_followup)
+    for required in (
+        "_mcn_company_card_followup_enabled",
+        "disabled_by_policy",
+        "auto_retry_blocked",
+        "send_outbound",
+    ):
+        if required not in followup_src:
+            failures.append(f"mcn_followup_policy_contract_missing:{required}")
+
     sent_evidence_src = inspect.getsource(guardian._mcn_company_card_sent_evidence)
     for required in (
         "prior_current_card_sent_to_provider",

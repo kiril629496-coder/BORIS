@@ -638,6 +638,7 @@ _MCN_COMPANY_CARD_SEND_STATE_KEY = "mcn_company_card_send_v1"
 _MCN_OWNER_ALERT_STORAGE_KEY = "mcn_phone_owner_alert_v1"
 _MCN_OWNER_ALERT_RETRY_SECONDS = 3600
 _MCN_FOLLOWUP_STORAGE_KEY = "mcn_company_card_followup_v1"
+_MCN_FOLLOWUP_POLICY_STORAGE_KEY = "mcn_company_card_followup_policy_v1"
 _MCN_FOLLOWUP_FIRST_DELAY_SECONDS = 48 * 3600
 _MCN_FOLLOWUP_REPEAT_DELAY_SECONDS = 72 * 3600
 _MCN_FOLLOWUP_SAFE_RETRY_SECONDS = 3600
@@ -910,16 +911,25 @@ def _owner_company_card_readiness() -> dict:
     }
 
 
-def _prepare_mcn_company_card_draft(mailbox_id: int) -> dict:
+def _prepare_mcn_company_card_draft(
+    mailbox_id: int,
+    request_message_id: str | None = None,
+    request_date: str | None = None,
+) -> dict:
     script = ROOT / "scripts" / "phone-mcn-company-card-send.py"
     python_bin = ROOT / "venv" / "bin" / "python"
+    argv = [
+        str(python_bin), str(script),
+        "--mailbox-id", str(int(mailbox_id)),
+        "--save-draft",
+    ]
+    if str(request_message_id or "").strip():
+        argv += ["--request-message-id", str(request_message_id).strip()]
+    if str(request_date or "").strip():
+        argv += ["--request-date", str(request_date).strip()]
     try:
         cp = subprocess.run(
-            [
-                str(python_bin), str(script),
-                "--mailbox-id", str(int(mailbox_id)),
-                "--save-draft",
-            ],
+            argv,
             cwd=str(ROOT),
             text=True,
             capture_output=True,
@@ -1130,11 +1140,29 @@ def _mcn_company_card_sent_evidence(
             prior_content_newest = item_dt
         if req_dt is not None and (item_dt is None or item_dt < req_dt):
             continue
-        if item_dt is not None and (manual_newest is None or item_dt > manual_newest):
-            manual_newest = item_dt
         action_ok = bool(item.get("boris_action_signal"))
         reply_ok = (not request_mid) or str(item.get("in_reply_to") or "").strip() == request_mid
-        if content_ok and item_dt is not None and (content_newest is None or item_dt > content_newest):
+
+        # MCN_SENT_EVIDENCE_THREAD_BOUND_V1:
+        # Evidence for a specific provider request must be bound to that exact
+        # Message-ID. A matching company-card attachment sent after the request
+        # but in reply to another MCN message is only provider-level disclosure
+        # evidence, not proof that this request was answered.
+        if reply_ok and item_dt is not None and (
+            manual_newest is None or item_dt > manual_newest
+        ):
+            manual_newest = item_dt
+        if (
+            content_ok
+            and item_dt is not None
+            and (content_newest is None or item_dt > content_newest)
+        ):
+            # Provider-level exact-current-card evidence is enough to suppress
+            # duplicate sends. Mail.ru can strip In-Reply-To when a prepared
+            # draft is sent, but discovery already proves: recipient is mcn.ru,
+            # the DOCX matches all current required fields, and it was sent
+            # after the provider request. Do not resend the same document just
+            # because the transport lost the thread header.
             content_newest = item_dt
         if action_ok and reply_ok:
             if item_dt is not None and (trusted_newest is None or item_dt > trusted_newest):
@@ -1232,6 +1260,13 @@ def _mcn_company_card_auto_resend_if_authorized(
         prior_dt = prior_dt.replace(tzinfo=timezone.utc)
     if prior_dt >= request_dt or request_dt - prior_dt > timedelta(days=180):
         return {"authorized": False, "reason": "prior_delivery_not_reusable"}
+    if request_dt - prior_dt < timedelta(hours=6):
+        return {
+            "authorized": False,
+            "reason": "repeat_request_too_soon",
+            "prior_sent_at": prior_dt.isoformat(),
+            "cooldown_hours": 6,
+        }
     fingerprint = str(prepared.get("card_fingerprint") or "").strip().lower()
     if (
         not prepared.get("ready")
@@ -1247,6 +1282,8 @@ def _mcn_company_card_auto_resend_if_authorized(
             [
                 str(python_bin), str(script),
                 "--mailbox-id", str(int(mailbox_id)),
+                "--request-message-id", request_mid,
+                "--request-date", str(op.get("date") or "").strip(),
                 "--apply", "--confirm-share-banking",
             ],
             cwd=str(ROOT),
@@ -1339,6 +1376,26 @@ def _cleanup_mcn_company_card_draft_after_sent(mailbox_id: int) -> dict:
         }
 
 
+def _mcn_company_card_followup_enabled() -> bool:
+    """Fail closed unless an explicit durable policy enables outbound follow-up."""
+    db = SessionLocal()
+    try:
+        raw = db.execute(text("""
+            SELECT value FROM storage
+            WHERE account_id='__mcn_mailbox_watch__' AND key=:k
+            ORDER BY id DESC LIMIT 1
+        """), {"k": _MCN_FOLLOWUP_POLICY_STORAGE_KEY}).scalar()
+    except Exception:
+        return False
+    finally:
+        db.close()
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except Exception:
+        return False
+    return bool(isinstance(payload, dict) and payload.get("enabled") is True)
+
+
 def _mcn_company_card_followup(
     mailbox_id: int,
     operational_reply: dict | None,
@@ -1355,6 +1412,14 @@ def _mcn_company_card_followup(
     evidence = sent_evidence if isinstance(sent_evidence, dict) else {}
     if not bool(evidence.get("sent")):
         return {"status": "not_needed", "sent": False}
+    if not _mcn_company_card_followup_enabled():
+        return {
+            "status": "disabled_by_policy",
+            "sent": False,
+            "attempts": 0,
+            "auto_retry_blocked": True,
+            "owner_action_required": False,
+        }
 
     recipient = str(op.get("sender_email") or "").strip().lower()
     if "@" not in recipient:
@@ -1663,7 +1728,11 @@ def _mcn_company_card_progress(mailbox_id: int, operational_reply: dict | None =
             },
         }
 
-    draft = _prepare_mcn_company_card_draft(int(mailbox_id))
+    draft = _prepare_mcn_company_card_draft(
+        int(mailbox_id),
+        request_message_id=str(op.get("message_id") or "") or None,
+        request_date=str(op.get("date") or "") or None,
+    )
     base = {
         "company_card_draft": draft,
         "company_card_sent_evidence": evidence_safe,
@@ -1696,6 +1765,30 @@ def _mcn_company_card_progress(mailbox_id: int, operational_reply: dict | None =
         auto_resend = _mcn_company_card_auto_resend_if_authorized(
             int(mailbox_id), op, evidence_safe, draft
         )
+        if auto_resend.get("reason") == "repeat_request_too_soon":
+            prior_sent_at = str(
+                auto_resend.get("prior_sent_at")
+                or evidence_safe.get("prior_current_card_sent_at")
+                or ""
+            )
+            followup = _mcn_company_card_followup(
+                int(mailbox_id),
+                op,
+                {"sent": True, "sent_at": prior_sent_at},
+            )
+            return {
+                **base,
+                "status": "waiting_mcn_response",
+                "owner_action_required": False,
+                "company_card_auto_resend": auto_resend,
+                "company_card_followup": followup,
+                "primary_next_action": {
+                    "code": "mcn_company_card_recently_sent_waiting_reply",
+                    "actor": "boris",
+                    "owner_action_required": False,
+                    "text": "Эта же актуальная карточка недавно уже отправлялась MCN. BORIS не создаёт дубль и сам ждёт ответ/контролирует follow-up.",
+                },
+            }
         if auto_resend.get("authorized"):
             base["company_card_auto_resend"] = auto_resend
             auto_status = str(auto_resend.get("status") or "")
