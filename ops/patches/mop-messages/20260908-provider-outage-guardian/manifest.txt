@@ -1,0 +1,10 @@
+scope=MOP provider outage ownerless self-heal + deterministic emergency qualification + guardian marketer retry policy
+created_utc=2026-09-08T16:26:23Z
+patch_sha256=7aaeda20f6b2206d15e66014b1169849b9e60d5b31037f88bf775bac158832e2
+patch_lines=561
+focused_regression=106/106 MOP/router + 5/5 guardian retry policy
+production_contract=PASS 20/20
+mobile_messages=PASS 6/6
+provider_outage_human=0
+guardian_current=success
+runtime_cleanup=legacy outage drafts 661 and 664 closed; draft 665 reclassified as business_partnership_request; event history preserved

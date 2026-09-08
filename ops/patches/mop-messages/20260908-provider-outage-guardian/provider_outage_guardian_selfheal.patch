@@ -1,0 +1,561 @@
+--- a/backend/app/api/messenger.py
++++ b/backend/app/api/messenger.py
+@@ -874,6 +874,67 @@
+     return base
+ 
+ 
++def _mop_emergency_next_question(required_questions, history_text: str) -> str:
++    """Pick the next useful account qualification question without any AI call.
++
++    The helper deliberately under-detects known facts rather than inventing them.
++    It is used only when every sales-AI provider is temporarily unavailable.
++    """
++    import re as _eq_re
++    questions = [str(x).strip() for x in (required_questions or []) if str(x).strip()]
++    if not questions:
++        return ""
++    client_text = "\n".join(_history_role_messages(history_text, "client")).lower().replace("ё", "е")
++
++    def _known(question: str) -> bool:
++        q = question.lower().replace("ё", "е")
++        if "телефон" in q or "номер" in q or "контакт" in q:
++            return bool(_eq_re.search(r"(?<!\d)(?:\+?7|8)[\s()\-]*\d{3}[\s()\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}(?!\d)|(?<!\d)9\d{9}(?!\d)", client_text))
++        if "аренда или покупка" in q or "новая или б/у/аренда" in q:
++            return bool(_eq_re.search(r"\b(?:аренд|снять|купить|покуп|приобрест|б/у|бу\b|новая|новую)\w*", client_text))
++        if "размер" in q or "площад" in q:
++            return bool(_eq_re.search(r"\d{1,4}(?:[.,]\d+)?\s*(?:[xх×]\s*\d{1,4}(?:[.,]\d+)?|м\s*(?:2|²)|кв\.?\s*м)", client_text))
++        if "город" in q or "где находится" in q or "район" in q:
++            return bool(_eq_re.search(r"\b(?:москва|санкт[ -]?петербург|спб|уфа|ижевск|стерлитамак|сочи|пенза|краснодар|ростов|екатеринбург|новосибирск|нижн(?:ий|его)\s+новгород)\b", client_text))
++        if "тип мебели" in q:
++            return bool(_eq_re.search(r"\b(?:кухн\w*|шкаф\w*|гардероб\w*|прихож\w*|тумб\w*|стеллаж\w*|мебел\w*)\b", client_text))
++        if "срок" in q or "когда" in q or "начать работы" in q or "реализовать" in q:
++            return bool(_eq_re.search(r"\b(?:сегодня|завтра|послезавтра|недел\w*|месяц\w*|дн(?:я|ей|ь)|\d{1,2}[./-]\d{1,2}|к\s+\d{1,2})\b", client_text))
++        if "адрес" in q:
++            return bool(_eq_re.search(r"\b(?:ул\.?|улиц\w*|проспект\w*|пр\.?|шоссе|д\.?\s*\d|дом\s*\d)\b", client_text))
++        return False
++
++    def _humanize(question: str) -> str:
++        q = question.strip()
++        low = q.lower().replace("ё", "е")
++        if q.endswith("?"):
++            return q
++        if low == "нужный размер бытовки":
++            return "Подскажите, пожалуйста, какой размер бытовки нужен?"
++        if low == "аренда или покупка":
++            return "Подскажите, пожалуйста, нужна аренда или покупка бытовки?"
++        if low == "новая или б/у/аренда":
++            return "Подскажите, пожалуйста, нужна новая бытовка, б/у или аренда?"
++        if low == "на какой срок нужна бытовка":
++            return "Подскажите, пожалуйста, на какой срок нужна бытовка?"
++        if low == "срок, к которому нужна бытовка":
++            return "Подскажите, пожалуйста, к какому сроку нужна бытовка?"
++        if low == "адрес объекта/доставки":
++            return "Подскажите, пожалуйста, адрес объекта или доставки?"
++        if "мягко выяснить задачу" in low:
++            return "Подскажите, пожалуйста, какая у вас задача?"
++        if low.startswith("уточнить "):
++            return "Подскажите, пожалуйста, " + q[len("Уточнить "):].rstrip(".?").lower() + "?"
++        if low.startswith("получить номер телефона") or "номер телефона для связи" in low:
++            return "Если удобно, оставьте номер телефона для связи."
++        return "Подскажите, пожалуйста: " + q.rstrip(".?") + "?"
++
++    for question in questions:
++        if not _known(question):
++            return _humanize(question)
++    return ""
++
++
+ def _mop_unknown_fact_guard(history_text: str, trusted_context: str = ""):
+     """Fail-safe common commercial facts before local inference.
+ 
+@@ -1903,18 +1964,27 @@
+                     local_num_predict=320,
+                 )
+             except _sales_ai.SalesAIUnavailable as _sales_exc:
++                _provider_chain = list(getattr(_sales_exc, "chain", []) or [])
+                 print(
+-                    "MOP_AI_ROUTER_DEFERRED %s/%s: %s"
+-                    % (account_id, chat_id, str(_sales_exc)[:220]),
++                    "MOP_AI_ROUTER_DEFERRED %s/%s: %s chain=%s"
++                    % (
++                        account_id,
++                        chat_id,
++                        str(_sales_exc)[:220],
++                        _json.dumps(_provider_chain, ensure_ascii=False)[:900],
++                    ),
+                     flush=True,
+                 )
+-                # MOP_AI_EMERGENCY_REPLY_V1:
+-                # A provider outage must never become a 502/client-visible error.
+-                # Fall back to a conservative deterministic continuation that
+-                # invents no commercial facts and explicitly hands the case to a
+-                # human when exact conditions are required.
++                # MOP_AI_EMERGENCY_REPLY_V2:
++                # A provider outage must never become a 502/client-visible error
++                # OR an owner/operator task by itself. Send a conservative
++                # deterministic continuation with zero invented commercial facts.
++                # The next substantive client turn re-enters the normal sales AI
++                # router automatically; explicit human requests are handled by the
++                # deterministic handoff path before generation.
+                 import re as _emergency_re
+                 _q_low = str(_question or "").strip().lower()
++                _emergency_next = _mop_emergency_next_question(_required_questions, history_text)
+                 if _emergency_re.search(
+                     r"(?:телефон|номер).{0,20}(?:не\s+хочу|не\s+буду|не\s+дам|не\s+остав)",
+                     _q_low,
+@@ -1927,15 +1997,17 @@
+                     r"(?:сколько|стоимост|\bцена\b|\bпрайс\b)",
+                     _q_low,
+                 ):
+-                    _emergency_text = (
+-                        "Точную стоимость без подтверждённых условий не буду придумывать. "
+-                        "Опишите, пожалуйста, вашу ситуацию чуть подробнее — "
+-                        "зафиксирую детали и передам специалисту."
+-                    )
++                    _emergency_text = "Точную стоимость без подтверждённых условий не буду придумывать."
++                    if _emergency_next:
++                        _emergency_text += " " + _emergency_next
++                    else:
++                        _emergency_text += " Опишите, пожалуйста, параметры — зафиксирую их и продолжим здесь."
++                elif _emergency_next:
++                    _emergency_text = _emergency_next
+                 else:
+                     _emergency_text = (
+                         "Можем продолжить здесь. Опишите, пожалуйста, ситуацию чуть подробнее — "
+-                        "я зафиксирую детали и передам специалисту без выдуманных условий."
++                        "я зафиксирую детали без выдуманных условий."
+                     )
+                 return _wrap(
+                     _emergency_text,
+@@ -1945,7 +2017,7 @@
+                         "prompt_tokens":0,
+                         "completion_tokens":0,
+                         "cost_rub":0.0,
+-                        "fallback_chain":[],
++                        "fallback_chain":_provider_chain,
+                         "deferred":True,
+                     },
+                     return_meta,
+@@ -1953,13 +2025,15 @@
+                         "intent":"provider_outage_safe_continuation",
+                         "qualification_stage":"ENGAGED",
+                         "lead_temperature":"warm",
+-                        "target_action":"продолжить диалог и передать специалисту",
++                        "target_action":"безопасно продолжить диалог без передачи владельцу",
+                         "phone_received":False,
+                         "crm_action":"keep_inquiry",
+-                        "next_action":"продолжить диалог без выдумывания условий",
++                        "next_action":"следующий содержательный ответ клиента автоматически повторно направить через sales AI router",
+                         "reactivation_candidate":False,
+-                        "human_handoff":True,
+-                        "handoff_reason":"all_sales_ai_providers_unavailable",
++                        "human_handoff":False,
++                        "handoff_reason":None,
++                        "provider_outage_deferred":True,
++                        "provider_outage_reason":"all_sales_ai_providers_unavailable",
+                         "qualification_fields":{},
+                     },
+                 )
+--- a/backend/app/services/sales_ai_router.py
++++ b/backend/app/services/sales_ai_router.py
+@@ -38,7 +38,9 @@
+ 
+ 
+ class SalesAIUnavailable(RuntimeError):
+-    pass
++    def __init__(self, message: str, *, chain: list[dict] | None = None):
++        super().__init__(message)
++        self.chain = list(chain or [])
+ 
+ 
+ class SalesAIProviderUnavailable(SalesAIUnavailable):
+@@ -527,7 +529,13 @@
+ 
+             if int(proc.returncode or 0) != 0:
+                 detail = ((proc.stderr or "") + "\n" + (proc.stdout or "")).lower()
+-                marker = "quota" if ("429" in detail or "quota" in detail or "rate" in detail) else "cli_error"
++                if "user location is not supported" in detail or "unsupported location" in detail:
++                    marker = "shared_unsupported_location_400"
++                elif "429" in detail or "quota" in detail or "rate limit" in detail:
++                    marker = "shared_quota_429"
++                else:
++                    marker = "cli_error"
++                # Do not include raw CLI output here: it may contain customer text.
+                 raise SalesAIProviderUnavailable("gemini " + marker)
+ 
+             try:
+@@ -991,7 +999,8 @@
+ 
+     raise SalesAIUnavailable(
+         "all sales AI providers unavailable: "
+-        + ", ".join(str(x.get("provider")) for x in chain)
++        + ", ".join(str(x.get("provider")) for x in chain),
++        chain=chain,
+     )
+ 
+ 
+--- a/backend/app/mop_core.py
++++ b/backend/app/mop_core.py
+@@ -140,6 +140,15 @@
+     )
+     if any(p in low for p in phrases):
+         return "client_requested_human"
++    partnership_phrases = (
++        "предлагаю сотрудничество", "предложение о сотрудничестве",
++        "партнерская программа", "партнёрская программа",
++        "интересует ли вас доп заработок", "интересует ли вас дополнительный заработок",
++        "доп заработок по продуктам", "дополнительный заработок по продуктам",
++        "агентское вознаграждение", "стать нашим партнером", "стать нашим партнёром",
++    )
++    if any(p in low for p in partnership_phrases):
++        return "business_partnership_request"
+     return None
+ 
+ 
+--- a/backend/production_contract_runner.py
++++ b/backend/production_contract_runner.py
+@@ -897,6 +897,7 @@
+     ROOT/'backend/app/api/mass_editor.py',
+     ROOT/'backend/app/api/cpx_advisor.py',
+     ROOT/'backend/app/services/reliability.py',
++    ROOT/'backend/app/services/sales_ai_router.py',
+     ROOT/'backend/app/db/session.py',
+     ROOT/'backend/app/db/base.py',
+     ROOT/'backend/app/main.py',
+--- a/backend/app/api/inbox_slots.py
++++ b/backend/app/api/inbox_slots.py
+@@ -847,6 +847,7 @@
+                         "individual_delivery_price": "Нужен индивидуальный расчёт доставки/вывоза",
+                         "previous_reply_needs_correction": "Нужно исправить предыдущий ответ МОПа и продолжить диалог",
+                         "stale_unanswered_client_inquiry": "Просроченный вопрос клиента — нужен ответ менеджера",
++                        "business_partnership_request": "Партнёрское предложение — нужно решение менеджера",
+                     }
+                     handoff_reason = _reason_labels.get(handoff_reason, handoff_reason)
+                     details = [x for x in (handoff_reason, str(err or "").strip()) if x]
+--- a/backend/boris_guardian.py
++++ b/backend/boris_guardian.py
+@@ -765,6 +765,54 @@
+     return {'bad': bad, 'details': details, 'healed': healed}
+ 
+ 
++def marketer_execution_health(state):
++    """Classify the last hourly marketer execution with canonical timer retry.
++
++    One failed execution is not immediately an owner incident when the hourly
++    timer is enabled, active and has a next trigger. The timer is the single
++    canonical retry owner (the service itself refuses manual starts). A second
++    distinct failed execution without an intervening success becomes critical.
++    """
++    timer='boris-ai-marketer.timer'
++    timer_active=active(timer)
++    timer_enabled=enabled(timer)
++    next_rc,next_out=sh("systemctl show boris-ai-marketer.timer -p NextElapseUSecRealtime --value")
++    retry_ready=bool(timer_active and timer_enabled and next_rc==0 and str(next_out or '').strip())
++    failed_rc,_=sh('systemctl is-failed boris-ai-marketer.service')
++    if failed_rc != 0:
++        state['marketer_last_failed_event']=''
++        state['marketer_consecutive_failed_executions']=0
++        return {'bad':[], 'warnings':[], 'retry_ready':retry_ready, 'failed':False, 'consecutive':0}
++
++    _,failure_id=sh("systemctl show boris-ai-marketer.service -p InactiveEnterTimestampMonotonic --value")
++    failure_id=str(failure_id or '').strip() or 'unknown_failed_execution'
++    previous=str(state.get('marketer_last_failed_event') or '')
++    consecutive=int(state.get('marketer_consecutive_failed_executions',0) or 0)
++    if failure_id != previous:
++        consecutive=(consecutive+1) if previous else 1
++        state['marketer_last_failed_event']=failure_id
++        state['marketer_consecutive_failed_executions']=consecutive
++
++    if consecutive >= 2:
++        return {
++            'bad':['ИИ-маркетолог: два часовых execution подряд завершились ошибкой'],
++            'warnings':[], 'retry_ready':retry_ready, 'failed':True,
++            'consecutive':consecutive, 'failure_id':failure_id,
++        }
++    if not retry_ready:
++        return {
++            'bad':['ИИ-маркетолог: execution завершился ошибкой, а канонический hourly retry не запланирован'],
++            'warnings':[], 'retry_ready':False, 'failed':True,
++            'consecutive':consecutive, 'failure_id':failure_id,
++        }
++    return {
++        'bad':[],
++        'warnings':['ИИ-маркетолог: один часовой цикл завершился ошибкой; канонический таймер повторит полный цикл автоматически'],
++        'retry_ready':True, 'failed':True,
++        'consecutive':consecutive, 'failure_id':failure_id,
++    }
++
++
+ def quick(send_ok=False):
+     s=load(); bad=[]; warnings=[]; healed=[]
+     # MARKETING_LIFECYCLE_GUARDIAN_WIRED_V1: run the bounded lifecycle finalizer
+@@ -935,9 +983,9 @@
+             healed.append('расписание ИИ-маркетолога')
+         else:
+             bad.append('ИИ-маркетолог: часовое расписание остановлено/отключено и не восстановилось автоматически')
+-    marketer_failed_rc, _ = sh('systemctl is-failed boris-ai-marketer.service')
+-    if marketer_failed_rc == 0:
+-        bad.append('ИИ-маркетолог: последний часовой execution завершился ошибкой')
++    marketer_exec=marketer_execution_health(s)
++    bad.extend(marketer_exec.get('bad') or [])
++    warnings.extend(marketer_exec.get('warnings') or [])
+     client_report_runtime=client_report_scheduler_health(self_heal=True)
+     for item in client_report_runtime.get('healed',[])[:5]:
+         healed.append('клиентские отчёты: '+str(item))
+--- a/backend/tests/test_mop_waiting_external_recovery.py
++++ b/backend/tests/test_mop_waiting_external_recovery.py
+@@ -114,13 +114,18 @@
+         self.assertNotIn("_giga.chat(", src)
+         self.assertNotIn("gigachat_provider_error_no_blind_replay", src)
+ 
+-    def test_mop_provider_outage_degrades_to_safe_reply_not_502(self):
++    def test_mop_provider_outage_degrades_to_safe_reply_not_502_or_owner_task(self):
+         src=inspect.getsource(messenger_api.generate_ai_draft_reply)
+-        self.assertIn("MOP_AI_EMERGENCY_REPLY_V1", src)
++        self.assertIn("MOP_AI_EMERGENCY_REPLY_V2", src)
+         self.assertIn('"provider":"deterministic_emergency"', src)
+-        self.assertIn('"handoff_reason":"all_sales_ai_providers_unavailable"', src)
++        self.assertIn('"provider_outage_deferred":True', src)
++        self.assertIn('"provider_outage_reason":"all_sales_ai_providers_unavailable"', src)
++        self.assertIn('"human_handoff":False', src)
++        self.assertIn('"handoff_reason":None', src)
++        self.assertIn('"fallback_chain":_provider_chain', src)
+         self.assertIn("provider_outage_safe_continuation", src)
+         self.assertIn("Точную стоимость без подтверждённых условий не буду придумывать.", src)
++        self.assertNotIn("зафиксирую детали и передам специалисту", src)
+ 
+ if __name__ == "__main__":
+     unittest.main()
+--- a/backend/tests/test_sales_ai_router.py
++++ b/backend/tests/test_sales_ai_router.py
+@@ -101,6 +101,26 @@
+     assert out["fallback_chain"][0]["provider"] == "gemini"
+ 
+ 
++def test_all_provider_outage_preserves_diagnostic_chain(monkeypatch):
++    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
++    monkeypatch.setenv("BORIS_SALES_GEMINI_ENABLED", "1")
++    monkeypatch.setenv("BORIS_SALES_LOCAL_ENABLED", "1")
++    with patch.object(R, "_circuit_blocks", return_value=False):
++        def g(**kw):
++            raise R.SalesAIProviderUnavailable("gemini quota/circuit")
++        def local(**kw):
++            raise R.SalesAIProviderUnavailable("local MOP inference busy; retry via provider recovery")
++        with pytest.raises(R.SalesAIUnavailable) as exc:
++            R.generate_text(
++                account_id="a", operation="mop_messenger_reply", prompt="p",
++                gemini_call=g, local_call=local,
++            )
++    assert [x["provider"] for x in exc.value.chain] == ["gemini", "ollama"]
++    assert exc.value.chain[0]["reason"] == "SalesAIProviderUnavailable"
++    assert "quota/circuit" in exc.value.chain[0]["detail"]
++    assert "inference busy" in exc.value.chain[1]["detail"]
++
++
+ def test_gigachat_credentials_never_change_sales_fallback_policy(monkeypatch):
+     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+     monkeypatch.setenv("BORIS_SALES_GIGACHAT_ENABLED", "1")
+@@ -282,6 +302,27 @@
+     assert out["fallback_chain"][0]["reason"] == "invalid_output"
+ 
+ 
++def test_gemini_cli_quota_error_is_safe_shared_marker(monkeypatch):
++    class Proc:
++        returncode = 1
++        stdout = ""
++        stderr = "HTTP 429 quota exceeded"
++
++    monkeypatch.setattr(R.subprocess, "run", lambda *a, **k: Proc())
++    monkeypatch.setattr(R, "dependency_call", lambda dep, fn, **kw: fn())
++
++    with pytest.raises(R.SalesAIProviderUnavailable) as exc:
++        R._gemini_default_call(
++            account_id="a",
++            operation="mop_messenger_reply",
++            prompt="SECRET CUSTOMER PROMPT",
++            model="gemini-test",
++            timeout=5,
++        )
++    assert str(exc.value) == "gemini shared_quota_429"
++    assert "SECRET CUSTOMER PROMPT" not in str(exc.value)
++
++
+ def test_gemini_cli_uses_deny_all_admin_policy(monkeypatch, tmp_path):
+     captured = {}
+ 
+--- a/backend/tests/test_mop_deterministic_no_reply.py
++++ b/backend/tests/test_mop_deterministic_no_reply.py
+@@ -60,6 +60,17 @@
+             mop_core.deterministic_handoff_reason("Можно созвониться и обсудить доставку?")
+         )
+ 
++    def test_business_partnership_offer_is_zero_ai_handoff(self):
++        for text in (
++            "Интересует ли вас доп заработок по продуктам страхования недвижимости?",
++            "Предлагаю сотрудничество по страхованию объектов",
++            "Есть партнерская программа для агентств недвижимости",
++        ):
++            self.assertEqual(
++                mop_core.deterministic_handoff_reason(text),
++                "business_partnership_request",
++            )
++
+     def test_begin_incoming_and_background_recovery_use_same_policy(self):
+         core_src = inspect.getsource(mop_core.begin_incoming)
+         recovery_src = inspect.getsource(mop_core.reconcile_trivial_human_required)
+--- a/backend/tests/test_background_runtime_generation_scope.py
++++ b/backend/tests/test_background_runtime_generation_scope.py
+@@ -14,6 +14,7 @@
+             "ROOT/'backend/app/api/mass_editor.py'",
+             "ROOT/'backend/app/api/cpx_advisor.py'",
+             "ROOT/'backend/app/services/reliability.py'",
++            "ROOT/'backend/app/services/sales_ai_router.py'",
+             "ROOT/'backend/app/db/session.py'",
+             "ROOT/'backend/app/db/base.py'",
+             "ROOT/'backend/app/main.py'",
+--- a/backend/tests/test_mop_attention_qa_isolation.py
++++ b/backend/tests/test_mop_attention_qa_isolation.py
+@@ -11,6 +11,8 @@
+         self.assertIn("avito_chat_id NOT LIKE 'qa_%'", src)
+         self.assertIn("stale_unanswered_client_inquiry", src)
+         self.assertIn("Просроченный вопрос клиента", src)
++        self.assertIn("business_partnership_request", src)
++        self.assertIn("Партнёрское предложение", src)
+ 
+ 
+ if __name__ == '__main__':
+--- a/backend/tests/test_mop_emergency_qualification.py
++++ b/backend/tests/test_mop_emergency_qualification.py
+@@ -0,0 +1,45 @@
++import unittest
++
++from app.api.messenger import _mop_emergency_next_question
++
++
++class MopEmergencyQualificationTests(unittest.TestCase):
++    def test_planeta_skips_known_city_and_furniture_type(self):
++        questions = [
++            "В каком городе нужен проект?",
++            "Какой тип мебели нужен?",
++            "Есть ли примерные размеры помещения или зоны?",
++            "Что важнее по комплектации и хранению?",
++        ]
++        history = """Клиент: Уфа
++Мы: Отлично, понял.
++Клиент: Нужна кухня"""
++        self.assertEqual(
++            _mop_emergency_next_question(questions, history),
++            "Есть ли примерные размеры помещения или зоны?",
++        )
++
++    def test_bytovki_after_size_asks_rent_or_purchase(self):
++        questions = [
++            "нужный размер бытовки",
++            "аренда или покупка",
++            "на какой срок нужна бытовка",
++            "адрес объекта/доставки",
++        ]
++        history = "Клиент: Нужна бытовка 6x2,4"
++        self.assertEqual(
++            _mop_emergency_next_question(questions, history),
++            "Подскажите, пожалуйста, нужна аренда или покупка бытовки?",
++        )
++
++    def test_known_phone_does_not_repeat_phone_question(self):
++        questions = ["Получить номер телефона для связи или время для замера"]
++        history = "Клиент: Мой номер +7 999 123-45-67"
++        self.assertEqual(_mop_emergency_next_question(questions, history), "")
++
++    def test_no_required_questions_returns_empty(self):
++        self.assertEqual(_mop_emergency_next_question([], "Клиент: тест"), "")
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/backend/tests/test_guardian_marketer_retry_policy.py
++++ b/backend/tests/test_guardian_marketer_retry_policy.py
+@@ -0,0 +1,84 @@
++import unittest
++from unittest.mock import patch
++
++import boris_guardian as guardian
++
++
++class GuardianMarketerRetryPolicyTests(unittest.TestCase):
++    def _sh_failed(self, failure_id="123"):
++        def fake(cmd, timeout=25):
++            if "NextElapseUSecRealtime" in cmd:
++                return 0, "Tue 2026-09-08 17:05:00 UTC"
++            if "systemctl is-failed boris-ai-marketer.service" in cmd:
++                return 0, "failed"
++            if "InactiveEnterTimestampMonotonic" in cmd:
++                return 0, failure_id
++            return 0, ""
++        return fake
++
++    def test_first_unique_failure_is_warning_when_timer_retry_is_ready(self):
++        state = {}
++        with patch.object(guardian, "active", return_value=True), \
++             patch.object(guardian, "enabled", return_value=True), \
++             patch.object(guardian, "sh", side_effect=self._sh_failed("100")):
++            out = guardian.marketer_execution_health(state)
++        self.assertEqual(out["bad"], [])
++        self.assertTrue(out["warnings"])
++        self.assertEqual(out["consecutive"], 1)
++        self.assertEqual(state["marketer_consecutive_failed_executions"], 1)
++
++    def test_same_failed_execution_does_not_increment_on_each_guardian_tick(self):
++        state = {
++            "marketer_last_failed_event": "100",
++            "marketer_consecutive_failed_executions": 1,
++        }
++        with patch.object(guardian, "active", return_value=True), \
++             patch.object(guardian, "enabled", return_value=True), \
++             patch.object(guardian, "sh", side_effect=self._sh_failed("100")):
++            out = guardian.marketer_execution_health(state)
++        self.assertEqual(out["bad"], [])
++        self.assertEqual(out["consecutive"], 1)
++
++    def test_second_distinct_failed_execution_is_critical(self):
++        state = {
++            "marketer_last_failed_event": "100",
++            "marketer_consecutive_failed_executions": 1,
++        }
++        with patch.object(guardian, "active", return_value=True), \
++             patch.object(guardian, "enabled", return_value=True), \
++             patch.object(guardian, "sh", side_effect=self._sh_failed("200")):
++            out = guardian.marketer_execution_health(state)
++        self.assertTrue(out["bad"])
++        self.assertEqual(out["consecutive"], 2)
++
++    def test_successful_execution_resets_consecutive_failure_state(self):
++        state = {
++            "marketer_last_failed_event": "100",
++            "marketer_consecutive_failed_executions": 1,
++        }
++        def fake(cmd, timeout=25):
++            if "NextElapseUSecRealtime" in cmd:
++                return 0, "Tue 2026-09-08 17:05:00 UTC"
++            if "systemctl is-failed boris-ai-marketer.service" in cmd:
++                return 1, "inactive"
++            return 0, ""
++        with patch.object(guardian, "active", return_value=True), \
++             patch.object(guardian, "enabled", return_value=True), \
++             patch.object(guardian, "sh", side_effect=fake):
++            out = guardian.marketer_execution_health(state)
++        self.assertFalse(out["failed"])
++        self.assertEqual(state["marketer_last_failed_event"], "")
++        self.assertEqual(state["marketer_consecutive_failed_executions"], 0)
++
++    def test_failure_is_critical_if_canonical_retry_timer_is_not_ready(self):
++        state = {}
++        with patch.object(guardian, "active", return_value=False), \
++             patch.object(guardian, "enabled", return_value=True), \
++             patch.object(guardian, "sh", side_effect=self._sh_failed("100")):
++            out = guardian.marketer_execution_health(state)
++        self.assertTrue(out["bad"])
++        self.assertFalse(out["retry_ready"])
++
++
++if __name__ == "__main__":
++    unittest.main()
