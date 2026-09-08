@@ -1,0 +1,6 @@
+scope=DB Session close disconnect self-heal + worker generation tracking
+created_utc=2026-09-08T12:18:49Z
+patch_sha256=205095d0458fe8b43b6eee8f92df3b80d3ce344fa72189551a381309ea17b93c
+patch_lines=167
+regression=70/70
+runtime_issue=auth login cleanup could 500 when PostgreSQL SSL connection closed during Session.close rollback
