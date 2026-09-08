@@ -1,0 +1,15 @@
+public_attention_http=200
+unpaid_bytovki_mop_actionable_http=0
+public_accounts_http=200
+3411770_94346_mop_enabled=false
+3411770_94346_status=readonly
+prodazha_bytovok_25677_mop_enabled=false
+prodazha_bytovok_25677_status=readonly
+mop_regression=51/51_PASS
+mobile_messages=6/6_PASS
+mobile_server_5xx_routes=0
+mobile_overflow=0
+guardian_quick=PASS
+bid_cap_seen=19/19
+bid_cap_hard_bad=0
+global_contract_state=converging_due_parallel_source_writes
