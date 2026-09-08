@@ -226,6 +226,22 @@ def main() -> int:
         if required not in telephony_api_src:
             failures.append(f"phone_entitlement_owner_api_contract_missing:{required}")
 
+    payments_src = (
+        ROOT / "app" / "api" / "payments.py"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "def _grant_phone_subscription_from_payment_ledger",
+        "provision_paid_phone_entitlement(",
+        "p.get(\"unit\") == \"phone_subscription\"",
+        "phone_payment_ledger_missing",
+        "BORIS_PHONE_MONTHLY_PRICE_RUB",
+        "_configured_phone_monthly_package",
+    ):
+        if required not in payments_src:
+            failures.append(f"phone_payment_entitlement_bridge_missing:{required}")
+    if 'PACKAGES["phone_monthly"]' in payments_src and "if _PHONE_MONTHLY_PACKAGE:" not in payments_src:
+        failures.append("phone_monthly_price_must_not_be_invented")
+
     sig = inspect.signature(guardian.real_mcn_acceptance_watch_once)
     param = sig.parameters.get("include_synthetic")
     if param is None or param.default is not False:
