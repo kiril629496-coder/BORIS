@@ -27,6 +27,7 @@ from app.api.prompts import router as prompts_router
 from app.models.saved_prompt import SavedPrompt  # чтобы create_all() увидел таблицу
 from app.models.banner import Banner  # чтобы create_all() увидел таблицу banners
 from app.api.landing import router as landing_router
+from app.api.software_site import router as software_site_router, admin_router as software_site_admin_router
 from app.api.billing import router as billing_router
 from app.telegram_bot import _telegram_poll_loop
 from app.api.messenger import _messenger_poll_loop
@@ -103,6 +104,8 @@ app.include_router(avito_categories_router, dependencies=_protected)
 app.include_router(banners_router, dependencies=_protected)
 app.include_router(prompts_router, dependencies=_protected)
 app.include_router(landing_router)
+app.include_router(software_site_router)
+app.include_router(software_site_admin_router)
 app.include_router(billing_router, dependencies=_protected)
 from app.api.category_requests import router as category_requests_router  # noqa: E402
 app.include_router(category_requests_router, dependencies=_protected)
