@@ -132,8 +132,10 @@ class AiProviderAuthClassificationTests(unittest.TestCase):
         self.assertEqual(out['status'],'cooldown')
         self.assertFalse(out['probed'])
 
-    def test_openai_billing_probe_success_is_only_path_back_to_available(self):
-        row={'state':aiprov.UNAVAILABLE_BILLING,'retry_due':True,'interval_due':True}
+    def test_openai_billing_probe_runs_when_retry_due_even_if_recently_updated(self):
+        # retry_at is the cadence owner. A recent updated_at must not add a
+        # second six-hour delay after the explicit retry window already elapsed.
+        row={'state':aiprov.UNAVAILABLE_BILLING,'retry_due':True,'interval_due':False}
         class Resp:
             status_code=200
             def json(self): return {}

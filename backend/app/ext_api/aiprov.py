@@ -623,16 +623,17 @@ def reprobe_openai_billing(min_interval_min=360):
         return {"provider": "openai", "status": "key_missing", "probed": False}
     row = db.one(
         """SELECT state, note, retry_at, updated_at,
-                  (retry_at IS NULL OR retry_at <= NOW()) AS retry_due,
-                  (updated_at IS NULL OR updated_at < NOW() - (:m || ' minutes')::interval) AS interval_due
-             FROM ext_ai_providers WHERE name='openai'""",
-        m=max(5, int(min_interval_min)),
+                  (retry_at IS NULL OR retry_at <= NOW()) AS retry_due
+             FROM ext_ai_providers WHERE name='openai'"""
     ) or {}
     if row.get("state") == AVAILABLE:
         return {"provider": "openai", "status": AVAILABLE, "probed": False, "recovered": False}
     if row.get("state") != UNAVAILABLE_BILLING:
         return {"provider": "openai", "status": str(row.get("state") or "unknown"), "probed": False}
-    if not row.get("retry_due") or not row.get("interval_due"):
+    # retry_at is the single recovery cadence. Every failed/inconclusive
+    # probe below writes a new retry_at, so a second updated_at interval would
+    # only delay legitimate recovery without adding storm protection.
+    if not row.get("retry_due"):
         return {"provider": "openai", "status": "cooldown", "probed": False}
 
     retry_long = max(3600, int(os.environ.get("BORIS_SALES_OPENAI_BILLING_RETRY_SEC", "21600") or 21600))
