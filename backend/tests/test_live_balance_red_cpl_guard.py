@@ -64,6 +64,23 @@ def _run(balance):
         return adv.check_raise_allowed("qa_wallet_floor", balance_ctx=ctx)
 
 
+def test_insufficient_wallet_blocks_before_spend_freshness_is_required():
+    ctx = {
+        "account_id": "qa_wallet_floor",
+        "status": adv.BALANCE_KNOWN,
+        "value": 36.11,
+        "fetched_at": datetime.utcnow().isoformat(),
+    }
+    with patch("app.db.session.SessionLocal", return_value=_DB()), \
+         patch.object(adv, "_load_json", side_effect=_load), \
+         patch("app.services.marketing_money_policy.latest_confirmed_spend") as spend:
+        out = adv.check_raise_allowed("qa_wallet_floor", balance_ctx=ctx)
+    assert out["allowed"] is False
+    assert out["reason_code"] == "blocked_insufficient_balance"
+    assert out["red_cpl_rub"] == 400.0
+    spend.assert_not_called()
+
+
 def test_positive_wallet_below_one_red_cpl_is_not_enough_for_auto_raise():
     out = _run(36.11)
     assert out["allowed"] is False

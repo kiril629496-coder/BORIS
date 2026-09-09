@@ -3744,6 +3744,26 @@ def check_raise_allowed(account_id, balance_ctx=None):
                 "human_reason": "суточный бюджет не имеет подтверждённого владельцем источника",
                 "client_message": "Автоматическое повышение ставок остановлено: бюджет не подтверждён владельцем.",
                 "balance": bal, "daily_budget_limit_rub": limit}
+    # FINAL_RAISE_RED_CPL_BALANCE_FLOOR_V1 / V2_EARLY:
+    # A known wallet below one owner-defined red CPL is already conclusive proof
+    # that an autonomous raise is unsafe. Block here before asking for spend/stats
+    # freshness, so external funding shortage is diagnosed correctly and workers
+    # do not keep probing a doomed write lane while reporting a weaker stale-spend
+    # reason. A sufficient wallet still requires every spend/stat guard below.
+    _required_balance_floor = float(red_cpl or 0)
+    if bal["value"] <= 0 or (
+        _required_balance_floor > 0
+        and float(bal["value"]) + 1e-9 < _required_balance_floor
+    ):
+        c = "blocked_insufficient_balance"
+        return {"allowed": False, "reason_code": c,
+                "human_reason": "%s: %.2f ₽ при минимуме %.2f ₽" % (
+                    GUARD_REASONS[c], bal["value"], _required_balance_floor
+                ),
+                "client_message": CLIENT_SAFE_MESSAGE[c],
+                "balance": bal, "daily_budget_limit_rub": limit,
+                "red_cpl_rub": _required_balance_floor,
+                "required_balance_floor_rub": _required_balance_floor}
     # Canonical daily-spend guard: wallet balance is not today's ad spend.
     # Once Avito stats/v2 says the configured daily limit is reached, any
     # further automatic bid raise is fail-closed for the rest of the day.
@@ -3842,26 +3862,6 @@ def check_raise_allowed(account_id, balance_ctx=None):
                 "client_message": "Рекламный бюджет приближается к безопасному пределу — новые повышения ставок остановлены.",
                 "balance": bal, "daily_budget_limit_rub": limit,
                 "spent_today_rub": spent_today, "adaptive_budget_policy": _budget_policy}
-    # FINAL_RAISE_RED_CPL_BALANCE_FLOOR_V1: a positive wallet is not enough
-    # to authorize autonomous spend. The guardian already treats a wallet below
-    # one owner-defined red CPL as unable to fund even one acceptable lead; the
-    # final provider-write guard must enforce the same rule for every raise lane
-    # (budget_resume, feed20, low-views, profitable-day push, etc.).
-    _required_balance_floor = float(red_cpl or 0)
-    if bal["value"] <= 0 or (
-        _required_balance_floor > 0
-        and float(bal["value"]) + 1e-9 < _required_balance_floor
-    ):
-        c = "blocked_insufficient_balance"
-        return {"allowed": False, "reason_code": c,
-                "human_reason": "%s: %.2f ₽ при минимуме %.2f ₽" % (
-                    GUARD_REASONS[c], bal["value"], _required_balance_floor
-                ),
-                "client_message": CLIENT_SAFE_MESSAGE[c],
-                "balance": bal, "daily_budget_limit_rub": limit,
-                "red_cpl_rub": _required_balance_floor,
-                "required_balance_floor_rub": _required_balance_floor,
-                "spent_today_rub": spent_today}
     return {"allowed": True, "reason_code": None,
             "human_reason": "расход %.2f ₽ из дневного лимита %.0f ₽" % (spent_today, limit),
             "client_message": None, "balance": bal, "daily_budget_limit_rub": limit,
