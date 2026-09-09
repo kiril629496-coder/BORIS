@@ -3571,9 +3571,12 @@ GUARD_REASONS = {
         "не задан дневной бюджет — порог безопасности неизвестен",
     "blocked_insufficient_balance":
         "на счёте меньше одной максимальной цены обращения, автоматическое повышение ставки запрещено",
+    "blocked_cpl_above_redline":
+        "фактическая цена бизнес-лида выше красной цены, автоматическое повышение ставки запрещено",
 }
 CLIENT_SAFE_MESSAGE = {
     "blocked_insufficient_balance": "Недостаточно средств на счёте Авито",
+    "blocked_cpl_above_redline": "Цена лида выше допустимого предела — повышение ставок остановлено",
     "blocked_guard_config_missing": "Не задан дневной бюджет продвижения",
 }
 CLIENT_SAFE_DEFAULT = "Проверка баланса временно недоступна"
@@ -3768,6 +3771,7 @@ def check_raise_allowed(account_id, balance_ctx=None):
     # Once Avito stats/v2 says the configured daily limit is reached, any
     # further automatic bid raise is fail-closed for the rest of the day.
     spent_today = None
+    business_contacts_today = None
     spend_signal = {"status": "unknown", "reason": "spending_unavailable"}
     _presence_pressure = {"blocked": False, "reason": "not_checked"}
     try:
@@ -3803,8 +3807,17 @@ def check_raise_allowed(account_id, balance_ctx=None):
                 _stats_age = (_mut_dt.datetime.now(_mut_dt.timezone.utc) - _collected.astimezone(_mut_dt.timezone.utc)).total_seconds()
                 _mut_stats_ok = bool(((_stats.get("completeness") or {}).get("complete") is True)
                                      and -60 <= _stats_age <= 900)
+                if _mut_stats_ok:
+                    _raw_contacts_today = sum(
+                        int((x or {}).get("contacts") or 0)
+                        for x in (_stats.get("items") or []) if isinstance(x, dict)
+                    )
+                    from app.services.kpi_lead_quality import apply_business_lead_filter as _business_filter
+                    _lead_quality = _business_filter(_db_spend, account_id, _raw_contacts_today) or {}
+                    business_contacts_today = float(_lead_quality.get("business_contacts_today") or 0)
             except Exception:
                 _mut_stats_ok = False
+                business_contacts_today = None
         finally:
             _db_spend.close()
         # MARKETER_MUTATION_SPEND_TIMESTAMP_SANITY_V1: a future/non-finite
@@ -3828,6 +3841,24 @@ def check_raise_allowed(account_id, balance_ctx=None):
                 "human_reason": "нет достоверных данных о расходах Avito за сегодня",
                 "client_message": CLIENT_SAFE_DEFAULT, "balance": bal,
                 "daily_budget_limit_rub": limit}
+    # FINAL_RAISE_RED_CPL_ECONOMICS_V1: all autonomous raise lanes share the
+    # same account-level economics guard. A confirmed current-day business CPL
+    # above the owner's red line forbids further bid increases; lower/repair
+    # lanes remain available and are the correct recovery path.
+    if red_cpl > 0 and business_contacts_today is not None and business_contacts_today > 0:
+        _actual_cpl_today = float(spent_today) / float(business_contacts_today)
+        if _actual_cpl_today > float(red_cpl) + 1e-9:
+            c = "blocked_cpl_above_redline"
+            return {"allowed": False, "reason_code": c,
+                    "human_reason": "%s: %.2f ₽ при лимите %.2f ₽" % (
+                        GUARD_REASONS[c], _actual_cpl_today, float(red_cpl)
+                    ),
+                    "client_message": CLIENT_SAFE_MESSAGE[c],
+                    "balance": bal, "daily_budget_limit_rub": limit,
+                    "spent_today_rub": spent_today,
+                    "business_contacts_today": business_contacts_today,
+                    "actual_cpl_rub": round(_actual_cpl_today, 2),
+                    "red_cpl_rub": float(red_cpl)}
     if bool((_presence_pressure or {}).get("blocked")):
         return {"allowed": False, "reason_code": "blocked_presence_budget_pressure",
                 "human_reason": "расход на присутствие/размещение уже системно несовместим с суточным лимитом",

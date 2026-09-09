@@ -94,3 +94,59 @@ def test_wallet_at_red_cpl_floor_passes_balance_floor():
     out = _run(400.0)
     assert out["allowed"] is True
     assert out["reason_code"] is None
+
+
+def test_confirmed_business_cpl_above_redline_blocks_final_raise():
+    ctx = {
+        "account_id": "qa_expensive_cpl",
+        "status": adv.BALANCE_KNOWN,
+        "value": 5537.68,
+        "fetched_at": datetime.utcnow().isoformat(),
+    }
+    kpi = {
+        "daily_budget_limit_rub": 1500.0,
+        "max_cost_per_lead_rub": 250.0,
+        "daily_budget_authorization": {
+            "policy_version": "MONEY_BUDGET_OWNER_PROVENANCE_V1",
+            "authorized_by_user_id": 60,
+            "daily_budget_limit_rub": 1500.0,
+            "source": "authenticated_set_kpi_settings",
+        },
+    }
+    stats = {
+        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "completeness": {"complete": True, "inventory_complete": True},
+        "items": [{"contacts": 3}],
+    }
+    spend = {
+        "status": "ok",
+        "spent_today_rub": 809.10,
+        "timestamp": time.time(),
+        "spending_date": adv.marketing_today_iso(),
+    }
+
+    def load(_db, _account_id, key):
+        if key == "kpi_settings":
+            return kpi
+        if key.startswith("daily_stats:"):
+            return stats
+        return {}
+
+    with patch("app.db.session.SessionLocal", return_value=_DB()), \
+         patch.object(adv, "_load_json", side_effect=load), \
+         patch("app.services.marketing_money_policy.latest_confirmed_spend", return_value=spend), \
+         patch("app.services.marketing_money_policy.presence_budget_pressure", return_value={"blocked": False}), \
+         patch("app.services.marketing_signal_guard.money_spend_signal_eligible", return_value=True), \
+         patch("app.services.kpi_lead_quality.apply_business_lead_filter", return_value={
+             "business_contacts_today": 3,
+             "raw_contacts_today": 3,
+             "excluded_job_seekers_today": 0,
+         }):
+        out = adv.check_raise_allowed("qa_expensive_cpl", balance_ctx=ctx)
+
+    assert out["allowed"] is False
+    assert out["reason_code"] == "blocked_cpl_above_redline"
+    assert out["spent_today_rub"] == 809.10
+    assert out["business_contacts_today"] == 3.0
+    assert out["actual_cpl_rub"] == 269.7
+    assert out["red_cpl_rub"] == 250.0
