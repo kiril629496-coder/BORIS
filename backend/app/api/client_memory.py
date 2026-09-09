@@ -5,7 +5,7 @@
 """
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import text, bindparam
 
@@ -22,6 +22,8 @@ TITLES = {
     "cena": "Цена", "usluga": "Услуга", "tovar": "Товар",
     "preimushchestvo": "Преимущество", "garantiya": "Гарантия",
     "faq": "Ответ клиенту", "vozrazhenie": "Возражение", "stil": "Стиль общения",
+    "company": "Профиль компании", "kontakty": "Контакты", "grafik": "График",
+    "geografiya": "Адрес / география", "usloviya": "Условия", "akciya": "Акция",
 }
 SOURCES = {
     "avito_item": "Объявление Авито", "dialog": "Переписка с клиентом",
@@ -54,7 +56,7 @@ USAGE = {
     "preimushchestvo": "Тексты объявлений и постов",
     "stil": "Тон и стиль ответов",
 }
-MOP_CATS = ("cena", "faq", "garantiya", "usluga", "tovar")
+MOP_CATS = ("cena", "faq", "garantiya", "usluga", "tovar", "kontakty", "grafik", "geografiya", "usloviya", "akciya")
 
 
 def _stage(r):
@@ -90,6 +92,7 @@ def _row(r, aliases=None):
         "confidence": r.confidence,
         "status": r.status,
         "confirmed_by": r.confirmed_by or "",
+        "requires_confirmation": str(r.status or "") != "confirmed",
         "snippet": r.snippet or "",
     }
 
@@ -224,8 +227,104 @@ def _confirm(db, account_id, fact_id, who, value=None):
     return f
 
 
+
+# BORIS_MEM_ACCOUNT_GUARD: account_id у этих ручек приходит В ТЕЛЕ запроса, а
+# check_account_access читает только путь, query и форму - поэтому проверки
+# доступа не было вовсе. Владение аккаунтом либо связь в user_account_access.
+def _mem_allowed(account_id, user):
+    from sqlalchemy import text as _t
+    if not account_id:
+        return False
+    uid = getattr(user, "id", 0)
+    if getattr(user, "role", "") == "owner":
+        return True
+    db = SessionLocal()
+    try:
+        if db.execute(_t("SELECT 1 FROM accounts WHERE account_id=:a AND owner_user_id=:u"),
+                      {"a": account_id, "u": uid}).fetchone():
+            return True
+        return bool(db.execute(_t(
+            "SELECT 1 FROM user_account_access WHERE user_id=:u AND account_id=:a"
+            " AND can_view = TRUE"), {"u": uid, "a": account_id}).fetchone())
+    finally:
+        db.close()
+
+
+KB_FILE_MAX_MB = 15
+
+
+@router.post("/upload_file")
+async def upload_knowledge_file(account_id: str, file: UploadFile = File(...),
+                                preview: bool = False, keep: str = "",
+                                user=Depends(get_current_user)):
+    """Принимает PDF / Word / Excel / текст и сам кладёт содержимое в знания.
+
+    account_id ИМЕННО в адресе запроса: общая проверка доступа читает его из
+    query и иначе отказывает ещё до входа в функцию."""
+    from app.services.file_knowledge import extract_text, to_facts
+    if not _mem_allowed(account_id, user):
+        return {"status": "error", "message": "Аккаунт недоступен"}
+    data = await file.read()
+    if not data:
+        return {"status": "error", "message": "Файл пустой"}
+    if len(data) > KB_FILE_MAX_MB * 1024 * 1024:
+        return {"status": "error",
+                "message": "Файл больше %s МБ" % KB_FILE_MAX_MB}
+    try:
+        raw, kind = extract_text(file.filename or "", data)
+    except Exception as e:
+        return {"status": "error",
+                "message": "Не удалось прочитать файл: %s" % str(e)[:90]}
+    if kind == "unsupported":
+        return {"status": "error",
+                "message": "Поддерживаются PDF, Word, Excel и текстовые файлы"}
+    if not (raw or "").strip():
+        return {"status": "error",
+                "message": "В файле не нашлось текста. Если это скан или фотография, "
+                           "текст из неё пока не распознаётся"}
+    facts = to_facts(raw, file.filename or "файл")
+    if preview and facts:
+        return {"status": "ok", "preview": True, "file": file.filename,
+                "facts": [{"i": _i, "category": _f["category"], "name": _f["name"],
+                           "value": _f["value"][:600]} for _i, _f in enumerate(facts)],
+                "message": "Проверьте, что запомнить"}
+    if keep:
+        _idx = set(int(_x) for _x in keep.split(",") if _x.strip().isdigit())
+        facts = [_f for _i, _f in enumerate(facts) if _i in _idx]
+    if not facts:
+        return {"status": "error", "message": "Текста слишком мало для знаний"}
+    who = getattr(user, "email", None) or "клиент"
+    db = SessionLocal()
+    saved = 0
+    try:
+        for f in facts:
+            try:
+                _save_manual_fact(db, account_id, who, f["category"], f["name"],
+                                  f["value"], snippet=f["snippet"])
+                saved += 1
+            except Exception as fe:
+                print("[kb_file] факт не сохранён: %s" % str(fe)[:120], flush=True)
+        db.commit()
+    finally:
+        db.close()
+    try:
+        from app.services.action_log import log_action, ACTOR_USER
+        log_action(account_id=account_id, action="Изучил файл клиента",
+                   object_kind="знания", object_name=(file.filename or "файл")[:200],
+                   after_val="добавлено фактов: %s" % saved,
+                   reason="файл загружен в информацию о компании",
+                   actor=ACTOR_USER, user_id=getattr(user, "id", None),
+                   source="memory.upload_file")
+    except Exception:
+        pass
+    return {"status": "ok", "facts": saved, "file": file.filename,
+            "message": "Борис прочитал файл и запомнил %s фрагментов" % saved}
+
+
 @router.post("/confirm")
 def confirm(body: FactBody, user=Depends(get_current_user)):
+    if not _mem_allowed(body.account_id, user):
+        return {"status": "error", "message": "Аккаунт недоступен"}
     db = SessionLocal()
     try:
         _confirm(db, body.account_id, body.fact_id, _who(user))
@@ -237,6 +336,8 @@ def confirm(body: FactBody, user=Depends(get_current_user)):
 
 @router.post("/edit")
 def edit(body: EditBody, user=Depends(get_current_user)):
+    if not _mem_allowed(body.account_id, user):
+        return {"status": "error", "message": "Аккаунт недоступен"}
     db = SessionLocal()
     try:
         _confirm(db, body.account_id, body.fact_id, _who(user), value=body.value)
@@ -248,6 +349,8 @@ def edit(body: EditBody, user=Depends(get_current_user)):
 
 @router.post("/reject")
 def reject(body: FactBody, user=Depends(get_current_user)):
+    if not _mem_allowed(body.account_id, user):
+        return {"status": "error", "message": "Аккаунт недоступен"}
     db = SessionLocal()
     try:
         db.execute(text("UPDATE client_facts SET status='rejected', updated_at=:t,"
@@ -422,9 +525,18 @@ def scope_accounts(db, account_id, shared=True):
 CAT_WORDS = {
     "cena": "цена стоимость сколько стоит прайс",
     "garantiya": "гарантия гарантии",
-    "usluga": "услуга услуги делаете",
-    "tovar": "товар продаете",
+    "usluga": "услуга услуги делаете оказываете сдаете аренда арендуете",
+    "tovar": "товар товары продаете продажа купить покупка",
     "preimushchestvo": "преимущество",
+    "kontakty": "контакт контакты телефон номер почта email связаться связь",
+    "grafik": "график режим часы работает открыто время работы",
+    "geografiya": (
+        "адрес база базы где находитесь местоположение самовывоз "
+        "офис офисе офисы салон салоны шоурум шоурумы приехать подъехать "
+        "приехать посетить посещение встреча встретиться"
+    ),
+    "usloviya": "условия оформление оплата договор",
+    "akciya": "акция акции акционный акционные спецпредложение специальные условия",
     "faq": "",
     "stil": "",
 }
@@ -474,11 +586,12 @@ def find_answer(db, account_id, question, shared=True, min_overlap=2):
     rows = db.execute(text(
         "SELECT f.id, f.account_id, f.category, f.name, f.value, f.source_type,"
         "       f.source_ref, f.confidence, f.status,"
-        "       coalesce(string_agg(al.alias, ' '), '')"
+        "       coalesce(string_agg(al.alias, ' '), ''),"
+        "       max(f.source_date), max(f.extracted_at)"
         "  FROM client_facts f LEFT JOIN client_aliases al ON al.fact_id = f.id"
         " WHERE f.account_id IN :accs"
         "   AND (f.status = 'confirmed' OR (f.status = 'draft' AND f.confidence >= 80))"
-        "   AND f.category NOT IN ('rule', 'keys')"
+        "   AND f.category NOT IN ('rule', 'keys', 'rule_marketing')"
         "   AND (COALESCE(f.scope, 'business') = 'business'"
         "        OR f.account_id = :self)"
         " GROUP BY f.id"
@@ -487,38 +600,180 @@ def find_answer(db, account_id, question, shared=True, min_overlap=2):
 
     # маркеры намерения вопроса: цена / покупка / изготовление / залог
     _price_q = bool(qw & stems(CAT_WORDS.get("cena", "")))
+    _direct_memory_categories = [cat for cat in ("kontakty", "grafik", "geografiya", "akciya")
+                                 if qw & stems(CAT_WORDS.get(cat, ""))]
+    _direct_memory_category = _direct_memory_categories[0] if len(_direct_memory_categories) == 1 else None
+    _q_low = str(question or "").lower().replace("ё", "е")
     _sale_q = bool(qw & {"прода", "купит", "покуп"})
+    _sale_product_price_q = bool(_price_q and any(x in _q_low for x in (
+        "под ключ", "каркас", "стандартн", "усиленн", "оргалит", "двпо", "osb",
+        "вагонк", "новая бытов", "новую бытов", "новой бытов", "производств"
+    )))
+    _used_sale_price_q = bool(_price_q and _sale_q and any(x in _q_low for x in ("б/у", "бу бытов", "бывш")))
+    _explicit_rent_q = any(x in _q_low for x in ("аренд", "снять", "сда"))
+    _rent_price_q = bool(_price_q and _explicit_rent_q)
+    import re as _intent_re
+    _temporary_term_q = bool(_intent_re.search(
+        r"\bна\s+(?:(?:\d+)|один|одну|два|две|три|четыре|несколько)\s*"
+        r"(?:месяц(?:а|ев)?|недел(?:ю|и|ь)?|дн(?:я|ей|ь)?|сут(?:ки|ок)?)\b",
+        _q_low,
+    ) or _intent_re.search(r"\bна\s+месяц\b", _q_low))
+    _mixed_rent_sale_account = False
+    if _price_q or _temporary_term_q or _explicit_rent_q or _sale_q:
+        _has_rent = bool(db.execute(text("""
+            SELECT 1 FROM client_facts
+             WHERE account_id=:a AND status='confirmed' AND category='tovar'
+               AND (lower(name) LIKE '%аренд%' OR lower(value) LIKE '%аренд%' OR lower(name) LIKE '%сда%')
+             LIMIT 1
+        """), {"a": account_id}).first())
+        _has_sale = bool(db.execute(text("""
+            SELECT 1 FROM client_facts
+             WHERE account_id=:a AND status='confirmed' AND category='tovar'
+               AND (lower(name) LIKE '%прода%' OR lower(name) LIKE '%продаж%' OR lower(value) LIKE '%продаж%' OR lower(value) LIKE '%покуп%')
+               AND lower(value) NOT LIKE 'нет.%'
+               AND lower(value) NOT LIKE 'нет %'
+               AND lower(value) NOT LIKE '%только с аренд%'
+             LIMIT 1
+        """), {"a": account_id}).first())
+        _mixed_rent_sale_account = bool(_has_rent and _has_sale)
+    _price_context_required = bool(
+        _price_q and _mixed_rent_sale_account
+        and not _rent_price_q and not _sale_q and not _sale_product_price_q and not _used_sale_price_q
+    )
+    _rent_or_buy_context_required = bool(
+        _mixed_rent_sale_account and _temporary_term_q
+        and not _explicit_rent_q and not _sale_q
+    )
+    _capability_q = (
+        any(x in _q_low for x in ("сдаете", "продаете", "есть аренда", "есть продажа", "занимаетесь аренд", "занимаетесь продаж"))
+        or ("какие бытов" in _q_low and any(x in _q_low for x in ("сда", "аренд", "прода", "продаж")))
+    )
+    _rent_capability_q = bool(_capability_q and any(x in _q_low for x in ("сда", "аренд")))
+    _sale_capability_q = bool(_capability_q and any(x in _q_low for x in ("прода", "продаж", "куп")))
     _make_q = bool(qw & {"изгот", "произв"})
     _dep_q = bool(qw & {"залог", "депоз", "обесп"})
+    _delivery_q = bool(qw & stems("доставка доставить привезти перевозка вывоз манипулятор разгрузка"))
     _avail_q = bool(qw & {"налич", "досту", "свобо", "остал", "имеет"}) or (
-        bool(qw & {"сейча", "сегод"}) and not _price_q)
+        bool(qw & {"сейча", "сегод"}) and not _price_q and not _direct_memory_category)
+    _price_context_required = bool(_price_context_required and not _delivery_q and not _avail_q)
+    if _price_context_required:
+        return {
+            "found": False,
+            "accounts": accs,
+            "reason_code": "price_context_required",
+            "reply": "Уточните, пожалуйста: вас интересует аренда или покупка?",
+            "task": {"account_id": account_id,
+                     "title": "Уточнить формат: аренда или покупка",
+                     "reason": "в аккаунте есть и аренда, и продажа; без уточнения цена двусмысленна"},
+        }
+    if _rent_or_buy_context_required:
+        return {
+            "found": False,
+            "accounts": accs,
+            "reason_code": "rent_or_buy_context_required",
+            "reply": "Уточните, пожалуйста: речь об аренде на указанный срок или о покупке?",
+            "task": {"account_id": account_id,
+                     "title": "Уточнить формат: аренда или покупка",
+                     "reason": "клиент указал временный срок, а аккаунт работает и с арендой, и с продажей"},
+        }
+
+    # If this price subject previously had an authoritative repeated outgoing
+    # consensus, expiration must fail closed. Never fall back to an older ad or
+    # historic dialog price after the current commercial offer has gone stale.
+    _consensus_relevant = []
+    if _price_q:
+        for _cr in rows:
+            if _cr[2] != "cena" or _cr[5] != "dialog_promo_consensus":
+                continue
+            _hits = len(qw & stems("%s %s %s" % (_cr[3], _cr[4], _cr[9])))
+            if _hits:
+                _consensus_relevant.append(_cr)
+    _consensus_blocks_fallback = bool(
+        _consensus_relevant and
+        not any(not runtime_fact_expired(_r[2], _r[3], _r[4], _r[10], _r[11])
+                for _r in _consensus_relevant)
+    )
     cands = []
     best, best_score, best_raw = None, 0, 0
     for r in rows:
-        # слова самого факта и отдельно слова-маркеры категории
-        subj = len(qw & stems("%s %s %s" % (r[3], r[4], r[9])))
+        if _consensus_blocks_fallback and r[2] == "cena" and r[5] != "dialog_promo_consensus":
+            continue
+        if runtime_fact_expired(r[2], r[3], r[4], r[10], r[11]):
+            continue
+        # Для цены предмет определяется только названием факта и алиасами.
+        # Текст значения не участвует: иначе «линолеум бытовой» может ошибочно
+        # совпасть с запросом «цена б/у бытовки».
+        _name_hits_raw = len(qw & stems(r[3]))
+        _value_hits_raw = len(qw & stems(r[4]))
+        _alias_hits = len(qw & stems(r[9]))
+        _nv_hits = _name_hits_raw if r[2] == "cena" else (_name_hits_raw + _value_hits_raw)
+        subj = _nv_hits + min(_alias_hits, 1)
         cw = len(qw & stems(CAT_WORDS.get(r[2], "")))
         _fw = stems("%s %s" % (r[3], r[4]))
+        _name_fw = stems(r[3])
+        _name_alias_fw = stems("%s %s" % (r[3], r[9]))
+        _name_alias_low = (str(r[3] or "") + " " + str(r[9] or "")).lower().replace("ё", "е")
+        # Rental intent must not be hijacked by a sale-only Avito listing that
+        # happens to share the same product/size words.
+        if _explicit_rent_q and r[5] == "avito_item":
+            _sale_item = any(x in _name_alias_low for x in ("продам", "прода", "продаж", "купить", "покуп"))
+            _rent_item = any(x in _name_alias_low for x in ("аренд", "сдам", "сдаю"))
+            if _sale_item and not _rent_item:
+                continue
+        if (r[5] == "dialog_promo_consensus" and "минималь" in str(r[3] or "").lower()
+                and _nv_hits == 0):
+            continue
+        # Прямой вопрос про контакты/адрес/график должен брать только факт своей категории:
+        # иначе исторический FAQ с похожими словами может создать ничью с отдельным фактом.
+        if _direct_memory_category and r[2] != _direct_memory_category:
+            continue
+        # Вопрос «сдаёте/продаёте?» — это каталог/возможность, а не любой
+        # факт, где случайно встретилось слово «аренда» или «бытовка».
+        if _capability_q and r[2] != "tovar":
+            continue
+        if _rent_capability_q and not ({"аренд", "сда"} & _name_alias_fw):
+            continue
+        if _sale_capability_q and not ({"прода", "покуп", "куп"} & _name_alias_fw):
+            continue
         # наличие подтверждает только менеджер: база на такой вопрос не отвечает
         if _avail_q:
             continue
         # факт про залог отвечает только на явный вопрос о залоге
         if "залог" in _fw and not _dep_q:
             continue
-        # вопрос о покупке: арендные и залоговые факты не отвечают
-        if _sale_q and ({"аренд", "залог"} & _fw):
+        # вопрос о покупке: чисто арендный факт не отвечает. Но явный
+        # отрицательный/режимный факт с «Продажа ...» в имени остаётся допустим.
+        if _sale_q and ({"аренд", "залог"} & _fw) and not ({"прода", "покуп"} & _name_fw):
+            continue
+        if _sale_product_price_q and r[5] == "dialog_promo_consensus":
+            continue
+        if _used_sale_price_q and r[2] == "cena" and not any(
+                x in _name_alias_low for x in ("б/у", "бу бытов", "бывш")):
+            continue
+        # доставка/вывоз для бытовок рассчитываются индивидуально: общий прайс
+        # товара никогда не должен отвечать на вопрос о стоимости логистики.
+        if _delivery_q and r[2] == "cena":
             continue
         # вопрос о сроке изготовления: цена отвечает только своя, предметная
         if _make_q and r[2] == "cena" and not ({"изгот", "произв"} & _fw):
+            continue
+        # Цена отвечает только когда клиент действительно спрашивает цену.
+        # Иначе «вы продаёте/сдаёте?» не имеет права цеплять прайс.
+        if r[2] == "cena" and not _price_q:
             continue
         # ценовой вопрос требует ценового факта
         if _price_q and r[2] != "cena":
             continue
         # маркер категории лишь уточняет намерение, но не заменяет
         # совпадения по сути: иначе «сколько стоит X» цепляет любую цену
-        if not (subj >= min_overlap or (subj >= 1 and cw >= 1)):
+        if not (subj >= min_overlap or (subj >= 1 and cw >= 1)
+                or (_direct_memory_category == r[2] and cw >= 1)):
             continue
-        score = subj * 2 + cw + (1 if r[2] == "faq" else 0) + (1 if r[8] == "confirmed" else 0)
+        _source_bonus = 4 if r[5] == "dialog_promo_consensus" else 0
+        score = (_nv_hits * 3 + min(_alias_hits, 1) + cw
+                 + (1 if r[2] == "faq" else 0)
+                 + (1 if r[8] == "confirmed" else 0)
+                 + _source_bonus)
         cands.append((score, subj, r, len(qw & stems(r[3]))))
 
     if cands:
@@ -537,22 +792,144 @@ def find_answer(db, account_id, question, shared=True, min_overlap=2):
                 _cena = [c for c in _top if c[2][2] == "cena"]
                 if len(_cena) == 1:
                     _top = _cena
+            # Дубликаты из разных подтверждённых источников с одинаковым
+            # значением — не конфликт. Разные значения по-прежнему оставляют
+            # ничью и заставляют BORIS уточнить.
+            if len(_top) > 1:
+                _cats = {str(c[2][2] or "") for c in _top}
+                _vals = {" ".join(str(c[2][4] or "").lower().split()) for c in _top}
+                if len(_cats) == 1 and len(_vals) == 1:
+                    _top = [max(_top, key=lambda c: int(c[2][0] or 0))]
+        if len(_top) > 1 and _direct_memory_category in {"kontakty", "grafik", "geografiya", "akciya"}:
+            _seen = set(); _parts = []; _ids = []
+            for _c in _top:
+                _r = _c[2]
+                _val = str(_r[4] or "").strip()
+                if not _val or _val in _seen:
+                    continue
+                _seen.add(_val); _ids.append(_r[0])
+                _label = str(_r[3] or "").strip()
+                _parts.append(((_label + ": ") if _label and _label.lower() != _val.lower() else "") + _val)
+            if _parts:
+                return {
+                    "found": True, "fact_id": _ids[0], "fact_ids": _ids,
+                    "account_id": account_id, "category": _direct_memory_category,
+                    "name": TITLES.get(_direct_memory_category, _direct_memory_category),
+                    "answer": "\n".join(_parts), "source": "Подтверждённая память BORIS",
+                    "source_ref": "combined_confirmed_facts", "confidence": 100,
+                    "confirmed": True, "score": _mx, "matched_words": _name_hits,
+                    "accounts": accs,
+                }
         if len(_top) == 1:
             best, best_score, best_raw = _top[0][2], _top[0][0], _top[0][1]
 
     if not best:
+        # COMPANY_VISIT_FAST_MEMORY_V1:
+        # Operational questions about visiting an office/salon/showroom must not
+        # fall through to generic qualification when the company profile already
+        # proves a customer-facing location exists. We derive only from explicit
+        # confirmed wording; a generic word like "офисная мебель" is not enough.
+        _visit_q = any(x in _q_low for x in (
+            "офис", "салон", "шоурум", "приех", "подъех", "посет", "встрет",
+        ))
+        if _visit_q:
+            _facility_rows = []
+            for _r in rows:
+                if str(_r[2] or "") not in ("company", "geografiya"):
+                    continue
+                _evidence = " ".join((str(_r[3] or ""), str(_r[4] or ""))).lower().replace("ё", "е")
+                if any(x in _evidence for x in (
+                    "сеть салон", "салон", "шоурум", "наш офис",
+                    "офис по адресу", "адрес офиса", "офисы",
+                )):
+                    _facility_rows.append(_r)
+            if _facility_rows:
+                _all_facility = " ".join(
+                    " ".join((str(_r[3] or ""), str(_r[4] or "")))
+                    for _r in _facility_rows
+                ).lower().replace("ё", "е")
+                if "салон" in _all_facility:
+                    _facility_phrase = "У компании есть салоны."
+                    _address_subject = "салона"
+                elif "шоурум" in _all_facility:
+                    _facility_phrase = "У компании есть шоурум."
+                    _address_subject = "шоурума"
+                else:
+                    _facility_phrase = "У компании есть офис."
+                    _address_subject = "офиса"
+
+                _city_values = []
+                _city_ids = []
+                for _r in rows:
+                    _name_low = str(_r[3] or "").strip().lower().replace("ё", "е")
+                    if (_name_low in {"cities", "city", "города", "город", "города работы", "география"}
+                            or (str(_r[2] or "") == "geografiya" and "город" in _name_low)):
+                        _value = str(_r[4] or "").strip()
+                        if _value and _value not in _city_values:
+                            _city_values.append(_value)
+                            _city_ids.append(_r[0])
+
+                _visit_answer = _facility_phrase
+                if _city_values:
+                    _visit_answer += " Города: " + "; ".join(_city_values) + "."
+                _visit_answer += (
+                    " Точный адрес %s в нужном городе уточнит менеджер."
+                    % _address_subject
+                )
+                _ids = [int(_r[0]) for _r in _facility_rows] + [
+                    int(x) for x in _city_ids
+                ]
+                return {
+                    "found": True,
+                    "fact_id": _ids[0],
+                    "fact_ids": list(dict.fromkeys(_ids)),
+                    "account_id": account_id,
+                    "category": "geografiya",
+                    "name": "",
+                    "answer": _visit_answer,
+                    "source_type": "confirmed_company_context",
+                    "source": "Подтверждённые данные компании",
+                    "source_ref": "combined_confirmed_company_profile",
+                    "confidence": 100,
+                    "confirmed": True,
+                    "score": 100,
+                    "matched_words": 1,
+                    "accounts": accs,
+                    "policy_version": "COMPANY_VISIT_FAST_MEMORY_V1",
+                }
+
+        _reason_code = "knowledge_missing"
+        _reply = "Уточню детали у менеджера и передам ваш вопрос."
+        _reason = "в базе знаний нет подтверждённого факта"
+        if _avail_q:
+            _reason_code = "availability_requires_human"
+            _reply = "Актуальное наличие проверяет менеджер. Передам ваш запрос."
+            _reason = "актуальное наличие требует проверки менеджером"
+        elif _delivery_q and _price_q:
+            _reason_code = "individual_delivery_price"
+            _reply = "Стоимость доставки и вывоза рассчитывается индивидуально. Передам менеджеру для расчёта."
+            _reason = "стоимость доставки/вывоза требует индивидуального расчёта"
+        elif _price_q:
+            _reason_code = "price_missing"
+            _reply = "Актуальную стоимость уточнит менеджер. Передам ваш запрос."
+            _reason = "нет свежего однозначного подтверждённого ценового факта"
+        elif _capability_q:
+            _reason_code = "capability_missing"
+            _reply = "Уточню этот вариант у менеджера и передам ваш вопрос."
+            _reason = "нет однозначного подтверждённого ответа по возможности услуги"
         return {
             "found": False,
             "accounts": accs,
-            "reply": "Уточню стоимость и условия у коллег и вернусь к вам.",
+            "reason_code": _reason_code,
+            "reply": _reply,
             "task": {"account_id": account_id,
                      "title": "Нужно уточнить: %s" % str(question)[:120],
-                     "reason": "в базе знаний нет подтверждённого факта"},
+                     "reason": _reason},
         }
     return {
         "found": True, "fact_id": best[0], "account_id": best[1],
         "category": best[2], "name": best[3], "answer": best[4],
-        "source": SOURCES.get(best[5], best[5]), "source_ref": best[6],
+        "source_type": best[5], "source": SOURCES.get(best[5], best[5]), "source_ref": best[6],
         "confidence": best[7], "confirmed": best[8] == "confirmed",
         "score": best_score, "matched_words": best_raw, "accounts": accs,
     }
@@ -634,6 +1011,133 @@ def memory_mode(db, account_id):
         return "off"
 
 
+def refresh_repeated_outgoing_offer_consensus(db, account_id: str, days: int = 7, min_chats: int = 2):
+    """Promote only repeated manager-sent promo prices into short-lived live facts.
+
+    One-off calculations are deliberately ignored. A price must appear in a
+    promo/special-offer message in at least min_chats distinct outgoing chats.
+    The generated fact names are stable, so a later repeated offer updates the
+    current value and stales the previous value instead of accumulating prices.
+    """
+    import re as _re, hashlib as _hashlib
+    from datetime import datetime as _dt, timezone as _tz
+    _latest_outgoing = db.execute(text("""
+        SELECT max(avito_created_at) FROM messenger_messages
+        WHERE account_id=:a AND lower(direction) LIKE 'out%' AND text IS NOT NULL
+          AND avito_created_at >= extract(epoch from (now() - (:d || ' days')::interval))::bigint
+          AND text ~* '(акци|спецпредлож|специальн.{0,15}цен)' AND text ~* '(руб|₽)'
+    """), {"a": account_id, "d": str(max(1, min(int(days), 30)))}).scalar()
+    _current_consensus = db.execute(text("""
+        SELECT max(extract(epoch from source_date)::bigint) FROM client_facts
+        WHERE account_id=:a AND source_type='dialog_promo_consensus' AND status='confirmed'
+    """), {"a": account_id}).scalar()
+    if _latest_outgoing and _current_consensus and int(_current_consensus) >= int(_latest_outgoing):
+        return {"updated": 0, "accepted": "cached"}
+
+    rows = db.execute(text("""
+        SELECT avito_chat_id,text,avito_created_at
+        FROM messenger_messages
+        WHERE account_id=:a
+          AND lower(direction) LIKE 'out%'
+          AND text IS NOT NULL
+          AND avito_created_at >= extract(epoch from (now() - (:d || ' days')::interval))::bigint
+          AND text ~* '(акци|спецпредлож|специальн.{0,15}цен)'
+          AND text ~* '(руб|₽)'
+        ORDER BY avito_created_at DESC
+        LIMIT 300
+    """), {"a": account_id, "d": str(max(1, min(int(days), 30)))}).all()
+    line_re = _re.compile(r"^\s*[-•]?\s*(.{3,150}?)\s*[-—–:]\s*(\d[\d\s]{2,8})\s*(?:руб(?:\.|лей)?|₽)\b", _re.I)
+    groups = {}
+    for chat_id, body, ts in rows:
+        for raw_line in str(body or "").splitlines():
+            m = line_re.search(raw_line.strip())
+            if not m:
+                continue
+            label = _re.sub(r"\s+", " ", m.group(1)).strip(" -—–:.;")[:150]
+            if not label or any(x in label.lower() for x in ("доставка", "вывоз", "продлить", "штраф", "залог")):
+                continue
+            try:
+                price = int(_re.sub(r"\s+", "", m.group(2)))
+            except Exception:
+                continue
+            if price <= 0:
+                continue
+            norm = _re.sub(r"[^a-zа-яё0-9]+", " ", label.lower()).strip()
+            key = (norm, price)
+            item = groups.setdefault(key, {"label": label, "price": price, "chats": set(), "ts": 0})
+            item["chats"].add(str(chat_id)); item["ts"] = max(int(item["ts"] or 0), int(ts or 0))
+    accepted = [x for x in groups.values() if len(x["chats"]) >= int(min_chats)]
+    if not accepted:
+        return {"updated": 0, "accepted": 0}
+    updated = 0
+    for item in accepted:
+        name = "Текущая акционная цена аренды: " + item["label"]
+        value = str(item["price"])
+        source_date = _dt.fromtimestamp(item["ts"], _tz.utc) if item["ts"] else _dt.now(_tz.utc)
+        db.execute(text("""
+            UPDATE client_facts SET status='stale',updated_at=now()
+            WHERE account_id=:a AND category='cena' AND name=:n
+              AND status='confirmed' AND value<>:v
+        """), {"a": account_id, "n": name, "v": value})
+        row = db.execute(text("""
+            SELECT id FROM client_facts WHERE account_id=:a AND category='cena' AND name=:n
+            ORDER BY id DESC LIMIT 1
+        """), {"a": account_id, "n": name}).first()
+        fh = _hashlib.sha256((account_id + '|cena|' + name + '|' + value).encode('utf-8')).hexdigest()
+        if row:
+            db.execute(text("""
+                UPDATE client_facts SET value=:v,status='confirmed',confidence=100,scope='account',
+                  source_type='dialog_promo_consensus',source_ref='repeated_outgoing_offer',source_date=:sd,
+                  confirmed_by='system_repeated_outgoing_consensus',confirmed_at=now(),updated_at=now(),fact_hash=:h
+                WHERE id=:i
+            """), {"v": value, "sd": source_date, "h": fh, "i": row[0]})
+        else:
+            db.execute(text("""
+                INSERT INTO client_facts(account_id,category,name,value,scope,source_type,source_ref,source_date,
+                  confidence,status,fact_hash,snippet,confirmed_by,confirmed_at,extracted_at,updated_at)
+                VALUES(:a,'cena',:n,:v,'account','dialog_promo_consensus','repeated_outgoing_offer',:sd,
+                  100,'confirmed',:h,:s,'system_repeated_outgoing_consensus',now(),:sd,now())
+            """), {"a": account_id, "n": name, "v": value, "sd": source_date,
+                    "h": fh, "s": (name + ': ' + value)[:500]})
+        updated += 1
+    accepted.sort(key=lambda x: (x["price"], x["label"].lower()))
+    summary = "; ".join("%s — %s руб." % (x["label"], x["price"]) for x in accepted[:12])
+    latest_ts = max(x["ts"] for x in accepted)
+    summary_date = _dt.fromtimestamp(latest_ts, _tz.utc) if latest_ts else _dt.now(_tz.utc)
+    promo_name = "Текущая акция аренды из повторяющихся исходящих менеджера"
+    promo_hash = _hashlib.sha256((account_id + '|akciya|' + promo_name + '|' + summary).encode('utf-8')).hexdigest()
+    prow = db.execute(text("SELECT id FROM client_facts WHERE account_id=:a AND category='akciya' AND name=:n ORDER BY id DESC LIMIT 1"), {"a": account_id, "n": promo_name}).first()
+    if prow:
+        db.execute(text("""UPDATE client_facts SET value=:v,status='confirmed',confidence=100,scope='account',source_type='dialog_promo_consensus',source_ref='repeated_outgoing_offer',source_date=:sd,confirmed_by='system_repeated_outgoing_consensus',confirmed_at=now(),updated_at=now(),fact_hash=:h WHERE id=:i"""), {"v": summary, "sd": summary_date, "h": promo_hash, "i": prow[0]})
+    else:
+        db.execute(text("""INSERT INTO client_facts(account_id,category,name,value,scope,source_type,source_ref,source_date,confidence,status,fact_hash,snippet,confirmed_by,confirmed_at,extracted_at,updated_at) VALUES(:a,'akciya',:n,:v,'account','dialog_promo_consensus','repeated_outgoing_offer',:sd,100,'confirmed',:h,:s,'system_repeated_outgoing_consensus',now(),:sd,now())"""), {"a": account_id, "n": promo_name, "v": summary, "sd": summary_date, "h": promo_hash, "s": summary[:500]})
+    # Generic "from" price is exposed only when all repeated offer lines share
+    # a real subject token (e.g. «бытовка»). This prevents a generic minimum
+    # from answering unrelated questions such as an individual delivery cost.
+    _token_sets = [set(_re.findall(r"[a-zа-яё0-9]{4,}", x["label"].lower())) for x in accepted]
+    _common = set.intersection(*_token_sets) if _token_sets else set()
+    _common -= {"цена", "рублей", "месяц", "обычная", "комнаты"}
+    min_price = min(x["price"] for x in accepted)
+    generic_subject = " ".join(sorted(_common)[:3]).strip()
+    if not generic_subject:
+        db.commit()
+        return {"updated": updated + 1, "accepted": len(accepted), "min_price": min_price}
+    generic_name = "Текущая акционная минимальная цена аренды: " + generic_subject
+    generic_value = "от %s" % min_price
+    grow = db.execute(text("SELECT id FROM client_facts WHERE account_id=:a AND category='cena' AND source_type='dialog_promo_consensus' AND name LIKE 'Текущая акционная минимальная цена%' ORDER BY id DESC LIMIT 1"), {"a": account_id}).first()
+    generic_hash = _hashlib.sha256((account_id + '|cena|' + generic_name + '|' + generic_value).encode('utf-8')).hexdigest()
+    if grow:
+        db.execute(text("""UPDATE client_facts SET name=:n,value=:v,status='confirmed',confidence=100,scope='account',source_type='dialog_promo_consensus',source_ref='repeated_outgoing_offer',source_date=:sd,confirmed_by='system_repeated_outgoing_consensus',confirmed_at=now(),updated_at=now(),fact_hash=:h WHERE id=:i"""), {"n": generic_name, "v": generic_value, "sd": summary_date, "h": generic_hash, "i": grow[0]})
+        gid = int(grow[0])
+    else:
+        gid = int(db.execute(text("""INSERT INTO client_facts(account_id,category,name,value,scope,source_type,source_ref,source_date,confidence,status,fact_hash,snippet,confirmed_by,confirmed_at,extracted_at,updated_at) VALUES(:a,'cena',:n,:v,'account','dialog_promo_consensus','repeated_outgoing_offer',:sd,100,'confirmed',:h,:s,'system_repeated_outgoing_consensus',now(),:sd,now()) RETURNING id"""), {"a": account_id, "n": generic_name, "v": generic_value, "sd": summary_date, "h": generic_hash, "s": generic_value}).scalar())
+    for alias in ("стоимость аренды", "сколько стоит аренда", "цена аренды", "аренда в месяц"):
+        if not db.execute(text("SELECT 1 FROM client_aliases WHERE account_id=:a AND fact_id=:f AND lower(alias)=lower(:x) LIMIT 1"), {"a": account_id, "f": gid, "x": alias}).first():
+            db.execute(text("INSERT INTO client_aliases(account_id,fact_id,alias,source_type,created_at) VALUES(:a,:f,:x,'outgoing_consensus',now())"), {"a": account_id, "f": gid, "x": alias})
+    db.commit()
+    return {"updated": updated + 2, "accepted": len(accepted), "min_price": min_price}
+
+
 def answer_for_ai(db, account_id, question, shared=True):
     """То, что зовёт МОП. Возвращает готовый ответ либо честное «уточню».
 
@@ -643,6 +1147,16 @@ def answer_for_ai(db, account_id, question, shared=True):
     mode = memory_mode(db, account_id)
     if mode == "off":
         return {"mode": "off", "use_memory": False}
+    try:
+        _qst = stems(question)
+        if _qst & (stems(CAT_WORDS.get("cena", "")) | stems(CAT_WORDS.get("akciya", ""))):
+            refresh_repeated_outgoing_offer_consensus(db, account_id)
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print("[memory] repeated outgoing offer refresh skipped: %s" % str(e)[:160])
     r = find_answer(db, account_id, question, shared)
     r["mode"] = mode
     r["use_memory"] = True
@@ -661,7 +1175,75 @@ def answer_for_ai(db, account_id, question, shared=True):
     r["rule_ids"] = [x["id"] for x in applicable]
     if r.get("found") and r.get("category") in ("cena", "garantiya", "tovar", "usluga"):
         r["fact_wins"] = True
+    _qlow = str(question or "").lower().replace("ё", "е")
+    _catalog_fast = bool(
+        r.get("found") and r.get("category") == "tovar"
+        and (any(x in _qlow for x in ("сдаете", "продаете", "есть аренда", "есть продажа"))
+             or ("какие бытов" in _qlow and any(x in _qlow for x in ("сда", "аренд", "прода", "продаж"))))
+        and not any(x in _qlow for x in ("подойдет", "лучше", "посовет", "выбрать", "какой размер", "достав", "расчет", "расчёт"))
+    )
+    r["fast_memory_safe"] = bool(
+        r.get("found") and (
+            r.get("category") in {"akciya", "kontakty", "geografiya", "grafik"}
+            or (r.get("category") == "cena" and r.get("source_type") == "dialog_promo_consensus")
+            or _catalog_fast
+        )
+    )
     return r
+
+
+def confirmed_context(db, account_id: str, limit: int = 80, max_chars: int = 12000,
+                      include_rules: bool = False, shared: bool = True) -> str:
+    """Confirmed memory for generation, with explicit business-scope sharing only.
+
+    Own confirmed facts are always visible. Facts from another profile are visible
+    only when both profiles belong to the same explicit memory_scopes group and
+    the source fact is scope='business'. owner_user_id alone is never a sharing
+    boundary, so unrelated clients cannot leak facts into each other.
+    """
+    accs = scope_accounts(db, account_id, shared=shared)
+    _rule_clause = "" if include_rules else " AND category <> 'rule'"
+    rows = db.execute(text("""
+        SELECT account_id,category,name,value,unit,source_date,extracted_at
+        FROM client_facts
+        WHERE account_id IN :accs
+          AND status='confirmed'
+          AND (account_id=:self OR COALESCE(scope,'business')='business')""" + _rule_clause + """
+        ORDER BY
+          CASE WHEN account_id=:self THEN 0 ELSE 1 END,
+          CASE category
+            WHEN 'rule' THEN 0 WHEN 'garantiya' THEN 1 WHEN 'cena' THEN 2
+            WHEN 'usluga' THEN 3 WHEN 'tovar' THEN 4 WHEN 'faq' THEN 5 ELSE 6
+          END,
+          updated_at DESC NULLS LAST,id DESC
+        LIMIT :l
+    """).bindparams(bindparam("accs", expanding=True)), {
+        "accs": accs,
+        "self": account_id,
+        "l": max(1, min(int(limit or 80), 200)),
+    }).mappings().all()
+    parts = []
+    total = 0
+    seen = set()
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        value = str(row.get("value") or "").strip()
+        if runtime_fact_expired(row.get("category"), name, value,
+                                row.get("source_date"), row.get("extracted_at")):
+            continue
+        if not value:
+            continue
+        unit = str(row.get("unit") or "").strip()
+        line = f"- {name + ': ' if name and name.lower() != value.lower() else ''}{value}{(' ' + unit) if unit else ''}"
+        norm = " ".join(line.lower().split())
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if total + len(line) + 1 > max_chars:
+            break
+        parts.append(line)
+        total += len(line) + 1
+    return "\n".join(parts)
 
 
 class ModeBody(BaseModel):
@@ -736,24 +1318,29 @@ def add_rule(db, account_id, text_rule, source_ref="", scope="account",
 
 
 def rules_for(db, account_id, shared=True, only_confirmed=True):
-    """Правила, доступные аккаунту.
+    """Rules available to one MOP without cross-client leakage.
 
-    scope='account'  — только собственные правила этого аккаунта;
-    scope='business' — правила всей группы, применяются ко всем её аккаунтам.
+    scope='account'  — only this account;
+    scope='business' — profiles in the same explicit memory_scopes group;
+    scope='platform' — generic owner-confirmed MOP behavior for every profile.
     """
     accs = scope_accounts(db, account_id, shared)
+    query_accs = list(dict.fromkeys(list(accs) + ["__platform__"]))
     sql = ("SELECT id, account_id, value, scope, confidence, status, source_ref,"
            " confirmed_by FROM client_facts WHERE category='rule'"
            "  AND status <> 'rejected' AND account_id IN :accs")
     if only_confirmed:
         sql += " AND status='confirmed'"
     rows = db.execute(text(sql).bindparams(bindparam("accs", expanding=True)),
-                      {"accs": accs}).all()
+                      {"accs": query_accs}).all()
     out = []
     for r in rows:
         sc = r[3] or "account"
-        # правило чужого аккаунта применимо, только если оно business
-        if r[1] != account_id and sc != "business":
+        if r[1] == "__platform__":
+            if sc != "platform":
+                continue
+        elif r[1] != account_id and sc != "business":
+            # A sibling account may share only explicitly business-wide rules.
             continue
         out.append({"id": r[0], "account_id": r[1], "rule": r[2], "scope": sc,
                     "confidence": r[4], "status": r[5], "source_ref": r[6] or "",
@@ -822,7 +1409,7 @@ SOURCE_STATUSES = ("connected", "queued", "processing", "ready",
 SOURCE_TRUST = {
     "avito_item": 85, "site": 85, "price_list": 85, "contract": 85, "invoice": 85,
     "commercial_offer": 80, "estimate": 80,
-    "dialog": 60, "dialog_price": 55, "dialog_promo": 40,
+    "dialog": 60, "dialog_price": 55, "dialog_promo": 40, "dialog_promo_consensus": 100,
     "vk": 55, "telegram": 55,
     "2gis": 50, "yandex_maps": 50,
     "certificate_verified": 85,   # распознан номер и срок действия
@@ -843,11 +1430,45 @@ SOURCE_ALLOWED = {
 
 # Срок годности факта в днях. Просроченный НЕ удаляется — требует подтверждения.
 FACT_TTL_DAYS = {
-    "cena": 60, "akciya": 14, "kontakty": 180, "grafik": 180,
+    "cena": 60, "akciya": 7, "kontakty": 180, "grafik": 180,
     "garantiya": 365, "usloviya": 365, "rekvizity": 730,
     "usluga": 730, "tovar": 730, "faq": 365, "rule": 365,
     "preimushchestvo": 730, "keys": 730, "stil": 730,
 }
+
+
+def runtime_fact_expired(category, name, value, source_date=None, extracted_at=None, now=None):
+    """Fail closed for time-sensitive knowledge used in client replies.
+
+    A fact can remain visible/auditable as confirmed in Knowledge while being
+    ineligible for live answers after its TTL or an explicit "до DD.MM.YYYY"
+    deadline. Promo-like FAQ text gets the shorter promotion TTL even when a
+    historic extractor classified it as FAQ.
+    """
+    import re as _re
+    from datetime import datetime as _dt, timezone as _tz
+    current = now or _dt.now(_tz.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_tz.utc)
+    text_value = (str(name or "") + "\n" + str(value or "")).lower().replace("ё", "е")
+    cat = str(category or "").lower()
+    ttl_cat = "akciya" if any(x in text_value for x in ("акция", "акционн", "спецпредлож")) else cat
+    ttl = FACT_TTL_DAYS.get(ttl_cat)
+    if any(x in text_value for x in ("в наличии", "сейчас в аренде", "свободная бытовка", "свободные бытовки", "есть свободн")):
+        ttl = min(int(ttl or 7), 7)
+    stamp = source_date or extracted_at
+    if ttl and stamp:
+        if getattr(stamp, "tzinfo", None) is None:
+            stamp = stamp.replace(tzinfo=_tz.utc)
+        if stamp < current - __import__("datetime").timedelta(days=int(ttl)):
+            return True
+    for d, m, y in _re.findall(r"\bдо\s+(\d{1,2})[.\-/](\d{1,2})[.\-/](20\d{2})\b", text_value):
+        try:
+            if _dt(int(y), int(m), int(d), tzinfo=_tz.utc).date() < current.date():
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def source_trust(source_type, default=50):
@@ -1383,5 +2004,46 @@ def fact_bulk(body: BulkFacts, user=Depends(get_current_user)):
         db.commit()
         return {"status": "ok", "written": written, "skipped": bad,
                 "blocked_by_conflict": sum(1 for p in parsed if p["conflicts"]) if not body.force else 0}
+    finally:
+        db.close()
+
+
+class AnswerBody(BaseModel):
+    account_id: str
+    question: str
+    answer: str
+
+
+@router.post("/answer")
+def answer_question(body: AnswerBody, user=Depends(get_current_user)):
+    """Клиент отвечает на частый вопрос покупателей прямо в Базе знаний.
+
+    Ответ сразу подтверждён: это слова владельца о собственном бизнесе,
+    проверять их не у кого. Повторный ответ на тот же вопрос обновляет
+    прежний, а не плодит дубли.
+    """
+    import hashlib
+    q = (body.question or "").strip()[:255]
+    a = (body.answer or "").strip()
+    if not q or not a:
+        raise HTTPException(status_code=400, detail="Нужен вопрос и ответ")
+
+    h = hashlib.md5(("faq|" + q.lower()).encode("utf-8")).hexdigest()
+    db = SessionLocal()
+    try:
+        who = _who(user)
+        db.execute(text(
+            "INSERT INTO client_facts (account_id, category, name, value,"
+            " source_type, source_ref, source_date, confidence, status,"
+            " confirmed_by, confirmed_at, fact_hash, extracted_at, updated_at)"
+            " VALUES (:a, 'faq', :n, :v, 'client', 'answer_ui', :t, 100,"
+            " 'confirmed', :w, :t, :h, :t, :t)"
+            " ON CONFLICT (account_id, fact_hash) DO UPDATE SET"
+            " value = EXCLUDED.value, status = 'confirmed', confidence = 100,"
+            " confirmed_by = EXCLUDED.confirmed_by, confirmed_at = EXCLUDED.confirmed_at,"
+            " updated_at = EXCLUDED.updated_at"),
+            {"a": body.account_id, "n": q, "v": a, "w": who, "t": _now(), "h": h})
+        db.commit()
+        return {"status": "ok", "message": "Ответ сохранён — BORIS будет отвечать так"}
     finally:
         db.close()
