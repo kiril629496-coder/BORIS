@@ -4923,7 +4923,7 @@ def _messenger_poll_loop():
                     xr = _recover_waiting_external_403(limit=20)
                     sr = _recover_send_failed_autosend(active_mop_accounts, limit=10)
                     try:
-                        heartbeat(
+                        _reliability_heartbeat(
                             "runtime",
                             "mop_send_failed_selfheal",
                             state="degraded" if (sr.get("deferred") or sr.get("handoff")) else "ok",

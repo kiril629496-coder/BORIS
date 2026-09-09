@@ -29,3 +29,15 @@ Final production validation:
 - Maria MOP active, auto_send enabled; account qualification settings updated in DB;
 - conflicting historical training rules preserved but marked rejected; effective rules are
   the current safe platform/Maria rules only.
+
+Latest send-failure self-heal validation:
+- policy: MOP_SEND_FAILED_SELFHEAL_V1;
+- only active paid MOP + explicit auto_send + enabled binding/schedule can retry;
+- Avito 402/403/access/subscription failures are never blindly retried;
+- each draft has a bounded send_failed budget; exhaustion becomes manager handoff;
+- the only retry path is mop_core.do_send(), which performs Avito readback dedupe before POST;
+- focused MOP regression suite after self-heal: 82 passed;
+- production worker heartbeat: runtime/mop_send_failed_selfheal = ok;
+- heartbeat observed active_mop_accounts=6, checked=0, retried=0, deferred=0, handoff=0;
+- production-wide scan at validation time: only one send_failed row existed and it belonged
+  to inactive QA account qa_mop_tg with auto_send=false, so no real client was retried.

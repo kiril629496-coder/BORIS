@@ -65,6 +65,7 @@ def test_recovery_uses_canonical_do_send_and_is_wired_into_messenger_owner_loop(
     assert "MOP_SEND_FAILED_SELFHEAL_V1" in helper
     assert "_recover_send_failed_autosend(active_mop_accounts" in loop
     assert '"mop_send_failed_selfheal"' in loop
+    assert "_reliability_heartbeat(" in loop
 
 
 def test_empty_active_set_is_noop():
