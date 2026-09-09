@@ -80,9 +80,10 @@ def _blocked_runtime_projection(account_id, reason, evidence=None):
         'budget_zero_existing_spend': (
             f"При бюджете BORIS 0 ₽ Avito уже списал {float(evidence.get('spent_today_rub') or 0):.0f} ₽ сегодня"
             + (f" (из них presence {float(evidence.get('presence_rub') or 0):.0f} ₽)." if evidence.get('presence_rub') is not None else ".")
-            + " BORIS новые повышения ставок и рост числа объявлений не запускает. "
-              "Чтобы остановить и этот существующий расход Avito, нужно отключить/изменить платное размещение; "
-              "автоматически менять действующие объявления без отдельного разрешения BORIS не будет."
+            + " BORIS новые повышения ставок и рост числа объявлений не запускает; "
+              "активное CPX-продвижение автоматически снимается lower-only safety brake и остаётся выключенным до появления подтверждённого бюджета. "
+              "Если расход после этого продолжается, это отдельное базовое платное размещение/presence Avito: "
+              "его нужно изменить/отключить либо сознательно задать новый дневной бюджет."
         ),
         'daily_budget_owner_provenance_missing': (
             f"Подтвердите сохранённый суточный рекламный бюджет {float(evidence.get('budget') or 0):.0f} ₽ "

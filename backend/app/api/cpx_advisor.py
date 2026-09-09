@@ -16,6 +16,7 @@ MIN_VIEWS_FOR_JUDGEMENT = 30      # суточный порог, оставле�
 # на объявление, а у живых клиентов это единицы показов В НЕДЕЛЮ.
 MIN_VIEWS_FOR_JUDGEMENT_7D = 3   # меньше — судить не о чем
 ARCHIVE_MIN_VIEWS_7D = 10        # столько показов без контактов — повод снизить
+RED_CPL_CURRENT_DAY_MIN_VIEWS = 10  # при выполненном KPI и красном CPL: 10 просмотров сегодня без контакта -> bounded lower
 WINDOW_DAYS = 7                  # семь ПОЛНЫХ дней, сегодняшний неполный не берём
 # Шаг изменения ставки (для будущих действий; сейчас только в тексте совета)
 BID_STEP_PCT = 10
@@ -203,11 +204,13 @@ def run_advisor(account_id: str = "otdushi"):
             _stats_money_fresh, _stats_money_evidence = False, {"reason":"stats_guard_error"}
 
         # 3) текущие ставки по объявлениям (наш cpxpromo)
-        # CPX_MEASURE_PROVIDER_QUERY_PRIORITIZES_WAITING_V1:
-        # getPromotionsByItemIds is intentionally bounded to 200 IDs. On large
-        # accounts unresolved money experiments must be inside that exact CPX
-        # probe; otherwise their current provider state can never self-heal and
-        # they may occupy the account measurement cap indefinitely.
+        # CPX_MEASURE_PROVIDER_QUERY_PRIORITIZES_WAITING_V2:
+        # Avito accepts getPromotionsByItemIds in bounded batches. Waiting money
+        # experiments remain first for fast self-heal, but candidate discovery
+        # must cover the FULL active inventory: on PBI every live paid promotion
+        # was beyond item position 200, so truncating here hid real client spend.
+        # Query all active IDs in <=200-item batches; every actual mutation still
+        # requires an exact getBids/{itemID} proof immediately before provider write.
         _active_item_ids_all = [
             int(it["id"]) for it in items_stats
             if it.get("status") == "active" and str(it.get("id") or "").isdigit()
@@ -224,7 +227,7 @@ def run_advisor(account_id: str = "otdushi"):
         for _iid in _waiting_probe_ids + _active_item_ids_all:
             if _iid not in _priority_ids:
                 _priority_ids.append(_iid)
-        item_ids = _priority_ids[:200]
+        item_ids = _priority_ids
         bids_map = {}
         # CPX_MEASURE_PROMOTION_OFF_SUPERSEDE_V1: only a successful promotions
         # inventory response may prove that an experiment's paid promotion is
@@ -256,38 +259,56 @@ def run_advisor(account_id: str = "otdushi"):
             tok = tok_data.get("access_token") if isinstance(tok_data, dict) else tok_data
         if _advice_retry <= 0 and _money_entitlement_active and _stats_money_fresh and tok and item_ids:
             try:
-                r = httpx.post("https://api.avito.ru/cpxpromo/1/getPromotionsByItemIds",
-                               headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
-                               json={"itemIDs": item_ids}, timeout=30)
-                if r.status_code == 429:
-                    _retry = None
-                    try:
-                        _raw = str(r.headers.get("Retry-After") or "").strip()
-                        if _raw:
-                            try:
-                                _retry = max(0, int(float(_raw)))
-                            except Exception:
-                                from email.utils import parsedate_to_datetime as _parse_advice_ra
-                                from datetime import datetime as _advice_dt, timezone as _advice_tz
-                                _when = _parse_advice_ra(_raw)
-                                if _when.tzinfo is None:
-                                    _when = _when.replace(tzinfo=_advice_tz.utc)
-                                _retry = max(0, int((_when.astimezone(_advice_tz.utc)-_advice_dt.now(_advice_tz.utc)).total_seconds()))
-                    except Exception:
+                # CPX_ADVISOR_FULL_ACTIVE_PROMOTION_TRUTH_V1:
+                # Avito bulk promotion reads are capped per request, not per
+                # account. Query the whole active inventory in <=200-item chunks
+                # so late-position paid listings remain visible to red-CPL lower
+                # recovery. A partial/failed tail never becomes global truth.
+                _bulk_all_ok = True
+                for _pos in range(0, len(item_ids), 200):
+                    _chunk_ids = item_ids[_pos:_pos + 200]
+                    r = httpx.post(
+                        "https://api.avito.ru/cpxpromo/1/getPromotionsByItemIds",
+                        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+                        json={"itemIDs": _chunk_ids},
+                        timeout=30,
+                    )
+                    if r.status_code == 429:
                         _retry = None
-                    _retry = _advice_record_throttle(account_id, _retry or 30, source="cpx_advice_promotions_429")
-                    bids_map = {"_error":"avito_account_throttled","retry_after_seconds":int(_retry)}
-                elif r.status_code == 200:
-                    _bids_truth_complete = True
-                    _bids_queried_item_ids = {
-                        int(x) for x in item_ids if str(x).isdigit()
-                    }
-                    for it in r.json().get("items", []):
+                        try:
+                            _raw = str(r.headers.get("Retry-After") or "").strip()
+                            if _raw:
+                                try:
+                                    _retry = max(0, int(float(_raw)))
+                                except Exception:
+                                    from email.utils import parsedate_to_datetime as _parse_advice_ra
+                                    from datetime import datetime as _advice_dt, timezone as _advice_tz
+                                    _when = _parse_advice_ra(_raw)
+                                    if _when.tzinfo is None:
+                                        _when = _when.replace(tzinfo=_advice_tz.utc)
+                                    _retry = max(0, int((_when.astimezone(_advice_tz.utc)-_advice_dt.now(_advice_tz.utc)).total_seconds()))
+                        except Exception:
+                            _retry = None
+                        _retry = _advice_record_throttle(
+                            account_id, _retry or 30, source="cpx_advice_promotions_429"
+                        )
+                        bids_map["_error"] = "avito_account_throttled"
+                        bids_map["retry_after_seconds"] = int(_retry)
+                        _bulk_all_ok = False
+                        break
+                    if r.status_code != 200:
+                        bids_map["_error"] = f"promotions_http_{int(r.status_code)}"
+                        _bulk_all_ok = False
+                        break
+                    _bids_queried_item_ids.update(
+                        int(x) for x in _chunk_ids if str(x).isdigit()
+                    )
+                    for it in (r.json() or {}).get("items", []):
                         mp = it.get("manualPromotion") or {}
                         iid = it.get("itemID")
                         if iid is None:
                             continue
-                        bids_map[iid] = {
+                        bids_map[int(iid)] = {
                             "bid_penny": mp.get("bidPenny"),
                             "min_bid_penny": mp.get("minBidPenny"),
                             "rec_bid_penny": mp.get("recBidPenny"),
@@ -295,7 +316,12 @@ def run_advisor(account_id: str = "otdushi"):
                             "promotion_active": bool(it.get("manualPromotion") or it.get("autoPromotion")),
                             "promotion_mode": "manual" if it.get("manualPromotion") else ("auto" if it.get("autoPromotion") else "off"),
                         }
+                _bids_truth_complete = bool(
+                    _bulk_all_ok
+                    and len(_bids_queried_item_ids) == len(set(item_ids))
+                )
             except Exception as e:
+                _bids_truth_complete = False
                 bids_map = {"_error": str(e)[:100]}
 
         # CPX_MEASURE_EXACT_GETBIDS_TRUTH_V1:
@@ -748,6 +774,37 @@ def run_advisor(account_id: str = "otdushi"):
                 entry["why"] = "Объявление видно в статистике, но Avito CPX ещё не подтвердил точный itemID в этом аккаунте для денежной записи."
                 entry["suggest"] = "наблюдать; денежное изменение разрешится автоматически после точного CPX-подтверждения itemID"
                 watching.append(entry)
+                continue
+
+            # RED_CPL_CURRENT_DAY_PAID_WASTE_V1:
+            # Historical converters are not immune to a bad current day. Once
+            # the account has already met today's lead target, confirmed account
+            # CPL is red, and one active paid listing itself collected >=10
+            # current-day views with zero contacts, a single 10% lower is a
+            # spend-reducing recovery — not an archive and not a raise. This
+            # reuses the same 10-view boundary where intraday reach-rescue stops
+            # buying more impressions without contact evidence.
+            _red_cpl_current_day_paid_waste = bool(
+                _cpl_redline_block
+                and target_leads > 0
+                and float(total_contacts or 0) >= float(target_leads)
+                and bool(entry.get("promotion_active"))
+                and bid_rub is not None
+                and float(bid_rub) > 0
+                and int(contacts or 0) == 0
+                and int(views or 0) >= RED_CPL_CURRENT_DAY_MIN_VIEWS
+            )
+            if _red_cpl_current_day_paid_waste:
+                entry["reason_code"] = "red_cpl_paid_zero_contact_waste"
+                entry["red_cpl_evidence"] = "current_day_10plus_zero_contact_after_kpi_met"
+                entry["why"] = (
+                    f"Сегодня {int(views or 0)} просмотров и 0 обращений при активной ставке "
+                    f"{float(bid_rub):.0f} ₽; KPI дня уже выполнен, CPL аккаунта "
+                    f"{float(acct_cpl):.0f} ₽ выше лимита {float(max_cpl):.0f} ₽ — "
+                    "безопасно снизить ставку одним шагом"
+                )
+                entry["suggest"] = "снизить ставку на один безопасный шаг и продолжить наблюдение"
+                archive.append(entry)
                 continue
 
             if c7 > 0:
@@ -1810,6 +1867,28 @@ def negative_raise_rollback_candidates(db, account_id: str):
     return out
 
 
+def _classify_negative_rollback_apply_result(result):
+    """Classify one apply_one result without turning proven idempotency into failure."""
+    result = result or {}
+    status = str(result.get("status") or "error")
+    changed = bool(status == "ok" and result.get("changed_avito") is not False)
+    idempotent_success = bool(
+        status == "ok"
+        and result.get("changed_avito") is False
+        and result.get("idempotent") is True
+        and str(result.get("execution_status") or "") in {"succeeded", "reconciled"}
+    )
+    if changed:
+        return "applied", status, True
+    if idempotent_success:
+        return "idempotent", status, False
+    if status == "blocked":
+        return "blocked", status, False
+    if status == "skipped":
+        return "skipped", status, False
+    return "error", status, False
+
+
 def run_negative_raise_rollback_cycle():
     """Run the loser self-heal from canonical Money-owned code."""
     # NEGATIVE_ROLLBACK_OWNED_CYCLE_V2: production must not depend on the
@@ -1895,8 +1974,7 @@ def run_negative_raise_rollback_cycle():
                 request_id=(f"neg-rollback:{account_id}:{candidate['item_id']}:"
                             f"{candidate.get('finished_at') or 'unknown'}"),
             )) or {}
-            status = str(result.get("status") or "error")
-            changed = bool(status == "ok" and result.get("changed_avito") is not False)
+            outcome, status, changed = _classify_negative_rollback_apply_result(result)
             # NEGATIVE_ROLLBACK_RUNTIME_MONOTONIC_VERIFY_V2: even after the
             # generic lower fence, count success only when the provider receipt
             # proves a strict decrease. Never send a compensating second write.
@@ -1907,16 +1985,22 @@ def run_negative_raise_rollback_cycle():
                 except Exception:
                     old_bid = new_bid = None
                 if old_bid is None or new_bid is None or new_bid >= old_bid:
+                    outcome = "error"
                     status = "error"
                     changed = False
                     result = dict(result)
                     result["reason_code"] = "negative_rollback_non_monotonic_receipt"
 
-            if changed:
+            if outcome == "applied":
                 summary["applied"] += 1
-            elif status == "blocked":
+            elif outcome == "idempotent":
+                # A succeeded/reconciled receipt is durable proof that this exact
+                # rollback already happened. Re-observing it is healthy and must
+                # never make the whole hourly marketer unit fail.
+                summary["skipped"] += 1
+            elif outcome == "blocked":
                 summary["blocked"] += 1
-            elif status == "skipped":
+            elif outcome == "skipped":
                 summary["skipped"] += 1
             else:
                 summary["errors"] += 1

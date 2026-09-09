@@ -327,9 +327,17 @@ def resume_account(account_id: str, apply: bool = False) -> dict:
     if not brake_day:
         out["status"] = "invalid_resume_state"
         return out
-    if brake_day >= today_msk:
+    _zero_budget_brake = str(state.get("brake_reason") or "") == "explicit_zero_budget"
+    # ZERO_BUDGET_SAME_DAY_AUTHORIZED_RESUME_V1:
+    # A normal budget-exhaustion brake must wait for the next Moscow day because
+    # the daily counter has not reset. An explicit-zero safety brake is different:
+    # if the owner later authorizes a positive budget on the same day, the fresh
+    # business gate below is sufficient to decide whether bounded restoration is
+    # safe. Never force the owner to wait overnight for a configuration change.
+    if brake_day >= today_msk and not _zero_budget_brake:
         out["status"] = "waiting_next_moscow_day"
         return out
+    out["zero_budget_same_day_resume_eligible"] = bool(_zero_budget_brake)
 
     db = SessionLocal()
     try:

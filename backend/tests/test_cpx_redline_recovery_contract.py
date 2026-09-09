@@ -45,7 +45,8 @@ def test_measurement_supersede_requires_exact_item_provider_query_scope():
     s = _src()
     assert "CPX_MEASURE_PROVIDER_QUERY_SCOPE_V1" in s
     assert "_bids_queried_item_ids = set()" in s
-    assert "int(x) for x in item_ids if str(x).isdigit()" in s
+    assert "_bids_queried_item_ids.update(" in s
+    assert "int(x) for x in _chunk_ids if str(x).isdigit()" in s
     start = s.index("CPX_MEASURE_MONEY_IDENTITY_ONLY_V1")
     end = s.index("if _truth_reason:", start)
     block = s[start:end]
@@ -69,3 +70,87 @@ def test_all_raise_boundaries_converge_on_canonical_money_guard():
     assert "_direct_guard = _direct_live_guard(" in promo
     assert '"cpx.raise_bid"' in resume
     assert "final_money = check_raise_allowed(account_id) or {}" in resume
+
+
+def test_red_cpl_lower_is_not_frozen_by_raise_measurement_backlog():
+    from unittest.mock import patch
+    import cpx_advisor_runner as runner
+
+    class _DB:
+        def close(self):
+            pass
+
+    intraday = {
+        "kpi_pace": {"state": "AHEAD"},
+        "decision": "HOLD_RAISE",
+        "selected_for_execution": 0,
+        "candidates_total": 10,
+        "top": [],
+        "mandate": {"max_actions_run": 5},
+    }
+    recs = {"lower": [{
+        "id": 123456,
+        "bid_rub": 26.0,
+        "promotion_active": True,
+        "reason_code": "red_cpl_paid_zero_contact_waste",
+    }]}
+    advice = {
+        "measurement_cycle": {
+            "waiting": 2,
+            "backlog_compaction": {"cap": 2},
+        }
+    }
+    with patch("app.db.session.SessionLocal", return_value=_DB()), \
+         patch("app.services.intraday.select_intraday_raise_candidates", return_value=intraday):
+        plan, mode, diagnostics = runner._build_plan("qa_red_cpl", recs, advice=advice)
+
+    assert plan == [({"id": 123456, "source": "red_cpl_recovery"}, "lower")]
+    assert mode.startswith("RED_CPL_RECOVERY:")
+    assert diagnostics["reason"] == "red_cpl_lower_during_raise_measurement_wait"
+    assert diagnostics["planned_after_guard"] == 1
+    assert diagnostics["measurement_waiting"] == 2
+    assert diagnostics["measurement_cap"] == 2
+
+
+def test_raise_measurement_backlog_still_blocks_when_no_red_cpl_lower_exists():
+    from unittest.mock import patch
+    import cpx_advisor_runner as runner
+
+    class _DB:
+        def close(self):
+            pass
+
+    intraday = {
+        "kpi_pace": {"state": "BEHIND"},
+        "decision": "RAISE_CANDIDATES",
+        "selected_for_execution": 5,
+        "candidates_total": 10,
+        "top": [{"status": "eligible", "item_id": 1}],
+        "mandate": {"max_actions_run": 5},
+    }
+    advice = {
+        "measurement_cycle": {
+            "waiting": 2,
+            "backlog_compaction": {"cap": 2},
+        }
+    }
+    with patch("app.db.session.SessionLocal", return_value=_DB()), \
+         patch("app.services.intraday.select_intraday_raise_candidates", return_value=intraday):
+        plan, mode, diagnostics = runner._build_plan("qa_wait", {"lower": []}, advice=advice)
+
+    assert plan == []
+    assert mode.startswith("MEASUREMENT_WAIT:")
+    assert diagnostics["reason"] == "account_measurement_backlog_wait"
+    assert diagnostics["planned_after_guard"] == 0
+
+
+def test_advisor_queries_full_active_promotion_inventory_in_bounded_chunks():
+    s = _src()
+    assert "CPX_MEASURE_PROVIDER_QUERY_PRIORITIZES_WAITING_V2" in s
+    assert "CPX_ADVISOR_FULL_ACTIVE_PROMOTION_TRUTH_V1" in s
+    assert "item_ids = _priority_ids" in s
+    assert "item_ids = _priority_ids[:200]" not in s
+    assert "for _pos in range(0, len(item_ids), 200):" in s
+    assert "_chunk_ids = item_ids[_pos:_pos + 200]" in s
+    assert "_bids_queried_item_ids.update(" in s
+    assert "len(_bids_queried_item_ids) == len(set(item_ids))" in s
