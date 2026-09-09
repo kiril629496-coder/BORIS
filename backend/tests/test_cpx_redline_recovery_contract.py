@@ -54,3 +54,18 @@ def test_measurement_supersede_requires_exact_item_provider_query_scope():
     assert "if _wc not in" not in block
     assert '"write_capability_lost"' not in block
     assert "_item_cpx_truth_complete and _expected_bid is not None" in block
+
+
+def test_all_raise_boundaries_converge_on_canonical_money_guard():
+    advisor = Path("app/api/cpx_advisor.py").read_text(encoding="utf-8")
+    autonomy = Path("app/services/autonomy.py").read_text(encoding="utf-8")
+    promo = Path("app/api/cpxpromo.py").read_text(encoding="utf-8")
+    resume = Path("cpx_budget_resume.py").read_text(encoding="utf-8")
+
+    assert "FINAL_RAISE_RED_CPL_ECONOMICS_V1" in advisor
+    assert 'if operation == "cpx.raise_bid":' in autonomy
+    assert "check_raise_allowed as _check_raise_allowed" in autonomy
+    assert "can_execute_live_action as _direct_live_guard" in promo
+    assert "_direct_guard = _direct_live_guard(" in promo
+    assert '"cpx.raise_bid"' in resume
+    assert "final_money = check_raise_allowed(account_id) or {}" in resume
