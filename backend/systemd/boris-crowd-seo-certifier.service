@@ -1,0 +1,11 @@
+[Unit]
+Description=BORIS Crowd SEO production certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/BORIS/backend
+ExecStart=/root/BORIS/backend/venv/bin/python /root/BORIS/backend/tools/crowd_seo_certifier_runner.py
+TimeoutStartSec=120
+Nice=10

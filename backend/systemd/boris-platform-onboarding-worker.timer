@@ -1,0 +1,12 @@
+[Unit]
+Description=BORIS platform onboarding checkpoint worker timer
+
+[Timer]
+OnCalendar=*-*-* *:30:00
+AccuracySec=30s
+RandomizedDelaySec=30s
+Persistent=true
+Unit=boris-platform-onboarding-worker.service
+
+[Install]
+WantedBy=timers.target
