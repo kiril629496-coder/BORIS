@@ -2043,6 +2043,16 @@ def request_outbound_call(account_id: str, to_number: str, user_id: int | None =
     p=selected_provider(account_id)
     if not p:
         return {'status':'provider_not_selected','message':'Сначала подключите оператора телефонии'}
+    # Commercial fail-closed boundary: a stored provider config must never be
+    # enough to originate a paid real call after Phone expires or before Phone
+    # is activated. Check this before credentials, adapter I/O or durable intent.
+    entitlement=phone_entitlement_status(account_id)
+    if not bool(entitlement.get('active')):
+        return {
+            'status':'phone_entitlement_required',
+            'message':'BORIS Phone не активен для этого аккаунта. Нужен оплаченный период Phone.',
+            'account_id':str(account_id or '')[:160],
+        }
     p2,credentials=provider_credentials(account_id)
     if p2!=p or not credentials:
         return {'status':'provider_not_connected','provider':p,'message':'Провайдер выбран, но production-доступ ещё не подтверждён'}

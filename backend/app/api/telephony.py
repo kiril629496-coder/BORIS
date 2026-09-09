@@ -41,6 +41,20 @@ def _require_private_platform_owner(user=Depends(get_current_user)):
     return user
 
 
+def _require_active_phone_entitlement(account_id: str) -> dict:
+    """Commercial boundary for user-triggered Phone provider operations."""
+    state = phone_entitlement_status(str(account_id or "").strip())
+    if not bool(state.get("active")):
+        raise HTTPException(
+            409,
+            {
+                "code": "phone_entitlement_required",
+                "message": "Для подключения оператора нужен активный оплаченный BORIS Phone.",
+            },
+        )
+    return state
+
+
 def _mcn_onboarding_raw_state() -> dict:
     import json as _json
     from app.db.session import SessionLocal
@@ -573,6 +587,7 @@ def set_provider_config(body: dict=Body(...), current_user=Depends(get_current_u
     account_id=str(body.get('account_id') or '').strip(); provider=str(body.get('provider') or '').strip()
     if not account_id or not provider: raise HTTPException(400,'account_id и provider обязательны')
     _assert_telephony_account_access(account_id,current_user); _assert_account_owner(account_id,current_user)
+    _require_active_phone_entitlement(account_id)
     public_config=body.get('public_config') if 'public_config' in body else None
     return save_provider_config(account_id,provider,body.get('credentials'),public_config,body.get('webhook_secret'),_actor_user_id(current_user,body.get('actor_user_id')))
 
@@ -581,6 +596,7 @@ def verify_provider_config(body: dict=Body(...), current_user=Depends(get_curren
     account_id=str(body.get('account_id') or '').strip()
     if not account_id: raise HTTPException(400,'account_id обязателен')
     _assert_telephony_account_access(account_id,current_user); _assert_account_owner(account_id,current_user)
+    _require_active_phone_entitlement(account_id)
     return verify_provider_connection(account_id,_actor_user_id(current_user,body.get('actor_user_id')))
 
 def _stream_access_still_allowed(account_id: str, current_user) -> bool:

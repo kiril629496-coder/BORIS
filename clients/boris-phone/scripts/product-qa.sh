@@ -705,4 +705,22 @@ grep -q 'Нужно решение владельца' frontend/app/dashboard/ph
 grep -q 'не повторяет опасные внешние действия автоматически' frontend/app/dashboard/phone/page.tsx
 echo PHONE_OWNER_ACTION_FALLBACK_UI=PASS
 
+# Commercial runtime gate: saved carrier credentials are not a substitute for
+# a currently paid BORIS Phone entitlement. New provider mutations and outbound
+# provider I/O must fail closed before touching credentials/operator transport.
+grep -q "entitlement=phone_entitlement_status(account_id)" backend/app/services/telephony_core.py
+grep -q "'status':'phone_entitlement_required'" backend/app/services/telephony_core.py
+grep -q 'def _require_active_phone_entitlement' backend/app/api/telephony.py
+test "$(grep -c '_require_active_phone_entitlement(account_id)' backend/app/api/telephony.py)" -ge 2
+grep -q 'def _assert_phone_entitlement' backend/app/api/mcn_phone.py
+test "$(grep -c '_assert_phone_entitlement(account_id)' backend/app/api/mcn_phone.py)" -ge 3
+grep -q 'test_unpaid_phone_stops_before_provider_credentials_or_adapter_io' backend/tests/test_telephony_db_integration.py
+grep -q 'test_unpaid_phone_blocks_provider_verify_before_external_probe' backend/tests/test_telephony_api_access.py
+grep -q 'test_unpaid_phone_blocks_atomic_mcn_onboard_before_storage' backend/tests/test_mcn_api_onboarding.py
+grep -q 'telephony_entitlements e' backend/app/services/asterisk_gateway.py
+grep -q 'e.paid_until>now()' backend/app/services/asterisk_gateway.py
+grep -q "return {'status':'phone_entitlement_required','owner_action_required':False}" backend/app/services/asterisk_gateway.py
+grep -q 'test_unpaid_phone_blocks_direct_mcn_origination_before_asterisk_probe' backend/tests/test_mcn_deferred_asterisk_recovery.py
+echo PHONE_COMMERCIAL_RUNTIME_GATE=PASS
+
 echo PHONE_PRODUCT_QA_FINAL=PASS
