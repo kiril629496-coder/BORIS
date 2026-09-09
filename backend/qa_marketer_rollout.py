@@ -157,6 +157,7 @@ ck('CANONICAL_MARKETING_ENTITLEMENT_MANDATE_GUARD','MARKETER_CANONICAL_ENTITLEME
 ck('WINNER_MEMORY_PRIORITY','WINNER_MEMORY_RANK_V1' in intr and 'PROFITABLE_DAY_WINNER_MEMORY_PRIORITY_V1' in advisor)
 ck("PROFITABLE_DAY_CURRENT_PROMOTION_TRUTH", "PROFITABLE_DAY_CURRENT_PROMOTION_TRUTH_V2" in advisor and "active_paid_ids" in advisor)
 ck('MEASURE_NO_SIGNAL_TIMEOUT','MEASURE_NO_SIGNAL_TIMEOUT_V1' in advisor and 'inconclusive_no_signal' in advisor and 'no_signal_feedback' in intr)
+ck('FIRST_BID_NO_SIGNAL_SLOT_RELEASE','FIRST_BID_NO_SIGNAL_SLOT_RELEASE_V1' in advisor and 'inconclusive_first_bid_no_signal' in advisor and 'measure_state=state' in advisor and 'measure_action=action' in advisor and 'stop_money_no_signal' in advisor)
 ck('CAPABILITY_COOLDOWN','CPX_ITEM_CAPABILITY_COOLDOWN_V1' in advisor and 'cpx_item_capability_cooldown' in intr)
 ck('LOWVIEWS_CAPABILITY_ROTATION','ACCOUNT_LOW_VIEWS_CAPABILITY_ROTATION_V2' in advisor and 'ACCOUNT_LOW_VIEWS_CAPABILITY_ROTATION_V3' in advisor and 'capability_skipped' in advisor and 'return 1440' in advisor)
 ck('LOWVIEWS_RUN_ID_SCOPE','ACCOUNT_LOW_VIEWS_RUN_ID_SCOPE_V1' in advisor and 'lv30_{account_id}_' in advisor)

@@ -1718,6 +1718,8 @@ def _finalize_measure_state(
         account_id=account_id,
         item_id=item_id,
         started_at=started_at,
+        measure_state=state,
+        measure_action=action,
     )
 
     if result.get("status") != "measured":
@@ -1741,7 +1743,7 @@ def _finalize_measure_state(
         "scale_next_bounded_step" if effect == "improved"
         else "hold_collect_leads" if effect == "reach_improved_no_lead_yet"
         else "rollback_or_lower" if effect == "worsened"
-        else "stop_money_no_signal" if effect in {"inconclusive_no_signal", "inconclusive_no_baseline"}
+        else "stop_money_no_signal" if effect in {"inconclusive_no_signal", "inconclusive_no_baseline", "inconclusive_first_bid_no_signal"}
         else "hold"
     )
     journal.append({
@@ -2038,6 +2040,8 @@ def _calculate_measure_effect(
     account_id,
     item_id,
     started_at,
+    measure_state=None,
+    measure_action=None,
 ):
     """
     Сравнивает статистику до и после изменения ставки.
@@ -2095,6 +2099,40 @@ def _calculate_measure_effect(
         item_id=item_id,
         started_at=started_at,
     )
+
+    # FIRST_BID_NO_SIGNAL_SLOT_RELEASE_V1:
+    # A bounded first activation (0 RUB -> positive bid) that receives zero
+    # views for one complete post-change day has produced no reach evidence.
+    # Keeping it in one of only two account measurement slots for seven days
+    # blocks better hypotheses without improving causality. Finalize it as
+    # inconclusive only: do not lower/disable the live bid and never call it a
+    # winner or loser. Ordinary positive-bid experiments keep the longer
+    # no-signal timeout below.
+    _ms = measure_state if isinstance(measure_state, dict) else {}
+    try:
+        _first_bid_no_signal = bool(
+            str(measure_action or _ms.get("action") or "") == "raise"
+            and str(_ms.get("status") or "") == "waiting_measurement"
+            and float(_ms.get("old_bid_rub") or 0) <= 0
+            and float(_ms.get("new_bid_rub") or 0) > 0
+            and int(after.get("days") or 0) >= MEASURE_MIN_DAYS
+            and int(after.get("views") or 0) <= 0
+        )
+    except Exception:
+        _first_bid_no_signal = False
+    if _first_bid_no_signal:
+        return {
+            "status": "measured",
+            "effect": "inconclusive_first_bid_no_signal",
+            "before": before,
+            "after": after,
+            "delta": {"views_per_day_pct": None, "contacts_per_day_pct": None},
+            "required_days": MEASURE_MIN_DAYS,
+            "reason": (
+                f"После первой платной ставки завершён {int(after.get('days') or 0)} полный день "
+                "без просмотров; замер закрыт без winner/loser, ставка Avito не менялась."
+            ),
+        }
 
     # MEASURE_NO_SIGNAL_TIMEOUT_V1: a bid experiment that produced zero views
     # for a full week is not allowed to hold a permanent measurement lock. It is
