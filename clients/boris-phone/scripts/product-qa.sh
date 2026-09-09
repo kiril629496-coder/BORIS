@@ -727,7 +727,24 @@ grep -q 'test_phone_entitlement_revoke_reconciles_transport_immediately' backend
 grep -q 'telephony_entitlements e' backend/app/services/mcn_network_guard.py
 grep -q 'test_firewall_desired_state_ignores_unpaid_or_expired_mcn_trunks' backend/tests/test_mcn_network_autodiscovery.py
 grep -q 'test_guardian_verification_ignores_unpaid_or_expired_mcn_trunks' backend/tests/test_mcn_deferred_asterisk_recovery.py
+grep -q 'test_runtime_health_snapshot_ignores_unpaid_or_expired_phone_transport' backend/tests/test_telephony_autonomy.py
+grep -q 'test_provider_health_guardian_excludes_synthetic_and_unpaid_accounts' backend/tests/test_telephony_db_integration.py
+grep -q 'test_control_plane_ignores_unpaid_provider_but_flags_active_paid_provider' backend/tests/test_telephony_autonomy.py
+grep -q 'telephony_entitlements e WHERE e.account_id=p.account_id' backend/app/services/control_plane_adapters.py
+test "$(grep -c 'telephony_entitlements e' backend/app/services/telephony_core.py)" -ge 5
 echo PHONE_COMMERCIAL_RUNTIME_GATE=PASS
 echo PHONE_ENTITLEMENT_TRANSPORT_SELF_HEAL=PASS
+echo PHONE_AUTONOMY_ENTITLEMENT_FILTER=PASS
+
+# Saved provider health is diagnostic truth, not permission to present Phone as
+# live after the paid entitlement expires. Bootstrap/UI must fail closed while
+# preserving stored config for automatic recovery after renewal.
+grep -q 'provider_stored_verified' backend/app/services/telephony_core.py
+grep -q "state='phone_inactive'" backend/app/services/telephony_core.py
+grep -q "'phone_active':phone_active" backend/app/services/telephony_core.py
+grep -q "active_capabilities = PROVIDERS.get(p,{}).get('capabilities',\[\]) if p and phone_active else \[\]" backend/app/services/telephony_core.py
+grep -q 'test_provider_status_saved_connected_is_phone_inactive_without_paid_entitlement' backend/tests/test_telephony_db_integration.py
+grep -q 'test_provider_status_restores_connected_truth_when_phone_becomes_active' backend/tests/test_telephony_db_integration.py
+echo PHONE_PROVIDER_STATUS_ENTITLEMENT_TRUTH=PASS
 
 echo PHONE_PRODUCT_QA_FINAL=PASS

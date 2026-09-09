@@ -66,6 +66,68 @@ class TelephonyDBIntegration(unittest.TestCase):
             status=T.provider_status(self.account)
         self.assertEqual(status.get('online_devices'),0)
 
+    def test_provider_status_saved_connected_is_phone_inactive_without_paid_entitlement(self):
+        account='real_tel_status_'+uuid.uuid4().hex[:16]
+        db=SessionLocal()
+        try:
+            db.execute(text("""INSERT INTO telephony_provider_configs(
+                account_id,provider,credentials_enc,public_config_json,status,last_health_at,last_health_status
+            ) VALUES(:a,'uis','stored-qa-only','{}'::jsonb,'connected',now(),'ok')"""),{'a':account})
+            db.commit()
+        finally:
+            db.close()
+        try:
+            with patch('app.services.telephony_adapters.adapter_status',return_value={'implemented':True,'capabilities':['api','call_control']}):
+                status=T.provider_status(account)
+                bootstrap=T.client_bootstrap(account,'web','0.0.0')
+            self.assertTrue(status.get('provider_configured'))
+            self.assertTrue(status.get('provider_stored_verified'))
+            self.assertFalse(status.get('provider_verified'))
+            self.assertFalse(status.get('phone_active'))
+            self.assertEqual(status.get('provider_state'),'phone_inactive')
+            self.assertEqual(status.get('capabilities'),[])
+            self.assertTrue(all(v=='phone_inactive' for v in (status.get('platforms') or {}).values()))
+            self.assertEqual((status.get('phone_entitlement') or {}).get('status'),'not_entitled')
+            self.assertEqual(bootstrap.get('provider_state'),'phone_inactive')
+            self.assertEqual(bootstrap.get('commands'),[])
+            self.assertFalse(bootstrap.get('media_enabled'))
+        finally:
+            db=SessionLocal()
+            try:
+                db.execute(text("DELETE FROM telephony_provider_configs WHERE account_id=:a"),{'a':account})
+                db.commit()
+            finally:
+                db.close()
+
+    def test_provider_status_restores_connected_truth_when_phone_becomes_active(self):
+        account='real_tel_status_'+uuid.uuid4().hex[:16]
+        db=SessionLocal()
+        try:
+            db.execute(text("""INSERT INTO telephony_provider_configs(
+                account_id,provider,credentials_enc,public_config_json,status,last_health_at,last_health_status
+            ) VALUES(:a,'uis','stored-qa-only','{}'::jsonb,'connected',now(),'ok')"""),{'a':account})
+            db.commit()
+        finally:
+            db.close()
+        try:
+            with patch.object(T,'phone_entitlement_status',return_value={
+                'status':'active','active':True,'account_id':account,'paid_until':'2099-01-01T00:00:00+00:00'
+            }), patch('app.services.telephony_adapters.adapter_status',return_value={'implemented':True,'capabilities':['api','call_control']}):
+                status=T.provider_status(account)
+            self.assertTrue(status.get('phone_active'))
+            self.assertTrue(status.get('provider_stored_verified'))
+            self.assertTrue(status.get('provider_verified'))
+            self.assertEqual(status.get('provider_state'),'connected')
+            self.assertIn('api',status.get('capabilities') or [])
+            self.assertNotIn('phone_inactive',set((status.get('platforms') or {}).values()))
+        finally:
+            db=SessionLocal()
+            try:
+                db.execute(text("DELETE FROM telephony_provider_configs WHERE account_id=:a"),{'a':account})
+                db.commit()
+            finally:
+                db.close()
+
     def test_no_manual_route_is_required_for_inbound_call(self):
         device='dev_qa_default_route_'+uuid.uuid4().hex[:12]
         registered=T.register_device(
