@@ -234,7 +234,7 @@ def provider_order(account_id: str | None = None) -> list[str]:
         order.append("openai")
 
     if (
-        _truthy("BORIS_SALES_DEEPSEEK_ENABLED", True)
+        _truthy("BORIS_SALES_DEEPSEEK_ENABLED", False)
         and str(os.getenv("DEEPSEEK_API_KEY") or "").strip()
         and not _deepseek_provider_blocked()
         and not _circuit_blocks("deepseek.sales", account_id)

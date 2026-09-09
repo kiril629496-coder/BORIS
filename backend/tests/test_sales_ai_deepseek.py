@@ -17,6 +17,17 @@ def _isolate(monkeypatch, *, gemini="0", local="0"):
     monkeypatch.setattr(R, "_circuit_blocks", lambda *a, **k: False)
 
 
+def test_deepseek_api_key_alone_does_not_enable_paid_provider(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test-key")
+    monkeypatch.delenv("BORIS_SALES_DEEPSEEK_ENABLED", raising=False)
+    monkeypatch.setenv("BORIS_SALES_GEMINI_ENABLED", "0")
+    monkeypatch.setenv("BORIS_SALES_LOCAL_ENABLED", "0")
+    monkeypatch.setattr(R, "_deepseek_provider_blocked", lambda: False)
+    monkeypatch.setattr(R, "_circuit_blocks", lambda *a, **k: False)
+    assert R.provider_order("a") == []
+
+
 def test_provider_order_includes_deepseek_without_openai(monkeypatch):
     _isolate(monkeypatch)
     assert R.provider_order("a") == ["deepseek"]
