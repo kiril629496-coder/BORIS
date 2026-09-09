@@ -1142,6 +1142,47 @@ def _mop_measurement_repair_reply(history_text: str) -> str:
     return "Понял, нужен замерщик. Размеры повторно спрашивать не буду. Подскажите адрес объекта, куда нужен замер?"
 
 
+def _mop_text_has_phone(text_value: str) -> bool:
+    """High-precision phone detector for the current client turn only."""
+    import re as _phone_re
+    raw=str(text_value or "")
+    return bool(
+        _phone_re.search(
+            r"(?<!\d)(?:\+?7|8)[\s()\-]*\d{3}[\s()\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}(?!\d)",
+            raw,
+        )
+        or _phone_re.search(r"(?<!\d)9\d{9}(?!\d)", raw)
+    )
+
+
+def _mop_handoff_rules_require_phone(handoff_rules) -> bool:
+    """Return True only when account rules explicitly hand phone leads to a human."""
+    import re as _rule_re
+    for rule in handoff_rules or []:
+        low=str(rule or "").lower().replace("ё","е").strip()
+        if not low:
+            continue
+        if _rule_re.search(
+            r"(?:получ\w*|остав\w*|дал(?:а|и)?|присла\w*)\s+(?:номер|телефон)"
+            r"|(?:номер|телефон)\s+(?:получ\w*|остав\w*|дан|прислан)",
+            low,
+        ):
+            return True
+    return False
+
+
+def _mop_phone_handoff_enabled_for_account(account_id: str) -> bool:
+    """Read account policy only for an actual phone turn; fail closed on DB errors."""
+    db=SessionLocal()
+    try:
+        cfg=_mop_sales_settings_cfg(db, str(account_id or "")) or {}
+        return _mop_handoff_rules_require_phone(cfg.get("handoff_rules") or [])
+    except Exception:
+        return False
+    finally:
+        db.close()
+
+
 def _deterministic_mop_qualification(history_text: str, reply_text: str, analysis: dict | None = None) -> dict:
     """Derive factual lead state without a second AI call.
 
@@ -1887,6 +1928,43 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
     # --- Память клиента. В режиме strict отвечаем ТОЛЬКО подтверждённым знанием,
     # модель в этом случае не вызывается вовсе. Режим off -> всё как раньше.
     _question = _extract_question(chat) if not proactive_event else ""
+
+    # MOP_PHONE_HANDOFF_RULE_V1:
+    # Phone receipt is a deterministic business event. If this exact account
+    # explicitly lists phone receipt in handoff_rules, do not spend AI tokens or
+    # continue qualification after the client has already supplied the target
+    # contact. Return one safe acknowledgement and persist a structured human
+    # handoff. Accounts without that rule are unchanged.
+    if (
+        _question
+        and _mop_text_has_phone(_question)
+        and _mop_phone_handoff_enabled_for_account(account_id)
+    ):
+        _phone_reply = "Спасибо, номер получил. Дальше по вашему запросу подключится менеджер."
+        _phone_analysis = _deterministic_mop_qualification(
+            "Клиент: " + str(_question),
+            _phone_reply,
+            {
+                "human_handoff": True,
+                "handoff_reason": "получен телефон клиента",
+                "next_action": "менеджеру связаться с клиентом по полученному телефону",
+            },
+        )
+        _phone_analysis["human_handoff"] = True
+        _phone_analysis["handoff_reason"] = "получен телефон клиента"
+        _phone_usage = {
+            "provider": "deterministic_guard",
+            "model": "phone_handoff_rule_v1",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_rub": 0.0,
+            "memory_fast_path": True,
+            "policy_version": "MOP_PHONE_HANDOFF_RULE_V1",
+        }
+        print("MOP_PHONE_HANDOFF_RULE %s/%s" % (account_id, chat_id), flush=True)
+        return _wrap(_phone_reply, _phone_usage, return_meta, analysis=_phone_analysis)
+
     _mem = {"use_memory": False}
     if _question:
         _mdb = SessionLocal()

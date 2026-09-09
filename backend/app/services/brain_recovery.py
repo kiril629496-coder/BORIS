@@ -879,6 +879,248 @@ def _safe_crm_next_action_recovery(db) -> dict:
     return {'action':'create_or_repair_next_action','result':{'repaired':repaired,'tasks_created':created,'tasks_reused':reused,'owner_disabled_skipped':skipped_disabled},'after':{'recent_actionable_missing':after},'passed':after==0}
 
 
+def _safe_crm_assignment_phone_handoff_recovery(db) -> dict:
+    """CRM_ASSIGNMENT_PHONE_HANDOFF_RECOVERY_V1.
+
+    DB-only, bounded recovery for two canonical drifts:
+    1) Messenger lead/task lost its manager while the open CRM deal already has
+       a responsible user.
+    2) A lead has a confirmed phone but no open human task because an older MOP
+       path failed to persist human_required.
+
+    No client message, AI request, provider call or money mutation occurs here.
+    Existing explicit assignments are never overwritten.
+    """
+    import re
+    from sqlalchemy import text
+    from app.mop_core import text_hash
+    from app.services.client_supervisor import load_supervisor_snapshot
+
+    rows=db.execute(text("""
+      WITH latest_leads AS (
+        SELECT DISTINCT ON (account_id,avito_chat_id)
+               id,account_id,avito_chat_id,has_phone,assigned_user_id,assigned_at
+          FROM messenger_leads
+         ORDER BY account_id,avito_chat_id,id DESC
+      )
+      SELECT l.id AS lead_id,l.account_id,l.avito_chat_id,l.has_phone,
+             l.assigned_user_id,
+             d.id AS deal_id,d.owner_user_id,d.responsible_user_id,d.contact_id
+        FROM latest_leads l
+        JOIN LATERAL (
+          SELECT x.id,x.owner_user_id,x.responsible_user_id,x.contact_id
+            FROM boris_crm_deals x
+           WHERE x.avito_account_id=l.account_id
+             AND x.avito_chat_id=l.avito_chat_id
+             AND x.status='open'
+           ORDER BY x.id DESC LIMIT 1
+        ) d ON true
+       WHERE l.assigned_user_id IS NULL OR l.has_phone=true
+       ORDER BY l.id
+       LIMIT 1000
+    """)).mappings().all()
+
+    phone_re=re.compile(
+        r"(?<!\d)(?:\+?7|8)?[\s\-()]*(9\d{2})[\s\-()]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}(?!\d)"
+    )
+    eligibility={}
+    lead_assigned=0
+    task_assigned=0
+    phone_tasks_created=0
+    phone_human_followup=0
+    phone_existing_task=0
+    phone_prior_recovery=0
+    phone_no_message_evidence=0
+    skipped_inactive=0
+    missing_manager=0
+    created_task_ids=[]
+
+    for r in rows:
+        aid=str(r.get("account_id") or "")
+        if aid not in eligibility:
+            try:
+                snap=load_supervisor_snapshot(db,aid,max_age_seconds=300) if aid else None
+                eligibility[aid]=bool(
+                    snap and snap.get("client_state")=="active"
+                    and "crm" in list(snap.get("expected_modules") or [])
+                )
+            except Exception:
+                eligibility[aid]=False
+        if not eligibility.get(aid):
+            skipped_inactive+=1
+            continue
+
+        manager_id=r.get("responsible_user_id") or r.get("owner_user_id")
+        if manager_id is None:
+            missing_manager+=1
+            continue
+        manager_id=int(manager_id)
+        deal_id=int(r["deal_id"])
+        lead_id=int(r["lead_id"])
+
+        if r.get("assigned_user_id") is None:
+            updated=db.execute(text("""
+              UPDATE messenger_leads
+                 SET assigned_user_id=:u,
+                     assigned_at=COALESCE(assigned_at,now()),
+                     updated_at=now()
+               WHERE id=:id AND assigned_user_id IS NULL
+               RETURNING id
+            """),{"u":manager_id,"id":lead_id}).scalar()
+            if updated is not None:
+                lead_assigned+=1
+
+        assigned_tasks=db.execute(text("""
+          UPDATE boris_crm_tasks
+             SET assigned_user_id=:u
+           WHERE deal_id=:d AND status='open' AND assigned_user_id IS NULL
+           RETURNING id
+        """),{"u":manager_id,"d":deal_id}).scalars().all()
+        task_assigned+=len(assigned_tasks)
+
+        if not bool(r.get("has_phone")):
+            continue
+
+        if db.execute(text("""
+          SELECT 1 FROM boris_crm_tasks
+           WHERE deal_id=:d AND status='open'
+           LIMIT 1
+        """),{"d":deal_id}).first():
+            phone_existing_task+=1
+            continue
+
+        if db.execute(text("""
+          SELECT 1 FROM boris_crm_tasks
+           WHERE deal_id=:d AND source='mop_phone_handoff_recovery'
+           LIMIT 1
+        """),{"d":deal_id}).first():
+            phone_prior_recovery+=1
+            continue
+
+        inbound=db.execute(text("""
+          SELECT avito_created_at,text
+            FROM messenger_messages
+           WHERE account_id=:a AND avito_chat_id=:c
+             AND lower(direction) LIKE 'in%'
+             AND COALESCE(msg_type,'')<>'system'
+           ORDER BY avito_created_at,id
+        """),{"a":aid,"c":str(r.get("avito_chat_id") or "")}).mappings().all()
+        phone_epoch=None
+        for msg in inbound:
+            if phone_re.search(str(msg.get("text") or "")):
+                try:
+                    phone_epoch=int(msg.get("avito_created_at") or 0)
+                except Exception:
+                    phone_epoch=0
+                if phone_epoch:
+                    break
+        if not phone_epoch:
+            phone_no_message_evidence+=1
+            continue
+
+        mop_hashes={
+            str(x[0]) for x in db.execute(text("""
+              SELECT outgoing_text_hash
+                FROM mop_drafts
+               WHERE account_id=:a AND avito_chat_id=:c
+                 AND outgoing_text_hash IS NOT NULL
+            """),{"a":aid,"c":str(r.get("avito_chat_id") or "")}).all()
+            if x[0]
+        }
+        outgoing=db.execute(text("""
+          SELECT text,msg_type
+            FROM messenger_messages
+           WHERE account_id=:a AND avito_chat_id=:c
+             AND lower(direction) LIKE 'out%'
+             AND avito_created_at>:ts
+           ORDER BY avito_created_at,id
+        """),{"a":aid,"c":str(r.get("avito_chat_id") or ""),"ts":phone_epoch}).mappings().all()
+        human_followup=False
+        for msg in outgoing:
+            body=str(msg.get("text") or "").strip()
+            if not body or str(msg.get("msg_type") or "").lower()=="system":
+                continue
+            if text_hash(body) not in mop_hashes:
+                human_followup=True
+                break
+        if human_followup:
+            phone_human_followup+=1
+            continue
+
+        due=db.execute(text("SELECT now()+interval '15 minutes'")).scalar()
+        task_id=db.execute(text("""
+          INSERT INTO boris_crm_tasks(
+            owner_user_id,deal_id,contact_id,title,description,assigned_user_id,
+            due_at,status,source,created_at
+          ) VALUES(
+            :o,:d,:c,'Связаться с клиентом — получен телефон',
+            'BORIS восстановил обязательную передачу менеджеру: клиент оставил телефон, а открытой задачи не было.',
+            :u,:due,'open','mop_phone_handoff_recovery',now()
+          ) RETURNING id
+        """),{
+          "o":r.get("owner_user_id"),"d":deal_id,"c":r.get("contact_id"),
+          "u":manager_id,"due":due,
+        }).scalar()
+        if task_id is None:
+            continue
+        task_id=int(task_id)
+        db.execute(text("""
+          UPDATE boris_crm_deals
+             SET next_action_at=CASE
+                   WHEN next_action_at IS NULL OR next_action_at>:due THEN :due
+                   ELSE next_action_at END,
+                 updated_at=now()
+           WHERE id=:d
+        """),{"due":due,"d":deal_id})
+        ref=f"brain_phone_handoff:{lead_id}:{deal_id}"
+        if not db.execute(text(
+            "SELECT 1 FROM boris_crm_activities WHERE source_ref=:r LIMIT 1"
+        ),{"r":ref}).first():
+            db.execute(text("""
+              INSERT INTO boris_crm_activities(
+                owner_user_id,deal_id,contact_id,activity_type,channel,title,body,
+                source,source_ref,actor_type,actor_id,metadata_json,created_at
+              ) VALUES(
+                :o,:d,:c,'task_created','crm',
+                'BORIS восстановил передачу лида с телефоном менеджеру',
+                'Телефон уже был получен, человеческий follow-up после него не подтверждён.',
+                'brain_phone_handoff',:ref,'system','boris',CAST(:meta AS jsonb),now()
+              )
+            """),{
+              "o":r.get("owner_user_id"),"d":deal_id,"c":r.get("contact_id"),
+              "ref":ref,
+              "meta":json.dumps({
+                "lead_id":lead_id,"account_id":aid,"task_id":task_id,
+                "assigned_user_id":manager_id,
+                "external_action":False,"owner_action_required":False,
+                "policy_version":"CRM_ASSIGNMENT_PHONE_HANDOFF_RECOVERY_V1",
+              },ensure_ascii=False),
+            })
+        phone_tasks_created+=1
+        created_task_ids.append(task_id)
+
+    db.commit()
+    return {
+      "action":"sync_crm_assignment_and_recover_phone_handoff",
+      "result":{
+        "changed":lead_assigned+task_assigned+phone_tasks_created,
+        "lead_assigned":lead_assigned,
+        "task_assigned":task_assigned,
+        "phone_tasks_created":phone_tasks_created,
+        "phone_task_ids":created_task_ids,
+        "phone_existing_task":phone_existing_task,
+        "phone_human_followup":phone_human_followup,
+        "phone_prior_recovery":phone_prior_recovery,
+        "phone_no_message_evidence":phone_no_message_evidence,
+        "skipped_inactive_or_crm_off":skipped_inactive,
+        "missing_manager":missing_manager,
+      },
+      "passed":True,
+      "verification":"active CRM snapshot + exact open deal manager; DB-only assignment/task recovery; no client/provider/AI action",
+      "marker":"CRM_ASSIGNMENT_PHONE_HANDOFF_RECOVERY_V1",
+    }
+
+
 def _safe_crm_task_existing_analysis_enrich(db) -> dict:
     """Turn generic call follow-up tasks into specific existing agreements.
 
@@ -1645,6 +1887,7 @@ def run_safe_recovery(db) -> dict:
     runners=(
         ("marketing",lambda:_safe_marketer_runtime_recovery(db)),
         ("crm",lambda:_safe_crm_next_action_recovery(db)),
+        ("crm_assignment_phone_handoff",lambda:_safe_crm_assignment_phone_handoff_recovery(db)),
         ("crm_task_enrich",lambda:_safe_crm_task_existing_analysis_enrich(db)),
         ("crm_task_evidence",lambda:_safe_crm_task_evidence_reconcile(db)),
         ("crm_calltracking_links",lambda:_safe_calltracking_orphan_task_link_repair(db)),
