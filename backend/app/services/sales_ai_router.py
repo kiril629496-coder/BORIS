@@ -1299,13 +1299,37 @@ def readiness(account_id: str | None = None) -> dict:
             "reason": "local_pressure_check_failed:" + type(exc).__name__,
         }
     if pressure.get("under_pressure"):
-        return {
-            "ready": False,
-            "order": order,
-            "ready_providers": [],
-            "reason": "local_fenced_by_production_pressure",
-            "pressure_reasons": list(pressure.get("reasons") or []),
+        # LOCAL_READINESS_TRANSIENT_PRESSURE_CONFIRM_V1:
+        # Keep readiness semantics aligned with the real Ollama call. A single
+        # short CPU/iowait/steal sample must not make live MOP fast-fail before
+        # _ollama_default_call gets the same bounded confirmation chance.
+        transient_reasons = {
+            "CPU занят выше безопасного порога",
+            "слишком высокий CPU iowait",
+            "гипервизор отбирает слишком много CPU",
         }
+        reasons = set(str(x) for x in (pressure.get("reasons") or []))
+        if reasons and reasons.issubset(transient_reasons):
+            time.sleep(0.25)
+            try:
+                confirmed = _sched.pressure()
+            except Exception:
+                confirmed = pressure
+            pressure = confirmed
+
+        historical_headroom = bool(
+            pressure.get("under_pressure")
+            and pressure.get("historical_load_only")
+            and pressure.get("instant_headroom")
+        )
+        if pressure.get("under_pressure") and not historical_headroom:
+            return {
+                "ready": False,
+                "order": order,
+                "ready_providers": [],
+                "reason": "local_fenced_by_production_pressure",
+                "pressure_reasons": list(pressure.get("reasons") or []),
+            }
 
     try:
         req = urllib.request.Request(

@@ -656,3 +656,60 @@ def test_local_ollama_caps_timeout_before_urlopen(monkeypatch, tmp_path):
     )
     assert seen["timeout"] == 45
     assert out["provider"] == "ollama"
+
+
+def test_readiness_rechecks_transient_pressure_before_fast_fail(monkeypatch):
+    monkeypatch.setattr(R, "provider_order", lambda account_id=None: ["ollama"])
+    samples = iter([
+        {"under_pressure": True, "reasons": ["слишком высокий CPU iowait"]},
+        {"under_pressure": False, "reasons": []},
+    ])
+    monkeypatch.setattr("app.ext_api.sched.pressure", lambda: next(samples))
+    monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+
+    class Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    monkeypatch.setattr(R.urllib.request, "urlopen", lambda req, timeout: Resp())
+    out = R.readiness("a")
+    assert out["ready"] is True
+    assert out["reason"] == "local_provider_available"
+
+
+def test_readiness_persistent_transient_pressure_stays_fail_closed(monkeypatch):
+    monkeypatch.setattr(R, "provider_order", lambda account_id=None: ["ollama"])
+    calls = {"n": 0}
+    def pressure():
+        calls["n"] += 1
+        return {"under_pressure": True, "reasons": ["CPU занят выше безопасного порога"]}
+    monkeypatch.setattr("app.ext_api.sched.pressure", pressure)
+    monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+    out = R.readiness("a")
+    assert calls["n"] == 2
+    assert out["ready"] is False
+    assert out["reason"] == "local_fenced_by_production_pressure"
+
+
+def test_readiness_historical_load_only_matches_inference_recovery_floor(monkeypatch):
+    monkeypatch.setattr(R, "provider_order", lambda account_id=None: ["ollama"])
+    monkeypatch.setattr(
+        "app.ext_api.sched.pressure",
+        lambda: {
+            "under_pressure": True,
+            "reasons": ["load average выше безопасного порога"],
+            "historical_load_only": True,
+            "instant_headroom": True,
+        },
+    )
+
+    class Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    monkeypatch.setattr(R.urllib.request, "urlopen", lambda req, timeout: Resp())
+    out = R.readiness("a")
+    assert out["ready"] is True
+    assert out["reason"] == "local_provider_available"
