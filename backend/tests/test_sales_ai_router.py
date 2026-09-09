@@ -15,6 +15,8 @@ def _isolate_live_gemini_daily_quota(monkeypatch):
     # Runtime provider behavior is verified separately against real services.
     monkeypatch.setattr(R, "_gemini_daily_quota_blocks", lambda: False)
     monkeypatch.setattr(R, "_openai_billing_blocked", lambda: False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(R, "_deepseek_provider_blocked", lambda: False)
     monkeypatch.setenv("BORIS_SALES_GIGACHAT_ENABLED", "0")
 
 
@@ -137,7 +139,9 @@ def test_status_exposes_exact_three_provider_policy(monkeypatch):
     monkeypatch.setenv("BORIS_SALES_LOCAL_ENABLED", "1")
     with patch.object(R, "_circuit_blocks", return_value=False),          patch.object(R, "_circuit_snapshot", return_value={}),          patch.object(R, "readiness", return_value={"ready": True, "order": ["gemini", "ollama"]}):
         out = R.status("a")
-    assert out["policy"] == "openai_if_usable_then_free_gemini_then_local"
+    assert out["policy"] == "openai_if_usable_then_deepseek_then_free_gemini_then_local"
+    assert "deepseek_circuit" in out
+    assert "deepseek" in out["models"]
     assert "gigachat_circuit" not in out
     assert "gigachat" not in out["models"]
     assert out["order"] == ["gemini", "ollama"]

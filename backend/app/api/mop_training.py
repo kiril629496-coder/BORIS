@@ -597,7 +597,7 @@ def _ai_json(
 
     # MOP_TRAINING_SALES_AI_ROUTER_V1:
     # Training uses the same autonomous provider policy as live MOP/ROP:
-    # OpenAI when usable -> free Gemini CLI -> local Ollama. This keeps
+    # OpenAI when usable -> DeepSeek -> free Gemini CLI -> local Ollama. This keeps
     # sparring alive when paid OpenAI is unavailable and automatically
     # returns to OpenAI after its reliability circuit recovers.
     try:
@@ -642,7 +642,7 @@ def _ai_json(
             "cost_rub": float(_routed.get("cost_rub") or 0.0),
             "elapsed_sec": round(_time.time() - started, 3),
             "fallback_chain": list(_routed.get("fallback_chain") or []),
-            "router_policy": "openai_if_usable_then_free_gemini_then_local",
+            "router_policy": "openai_if_usable_then_deepseek_then_free_gemini_then_local",
         }
         return _result, _usage
     except Exception as _router_exc:

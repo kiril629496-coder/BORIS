@@ -1993,7 +1993,7 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
 
         # MOP_SALES_AI_ROUTER_V1:
         # One canonical provider policy for live MOP and training:
-        # OpenAI when usable -> free Gemini CLI -> local Ollama.
+        # OpenAI when usable -> DeepSeek -> free Gemini CLI -> local Ollama.
         # The outer advisory lock/cache remains the exactly-once boundary for
         # one incoming client intent. Provider selection is automatic and
         # OpenAI is retried only after its reliability circuit permits a
@@ -2150,7 +2150,7 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
                 "request_id":str((_sales_result or {}).get("request_id") or ""),
                 "cost_rub":float((_sales_result or {}).get("cost_rub") or 0.0),
                 "fallback_chain":list((_sales_result or {}).get("fallback_chain") or []),
-                "router_policy":"openai_if_usable_then_free_gemini_then_local",
+                "router_policy":"openai_if_usable_then_deepseek_then_free_gemini_then_local",
             })
             reply_text, analysis, structured_error = _normalize_mop_structured(raw_content)
         reply_text, analysis, _meta_repair = _repair_meta_client_reply(reply_text, _question, analysis)
@@ -2208,7 +2208,7 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
                 ).hexdigest()[:24]
             )
         _logged_cost = float((usage or {}).get("cost_rub") or 0.0)
-        if _provider_kind not in {"openai", "gemini", "ollama"}:
+        if _provider_kind not in {"openai", "deepseek", "gemini", "ollama"}:
             try:
                 from app.usage import log_usage as _log_common
                 _logged_cost = float(_log_common(

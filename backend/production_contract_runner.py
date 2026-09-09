@@ -300,7 +300,7 @@ REQUIRED_MARKERS = {
     "rop_chat_sales_ai_router": (ROOT / "backend/app/api/calltracking.py", "rop_chat_analysis"),
     "sales_gemini_daily_reset_probe_latch": (ROOT / "backend/app/services/sales_ai_router.py", "GEMINI_DAILY_RESET_PROBE_LATCH_V1"),
     "sales_router_no_gigachat_fallback": (ROOT / "backend/app/services/sales_ai_router.py", "SALES_ROUTER_NO_GIGACHAT_FALLBACK_V1"),
-    "sales_router_exact_provider_policy": (ROOT / "backend/app/services/sales_ai_router.py", "openai_if_usable_then_free_gemini_then_local"),
+    "sales_router_exact_provider_policy": (ROOT / "backend/app/services/sales_ai_router.py", "openai_if_usable_then_deepseek_then_free_gemini_then_local"),
     "sales_local_emergency_model": (ROOT / "backend/app/services/sales_ai_router.py", "SALES_LOCAL_EMERGENCY_MODEL_V1"),
     "sales_local_pressure_recovery_floor": (ROOT / "backend/app/services/sales_ai_router.py", "LOCAL_AI_HISTORICAL_LOAD_RECOVERY_FLOOR_V1"),
     "gemini_daily_reset_proactive_probe": (ROOT / "backend/.boris_ops/chat_coordination/development_provider_watch.py", "GEMINI_DAILY_RESET_PROACTIVE_PROBE_V1"),

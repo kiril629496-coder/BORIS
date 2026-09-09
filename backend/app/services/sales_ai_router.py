@@ -5,6 +5,7 @@ One provider-selection layer for MOP / ROP / training.
 
 Policy:
     OpenAI (when usable and budget allows)
+        -> DeepSeek remote fallback
         -> Gemini CLI free fallback
         -> local Ollama/Qwen fallback
 
@@ -211,6 +212,17 @@ def _gemini_daily_quota_blocks() -> bool:
         db.close()
 
 
+def _deepseek_provider_blocked() -> bool:
+    """Read-only durable provider latch; no network call."""
+    try:
+        from app.ext_api import aiprov as _aiprov
+        row = _aiprov.state("deepseek") or {}
+        return bool(row) and not bool(row.get("usable", True))
+    except Exception:
+        # Missing provider-state evidence must not invent an outage.
+        return False
+
+
 def provider_order(account_id: str | None = None) -> list[str]:
     order: list[str] = []
     if (
@@ -222,6 +234,14 @@ def provider_order(account_id: str | None = None) -> list[str]:
         order.append("openai")
 
     if (
+        _truthy("BORIS_SALES_DEEPSEEK_ENABLED", True)
+        and str(os.getenv("DEEPSEEK_API_KEY") or "").strip()
+        and not _deepseek_provider_blocked()
+        and not _circuit_blocks("deepseek.sales", account_id)
+    ):
+        order.append("deepseek")
+
+    if (
         _truthy("BORIS_SALES_GEMINI_ENABLED", True)
         and not _gemini_daily_quota_blocks()
         and not _circuit_blocks("gemini.sales", account_id)
@@ -230,7 +250,7 @@ def provider_order(account_id: str | None = None) -> list[str]:
 
     # SALES_ROUTER_NO_GIGACHAT_FALLBACK_V1:
     # Sales/MOP/ROP policy is intentionally limited to:
-    # paid OpenAI primary -> free Gemini CLI -> local Ollama/Qwen.
+    # paid OpenAI primary -> DeepSeek remote -> free Gemini CLI -> local Ollama/Qwen.
     # GigaChat credentials must never silently change this policy.
     if _truthy("BORIS_SALES_LOCAL_ENABLED", True):
         order.append("ollama")
@@ -483,6 +503,212 @@ def _openai_default_call(
         "cost_rub": round(cost, 4),
     }
 
+
+def _deepseek_default_call(
+    *,
+    account_id: str,
+    operation: str,
+    prompt: str,
+    model: str,
+    timeout: int,
+    max_output_tokens: int,
+    module: str,
+    expect_json: bool = False,
+) -> dict:
+    """One bounded DeepSeek ChatCompletions call with durable provider fencing."""
+    import requests
+    from app.usage import log_usage
+    from app.ext_api import aiprov as _aiprov
+
+    key = str(os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    if not key:
+        raise SalesAIProviderUnavailable("deepseek key missing")
+
+    base = str(
+        os.getenv("BORIS_DEEPSEEK_BASE_URL")
+        or os.getenv("DEEPSEEK_BASE_URL")
+        or "https://api.deepseek.com"
+    ).rstrip("/")
+    endpoint = base + "/chat/completions"
+    module_name = str(module or "sales").strip().lower()
+    fast_non_thinking = bool(module_name == "mop" or str(operation or "").startswith("mop_"))
+
+    messages = []
+    if expect_json:
+        messages.append({
+            "role": "system",
+            "content": "Return only valid JSON. The final response must be a JSON object.",
+        })
+    messages.append({"role": "user", "content": str(prompt)})
+
+    body = {
+        "model": str(model),
+        "messages": messages,
+        "max_tokens": max(64, int(max_output_tokens or 900)),
+        "stream": False,
+        "thinking": {"type": "disabled" if fast_non_thinking else "enabled"},
+    }
+    if fast_non_thinking:
+        body["temperature"] = float(os.getenv("BORIS_DEEPSEEK_MOP_TEMPERATURE", "0.15") or 0.15)
+    else:
+        body["reasoning_effort"] = str(
+            os.getenv("BORIS_DEEPSEEK_REASONING_EFFORT") or "high"
+        )
+    if expect_json:
+        body["response_format"] = {"type": "json_object"}
+
+    def _run():
+        try:
+            response = requests.post(
+                endpoint,
+                headers={
+                    "Authorization": "Bearer " + key,
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=max(5, int(timeout)),
+            )
+        except Exception as exc:
+            raise SalesAIProviderUnavailable(
+                "deepseek transport unavailable: " + type(exc).__name__
+            ) from exc
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise SalesAIProviderUnavailable(
+                "deepseek invalid response envelope"
+            ) from exc
+
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code >= 300:
+            err = data.get("error") if isinstance(data, dict) else {}
+            err = err if isinstance(err, dict) else {}
+            safe_code = str(err.get("code") or err.get("type") or "")[:80]
+            if status_code in (400, 422):
+                raise SalesAIValidationError(
+                    "deepseek request rejected http=%s code=%s"
+                    % (status_code, safe_code or "invalid_parameters")
+                )
+            if status_code == 402:
+                state = _aiprov.UNAVAILABLE_BILLING
+                retry_after = max(
+                    3600,
+                    int(os.getenv("BORIS_DEEPSEEK_BILLING_RETRY_SEC", "21600") or 21600),
+                )
+                reason = "billing"
+            elif status_code in (401, 403):
+                state = _aiprov.AUTH_ERROR
+                retry_after = max(
+                    300,
+                    int(os.getenv("BORIS_DEEPSEEK_AUTH_RETRY_SEC", "1800") or 1800),
+                )
+                reason = "authentication"
+            elif status_code == 429:
+                state = _aiprov.RATE_LIMITED
+                retry_after = max(
+                    30,
+                    int(os.getenv("BORIS_DEEPSEEK_RATE_RETRY_SEC", "300") or 300),
+                )
+                reason = "rate_limit"
+            else:
+                state = _aiprov.TEMP_ERROR
+                retry_after = max(
+                    30,
+                    int(os.getenv("BORIS_DEEPSEEK_TEMP_RETRY_SEC", "120") or 120),
+                )
+                reason = "provider_error"
+            try:
+                _aiprov.mark(
+                    "deepseek",
+                    state,
+                    "sales DeepSeek http=%s code=%s" % (status_code, safe_code or reason),
+                    retry_after=retry_after,
+                )
+            except Exception:
+                pass
+            raise SalesAIProviderUnavailable(
+                "deepseek %s http=%s" % (reason, status_code)
+            )
+
+        try:
+            _aiprov.mark("deepseek", _aiprov.AVAILABLE, "sales DeepSeek call PASS")
+        except Exception:
+            pass
+        return data
+
+    try:
+        data = dependency_call(
+            "deepseek.sales",
+            _run,
+            threshold=max(
+                2,
+                int(os.getenv("BORIS_SALES_DEEPSEEK_CIRCUIT_THRESHOLD", "2") or 2),
+            ),
+            cooldown_seconds=max(
+                60,
+                int(os.getenv("BORIS_SALES_DEEPSEEK_COOLDOWN_SEC", "90") or 90),
+            ),
+            account_id=str(account_id or "") or None,
+            tenant_limit_per_minute=max(
+                1,
+                int(os.getenv("BORIS_SALES_DEEPSEEK_TENANT_RPM", "60") or 60),
+            ),
+        )
+    except (CircuitOpen, ProviderDeferred):
+        raise
+
+    choices = data.get("choices") if isinstance(data, dict) else None
+    message = ((choices or [{}])[0].get("message") or {}) if choices else {}
+    text_out = str(message.get("content") or "").strip()
+    if not text_out:
+        raise SalesAIOutputInvalid("deepseek returned empty content")
+
+    usage = data.get("usage") if isinstance(data, dict) else {}
+    usage = usage if isinstance(usage, dict) else {}
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+    cache_hit = int(usage.get("prompt_cache_hit_tokens") or 0)
+    request_id = str(data.get("id") or "").strip()
+    if not request_id:
+        request_id = "deepseek:sales:" + hashlib.sha256(
+            (str(account_id) + ":" + str(operation) + ":" + text_out).encode("utf-8")
+        ).hexdigest()[:24]
+
+    cost = float(log_usage(
+        account_id=str(account_id),
+        provider="deepseek",
+        model=str(model),
+        operation=str(operation),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        request_id=request_id,
+        usage_details={
+            "input_tokens_details": {"cached_tokens": cache_hit},
+            "deepseek_prompt_cache_hit_tokens": cache_hit,
+            "deepseek_prompt_cache_miss_tokens": int(
+                usage.get("prompt_cache_miss_tokens") or 0
+            ),
+            "deepseek_reasoning_tokens": int(
+                ((usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)
+                if isinstance(usage.get("completion_tokens_details"), dict)
+                else 0
+            ),
+        },
+    ) or 0.0)
+
+    return {
+        "text": text_out,
+        "provider": "deepseek",
+        "model": str(model),
+        "request_id": request_id,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "prompt_cache_hit_tokens": cache_hit,
+        },
+        "cost_rub": round(cost, 4),
+    }
 
 def _gemini_default_call(
     *,
@@ -867,6 +1093,7 @@ def generate_text(
     module: str = "sales",
     idempotency_key: str = "",
     openai_model: str | None = None,
+    deepseek_model: str | None = None,
     gemini_model: str | None = None,
     gigachat_model: str | None = None,
     local_model: str | None = None,
@@ -878,6 +1105,7 @@ def generate_text(
     local_num_ctx: int | None = None,
     local_num_predict: int | None = None,
     openai_call: Callable[..., Any] | None = None,
+    deepseek_call: Callable[..., Any] | None = None,
     gemini_call: Callable[..., Any] | None = None,
     gigachat_call: Callable[..., Any] | None = None,
     local_call: Callable[..., Any] | None = None,
@@ -891,6 +1119,19 @@ def generate_text(
 
     openai_model = str(
         openai_model or os.getenv("BORIS_SALES_OPENAI_MODEL") or "gpt-5.4-mini"
+    )
+    _module_name = str(module or "sales").strip().lower()
+    deepseek_model = str(
+        deepseek_model
+        or (
+            os.getenv("BORIS_MOP_DEEPSEEK_MODEL")
+            if _module_name == "mop"
+            else os.getenv("BORIS_ROP_DEEPSEEK_MODEL")
+            if _module_name == "rop"
+            else None
+        )
+        or os.getenv("BORIS_SALES_DEEPSEEK_MODEL")
+        or ("deepseek-v4-pro" if _module_name == "rop" else "deepseek-v4-flash")
     )
     gemini_model = str(
         gemini_model or os.getenv("BORIS_SALES_GEMINI_MODEL") or "gemini-2.5-flash"
@@ -908,12 +1149,14 @@ def generate_text(
 
     adapters = {
         "openai": openai_call or _openai_default_call,
+        "deepseek": deepseek_call or _deepseek_default_call,
         "gemini": gemini_call or _gemini_default_call,
         "gigachat": gigachat_call or _gigachat_default_call,
         "ollama": local_call or _ollama_default_call,
     }
     models = {
         "openai": openai_model,
+        "deepseek": deepseek_model,
         "gemini": gemini_model,
         "gigachat": gigachat_model,
         "ollama": local_model,
@@ -938,6 +1181,12 @@ def generate_text(
                 "max_output_tokens": int(max_output_tokens),
                 "idempotency_key": str(idempotency_key or ""),
                 "module": str(module or "sales"),
+            })
+        elif provider == "deepseek":
+            kwargs.update({
+                "max_output_tokens": int(max_output_tokens),
+                "module": str(module or "sales"),
+                "expect_json": bool(expect_json),
             })
         elif provider == "gigachat":
             kwargs.update({
@@ -1081,11 +1330,13 @@ def status(account_id: str | None = None) -> dict:
         "order": provider_order(account_id),
         "readiness": readiness(account_id),
         "openai_circuit": _circuit_snapshot("openai.text", account_id),
+        "deepseek_circuit": _circuit_snapshot("deepseek.sales", account_id),
         "gemini_circuit": _circuit_snapshot("gemini.sales", account_id),
         "models": {
             "openai": str(os.getenv("BORIS_SALES_OPENAI_MODEL") or "gpt-5.4-mini"),
+            "deepseek": str(os.getenv("BORIS_SALES_DEEPSEEK_MODEL") or "deepseek-v4-flash"),
             "gemini": str(os.getenv("BORIS_SALES_GEMINI_MODEL") or "gemini-2.5-flash"),
             "ollama": str(os.getenv("BORIS_SALES_LOCAL_MODEL") or "qwen3:1.7b"),
         },
-        "policy": "openai_if_usable_then_free_gemini_then_local",
+        "policy": "openai_if_usable_then_deepseek_then_free_gemini_then_local",
     }

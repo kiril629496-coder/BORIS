@@ -16,6 +16,10 @@ IMAGE_FALLBACK_USD = 0.04         # ВРЕМЕННАЯ оценка цены г�
 PRICES = {
     ("openai", "gpt-5.4"):        {"in": 2.50, "out": 15.00},
     ("openai", "gpt-4o-mini"):    {"in": 0.15, "out": 0.60},
+    # DeepSeek peak rates (UTC peak window). Off-peak is cheaper; using peak
+    # rates here keeps BORIS cost accounting conservative rather than understated.
+    ("deepseek", "deepseek-v4-flash"): {"in": 0.44, "cached_in": 0.014, "out": 1.32},
+    ("deepseek", "deepseek-v4-pro"):   {"in": 1.32, "cached_in": 0.044, "out": 3.96},
     ("openai", "gpt-image"):      {"image_usd": IMAGE_FALLBACK_USD},
     ("gigachat", "GigaChat-Max"): {"in": 0.20, "out": 0.20},
     ("gigachat", "GigaChat-Pro"): {"in": 0.15, "out": 0.15},
