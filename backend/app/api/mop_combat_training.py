@@ -886,7 +886,24 @@ def sparring_turn(body: SparringTurn):
         answer="Принял. Этот момент уже зафиксирован, повторно уточнять его не буду."
 
     _usage=_generated_usage
-    turn={"id":f"t_{now}_{len(state['messages'])}","role":"mop","text":answer,"at":int(time.time()),"instruction_version":_instruction_version(account_id),"business_goal":state.get("business_goal") or "","provider":str(_usage.get("provider") or "local"),"model":str(_usage.get("model") or "local"),"usage":_usage,"training":True,"delivery":"disabled"}
+    _analysis=(generated or {}).get("analysis")
+    if not isinstance(_analysis,dict):
+        _analysis=None
+    turn={
+        "id":f"t_{now}_{len(state['messages'])}",
+        "role":"mop",
+        "text":answer,
+        "at":int(time.time()),
+        "instruction_version":_instruction_version(account_id),
+        "business_goal":state.get("business_goal") or "",
+        "provider":str(_usage.get("provider") or "local"),
+        "model":str(_usage.get("model") or "local"),
+        "usage":_usage,
+        "analysis":_analysis,
+        "human_handoff":bool((_analysis or {}).get("human_handoff") is True),
+        "training":True,
+        "delivery":"disabled",
+    }
     state["messages"].append(turn)
     state["manager_turns"] = sum(1 for m in state.get("messages", []) if m.get("role") == "mop")
     state["updated_at"]=int(time.time()); _save(account_id,rows)

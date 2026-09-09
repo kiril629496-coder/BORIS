@@ -38,6 +38,9 @@ def test_crm_phone_recovery_is_db_only_and_idempotent_by_source():
     assert "CRM_ASSIGNMENT_PHONE_HANDOFF_RECOVERY_V1" in src
     assert "assigned_user_id IS NULL" in src
     assert "mop_phone_handoff_recovery" in src
+    assert "client_supervisor_snapshot_v1" in src
+    assert "SET LOCAL jit=off" in src
+    assert "brain_phone_handoff_evidence" in src
     assert "human_followup" in src
     assert "send_message(" not in src
     assert "generate_ai" not in src
@@ -58,3 +61,5 @@ def test_training_phone_handoff_precedes_first_contact_fast_stage():
     assert "_mop_text_has_phone(body.message.strip())" in src
     assert "_mop_phone_handoff_enabled_for_account(account_id)" in src
     assert "generate_ai_draft_reply(" in src
+    assert '"analysis":_analysis' in src
+    assert '"human_handoff":bool' in src

@@ -896,10 +896,15 @@ def _safe_crm_assignment_phone_handoff_recovery(db) -> dict:
     from app.mop_core import text_hash
     from app.services.client_supervisor import load_supervisor_snapshot
 
+    # This control query is branch-heavy and returns only a tiny recovery set.
+    # PostgreSQL JIT startup costs far more than execution here; keep the setting
+    # transaction-local so analytical/business queries elsewhere are untouched.
+    db.execute(text("SET LOCAL jit=off"))
+
     rows=db.execute(text("""
       WITH latest_leads AS (
         SELECT DISTINCT ON (account_id,avito_chat_id)
-               id,account_id,avito_chat_id,has_phone,assigned_user_id,assigned_at
+               id,account_id,avito_chat_id,has_phone,assigned_user_id,assigned_at,updated_at
           FROM messenger_leads
          ORDER BY account_id,avito_chat_id,id DESC
       )
@@ -915,9 +920,61 @@ def _safe_crm_assignment_phone_handoff_recovery(db) -> dict:
              AND x.status='open'
            ORDER BY x.id DESC LIMIT 1
         ) d ON true
-       WHERE l.assigned_user_id IS NULL OR l.has_phone=true
+        JOIN LATERAL (
+          SELECT ss.value::jsonb AS snap
+            FROM storage ss
+           WHERE ss.account_id=l.account_id
+             AND ss.key='client_supervisor_snapshot_v1'
+           ORDER BY ss.id DESC LIMIT 1
+        ) sup ON true
+       WHERE sup.snap->>'client_state'='active'
+         AND (sup.snap->'expected_modules') ? 'crm'
+         AND (sup.snap->>'checked_at')::timestamptz>=now()-interval '5 minutes'
+         AND (
+           l.assigned_user_id IS NULL
+           OR EXISTS (
+             SELECT 1 FROM boris_crm_tasks t
+              WHERE t.deal_id=d.id AND t.status='open'
+                AND t.assigned_user_id IS NULL
+           )
+           OR (
+             l.has_phone=true
+             AND l.updated_at>=now()-interval '30 days'
+             AND (
+               EXISTS (
+                 SELECT 1 FROM boris_crm_activities pa
+                  WHERE pa.deal_id=d.id AND pa.source='mop_goal'
+                    AND right(COALESCE(pa.source_ref,''),14)='phone_received'
+               )
+               OR EXISTS (
+                 SELECT 1 FROM messenger_messages pm
+                  WHERE pm.account_id=l.account_id
+                    AND pm.avito_chat_id=l.avito_chat_id
+                    AND lower(pm.direction) LIKE 'in%'
+                    AND COALESCE(pm.msg_type,'')<>'system'
+                    AND regexp_replace(COALESCE(pm.text,''),'[^0-9]','','g')
+                        ~ '(7|8)?9[0-9]{9}'
+               )
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM boris_crm_tasks t
+                WHERE t.deal_id=d.id AND t.status='open'
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM boris_crm_tasks t
+                WHERE t.deal_id=d.id AND t.source='mop_phone_handoff_recovery'
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM boris_crm_activities ev
+                WHERE ev.deal_id=d.id
+                  AND ev.source='brain_phone_handoff_evidence'
+                  AND COALESCE(ev.metadata_json->>'lead_id','')=CAST(l.id AS text)
+                  AND COALESCE(ev.metadata_json->>'outcome','')='human_followup'
+             )
+           )
+         )
        ORDER BY l.id
-       LIMIT 1000
+       LIMIT 300
     """)).mappings().all()
 
     phone_re=re.compile(
@@ -931,6 +988,7 @@ def _safe_crm_assignment_phone_handoff_recovery(db) -> dict:
     phone_existing_task=0
     phone_prior_recovery=0
     phone_no_message_evidence=0
+    phone_satisfied_marked=0
     skipped_inactive=0
     missing_manager=0
     created_task_ids=[]
@@ -1015,6 +1073,18 @@ def _safe_crm_assignment_phone_handoff_recovery(db) -> dict:
                 if phone_epoch:
                     break
         if not phone_epoch:
+            goal_at=db.execute(text("""
+              SELECT min(created_at)
+                FROM boris_crm_activities
+               WHERE deal_id=:d AND source='mop_goal'
+                 AND right(COALESCE(source_ref,''),14)='phone_received'
+            """),{"d":deal_id}).scalar()
+            if goal_at is not None:
+                try:
+                    phone_epoch=int(goal_at.timestamp())
+                except Exception:
+                    phone_epoch=None
+        if not phone_epoch:
             phone_no_message_evidence+=1
             continue
 
@@ -1045,6 +1115,32 @@ def _safe_crm_assignment_phone_handoff_recovery(db) -> dict:
                 break
         if human_followup:
             phone_human_followup+=1
+            ref=f"brain_phone_handoff_satisfied:{lead_id}:{deal_id}"
+            if not db.execute(text(
+                "SELECT 1 FROM boris_crm_activities WHERE source_ref=:r LIMIT 1"
+            ),{"r":ref}).first():
+                db.execute(text("""
+                  INSERT INTO boris_crm_activities(
+                    owner_user_id,deal_id,contact_id,activity_type,channel,title,body,
+                    source,source_ref,actor_type,actor_id,metadata_json,created_at
+                  ) VALUES(
+                    :o,:d,:c,'handoff_evidence','crm',
+                    'Передача лида с телефоном уже выполнена человеком',
+                    'После получения телефона найден исходящий ответ, не принадлежащий MOP.',
+                    'brain_phone_handoff_evidence',:ref,'system','boris',
+                    CAST(:meta AS jsonb),now()
+                  )
+                """),{
+                  "o":r.get("owner_user_id"),"d":deal_id,"c":r.get("contact_id"),
+                  "ref":ref,
+                  "meta":json.dumps({
+                    "lead_id":lead_id,"account_id":aid,"deal_id":deal_id,
+                    "outcome":"human_followup",
+                    "external_action":False,"owner_action_required":False,
+                    "policy_version":"CRM_ASSIGNMENT_PHONE_HANDOFF_RECOVERY_V1",
+                  },ensure_ascii=False),
+                })
+                phone_satisfied_marked+=1
             continue
 
         due=db.execute(text("SELECT now()+interval '15 minutes'")).scalar()
@@ -1103,13 +1199,14 @@ def _safe_crm_assignment_phone_handoff_recovery(db) -> dict:
     return {
       "action":"sync_crm_assignment_and_recover_phone_handoff",
       "result":{
-        "changed":lead_assigned+task_assigned+phone_tasks_created,
+        "changed":lead_assigned+task_assigned+phone_tasks_created+phone_satisfied_marked,
         "lead_assigned":lead_assigned,
         "task_assigned":task_assigned,
         "phone_tasks_created":phone_tasks_created,
         "phone_task_ids":created_task_ids,
         "phone_existing_task":phone_existing_task,
         "phone_human_followup":phone_human_followup,
+        "phone_satisfied_marked":phone_satisfied_marked,
         "phone_prior_recovery":phone_prior_recovery,
         "phone_no_message_evidence":phone_no_message_evidence,
         "skipped_inactive_or_crm_off":skipped_inactive,
