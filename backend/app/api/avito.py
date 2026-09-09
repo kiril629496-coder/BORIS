@@ -150,6 +150,20 @@ def _humanize_entry(e):
     return out
 
 
+def _audit_should_append(log, entry) -> bool:
+    """Suppress only an exact consecutive autonomous scenario status repeat."""
+    if not isinstance(entry, dict) or entry.get("action") != "scenario_step":
+        return True
+    if not isinstance(log, list) or not log:
+        return True
+    last = log[-1] if isinstance(log[-1], dict) else {}
+    return not (
+        str(last.get("actor") or "") == str(entry.get("actor") or "")
+        and str(last.get("action") or "") == "scenario_step"
+        and str(last.get("details") or "") == str(entry.get("details") or "")
+    )
+
+
 def _audit_log(account_id: str, action: str, details: str = "", actor: str = "boris"):
     """Журнал действий: записывает каждое изменяющее действие в Storage.
     Позволяет ответить 'кто/что/когда/почему' при любом инциденте.
@@ -169,12 +183,20 @@ def _audit_log(account_id: str, action: str, details: str = "", actor: str = "bo
                 log = _json.loads(row.value)
             except Exception:
                 log = []
-        log.append({
+        entry = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "actor": actor,
             "action": action,
             "details": details[:500],
-        })
+        }
+        # SCENARIO_AUDIT_EXACT_DEDUPE_V1:
+        # Autonomous scenarios may wake up frequently while external/business
+        # state is unchanged. Do not bury meaningful work under hundreds of
+        # byte-identical "still waiting" lines. Only exact consecutive
+        # scenario_step duplicates are suppressed; changed summaries and all
+        # other business actions keep their full audit trail.
+        if _audit_should_append(log, entry):
+            log.append(entry)
         # Храним последние 500 записей, чтобы не раздувать
         log = log[-500:]
         raw = _json.dumps(log, ensure_ascii=False)
