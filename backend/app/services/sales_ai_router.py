@@ -36,6 +36,7 @@ from typing import Any, Callable
 from app.db.session import SessionLocal
 from app.models.reliability import ReliabilityCircuit
 from app.services.reliability import CircuitOpen, ProviderDeferred, dependency_call
+from app.services.ai_privacy import safe_external_ai_payload, restore_external_ai_output
 
 
 class SalesAIUnavailable(RuntimeError):
@@ -212,6 +213,21 @@ def _gemini_daily_quota_blocks() -> bool:
         db.close()
 
 
+def _gemini_rate_limited_blocked() -> bool:
+    """Keep live customer traffic off Gemini after a proven quota response.
+
+    MOP_GEMINI_QUOTA_PROVIDER_FENCE_V1:
+    the canonical provider watcher owns recovery. Live MOP traffic must not
+    become the probe that waits on a provider already known to be rate-limited.
+    """
+    try:
+        from app.ext_api import aiprov as _aiprov
+        state = _aiprov.state("gemini_cli") or {}
+        return str(state.get("state") or "") == str(_aiprov.RATE_LIMITED)
+    except Exception:
+        return False
+
+
 def _deepseek_provider_blocked() -> bool:
     """Read-only durable provider latch; no network call."""
     try:
@@ -244,6 +260,7 @@ def provider_order(account_id: str | None = None) -> list[str]:
     if (
         _truthy("BORIS_SALES_GEMINI_ENABLED", True)
         and not _gemini_daily_quota_blocks()
+        and not _gemini_rate_limited_blocked()
         and not _circuit_blocks("gemini.sales", account_id)
     ):
         order.append("gemini")
@@ -308,14 +325,16 @@ def _provider_error_kind(status: int, code: str = "") -> str:
 
 
 def _openai_billing_blocked() -> bool:
-    """Read-only durable billing latch shared with the external provider state."""
+    """Read-only durable billing latch shared with the external provider state.
+
+    retry_at is only the earliest time a dedicated recovery probe may run; its
+    expiry is not evidence that funds returned. Live MOP/ROP traffic therefore
+    stays off OpenAI until provider state is explicitly proven AVAILABLE again.
+    """
     try:
         from app.ext_api import aiprov
         row = aiprov.state("openai") or {}
-        return (
-            row.get("state") == aiprov.UNAVAILABLE_BILLING
-            and bool(row.get("cooling"))
-        )
+        return row.get("state") == aiprov.UNAVAILABLE_BILLING
     except Exception:
         # A broken state reader must not silently disable the primary provider.
         return False
@@ -340,6 +359,7 @@ def _openai_default_call(
     if not key:
         raise SalesAIProviderUnavailable("openai key missing")
 
+    external_prompt, privacy_vault = safe_external_ai_payload(str(prompt))
     intent = str(idempotency_key or "").strip()
     if not intent:
         intent = hashlib.sha256(
@@ -383,7 +403,7 @@ def _openai_default_call(
                 },
                 json={
                     "model": model,
-                    "input": prompt,
+                    "input": external_prompt,
                     "max_output_tokens": int(max_output_tokens),
                 },
                 timeout=int(timeout),
@@ -461,6 +481,8 @@ def _openai_default_call(
 
     body = response.json() or {}
     text_out = _response_output_text(body)
+    if text_out:
+        text_out = str(restore_external_ai_output(text_out, privacy_vault))
     if not text_out:
         try:
             ai_budget.stop(run_id, "openai_empty_response")
@@ -504,6 +526,7 @@ def _openai_default_call(
     }
 
 
+
 def _deepseek_default_call(
     *,
     account_id: str,
@@ -533,13 +556,14 @@ def _deepseek_default_call(
     module_name = str(module or "sales").strip().lower()
     fast_non_thinking = bool(module_name == "mop" or str(operation or "").startswith("mop_"))
 
+    external_prompt, privacy_vault = safe_external_ai_payload(str(prompt))
     messages = []
     if expect_json:
         messages.append({
             "role": "system",
             "content": "Return only valid JSON. The final response must be a JSON object.",
         })
-    messages.append({"role": "user", "content": str(prompt)})
+    messages.append({"role": "user", "content": str(external_prompt)})
 
     body = {
         "model": str(model),
@@ -661,6 +685,8 @@ def _deepseek_default_call(
     choices = data.get("choices") if isinstance(data, dict) else None
     message = ((choices or [{}])[0].get("message") or {}) if choices else {}
     text_out = str(message.get("content") or "").strip()
+    if text_out:
+        text_out = str(restore_external_ai_output(text_out, privacy_vault))
     if not text_out:
         raise SalesAIOutputInvalid("deepseek returned empty content")
 
@@ -720,6 +746,8 @@ def _gemini_default_call(
 ) -> dict:
     from app.usage import log_usage
 
+    external_prompt, privacy_vault = safe_external_ai_payload(str(prompt))
+
     def _run():
         with tempfile.TemporaryDirectory(prefix="boris_sales_gemini_") as work:
             # CLIENT_PROMPT_TOOL_ISOLATION_V1:
@@ -742,7 +770,7 @@ def _gemini_default_call(
             argv = [
                 str(os.getenv("BORIS_SALES_GEMINI_BIN") or "gemini"),
                 "-m", str(model),
-                "-p", str(prompt),
+                "-p", str(external_prompt),
                 "-o", "json",
                 "--approval-mode", "plan",
                 "--admin-policy", policy_path,
@@ -766,6 +794,22 @@ def _gemini_default_call(
                     marker = "shared_unsupported_location_400"
                 elif "429" in detail or "quota" in detail or "rate limit" in detail:
                     marker = "shared_quota_429"
+                    # MOP_GEMINI_QUOTA_PROVIDER_FENCE_V1:
+                    # Persist proven quota before raising. Provider watcher will
+                    # restore AVAILABLE after a real successful probe.
+                    try:
+                        from app.ext_api import aiprov as _aiprov
+                        _aiprov.mark(
+                            "gemini_cli",
+                            _aiprov.RATE_LIMITED,
+                            "sales Gemini shared quota/rate limit",
+                            retry_after=max(
+                                120,
+                                int(os.getenv("BORIS_SALES_GEMINI_QUOTA_RETRY_SEC", "900") or 900),
+                            ),
+                        )
+                    except Exception:
+                        pass
                 else:
                     marker = "cli_error"
                 # Do not include raw CLI output here: it may contain customer text.
@@ -776,17 +820,35 @@ def _gemini_default_call(
             except Exception as exc:
                 raise SalesAIProviderUnavailable("gemini invalid envelope") from exc
             text_out = str((envelope or {}).get("response") or "").strip()
+            if text_out:
+                text_out = str(restore_external_ai_output(text_out, privacy_vault))
             if not text_out:
                 raise SalesAIProviderUnavailable("gemini empty response")
+            try:
+                from app.ext_api import aiprov as _aiprov
+                _aiprov.mark(
+                    "gemini_cli",
+                    _aiprov.AVAILABLE,
+                    "sales Gemini call PASS",
+                )
+            except Exception:
+                pass
             return text_out
 
     try:
         text_out = dependency_call(
             "gemini.sales",
             _run,
-            threshold=1,
+            # MOP_GEMINI_TRANSIENT_TIMEOUT_RECOVERY_V1:
+            # one plain timeout must not exile one client from Gemini for 15m.
+            # Proven quota is fenced immediately through aiprov above.
+            threshold=max(
+                2,
+                int(os.getenv("BORIS_SALES_GEMINI_CIRCUIT_THRESHOLD", "2") or 2),
+            ),
             cooldown_seconds=max(
-                120, int(os.getenv("BORIS_SALES_GEMINI_COOLDOWN_SEC", "900") or 900)
+                60,
+                int(os.getenv("BORIS_SALES_GEMINI_COOLDOWN_SEC", "90") or 90),
             ),
             account_id=str(account_id or "") or None,
             tenant_limit_per_minute=max(
@@ -838,6 +900,7 @@ def _gigachat_default_call(
         _outage_note_success,
     )
 
+    external_prompt, privacy_vault = safe_external_ai_payload(str(prompt))
     creds = str(os.getenv("GIGACHAT_KEY") or "").strip()
     if not creds:
         raise SalesAIProviderUnavailable("gigachat key missing")
@@ -854,7 +917,7 @@ def _gigachat_default_call(
             response = client.chat(
                 Chat(
                     messages=[
-                        Messages(role=MessagesRole.USER, content=str(prompt))
+                        Messages(role=MessagesRole.USER, content=str(external_prompt))
                     ],
                     temperature=0.1,
                     max_tokens=max(64, int(max_output_tokens)),
@@ -882,6 +945,8 @@ def _gigachat_default_call(
         pass
 
     text_out = str(response.choices[0].message.content or "").strip()
+    if text_out:
+        text_out = str(restore_external_ai_output(text_out, privacy_vault))
     if not text_out:
         raise SalesAIProviderUnavailable("gigachat empty response")
 
@@ -1090,6 +1155,7 @@ def generate_text(
     account_id: str,
     operation: str,
     prompt: str,
+    local_prompt: str | None = None,
     module: str = "sales",
     idempotency_key: str = "",
     openai_model: str | None = None,
@@ -1116,6 +1182,23 @@ def generate_text(
     prompt = str(prompt or "").strip()
     if not prompt:
         raise ValueError("prompt required")
+    local_prompt = str(local_prompt or prompt).strip() or prompt
+
+    # SALES_AI_TOTAL_DEADLINE_V1:
+    # timeout is one total request budget, not a fresh budget per provider.
+    # Otherwise Gemini may consume the whole browser wait and Ollama starts
+    # only after the client has already aborted the request.
+    timeout = max(1, int(timeout or 1))
+    # MOP_INTERACTIVE_TOTAL_BUDGET_V1:
+    # Client-facing MOP must stay conversational. Training and live Avito use
+    # the same router, so cap the whole provider chain here instead of relying
+    # on each caller to choose a small enough timeout.
+    if str(module or "").strip().lower() == "mop":
+        timeout = min(
+            timeout,
+            max(8, min(16, int(os.getenv("BORIS_MOP_ROUTER_TOTAL_TIMEOUT_SEC", "12") or 12))),
+        )
+    _deadline = time.monotonic() + float(timeout)
 
     openai_model = str(
         openai_model or os.getenv("BORIS_SALES_OPENAI_MODEL") or "gpt-5.4-mini"
@@ -1167,14 +1250,72 @@ def generate_text(
     if not order:
         raise SalesAIUnavailable("no sales AI provider enabled")
 
-    for provider in order:
+    # MOP_LOCAL_READINESS_FAST_FAIL_V1:
+    # If MOP has only local Ollama left, readiness already knows whether the
+    # server pressure fence/daemon makes that path usable. Do not spend the
+    # whole client wait budget on a provider that is known unavailable.
+    if str(module or "").strip().lower() == "mop" and order == ["ollama"]:
+        _local_ready = readiness(account_id)
+        if not _local_ready.get("ready"):
+            raise SalesAIUnavailable(
+                "mop local provider unavailable: " + str(_local_ready.get("reason") or "not_ready"),
+                chain=[{
+                    "provider": "ollama",
+                    "reason": str(_local_ready.get("reason") or "not_ready"),
+                    "detail": ", ".join(_local_ready.get("pressure_reasons") or [])[:220],
+                }],
+            )
+
+    for _idx, provider in enumerate(order):
+        _remaining = int(_deadline - time.monotonic())
+        if _remaining <= 0:
+            chain.append({
+                "provider": provider,
+                "reason": "total_timeout_exhausted",
+                "detail": "shared sales AI deadline exhausted before provider start",
+            })
+            break
         model = models[provider]
+
+        # SALES_AI_LOCAL_RESERVE_V1:
+        # MOP must not let a slow remote provider consume the whole request
+        # budget when local Ollama is the final recovery layer. Reserve a
+        # bounded slice for local inference and cap each remote attempt.
+        _provider_timeout = max(1, min(int(timeout), _remaining))
+        _later = order[_idx + 1:]
+        if (
+            str(operation or "").startswith("mop_")
+            and provider != "ollama"
+            and "ollama" in _later
+        ):
+            _reserve = max(
+                12,
+                min(
+                    35,
+                    int(os.getenv("BORIS_SALES_LOCAL_RESERVE_SEC", "30") or 30),
+                ),
+            )
+            _remote_cap = max(
+                8,
+                min(
+                    40,
+                    int(os.getenv("BORIS_SALES_REMOTE_ATTEMPT_CAP_SEC", "30") or 30),
+                ),
+            )
+            # Keep at least 5s for the current remote attempt while preserving
+            # as much of the configured local reserve as the total budget allows.
+            _effective_reserve = min(_reserve, max(0, _remaining - 5))
+            _provider_timeout = max(
+                5,
+                min(_remote_cap, max(5, _remaining - _effective_reserve)),
+            )
+
         kwargs = {
             "account_id": account_id,
             "operation": str(operation),
-            "prompt": prompt,
+            "prompt": local_prompt if provider == "ollama" else prompt,
             "model": model,
-            "timeout": int(timeout),
+            "timeout": _provider_timeout,
         }
         if provider == "openai":
             kwargs.update({
@@ -1205,15 +1346,39 @@ def generate_text(
                 try:
                     result["json"] = _json_value(result["text"])
                 except SalesAIOutputInvalid:
-                    # GIGACHAT_MOP_TEXT_ENVELOPE_V1:
-                    # GigaChat can occasionally obey the conversational task but
-                    # ignore the JSON-only formatting instruction. For the live
-                    # MOP contract we can losslessly wrap that natural reply into
-                    # the known schema; messenger policy guards still validate the
-                    # actual text afterwards. Do not guess schemas for other ops.
-                    if provider == "gigachat" and str(operation) == "mop_messenger_reply":
+                    # MOP_TEXT_ENVELOPE_V2:
+                    # Free/local providers may obey the conversational task but
+                    # not the JSON envelope. For MOP only, wrap the natural reply
+                    # into the canonical schema; messenger policy guards still
+                    # validate the actual client text deterministically.
+                    if (
+                        provider in {"gigachat", "ollama"}
+                        and str(operation) == "mop_messenger_reply"
+                    ):
+                        natural = str(result["text"] or "").strip()
+                        if not natural:
+                            raise
+                        # Local MOP is intentionally prompted for plain text to
+                        # reduce CPU latency. If an older model still emits a
+                        # JSON-looking prefix, extract reply_text when possible
+                        # instead of exposing JSON syntax to the client.
+                        if provider == "ollama" and natural.lstrip().startswith("{"):
+                            try:
+                                candidate = json.loads(natural)
+                                natural = str(candidate.get("reply_text") or "").strip() or natural
+                            except Exception:
+                                import re as _re_local
+                                m = _re_local.search(
+                                    r'"reply_text"\s*:\s*"((?:\\.|[^"\\])*)',
+                                    natural,
+                                )
+                                if m:
+                                    try:
+                                        natural = json.loads('"' + m.group(1) + '"')
+                                    except Exception:
+                                        natural = m.group(1)
                         wrapped = {
-                            "reply_text": str(result["text"]).strip(),
+                            "reply_text": natural,
                             "human_handoff": False,
                             "handoff_reason": None,
                         }
@@ -1317,6 +1482,8 @@ def readiness(account_id: str | None = None) -> dict:
                 confirmed = pressure
             pressure = confirmed
 
+        # Match the historical-load recovery floor used by the actual local
+        # inference path. RAM/swap/current CPU pressure still fails closed.
         historical_headroom = bool(
             pressure.get("under_pressure")
             and pressure.get("historical_load_only")

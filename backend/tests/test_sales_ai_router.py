@@ -7,6 +7,7 @@ import pytest
 from app.services import sales_ai_router as R
 
 _REAL_GEMINI_DAILY_QUOTA_BLOCKS = R._gemini_daily_quota_blocks
+_REAL_OPENAI_BILLING_BLOCKED = R._openai_billing_blocked
 
 
 @pytest.fixture(autouse=True)
@@ -14,6 +15,7 @@ def _isolate_live_gemini_daily_quota(monkeypatch):
     # Unit tests must not inherit today's production provider credentials/quota.
     # Runtime provider behavior is verified separately against real services.
     monkeypatch.setattr(R, "_gemini_daily_quota_blocks", lambda: False)
+    monkeypatch.setattr(R, "_gemini_rate_limited_blocked", lambda: False)
     monkeypatch.setattr(R, "_openai_billing_blocked", lambda: False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr(R, "_deepseek_provider_blocked", lambda: False)
@@ -29,6 +31,15 @@ def _ok(provider):
         "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         "cost_rub": 0 if provider != "openai" else 1.23,
     }
+
+
+def test_provider_order_skips_gemini_while_provider_is_rate_limited(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(R, "_gemini_rate_limited_blocked", lambda: True)
+    monkeypatch.setenv("BORIS_SALES_GEMINI_ENABLED", "1")
+    monkeypatch.setenv("BORIS_SALES_LOCAL_ENABLED", "1")
+    with patch.object(R, "_circuit_blocks", return_value=False):
+        assert R.provider_order("a") == ["ollama"]
 
 
 def test_openai_first_when_usable(monkeypatch):
@@ -213,6 +224,22 @@ def test_provider_order_skips_openai_while_billing_latch_cools(monkeypatch):
     monkeypatch.setenv("BORIS_SALES_LOCAL_ENABLED", "1")
     with patch.object(R, "_openai_billing_blocked", return_value=True),          patch.object(R, "_circuit_blocks", return_value=False):
         assert R.provider_order("a") == ["gemini", "ollama"]
+
+
+def test_openai_billing_latch_stays_blocked_after_retry_time_elapsed(monkeypatch):
+    from app.ext_api import aiprov
+    monkeypatch.setattr(
+        aiprov,
+        "state",
+        lambda provider=None: {
+            "name": "openai",
+            "state": aiprov.UNAVAILABLE_BILLING,
+            "cooling": False,
+            "usable": False,
+            "probe_required": True,
+        } if provider == "openai" else {},
+    )
+    assert _REAL_OPENAI_BILLING_BLOCKED() is True
 
 
 def test_openai_credit_balance_failure_sets_long_billing_latch(monkeypatch):
@@ -656,6 +683,60 @@ def test_local_ollama_caps_timeout_before_urlopen(monkeypatch, tmp_path):
     )
     assert seen["timeout"] == 45
     assert out["provider"] == "ollama"
+
+
+def test_mop_total_router_budget_is_capped(monkeypatch):
+    monkeypatch.setenv("BORIS_MOP_ROUTER_TOTAL_TIMEOUT_SEC", "12")
+    monkeypatch.setattr(R, "provider_order", lambda account_id=None: ["gemini"])
+    seen = {}
+
+    def gemini(**kw):
+        seen.update(kw)
+        return {"text": "ok", "provider": "gemini", "model": kw.get("model")}
+
+    out = R.generate_text(
+        account_id="a",
+        operation="mop_messenger_reply",
+        module="mop",
+        prompt="p",
+        timeout=60,
+        gemini_call=gemini,
+    )
+    assert out["provider"] == "gemini"
+    assert 1 <= int(seen["timeout"]) <= 12
+
+
+def test_mop_only_local_not_ready_fails_before_generation(monkeypatch):
+    monkeypatch.setattr(R, "provider_order", lambda account_id=None: ["ollama"])
+    monkeypatch.setattr(
+        R,
+        "readiness",
+        lambda account_id=None: {
+            "ready": False,
+            "order": ["ollama"],
+            "ready_providers": [],
+            "reason": "local_fenced_by_production_pressure",
+            "pressure_reasons": ["CPU pressure"],
+        },
+    )
+    called = {"n": 0}
+
+    def local(**kw):
+        called["n"] += 1
+        return {"text": "must not run"}
+
+    with pytest.raises(R.SalesAIUnavailable) as exc:
+        R.generate_text(
+            account_id="a",
+            operation="mop_messenger_reply",
+            module="mop",
+            prompt="p",
+            timeout=60,
+            local_call=local,
+        )
+    assert called["n"] == 0
+    assert "local_fenced_by_production_pressure" in str(exc.value)
+    assert exc.value.chain[0]["provider"] == "ollama"
 
 
 def test_readiness_rechecks_transient_pressure_before_fast_fail(monkeypatch):
