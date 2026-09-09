@@ -4078,7 +4078,12 @@ def ensure_paid_tariff_raise_mandate(account_id: str):
             return {"status": "blocked", "reason": "no_active_boris_marketer_entitlement",
                     "service_entitlement": _entitlement,
                     "revoked_stale_paid_mandates": int(_expired.rowcount or 0)}
-        krow = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "kpi_settings").first()
+        # PAID_TARIFF_KPI_LATEST_SINGLETON_V1: always reconcile money authority
+        # from the newest owner settings. Historical duplicate rows must never
+        # resurrect a paused/old budget state.
+        krow = (db.query(Storage)
+                .filter(Storage.account_id == account_id, Storage.key == "kpi_settings")
+                .order_by(Storage.id.desc()).first())
         try:
             kpi = _json_mandate.loads(krow.value or "{}") if krow else {}
         except Exception:
@@ -4334,6 +4339,64 @@ def ensure_paid_tariff_raise_mandate(account_id: str):
                 "allowed_operations": desired_operations}
     finally:
         db.close()
+
+
+def reconcile_paid_tariff_raise_mandates():
+    """DB-only fleet reconcile for standing paid KPI money authority.
+
+    PAID_TARIFF_MANDATE_HOURLY_RECONCILE_V1:
+    Rollout preflight requires a raise-capable paid_tariff_kpi mandate, while
+    the old code created it only inside downstream money functions that preflight
+    could block before reaching. This fleet pass breaks that dependency cycle.
+    It never calls Avito and never changes a bid. Each account still must prove
+    active paid entitlement, authenticated owner budget, explicit target/red CPL
+    and autonomous-mode switches inside ensure_paid_tariff_raise_mandate.
+    """
+    from app.db.session import SessionLocal
+    from sqlalchemy import text as _t_paid_reconcile
+    db = SessionLocal()
+    try:
+        rows = db.execute(_t_paid_reconcile("""
+            SELECT DISTINCT account_id
+              FROM storage
+             WHERE key='kpi_settings'
+               AND account_id IS NOT NULL
+               AND account_id <> ''
+               AND account_id NOT LIKE 'qa%'
+               AND account_id NOT LIKE 'user:%'
+             ORDER BY account_id
+        """)).fetchall()
+        accounts = [str(r[0]) for r in rows if r and r[0]]
+    finally:
+        db.close()
+
+    results=[]; created=0; upgraded=0; reused=0; blocked=0; errors=0
+    for account_id in accounts:
+        try:
+            res=ensure_paid_tariff_raise_mandate(account_id) or {}
+            status=str(res.get("status") or "")
+            if status=="created": created += 1
+            elif status=="upgraded": upgraded += 1
+            elif status=="reused": reused += 1
+            elif status=="blocked": blocked += 1
+            results.append({"account_id":account_id, **res})
+        except Exception as exc:
+            errors += 1
+            results.append({
+                "account_id":account_id,
+                "status":"error",
+                "error":f"{type(exc).__name__}: {str(exc)[:180]}",
+            })
+    return {
+        "status":"ok" if errors==0 else "error",
+        "checked":len(accounts),
+        "created":created,
+        "upgraded":upgraded,
+        "reused":reused,
+        "blocked":blocked,
+        "errors":errors,
+        "results":results,
+    }
 
 
 # NEW_ITEM_NO_PROMO_BOOTSTRAP_V2

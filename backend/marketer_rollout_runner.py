@@ -114,11 +114,14 @@ def _blocked_runtime_projection(account_id, reason, evidence=None):
         'bid_autopilot_disabled':'PAUSED_BY_OWNER: автопилот ставок выключен владельцем; автоматические повышения не выполняются.',
         'autonomous_mode_disabled':'PAUSED_BY_OWNER: автономный режим маркетолога выключен владельцем; автоматические повышения не выполняются.',
     }.get(str(reason))
+    # MARKETER_SPEND_STALE_EXPECTED_WAIT_V1: a >15m spend snapshot is a normal
+    # scheduler wait, not an owner/business failure. No money action is allowed,
+    # but owner-facing runtime must remain waiting and retry automatically.
     # MARKETER_EXPECTED_WAIT_NOT_BLOCKED_V1: provider/data/inventory waits that
     # require no owner action are normal scheduler states, not broken production.
     _expected_wait = str(reason) in {
         'no_active_items','stats_not_fresh','stats_spend_snapshot_skew',
-        'spend_signal_unverified','spend_provider_degraded',
+        'spend_not_fresh','spend_signal_unverified','spend_provider_degraded',
         'provider_stats_day_lagged','dedicated_stats_owner_not_completed',
     }
     now=datetime.now(timezone.utc).isoformat()

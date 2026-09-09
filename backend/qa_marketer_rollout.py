@@ -463,6 +463,7 @@ ck("LATE_DAY_PACING_SLOT_ROTATION_FRESH_GUARD", "LATE_DAY_PACING_SLOT_ROTATION_F
 ck("ZERO_ACTIVE_INVENTORY_PRECEDES_OWNER_CONFIG", "MARKETER_ZERO_ACTIVE_INVENTORY_PRECEDES_OWNER_CONFIG_V1" in roll and roll.index("MARKETER_ZERO_ACTIVE_INVENTORY_PRECEDES_OWNER_CONFIG_V1") < roll.index("budget=float(k.get") and "'no_active_items'" in roll)
 ck("PAUSED_BY_OWNER_NOT_INCIDENT", "MARKETER_PAUSED_BY_OWNER_NOT_INCIDENT_V1" in roll and "'paused' if _paused_by_owner else 'waiting' if _expected_wait else 'blocked'" in roll)
 ck("EXPECTED_WAIT_NOT_BLOCKED", "MARKETER_EXPECTED_WAIT_NOT_BLOCKED_V1" in roll and "'no_active_items'" in roll and "'waiting' if _expected_wait" in roll)
+ck("SPEND_STALE_EXPECTED_WAIT", "MARKETER_SPEND_STALE_EXPECTED_WAIT_V1" in roll and "'spend_not_fresh'" in roll and "'waiting' if _expected_wait" in roll)
 ck('AUTOPILOT_MODE_PRECEDES_OWNER_MONEY_CONFIG', 'AUTOPILOT_MODE_PRECEDES_OWNER_MONEY_CONFIG_V1' in roll and
    roll.index("if not bool(k.get('bid_autopilot'))") < roll.index('budget=float') and
    "'bid_autopilot_disabled'" in roll and "'autonomous_mode_disabled'" in roll)
@@ -511,6 +512,7 @@ ck('PRESENCE_BUDGET_GROWTH_SELF_HEAL_WIRE', 'PRESENCE_BUDGET_GROWTH_SELF_HEAL_WI
 ck('PRESENCE_BUDGET_DRY_RUN_NO_MUTATION', 'PRESENCE_BUDGET_DRY_RUN_NO_MUTATION_V1' in money_policy_src and
    'mutate: bool = True' in money_policy_src and 'if mutate:' in money_policy_src and
    'mutate=bool(apply)' in budget_brake and 'would_freeze_additive_growth' in money_policy_src)
+ck('PAID_TARIFF_MANDATE_HOURLY_RECONCILE','PAID_TARIFF_MANDATE_HOURLY_RECONCILE_V1' in advisor and 'PAID_TARIFF_KPI_LATEST_SINGLETON_V1' in advisor and 'reconcile_paid_tariff_raise_mandates' in advisor and 'PAID_TARIFF_MANDATE_HOURLY_RECONCILE_WIRE_V1' in _hourly_src and 'paid_tariff_mandate_reconcile' in _hourly_src)
 failed=[x for x in checks if not x[1]]
 print('QA_MARKETER_ROLLOUT=', 'PASS' if not failed else 'FAIL','checks=',len(checks),'failed=',len(failed))
 raise SystemExit(1 if failed else 0)
