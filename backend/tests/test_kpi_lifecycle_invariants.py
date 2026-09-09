@@ -196,10 +196,11 @@ def test_lowviews_zero_bid_is_handed_to_bounded_first_activation_lane():
 
 def test_account_money_growth_pauses_when_measurement_backlog_is_excessive():
     s=(ROOT/"app/api/cpx_advisor.py").read_text(encoding="utf-8")
-    # Two full top-10 portfolios are the evidence ceiling. Inventory size must
-    # never inflate the number of unresolved money experiments allowed at once.
-    assert "MEASUREMENT_BACKLOG_GUARD_V2" in s
-    assert "MEASUREMENT_BACKLOG_LIMIT = 20" in s
+    # All autonomous raise lanes share the same small account-level evidence
+    # ceiling. Inventory size must never inflate unresolved paid experiments.
+    assert "PROFITABLE_DAY_CANONICAL_MEASUREMENT_CAP_V1" in s
+    assert "MEASUREMENT_BACKLOG_LIMIT = MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT" in s
+    assert "MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT = 2" in s
     block=s[s.index("def profitable_day_push"):s.index("# PROFITABLE_DAY_ACTIVE_PROMOTION_ONLY_V1")]
     assert "waiting_measurement" in block
     assert "measurement_backlog_limit" in block

@@ -203,13 +203,35 @@ def run_advisor(account_id: str = "otdushi"):
             _stats_money_fresh, _stats_money_evidence = False, {"reason":"stats_guard_error"}
 
         # 3) текущие ставки по объявлениям (наш cpxpromo)
-        item_ids = [it["id"] for it in items_stats if it.get("status") == "active"][:200]
+        # CPX_MEASURE_PROVIDER_QUERY_PRIORITIZES_WAITING_V1:
+        # getPromotionsByItemIds is intentionally bounded to 200 IDs. On large
+        # accounts unresolved money experiments must be inside that exact CPX
+        # probe; otherwise their current provider state can never self-heal and
+        # they may occupy the account measurement cap indefinitely.
+        _active_item_ids_all = [
+            int(it["id"]) for it in items_stats
+            if it.get("status") == "active" and str(it.get("id") or "").isdigit()
+        ]
+        try:
+            _waiting_probe_ids = [
+                int(x.get("item_id")) for x in
+                (_active_raise_measurement_summary(db, account_id).get("items") or [])
+                if str(x.get("item_id") or "").isdigit()
+            ]
+        except Exception:
+            _waiting_probe_ids = []
+        _priority_ids = []
+        for _iid in _waiting_probe_ids + _active_item_ids_all:
+            if _iid not in _priority_ids:
+                _priority_ids.append(_iid)
+        item_ids = _priority_ids[:200]
         bids_map = {}
         # CPX_MEASURE_PROMOTION_OFF_SUPERSEDE_V1: only a successful promotions
         # inventory response may prove that an experiment's paid promotion is
         # now off/unreported. 429/transport/stale-stats must never masquerade as
         # provider truth and prematurely close measurement evidence.
         _bids_truth_complete = False
+        _bids_exact_item_ids = set()
         # CPX_MEASURE_PROVIDER_QUERY_SCOPE_V1: a successful provider response is
         # authoritative only for itemIDs that were actually included in that
         # request. Large accounts may have >200 active items, so a global
@@ -275,6 +297,58 @@ def run_advisor(account_id: str = "otdushi"):
                         }
             except Exception as e:
                 bids_map = {"_error": str(e)[:100]}
+
+        # CPX_MEASURE_EXACT_GETBIDS_TRUTH_V1:
+        # Bulk getPromotionsByItemIds is useful for broad portfolio reads, but it
+        # has been observed to omit the currently selected manual promotion for an
+        # item while exact getBids/{itemID} reports the live manual bid. For at
+        # most the two unresolved account measurement slots, exact read-only
+        # getBids is authoritative. This keeps causal slots from waiting on a
+        # misleading bulk projection and costs at most two extra provider reads
+        # only when unresolved experiments exist.
+        if (_advice_retry <= 0 and _money_entitlement_active and _stats_money_fresh
+                and tok and _waiting_probe_ids and not isinstance(bids_map.get("_error"), str)):
+            for _mid in _waiting_probe_ids[:MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT]:
+                try:
+                    _er = httpx.get(
+                        f"https://api.avito.ru/cpxpromo/1/getBids/{int(_mid)}",
+                        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+                        timeout=20,
+                    )
+                    if _er.status_code == 429:
+                        _retry = None
+                        try:
+                            _raw = str(_er.headers.get("Retry-After") or "").strip()
+                            _retry = max(0, int(float(_raw))) if _raw else 30
+                        except Exception:
+                            _retry = 30
+                        _advice_record_throttle(
+                            account_id, _retry or 30,
+                            source="cpx_advice_measure_exact_getbids_429",
+                        )
+                        break
+                    if _er.status_code != 200:
+                        continue
+                    _exact = _er.json() or {}
+                    _selected = str(_exact.get("selectedType") or "").strip().lower()
+                    _manual = _exact.get("manual") if isinstance(_exact.get("manual"), dict) else {}
+                    _auto = _exact.get("auto") if isinstance(_exact.get("auto"), dict) else {}
+                    _bid_penny = _manual.get("bidPenny") if _selected == "manual" else None
+                    bids_map[int(_mid)] = {
+                        "bid_penny": _bid_penny,
+                        "min_bid_penny": _manual.get("minBidPenny"),
+                        "rec_bid_penny": _manual.get("recBidPenny"),
+                        "max_bid_penny": _manual.get("maxBidPenny"),
+                        "promotion_active": bool(_selected in {"manual", "auto"}),
+                        "promotion_mode": (_selected if _selected in {"manual", "auto"} else "off"),
+                        "exact_getbids_truth": True,
+                    }
+                    _bids_exact_item_ids.add(int(_mid))
+                    _bids_queried_item_ids.add(int(_mid))
+                except Exception:
+                    # Exact measurement truth is an optimization/self-heal read.
+                    # Never turn transport trouble into false "promotion off".
+                    continue
 
         # 4) расход за день — только подтверждённый провайдером spending signal.
         # Баланс кошелька не является расходом за сегодня: пополнение, возврат и
@@ -466,8 +540,11 @@ def run_advisor(account_id: str = "otdushi"):
                     # read-only. Provider truth is authoritative only when THIS
                     # exact itemID was included in a successful current CPX read.
                     _item_cpx_truth_complete = bool(
-                        _bids_truth_complete
-                        and _measure_iid in _bids_queried_item_ids
+                        _measure_iid in _bids_exact_item_ids
+                        or (
+                            _bids_truth_complete
+                            and _measure_iid in _bids_queried_item_ids
+                        )
                     )
                     if (_item_cpx_truth_complete and _expected_bid is not None and _expected_bid > 0
                           and (not bool(_cur_bid_info.get("promotion_active")) or _cur_bid_rub is None)):
@@ -612,7 +689,10 @@ def run_advisor(account_id: str = "otdushi"):
             # in THIS account returned this exact itemID in the same fresh cycle.
             # apply_one re-confirms getBids/{itemID} immediately before mutation.
             _raw_write_capability = str(it.get("write_capability") or "read_only_until_mapped")
-            _provider_exact_money = bool(_bids_truth_complete and isinstance(bid_info, dict) and iid in bids_map)
+            _provider_exact_money = bool(
+                isinstance(bid_info, dict) and iid in bids_map
+                and (_bids_truth_complete or int(iid) in _bids_exact_item_ids)
+            )
             # CPX_PROVIDER_PROBE_MONEY_WRITABILITY_V1: an item present in the
             # fresh authenticated daily inventory may enter bid planning even if
             # it has no CampaignItem/content mapping. This grants NO provider
@@ -5148,10 +5228,11 @@ def profitable_day_push(account_id: str, max_items: int = 2):
         cpl=spent/contacts
         if cpl>red*0.80: return {"status":"blocked","reason":"cpl_headroom_insufficient","cpl_rub":round(cpl,2),"red_cpl_rub":red,"changed_avito":False}
         if spent>=budget*0.90: return {"status":"blocked","reason":"budget_near_limit","spent_rub":spent,"budget_rub":budget,"changed_avito":False}
-        # MEASUREMENT_BACKLOG_GUARD_V2: unresolved money experiments have a fixed evidence ceiling.
-        # Inventory size must not raise this ceiling: that would allow a large account to accumulate
-        # hundreds of simultaneous paid hypotheses before BORIS learns their outcome.
-        MEASUREMENT_BACKLOG_LIMIT = 20
+        # PROFITABLE_DAY_CANONICAL_MEASUREMENT_CAP_V1:
+        # All autonomous raise lanes share the same account-level evidence cap.
+        # Do not let this helper advertise capacity 20 while final apply_one
+        # correctly enforces the canonical cap 2.
+        MEASUREMENT_BACKLOG_LIMIT = MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT
         _active_today=len(items)
         _measurement_backlog_limit=MEASUREMENT_BACKLOG_LIMIT
         _waiting_by_item={}
