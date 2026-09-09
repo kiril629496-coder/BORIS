@@ -749,14 +749,21 @@ def _mcn_owner_action_alert_once(payload: dict) -> dict:
     allowed = {
         "mcn_phone_entitlement_required",
         "mcn_phone_account_binding_required",
+        "mcn_company_card_response_sla",
     }
     if not bool(src.get("owner_action_required")) or code not in allowed:
         return {"status": "not_needed", "sent": False}
 
     operational = src.get("operational_reply") if isinstance(src.get("operational_reply"), dict) else {}
+    sent_evidence = (
+        src.get("company_card_sent_evidence")
+        if isinstance(src.get("company_card_sent_evidence"), dict)
+        else {}
+    )
     signature_payload = {
         "code": code,
         "provider_message_id": str(operational.get("message_id") or "")[:500],
+        "company_card_sent_at": str(sent_evidence.get("sent_at") or "")[:80],
         "candidate_count": int(src.get("candidate_count") or 0),
         "phone_account_status": str(src.get("phone_account_status") or "")[:80],
     }
@@ -825,11 +832,18 @@ def _mcn_owner_action_alert_once(payload: dict) -> dict:
     finally:
         db.close()
 
-    text_msg = (
-        "BORIS Phone: MCN уже прислал готовые SIP-параметры. "
-        + str(action.get("text") or "").strip()
-        + " Секретные SIP-данные в уведомление не выводятся."
-    )[:3600]
+    if code == "mcn_company_card_response_sla":
+        text_msg = (
+            "BORIS Phone: MCN не ответил в течение контрольного срока после отправки карточки. "
+            + str(action.get("text") or "").strip()
+            + " BORIS не отправляет повторные письма автоматически и продолжает мониторить входящие."
+        )[:3600]
+    else:
+        text_msg = (
+            "BORIS Phone: MCN уже прислал готовые SIP-параметры. "
+            + str(action.get("text") or "").strip()
+            + " Секретные SIP-данные в уведомление не выводятся."
+        )[:3600]
     try:
         from app.ext_api.notify import send as notify_owner
         delivered = bool(notify_owner(text_msg))
@@ -1413,12 +1427,40 @@ def _mcn_company_card_followup(
     if not bool(evidence.get("sent")):
         return {"status": "not_needed", "sent": False}
     if not _mcn_company_card_followup_enabled():
+        sent_at_policy = _parse_mail_time(str(evidence.get("sent_at") or ""))
+        if sent_at_policy is None:
+            return {
+                "status": "waiting_sent_time_evidence",
+                "sent": False,
+                "attempts": 0,
+                "auto_retry_blocked": True,
+                "owner_action_required": False,
+            }
+        now_policy = now or datetime.now(timezone.utc)
+        if now_policy.tzinfo is None:
+            now_policy = now_policy.replace(tzinfo=timezone.utc)
+        now_policy = now_policy.astimezone(timezone.utc)
+        due_at = sent_at_policy + timedelta(seconds=_MCN_FOLLOWUP_FIRST_DELAY_SECONDS)
+        if now_policy >= due_at:
+            return {
+                "status": "response_sla_expired",
+                "sent": False,
+                "attempts": 0,
+                "auto_retry_blocked": True,
+                "owner_action_required": True,
+                "due_at": due_at.isoformat(),
+                "waited_hours": round(
+                    max(0.0, (now_policy - sent_at_policy).total_seconds()) / 3600.0,
+                    1,
+                ),
+            }
         return {
             "status": "disabled_by_policy",
             "sent": False,
             "attempts": 0,
             "auto_retry_blocked": True,
             "owner_action_required": False,
+            "due_at": due_at.isoformat(),
         }
 
     recipient = str(op.get("sender_email") or "").strip().lower()
@@ -1702,6 +1744,24 @@ def _mcn_company_card_progress(mailbox_id: int, operational_reply: dict | None =
     if evidence_safe["sent"]:
         draft_cleanup = _cleanup_mcn_company_card_draft_after_sent(int(mailbox_id))
         followup = _mcn_company_card_followup(int(mailbox_id), op, evidence_safe)
+        if bool(followup.get("owner_action_required")):
+            return {
+                "status": "owner_action",
+                "owner_action_required": True,
+                "company_card_sent_evidence": evidence_safe,
+                "company_card_draft_cleanup": draft_cleanup,
+                "company_card_followup": followup,
+                "primary_next_action": {
+                    "code": "mcn_company_card_response_sla",
+                    "actor": "owner",
+                    "owner_action_required": True,
+                    "text": (
+                        "MCN не ответил в течение 48 часов после подтверждённой отправки карточки. "
+                        "Автоматические повторные письма отключены политикой; BORIS продолжает "
+                        "мониторить входящие. Нужна внешняя эскалация в MCN без повторной отправки карточки."
+                    ),
+                },
+            }
         return {
             "status": "waiting_mcn_response",
             "owner_action_required": False,

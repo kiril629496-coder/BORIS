@@ -1133,8 +1133,8 @@ class McnCompanyCardAutoFollowupTests(unittest.TestCase):
         finally:
             db.close()
 
-    def test_followup_policy_disabled_never_calls_smtp(self):
-        now = G.datetime(2026, 9, 10, 1, 0, tzinfo=G.timezone.utc)
+    def test_followup_policy_disabled_never_calls_smtp_before_sla(self):
+        now = G.datetime(2026, 9, 2, 12, 0, tzinfo=G.timezone.utc)
         with patch.object(G, "_mcn_company_card_followup_enabled", return_value=False), \
              patch("app.services.client_mailboxes.send_outbound") as send:
             out = G._mcn_company_card_followup(2, self.op, self.evidence, now=now)
@@ -1142,7 +1142,50 @@ class McnCompanyCardAutoFollowupTests(unittest.TestCase):
         self.assertFalse(out["sent"])
         self.assertTrue(out["auto_retry_blocked"])
         self.assertFalse(out["owner_action_required"])
+        self.assertEqual(out["due_at"], "2026-09-03T00:00:00+00:00")
         send.assert_not_called()
+
+    def test_followup_policy_disabled_escalates_after_sla_without_smtp(self):
+        now = G.datetime(2026, 9, 3, 0, 1, tzinfo=G.timezone.utc)
+        with patch.object(G, "_mcn_company_card_followup_enabled", return_value=False), \
+             patch("app.services.client_mailboxes.send_outbound") as send:
+            out = G._mcn_company_card_followup(2, self.op, self.evidence, now=now)
+        self.assertEqual(out["status"], "response_sla_expired")
+        self.assertFalse(out["sent"])
+        self.assertTrue(out["auto_retry_blocked"])
+        self.assertTrue(out["owner_action_required"])
+        self.assertGreaterEqual(float(out["waited_hours"]), 48.0)
+        send.assert_not_called()
+
+    def test_company_card_progress_promotes_disabled_followup_sla_to_owner_action(self):
+        with patch.object(G, "_mcn_company_card_sent_evidence", return_value={
+            "sent": True,
+            "source": "send_state",
+            "reason": "smtp_accepted",
+            "sent_at": "2026-09-01T00:00:00+00:00",
+            "delivery_ambiguous": False,
+        }), patch.object(G, "_cleanup_mcn_company_card_draft_after_sent", return_value={
+            "removed": False, "reason": "current_draft_not_found", "count": 0,
+        }), patch.object(G, "_mcn_company_card_followup", return_value={
+            "status": "response_sla_expired",
+            "sent": False,
+            "attempts": 0,
+            "auto_retry_blocked": True,
+            "owner_action_required": True,
+            "waited_hours": 48.1,
+        }):
+            out = G._mcn_company_card_progress(2, self.op)
+        self.assertEqual(out["status"], "owner_action")
+        self.assertTrue(out["owner_action_required"])
+        self.assertEqual(
+            out["primary_next_action"]["code"],
+            "mcn_company_card_response_sla",
+        )
+        self.assertEqual(out["primary_next_action"]["actor"], "owner")
+        self.assertEqual(
+            out["company_card_followup"]["status"],
+            "response_sla_expired",
+        )
 
     def test_followup_waits_full_48_hours(self):
         now = G.datetime(2026, 9, 2, 23, 59, tzinfo=G.timezone.utc)
@@ -1266,6 +1309,39 @@ class McnOwnerGlobalAlertTests(unittest.TestCase):
         self.assertEqual(first["status"], "retry")
         self.assertEqual(second["status"], "throttled")
         self.assertEqual(send.call_count, 1)
+
+    def test_response_sla_alert_is_sent_once_without_false_sip_claim(self):
+        payload = {
+            "owner_action_required": True,
+            "candidate_count": 0,
+            "phone_account_status": "waiting_phone_account",
+            "operational_reply": {
+                "message_id": "<mcn-company-card-request@test>",
+                "username": "MUST_NOT_LEAK_USER",
+                "password": "MUST_NOT_LEAK_PASSWORD",
+            },
+            "company_card_sent_evidence": {
+                "sent": True,
+                "sent_at": "2026-09-01T00:00:00+00:00",
+            },
+            "primary_next_action": {
+                "code": "mcn_company_card_response_sla",
+                "actor": "owner",
+                "owner_action_required": True,
+                "text": "Нужна внешняя эскалация в MCN без повторной отправки карточки.",
+            },
+        }
+        with patch("app.ext_api.notify.send", return_value=True) as send:
+            first = G._mcn_owner_action_alert_once(payload)
+            second = G._mcn_owner_action_alert_once(payload)
+        self.assertEqual(first["status"], "sent")
+        self.assertEqual(second["status"], "already_sent")
+        self.assertEqual(send.call_count, 1)
+        alert_text = send.call_args.args[0]
+        self.assertIn("MCN не ответил", alert_text)
+        self.assertNotIn("уже прислал готовые SIP", alert_text)
+        self.assertNotIn("MUST_NOT_LEAK_USER", alert_text)
+        self.assertNotIn("MUST_NOT_LEAK_PASSWORD", alert_text)
 
     def test_waiting_for_mcn_reply_never_notifies_owner(self):
         payload = {

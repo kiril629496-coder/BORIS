@@ -312,6 +312,9 @@ def main() -> int:
     for required in (
         "_mcn_company_card_followup_enabled",
         "disabled_by_policy",
+        "response_sla_expired",
+        "_MCN_FOLLOWUP_FIRST_DELAY_SECONDS",
+        "owner_action_required",
         "auto_retry_blocked",
         "send_outbound",
     ):
@@ -333,10 +336,21 @@ def main() -> int:
         "mcn_company_card_auto_resend_verifying",
         "mcn_company_card_auto_resend_retry",
         "mcn_company_card_sent_waiting_reply",
+        "mcn_company_card_response_sla",
         "mcn_company_card_delivery_verify",
     ):
         if required not in progress_src:
             failures.append(f"mcn_repeat_card_progress_contract_missing:{required}")
+
+    owner_alert_src = inspect.getsource(guardian._mcn_owner_action_alert_once)
+    for required in (
+        "mcn_company_card_response_sla",
+        "MCN не ответил",
+        "already_sent",
+        "_MCN_OWNER_ALERT_RETRY_SECONDS",
+    ):
+        if required not in owner_alert_src:
+            failures.append(f"mcn_response_sla_alert_contract_missing:{required}")
 
     sig = inspect.signature(guardian.real_mcn_acceptance_watch_once)
     param = sig.parameters.get("include_synthetic")
