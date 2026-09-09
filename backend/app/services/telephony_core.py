@@ -7413,12 +7413,16 @@ def provider_health_guardian(limit: int = 100, stale_seconds: int = 900, include
     limit=max(1,min(int(limit),500)); stale_seconds=max(300,min(int(stale_seconds),86400))
     db=SessionLocal()
     try:
-        rows=db.execute(text("""SELECT account_id,provider,last_health_at
-          FROM telephony_provider_configs
-          WHERE credentials_enc IS NOT NULL AND credentials_enc<>''
-            AND (last_health_at IS NULL OR last_health_at < now()-(:seconds||' seconds')::interval)
-            AND (:include_synthetic OR NOT (lower(account_id) ~ '^__.*qa' OR lower(account_id) ~ '^qa[-_]'))
-          ORDER BY COALESCE(last_health_at,to_timestamp(0)) ASC
+        rows=db.execute(text("""SELECT p.account_id,p.provider,p.last_health_at
+          FROM telephony_provider_configs p
+          WHERE p.credentials_enc IS NOT NULL AND p.credentials_enc<>''
+            AND (p.last_health_at IS NULL OR p.last_health_at < now()-(:seconds||' seconds')::interval)
+            AND (:include_synthetic OR NOT (lower(p.account_id) ~ '^__.*qa' OR lower(p.account_id) ~ '^qa[-_]'))
+            AND EXISTS (
+              SELECT 1 FROM telephony_entitlements e
+              WHERE e.account_id=p.account_id AND e.enabled=true AND e.paid_until>now()
+            )
+          ORDER BY COALESCE(p.last_health_at,to_timestamp(0)) ASC
           LIMIT :limit"""),{'seconds':stale_seconds,'limit':limit,'include_synthetic':bool(include_synthetic)}).mappings().all()
     finally:
         db.close()
@@ -7518,9 +7522,14 @@ def telephony_autonomy_snapshot(include_synthetic: bool = False) -> dict[str, An
                 WHERE t.description=('boris_callback_overdue:'||c.id)
                   AND t.status NOT IN ('done','completed','cancelled')
               )"""),
-          'stale_provider_health':count(f"""SELECT count(*) FROM telephony_provider_configs
-            WHERE credentials_enc IS NOT NULL AND credentials_enc<>''
-              AND (last_health_at IS NULL OR last_health_at<now()-interval '20 minutes') AND {synthetic}"""),
+          'stale_provider_health':count(f"""SELECT count(*) FROM telephony_provider_configs p
+            WHERE p.credentials_enc IS NOT NULL AND p.credentials_enc<>''
+              AND (p.last_health_at IS NULL OR p.last_health_at<now()-interval '20 minutes')
+              AND {synthetic.replace('account_id','p.account_id')}
+              AND EXISTS (
+                SELECT 1 FROM telephony_entitlements e
+                WHERE e.account_id=p.account_id AND e.enabled=true AND e.paid_until>now()
+              )"""),
           'stale_media_sessions':count(f"""SELECT count(*) FROM telephony_media_sessions m
             LEFT JOIN telephony_calls c ON c.account_id=m.account_id AND c.id=m.call_id
             LEFT JOIN telephony_devices d ON d.account_id=m.account_id AND d.id=m.device_id
@@ -7579,13 +7588,26 @@ def telephony_autonomy_snapshot(include_synthetic: bool = False) -> dict[str, An
             FROM telephony_trunks t
             LEFT JOIN telephony_provider_configs p ON p.account_id=t.account_id
             WHERE t.provider='mcn' AND t.enabled=true AND p.account_id IS NULL
-              AND (:include_synthetic OR NOT (lower(t.account_id) ~ '^__.*qa' OR lower(t.account_id) ~ '^qa[-_]'))"""),
-          'degraded_mcn_transport':count(f"""SELECT count(*) FROM telephony_trunks
-            WHERE provider='mcn' AND enabled=true
-              AND (status<>'connected' OR COALESCE(last_health_status,'') NOT IN ('registration_registered','ok'))
-              AND {synthetic}"""),
-          'degraded_telphin_sip':count(f"""SELECT count(*) FROM telephony_telphin_trunk_state
-            WHERE enabled=true AND status<>'registered' AND {synthetic}"""),
+              AND (:include_synthetic OR NOT (lower(t.account_id) ~ '^__.*qa' OR lower(t.account_id) ~ '^qa[-_]'))
+              AND EXISTS (
+                SELECT 1 FROM telephony_entitlements e
+                WHERE e.account_id=t.account_id AND e.enabled=true AND e.paid_until>now()
+              )"""),
+          'degraded_mcn_transport':count(f"""SELECT count(*) FROM telephony_trunks t
+            WHERE t.provider='mcn' AND t.enabled=true
+              AND (t.status<>'connected' OR COALESCE(t.last_health_status,'') NOT IN ('registration_registered','ok'))
+              AND {synthetic.replace('account_id','t.account_id')}
+              AND EXISTS (
+                SELECT 1 FROM telephony_entitlements e
+                WHERE e.account_id=t.account_id AND e.enabled=true AND e.paid_until>now()
+              )"""),
+          'degraded_telphin_sip':count(f"""SELECT count(*) FROM telephony_telphin_trunk_state s
+            WHERE s.enabled=true AND s.status<>'registered'
+              AND {synthetic.replace('account_id','s.account_id')}
+              AND EXISTS (
+                SELECT 1 FROM telephony_entitlements e
+                WHERE e.account_id=s.account_id AND e.enabled=true AND e.paid_until>now()
+              )"""),
           'overdue_manager_actions':count(f"""SELECT count(*) FROM telephony_manager_actions
             WHERE status='open' AND due_at IS NOT NULL AND due_at<=now() AND {synthetic}"""),
           'degraded_turn_media':degraded_turn_media,

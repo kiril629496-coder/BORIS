@@ -25,7 +25,7 @@ class TelephonyDBIntegration(unittest.TestCase):
     def tearDown(self):
         db=SessionLocal()
         try:
-            for table in ('telephony_events','telephony_audit','telephony_call_quality','telephony_transcript_chunks','telephony_call_targets','telephony_commands','telephony_push_outbox','telephony_recordings','telephony_calls','telephony_devices','telephony_provider_configs'):
+            for table in ('telephony_events','telephony_audit','telephony_call_quality','telephony_transcript_chunks','telephony_call_targets','telephony_commands','telephony_push_outbox','telephony_recordings','telephony_calls','telephony_devices','telephony_provider_configs','telephony_entitlements'):
                 db.execute(text(f'DELETE FROM {table} WHERE account_id=:a'),{'a':self.account})
             db.commit()
         finally: db.close()
@@ -167,7 +167,7 @@ class TelephonyDBIntegration(unittest.TestCase):
         self.assertNotIn('credential-secret',str(row[2] or ''))
         self.assertNotIn('credential-secret',_json.dumps(audit))
 
-    def test_provider_health_guardian_excludes_synthetic_accounts_by_default(self):
+    def test_provider_health_guardian_excludes_synthetic_and_unpaid_accounts(self):
         import json as _json
         from app.crypto_utils import encrypt_secret
         db=SessionLocal()
@@ -179,6 +179,31 @@ class TelephonyDBIntegration(unittest.TestCase):
             out=T.provider_health_guardian(100,300)
             self.assertEqual(out.get('candidates'),0)
             verify.assert_not_called()
+
+            # Synthetic opt-in alone is not enough: Phone is a paid module and
+            # provider health must remain silent without a live entitlement.
+            unpaid=T.provider_health_guardian(100,300,include_synthetic=True)
+            self.assertEqual(int(unpaid.get('candidates') or 0),0)
+            verify.assert_not_called()
+
+            db=SessionLocal()
+            try:
+                db.execute(text("""INSERT INTO telephony_entitlements(
+                    account_id,enabled,period_start,paid_until,price_rub,commercial_ref,source
+                ) VALUES(:a,true,now()-interval '2 days',now()-interval '1 minute',1,'qa-provider-health-expired','qa')"""),{'a':self.account})
+                db.commit()
+            finally:
+                db.close()
+            expired=T.provider_health_guardian(100,300,include_synthetic=True)
+            self.assertEqual(int(expired.get('candidates') or 0),0)
+            verify.assert_not_called()
+
+            db=SessionLocal()
+            try:
+                db.execute(text("UPDATE telephony_entitlements SET paid_until=now()+interval '1 day' WHERE account_id=:a"),{'a':self.account})
+                db.commit()
+            finally:
+                db.close()
             opted=T.provider_health_guardian(100,300,include_synthetic=True)
             self.assertGreaterEqual(int(opted.get('candidates') or 0),1)
             self.assertGreaterEqual(int(opted.get('checked') or 0),1)
