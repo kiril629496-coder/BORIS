@@ -84,6 +84,13 @@ class MCNDeferredAsteriskRecoveryTests(unittest.TestCase):
         self.assertIn('e.enabled=true',src)
         self.assertIn('e.paid_until>now()',src)
 
+    def test_guardian_verification_ignores_unpaid_or_expired_mcn_trunks(self):
+        src=inspect.getsource(A.mcn_pjsip_guardian)
+        self.assertIn('telephony_entitlements e',src)
+        self.assertIn('e.account_id=t.account_id',src)
+        self.assertIn('e.enabled=true',src)
+        self.assertIn('e.paid_until>now()',src)
+
     def test_deferred_hold_is_applied_after_mcn_call_commit(self):
         self._insert_call(state='active',answered=True,direction='inbound')
         self._insert_deferred('ChannelHold','canonical_call_not_found',{})

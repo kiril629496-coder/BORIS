@@ -1726,11 +1726,15 @@ def mcn_pjsip_guardian(include_synthetic: bool = False) -> dict[str, Any]:
     db = SessionLocal()
     try:
         rows = db.execute(text("""
-        SELECT id,account_id,status FROM telephony_trunks
-        WHERE provider='mcn' AND enabled=true
-          AND status IN ('configured_unverified','connected')
-          AND (:include_synthetic OR NOT (lower(account_id) ~ '^__.*qa' OR lower(account_id) ~ '^qa[-_]'))
-        ORDER BY id
+        SELECT t.id,t.account_id,t.status FROM telephony_trunks t
+        WHERE t.provider='mcn' AND t.enabled=true
+          AND t.status IN ('configured_unverified','connected')
+          AND (:include_synthetic OR NOT (lower(t.account_id) ~ '^__.*qa' OR lower(t.account_id) ~ '^qa[-_]'))
+          AND EXISTS (
+              SELECT 1 FROM telephony_entitlements e
+              WHERE e.account_id=t.account_id AND e.enabled=true AND e.paid_until>now()
+          )
+        ORDER BY t.id
         """), {"include_synthetic": bool(include_synthetic)}).mappings().all()
     finally:
         db.close()

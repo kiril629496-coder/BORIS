@@ -721,6 +721,13 @@ grep -q 'telephony_entitlements e' backend/app/services/asterisk_gateway.py
 grep -q 'e.paid_until>now()' backend/app/services/asterisk_gateway.py
 grep -q "return {'status':'phone_entitlement_required','owner_action_required':False}" backend/app/services/asterisk_gateway.py
 grep -q 'test_unpaid_phone_blocks_direct_mcn_origination_before_asterisk_probe' backend/tests/test_mcn_deferred_asterisk_recovery.py
+grep -q 'def _phone_entitlement_transport_reconcile' backend/app/api/telephony.py
+test "$(grep -c 'transport_reconcile' backend/app/api/telephony.py)" -ge 2
+grep -q 'test_phone_entitlement_revoke_reconciles_transport_immediately' backend/tests/test_telephony_mcn_owner_api.py
+grep -q 'telephony_entitlements e' backend/app/services/mcn_network_guard.py
+grep -q 'test_firewall_desired_state_ignores_unpaid_or_expired_mcn_trunks' backend/tests/test_mcn_network_autodiscovery.py
+grep -q 'test_guardian_verification_ignores_unpaid_or_expired_mcn_trunks' backend/tests/test_mcn_deferred_asterisk_recovery.py
 echo PHONE_COMMERCIAL_RUNTIME_GATE=PASS
+echo PHONE_ENTITLEMENT_TRANSPORT_SELF_HEAL=PASS
 
 echo PHONE_PRODUCT_QA_FINAL=PASS

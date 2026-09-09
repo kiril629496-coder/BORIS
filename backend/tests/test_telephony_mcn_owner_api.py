@@ -295,7 +295,10 @@ class TelephonyMcnOwnerApiTests(unittest.TestCase):
             "has_commercial_ref": True,
             "commercial_ref_hash": "deadbeefdeadbeef",
         }
-        with patch.object(API, "provision_paid_phone_entitlement", return_value=activated) as provision,              patch("telephony_guardian_runner.mcn_mailbox_autoonboard_once", return_value={"status": "ok"}) as refresh,              patch.object(API, "_mcn_onboarding_raw_state", return_value=connected_state()):
+        with patch.object(API, "provision_paid_phone_entitlement", return_value=activated) as provision, \
+             patch("telephony_guardian_runner.mcn_mailbox_autoonboard_once", return_value={"status": "ok"}) as refresh, \
+             patch.object(API, "_mcn_onboarding_raw_state", return_value=connected_state()), \
+             patch.object(API, "_phone_entitlement_transport_reconcile", return_value={"status":"ok","changed":True,"applied":True}) as reconcile:
             out = API.platform_phone_entitlement_activate(body, self.owner)
         provision.assert_called_once_with(
             "acc-a",
@@ -307,7 +310,9 @@ class TelephonyMcnOwnerApiTests(unittest.TestCase):
             allow_zero_price=False,
         )
         refresh.assert_called_once_with(force_refresh=True)
+        reconcile.assert_called_once_with()
         self.assertEqual(out["status"], "ok")
+        self.assertTrue(out["transport_reconcile"]["applied"])
         serialized = json.dumps(out, ensure_ascii=False)
         self.assertNotIn("invoice-2026-001", serialized)
 
@@ -337,6 +342,43 @@ class TelephonyMcnOwnerApiTests(unittest.TestCase):
                 )
         self.assertEqual(ctx.exception.status_code, 400)
         revoke.assert_not_called()
+
+    def test_phone_entitlement_revoke_reconciles_transport_immediately(self):
+        revoked = {"status":"revoked","active":False,"account_id":"acc-a"}
+        with patch.object(API, "revoke_phone_entitlement", return_value=revoked) as revoke, \
+             patch.object(API, "_phone_entitlement_transport_reconcile", return_value={
+                 "status":"ok","changed":True,"applied":True,"deferred":False
+             }) as reconcile:
+            out = API.platform_phone_entitlement_revoke(
+                {"confirm_revoke_phone": True, "account_id": "acc-a", "reason": "payment_ended"},
+                self.owner,
+            )
+        revoke.assert_called_once_with("acc-a", actor_user_id=101, reason="payment_ended")
+        reconcile.assert_called_once_with()
+        self.assertEqual(out["status"], "ok")
+        self.assertFalse(out["entitlement"]["active"])
+        self.assertTrue(out["transport_reconcile"]["applied"])
+
+    def test_transport_reconcile_projection_exposes_no_trunk_or_provider_details(self):
+        raw={
+            "status":"ok","changed":True,"applied":False,"deferred":True,
+            "action":"defer_active_calls","rendered":1,
+            "trunks_verified":1,"trunks_degraded":0,
+            "provider_verified":1,"provider_degraded":0,
+            "error_code":None,"owner_action_required":False,
+            "trunks":[{"account_id":"secret-account","registration_state":"registered"}],
+            "provider_results":[{"account_id":"secret-account","status":"ok"}],
+            "firewall":{"desired_networks":["10.0.0.0/8"]},
+        }
+        with patch("app.services.asterisk_gateway.mcn_pjsip_guardian", return_value=raw):
+            out=API._phone_entitlement_transport_reconcile()
+        self.assertEqual(out["status"],"ok")
+        self.assertTrue(out["deferred"])
+        self.assertEqual(out["action"],"defer_active_calls")
+        self.assertNotIn("trunks",out)
+        self.assertNotIn("provider_results",out)
+        self.assertNotIn("firewall",out)
+        self.assertNotIn("secret-account",json.dumps(out,ensure_ascii=False))
 
     def test_phone_entitlement_status_never_needs_commercial_reference_value(self):
         safe = {

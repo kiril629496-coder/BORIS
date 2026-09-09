@@ -55,6 +55,33 @@ def _require_active_phone_entitlement(account_id: str) -> dict:
     return state
 
 
+def _phone_entitlement_transport_reconcile() -> dict:
+    """Immediately converge MCN transport after Phone commercial state changes."""
+    try:
+        from app.services.asterisk_gateway import mcn_pjsip_guardian
+        raw = mcn_pjsip_guardian()
+    except Exception as exc:
+        return {
+            "status": "degraded",
+            "error_code": type(exc).__name__[:120],
+            "owner_action_required": False,
+        }
+    return {
+        "status": str(raw.get("status") or "unknown")[:80],
+        "changed": bool(raw.get("changed")),
+        "applied": bool(raw.get("applied")),
+        "deferred": bool(raw.get("deferred")),
+        "action": str(raw.get("action") or "none")[:80],
+        "rendered": int(raw.get("rendered") or 0),
+        "trunks_verified": int(raw.get("trunks_verified") or 0),
+        "trunks_degraded": int(raw.get("trunks_degraded") or 0),
+        "provider_verified": int(raw.get("provider_verified") or 0),
+        "provider_degraded": int(raw.get("provider_degraded") or 0),
+        "error_code": str(raw.get("error_code") or "")[:120] or None,
+        "owner_action_required": bool(raw.get("owner_action_required")),
+    }
+
+
 def _mcn_onboarding_raw_state() -> dict:
     import json as _json
     from app.db.session import SessionLocal
@@ -1378,10 +1405,12 @@ def platform_phone_entitlement_activate(
         _phone_guardian.mcn_mailbox_autoonboard_once(force_refresh=True)
     except Exception:
         pass
+    transport = _phone_entitlement_transport_reconcile()
     return {
         'status':'ok',
         'entitlement':result,
         'onboarding':_mcn_onboarding_safe_projection(),
+        'transport_reconcile':transport,
         'truth':'explicit paid Phone entitlement; no price or paid period is invented',
     }
 
@@ -1402,9 +1431,11 @@ def platform_phone_entitlement_revoke(
         actor_user_id=_actor_user_id(current_user),
         reason=reason,
     )
+    transport = _phone_entitlement_transport_reconcile()
     return {
         'status':'ok',
         'entitlement':result,
+        'transport_reconcile':transport,
         'truth':'Phone entitlement revoked explicitly; provider credentials are not returned',
     }
 
