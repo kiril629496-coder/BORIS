@@ -1,6 +1,6 @@
 import inspect
 
-from app.api import messenger
+from app.api import messenger, mop_combat_training
 from app.services import brain_recovery
 
 
@@ -48,3 +48,13 @@ def test_safe_recovery_runner_contains_assignment_phone_handoff():
     src = inspect.getsource(brain_recovery.run_safe_recovery)
     assert "crm_assignment_phone_handoff" in src
     assert "_safe_crm_assignment_phone_handoff_recovery" in src
+
+
+def test_training_phone_handoff_precedes_first_contact_fast_stage():
+    src = inspect.getsource(mop_combat_training.sparring_turn)
+    phone_pos = src.index("MOP_TRAINING_PHONE_HANDOFF_PRIORITY_V1")
+    first_contact_pos = src.index("if generated is None and not _has_previous_mop")
+    assert phone_pos < first_contact_pos
+    assert "_mop_text_has_phone(body.message.strip())" in src
+    assert "_mop_phone_handoff_enabled_for_account(account_id)" in src
+    assert "generate_ai_draft_reply(" in src

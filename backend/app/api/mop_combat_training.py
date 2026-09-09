@@ -575,7 +575,14 @@ def sparring_turn(body: SparringTurn):
     account_id=_safe_account(body.account_id); rows,state=_spar(account_id,body.session_id)
     if state.get("status")!="active": raise HTTPException(status_code=409,detail="sparring session not active")
     now=int(time.time()); state["messages"].append({"id":f"h_{now}_{len(state['messages'])}","role":"client","text":body.message.strip(),"at":now})
-    from app.api.messenger import generate_ai_draft_reply, _mop_output_policy_violations, _mop_measurement_intent, _mop_measurement_repair_reply
+    from app.api.messenger import (
+        generate_ai_draft_reply,
+        _mop_output_policy_violations,
+        _mop_measurement_intent,
+        _mop_measurement_repair_reply,
+        _mop_text_has_phone,
+        _mop_phone_handoff_enabled_for_account,
+    )
     training_chat={
         "id":f"training:{state['session_id']}",
         "_training_messages":[{"role":m.get("role"),"text":m.get("text") or ""} for m in state["messages"]],
@@ -584,23 +591,237 @@ def sparring_turn(body: SparringTurn):
         "last_message":{"direction":"in","text":body.message.strip()},
         "context":{},
     }
-    generated=generate_ai_draft_reply(
-        account_id,
-        training_chat,
-        return_meta=True,
-        # MOP_TRAINING_BOUNDED_WAIT_V2:
-        # The training turn must leave enough shared budget for both the remote
-        # provider and the local Ollama recovery layer. Remote attempts are
-        # separately capped in sales_ai_router, so this larger total budget does
-        # not force the UI to wait the full value when a provider answers fast.
-        ai_timeout_sec=max(
-            35,
-            min(
-                70,
-                int(os.environ.get("BORIS_MOP_TRAINING_TURN_TIMEOUT_SEC", "60") or 60),
-            ),
-        ),
+    # MOP_FIRST_CONTACT_FAST_STAGE_V1:
+    # The trainer knows exactly whether this is the first manager turn, so do
+    # not spend AI time on a greeting/company-intro that is already present in
+    # configured company truth and the account sales cycle.
+    generated=None
+    _has_previous_mop=any(
+        m.get("role")=="mop"
+        for m in state.get("messages", [])[:-1]
     )
+
+    # MOP_TRAINING_PHONE_HANDOFF_PRIORITY_V1:
+    # Training must obey the same account handoff policy as live Messenger.
+    # A real phone on the current client turn has higher priority than the
+    # trainer's first-contact / sales-cycle fast guards. Delegate to the
+    # canonical generator so policy, wording and zero-AI accounting stay equal.
+    _phone_handoff_turn=False
+    try:
+        _phone_handoff_turn=bool(
+            _mop_text_has_phone(body.message.strip())
+            and _mop_phone_handoff_enabled_for_account(account_id)
+        )
+    except Exception:
+        _phone_handoff_turn=False
+    if _phone_handoff_turn:
+        generated=generate_ai_draft_reply(
+            account_id,
+            training_chat,
+            return_meta=True,
+            idempotency_key=f"mop-training-phone:{account_id}:{state['session_id']}:{len(state['messages'])}",
+        )
+
+    if generated is None and not _has_previous_mop:
+        try:
+            from app.db.session import SessionLocal as _FirstContactSession
+            from app.api.client_memory import _first_contact_sales_reply
+            _fcdb=_FirstContactSession()
+            try:
+                _fc=_first_contact_sales_reply(
+                    _fcdb, account_id, body.message.strip(), force=True
+                )
+            finally:
+                _fcdb.close()
+            if _fc:
+                generated={
+                    "text":str(_fc.get("answer") or ""),
+                    "usage":{
+                        "provider":"deterministic_guard",
+                        "model":"first_contact_sales_stage_v1",
+                        "prompt_tokens":0,
+                        "completion_tokens":0,
+                        "total_tokens":0,
+                        "cost_rub":0.0,
+                        "memory_fast_path":True,
+                        "policy_version":"MOP_FIRST_CONTACT_SALES_STAGE_V1",
+                    },
+                }
+        except Exception as _fc_exc:
+            print("MOP_FIRST_CONTACT_FAST_STAGE_DEFERRED %s: %s" % (
+                account_id, str(_fc_exc)[:160]
+            ), flush=True)
+
+    if generated is None and _has_previous_mop:
+        # MOP_TRAINING_SALES_CYCLE_FAST_STAGE_V1:
+        # A short answer to the previous qualification question is a completed
+        # sales stage, not a reason to wait for AI. Move immediately to the next
+        # still-missing required question. Substantive questions stay on the
+        # normal memory/AI path and are answered before qualification continues.
+        import re as _cycle_re
+        _client_now=" ".join(body.message.strip().split())
+        _client_low=_client_now.lower().replace("ё","е")
+        _cycle_words=_cycle_re.findall(r"[а-яёa-z0-9]+",_client_low,_cycle_re.I)
+        _looks_like_client_question=(
+            "?" in _client_now
+            or any(x in _client_low for x in (
+                "как ", "почему", "сколько", "можно", "где ", "когда",
+                "цена", "стоим", "адрес", "офис", "салон", "шоурум",
+                "услов", "гарант", "достав",
+            ))
+        )
+        if len(_cycle_words) <= 6 and not _looks_like_client_question:
+            try:
+                from app.db.session import SessionLocal as _CycleSession
+                from app.api.client_memory import rules_for as _cycle_rules_for
+                from app.api.messenger import (
+                    _mop_confirmed_learning_relevant,
+                    _mop_effective_learning_rules,
+                    _mop_emergency_next_question,
+                    _mop_sales_settings_cfg,
+                )
+                _cycledb=_CycleSession()
+                try:
+                    _cycle_rules=_mop_effective_learning_rules(
+                        _cycle_rules_for(
+                            _cycledb, account_id, shared=True, only_confirmed=True
+                        ) or []
+                    )
+                    _cycle_cfg=_mop_sales_settings_cfg(_cycledb,account_id)
+                finally:
+                    _cycledb.close()
+                _cycle_specific_rules=[
+                    x for x in _cycle_rules
+                    if str((x or {}).get("account_id") or "")!="__platform__"
+                ]
+                _cycle_learning_relevant=_mop_confirmed_learning_relevant(
+                    _client_now,_cycle_specific_rules
+                )
+                if not _cycle_learning_relevant:
+                    _cycle_history="\n".join(
+                        ("Клиент: " if m.get("role")=="client" else "Мы: ")
+                        + str(m.get("text") or "")
+                        for m in state.get("messages", [])
+                        if m.get("role") in {"client","mop"}
+                    )
+                    _last_mop=next((
+                        str(m.get("text") or "").strip()
+                        for m in reversed(state.get("messages", [])[:-1])
+                        if m.get("role")=="mop" and str(m.get("text") or "").strip()
+                    ),"")
+                    _last_low=_last_mop.lower().replace("ё","е")
+                    _answer_matches=True
+                    if any(x in _last_low for x in ("размер","площад","габарит")):
+                        _answer_matches=bool(
+                            _cycle_re.search(
+                                r"(?:нет|нету|не\s+зна|замер|замерщик|"
+                                r"\d+(?:[.,]\d+)?\s*[xх×]\s*\d+(?:[.,]\d+)?|"
+                                r"\d+\s*(?:м2|м²|метр))",
+                                _client_low,
+                            )
+                        )
+                    if not _answer_matches:
+                        generated={
+                            "text":"Уточню именно про размеры: есть примерные размеры помещения или зоны?",
+                            "usage":{
+                                "provider":"deterministic_guard",
+                                "model":"sales_cycle_reask_v1",
+                                "prompt_tokens":0,
+                                "completion_tokens":0,
+                                "total_tokens":0,
+                                "cost_rub":0.0,
+                                "memory_fast_path":True,
+                                "policy_version":"MOP_TRAINING_SALES_CYCLE_REASK_V1",
+                            },
+                        }
+                    else:
+                        _cycle_next=_mop_emergency_next_question(
+                            _cycle_cfg.get("required_questions") or [],
+                            _cycle_history,
+                        )
+                        if _cycle_next:
+                            generated={
+                                "text":_cycle_next,
+                                "usage":{
+                                    "provider":"deterministic_guard",
+                                    "model":"sales_cycle_stage_v1",
+                                    "prompt_tokens":0,
+                                    "completion_tokens":0,
+                                    "total_tokens":0,
+                                    "cost_rub":0.0,
+                                    "memory_fast_path":True,
+                                    "policy_version":"MOP_TRAINING_SALES_CYCLE_FAST_STAGE_V1",
+                                },
+                            }
+                        else:
+                            _goal_now=str(
+                                ((state.get("crm_client_context") or {}).get("dialog_goal"))
+                                or state.get("business_goal")
+                                or ""
+                            ).lower().replace("ё","е")
+                            _phone_known=bool(_cycle_re.search(
+                                r"(?<!\d)(?:\+?7|8)[\s()\-]*\d{3}[\s()\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}(?!\d)|(?<!\d)9\d{9}(?!\d)",
+                                _cycle_history,
+                            ))
+                            _target_text=""
+                            if not _phone_known and ("созвон" in _goal_now or "телефон" in _goal_now or "контакт" in _goal_now):
+                                if "замер" in _goal_now:
+                                    _target_text=(
+                                        "Основные параметры зафиксировал. "
+                                        "Чтобы согласовать замер и следующий шаг, оставьте, пожалуйста, номер телефона для связи."
+                                    )
+                                elif "созвон" in _goal_now:
+                                    _target_text=(
+                                        "Основные параметры зафиксировал. "
+                                        "Если удобно, оставьте номер телефона для связи, чтобы согласовать короткий созвон."
+                                    )
+                                else:
+                                    _target_text=(
+                                        "Основные параметры зафиксировал. "
+                                        "Если удобно, оставьте номер телефона для связи."
+                                    )
+                            elif _phone_known:
+                                _target_text=(
+                                    "Основные параметры зафиксировал, контакт уже есть. "
+                                    "Повторно ничего из пройденного уточнять не буду."
+                                )
+                            if _target_text:
+                                generated={
+                                    "text":_target_text,
+                                    "usage":{
+                                        "provider":"deterministic_guard",
+                                        "model":"sales_cycle_target_v1",
+                                        "prompt_tokens":0,
+                                        "completion_tokens":0,
+                                        "total_tokens":0,
+                                        "cost_rub":0.0,
+                                        "memory_fast_path":True,
+                                        "policy_version":"MOP_TRAINING_SALES_CYCLE_TARGET_V1",
+                                    },
+                                }
+            except Exception as _cycle_exc:
+                print("MOP_TRAINING_SALES_CYCLE_FAST_STAGE_DEFERRED %s: %s" % (
+                    account_id,str(_cycle_exc)[:160]
+                ),flush=True)
+
+    if generated is None:
+        generated=generate_ai_draft_reply(
+            account_id,
+            training_chat,
+            return_meta=True,
+            # MOP_TRAINING_BOUNDED_WAIT_V2:
+            # The training turn must leave enough shared budget for both the remote
+            # provider and the local Ollama recovery layer. Remote attempts are
+            # separately capped in sales_ai_router, so this larger total budget does
+            # not force the UI to wait the full value when a provider answers fast.
+            ai_timeout_sec=max(
+                35,
+                min(
+                    70,
+                    int(os.environ.get("BORIS_MOP_TRAINING_TURN_TIMEOUT_SEC", "60") or 60),
+                ),
+            ),
+        )
     answer=str((generated or {}).get("text") or "").strip()
     if not answer or answer.startswith("[Ошибка генерации черновика:"): raise HTTPException(status_code=502,detail=answer or "MOP generation failed")
 
@@ -625,23 +846,46 @@ def sparring_turn(body: SparringTurn):
             for cue in ("размер","площад","габарит")
         )
     )
+    _generated_usage=(generated or {}).get("usage") or {}
+    _generated_model=str(_generated_usage.get("model") or "")
     _training_policy=_mop_output_policy_violations(answer,_training_history)
     _tpv=set(str(x) for x in _training_policy)
+
+    # TRAINING_MEASUREMENT_QUESTION_SCOPE_V1:
+    # The generic output guard intentionally errs on the safe side and can mark
+    # an answer when "размеры" appear in a statement while a different sentence
+    # contains the question mark. In training, repair only when an actual
+    # question sentence asks dimensions/area/size again.
+    import re as _training_measure_re
+    _answer_question_sentences=_training_measure_re.findall(
+        r"[^.!?]*\?", str(answer or "").lower().replace("ё","е")
+    )
+    _actually_reasks_dimensions=any(
+        _training_measure_re.search(r"(?:размер|площад|габарит)", sentence)
+        for sentence in _answer_question_sentences
+    )
     if (
         _measurement_context
-        or "measurement_required_no_dimensions" in _tpv
+        or (
+            "measurement_required_no_dimensions" in _tpv
+            and _actually_reasks_dimensions
+        )
         or (
             "repeated_answered_question:dimensions" in _tpv
             and _mop_measurement_intent(body.message)
+            and _actually_reasks_dimensions
         )
     ):
         answer=_mop_measurement_repair_reply(_training_history)
     elif "phone_already_received" in _tpv:
         answer="Контакт уже есть, повторно номер не нужен. Продолжим по текущему вопросу."
-    elif any(x.startswith("repeated_answered_question:") for x in _tpv):
+    elif (
+        _generated_model!="sales_cycle_reask_v1"
+        and any(x.startswith("repeated_answered_question:") for x in _tpv)
+    ):
         answer="Принял. Этот момент уже зафиксирован, повторно уточнять его не буду."
 
-    _usage=(generated or {}).get("usage") or {}
+    _usage=_generated_usage
     turn={"id":f"t_{now}_{len(state['messages'])}","role":"mop","text":answer,"at":int(time.time()),"instruction_version":_instruction_version(account_id),"business_goal":state.get("business_goal") or "","provider":str(_usage.get("provider") or "local"),"model":str(_usage.get("model") or "local"),"usage":_usage,"training":True,"delivery":"disabled"}
     state["messages"].append(turn)
     state["manager_turns"] = sum(1 for m in state.get("messages", []) if m.get("role") == "mop")
@@ -704,11 +948,13 @@ def sparring_learning(body: SparringLearning):
             }
         h=hashlib.md5(("rule|account|sparring:%s:%s"%(body.session_id,body.turn_id)).encode()).hexdigest(); db=SessionLocal()
         try:
+            from app.api.client_memory import learning_rule_scope
+            learning_scope=learning_rule_scope(db,account_id)
             row=db.execute(sql_text("SELECT id FROM client_facts WHERE account_id=:a AND fact_hash=:h"),{"a":account_id,"h":h}).first()
             if row:
-                fact_id=int(row[0]); db.execute(sql_text("UPDATE client_facts SET value=:v,source_ref=:sr,status='confirmed',confidence=100,updated_at=now() WHERE id=:i"),{"v":rule,"sr":"mop_sparring:"+body.session_id,"i":fact_id})
+                fact_id=int(row[0]); db.execute(sql_text("UPDATE client_facts SET value=:v,scope=:sc,source_ref=:sr,status='confirmed',confidence=100,updated_at=now() WHERE id=:i"),{"v":rule,"sc":learning_scope,"sr":"mop_sparring:"+body.session_id,"i":fact_id})
             else:
-                fact_id=int(db.execute(sql_text("INSERT INTO client_facts(account_id,category,name,value,scope,source_type,source_ref,source_date,confidence,status,fact_hash,snippet,confirmed_by) VALUES(:a,'rule','Правило из спарринга',:v,'account','client',:sr,now(),100,'confirmed',:h,:sn,'owner') RETURNING id"),{"a":account_id,"v":rule,"sr":"mop_sparring:"+body.session_id,"h":h,"sn":("Спарринг, оценка %s/10. "%fb.get('score')+rule)[:500]}).scalar_one()); db.commit()
+                fact_id=int(db.execute(sql_text("INSERT INTO client_facts(account_id,category,name,value,scope,source_type,source_ref,source_date,confidence,status,fact_hash,snippet,confirmed_by) VALUES(:a,'rule','Правило из спарринга',:v,:sc,'client',:sr,now(),100,'confirmed',:h,:sn,'owner') RETURNING id"),{"a":account_id,"v":rule,"sc":learning_scope,"sr":"mop_sparring:"+body.session_id,"h":h,"sn":("Спарринг, оценка %s/10. "%fb.get('score')+rule)[:500]}).scalar_one()); db.commit()
             if row: db.commit()
         finally: db.close()
         fb.update({"proposal_status":"remembered","approved_rule":rule,"fact_id":fact_id})
@@ -769,11 +1015,13 @@ def real_dialog_feedback(body: RealDialogFeedback):
         }
     h=hashlib.md5(("rule|account|dialog:%s"%body.avito_chat_id).encode()).hexdigest(); db=SessionLocal()
     try:
+        from app.api.client_memory import learning_rule_scope
+        learning_scope=learning_rule_scope(db,account_id)
         row=db.execute(sql_text("SELECT id FROM client_facts WHERE account_id=:a AND fact_hash=:h"),{"a":account_id,"h":h}).first()
         if row:
-            fact_id=int(row[0]); db.execute(sql_text("UPDATE client_facts SET value=:v,source_ref=:sr,status='confirmed',confidence=100,snippet=:sn,confirmed_by='owner',updated_at=now() WHERE id=:i"),{"v":proposal,"sr":"mop_dialog:"+body.avito_chat_id,"sn":("Оценка %s/5. "%body.score+body.comment.strip())[:500],"i":fact_id})
+            fact_id=int(row[0]); db.execute(sql_text("UPDATE client_facts SET value=:v,scope=:sc,source_ref=:sr,status='confirmed',confidence=100,snippet=:sn,confirmed_by='owner',updated_at=now() WHERE id=:i"),{"v":proposal,"sc":learning_scope,"sr":"mop_dialog:"+body.avito_chat_id,"sn":("Оценка %s/5. "%body.score+body.comment.strip())[:500],"i":fact_id})
         else:
-            fact_id=int(db.execute(sql_text("INSERT INTO client_facts(account_id,category,name,value,scope,source_type,source_ref,source_date,confidence,status,fact_hash,snippet,confirmed_by,confirmed_at) VALUES(:a,'rule','Правило из реального диалога',:v,'account','client',:sr,now(),100,'confirmed',:h,:sn,'owner',now()) RETURNING id"),{"a":account_id,"v":proposal,"sr":"mop_dialog:"+body.avito_chat_id,"h":h,"sn":("Оценка %s/5. "%body.score+body.comment.strip())[:500]}).scalar_one())
+            fact_id=int(db.execute(sql_text("INSERT INTO client_facts(account_id,category,name,value,scope,source_type,source_ref,source_date,confidence,status,fact_hash,snippet,confirmed_by,confirmed_at) VALUES(:a,'rule','Правило из реального диалога',:v,:sc,'client',:sr,now(),100,'confirmed',:h,:sn,'owner',now()) RETURNING id"),{"a":account_id,"v":proposal,"sc":learning_scope,"sr":"mop_dialog:"+body.avito_chat_id,"h":h,"sn":("Оценка %s/5. "%body.score+body.comment.strip())[:500]}).scalar_one())
         db.commit()
     finally: db.close()
     item={"kind":"real_dialog_feedback","id":f"dialogfb_{now}_{len(rows)}","account_id":account_id,"avito_chat_id":body.avito_chat_id,"score":body.score,"comment":body.comment.strip(),"flags":body.flags,"proposal":proposal,"proposal_status":"remembered","fact_id":fact_id,"memory_store":"client_facts","created_at":now,"updated_at":now}
@@ -808,11 +1056,13 @@ def real_dialog_learning(body: RealDialogLearning):
     from sqlalchemy import text as sql_text
     account_id=_safe_account(body.account_id); rule=body.rule_text.strip(); h=hashlib.md5(("rule|account|dialog:%s"%body.avito_chat_id).encode()).hexdigest(); db=SessionLocal()
     try:
+        from app.api.client_memory import learning_rule_scope
+        learning_scope=learning_rule_scope(db,account_id)
         row=db.execute(sql_text("SELECT id FROM client_facts WHERE account_id=:a AND fact_hash=:h"),{"a":account_id,"h":h}).first()
         if row:
-            fact_id=int(row[0]); db.execute(sql_text("UPDATE client_facts SET value=:v,source_ref=:sr,status='confirmed',confidence=100,snippet=:sn,updated_at=now() WHERE id=:i"),{"v":rule,"sr":"mop_dialog:"+body.avito_chat_id,"sn":("Оценка %s/5. "%body.score+body.comment)[:500],"i":fact_id})
+            fact_id=int(row[0]); db.execute(sql_text("UPDATE client_facts SET value=:v,scope=:sc,source_ref=:sr,status='confirmed',confidence=100,snippet=:sn,updated_at=now() WHERE id=:i"),{"v":rule,"sc":learning_scope,"sr":"mop_dialog:"+body.avito_chat_id,"sn":("Оценка %s/5. "%body.score+body.comment)[:500],"i":fact_id})
         else:
-            fact_id=int(db.execute(sql_text("INSERT INTO client_facts(account_id,category,name,value,scope,source_type,source_ref,source_date,confidence,status,fact_hash,snippet,confirmed_by) VALUES(:a,'rule','Правило из реального диалога',:v,'account','client',:sr,now(),100,'confirmed',:h,:sn,'owner') RETURNING id"),{"a":account_id,"v":rule,"sr":"mop_dialog:"+body.avito_chat_id,"h":h,"sn":("Оценка %s/5. "%body.score+body.comment)[:500]}).scalar_one())
+            fact_id=int(db.execute(sql_text("INSERT INTO client_facts(account_id,category,name,value,scope,source_type,source_ref,source_date,confidence,status,fact_hash,snippet,confirmed_by) VALUES(:a,'rule','Правило из реального диалога',:v,:sc,'client',:sr,now(),100,'confirmed',:h,:sn,'owner') RETURNING id"),{"a":account_id,"v":rule,"sc":learning_scope,"sr":"mop_dialog:"+body.avito_chat_id,"h":h,"sn":("Оценка %s/5. "%body.score+body.comment)[:500]}).scalar_one())
         db.commit(); return {"status":"ok","fact_id":fact_id,"source":"real_dialog","applies_next_generation":True}
     finally: db.close()
 
