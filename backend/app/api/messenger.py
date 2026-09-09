@@ -3583,6 +3583,153 @@ def _recover_waiting_external_403(limit: int = 20, only_account: str | None = No
     return stats
 
 
+def _mop_send_failed_recovery_decision(*, send_error: str, failure_count: int,
+                                       auto_send: bool, owner_enabled: bool,
+                                       binding_enabled: bool, schedule_active: bool,
+                                       entitlement_active: bool) -> str:
+    """Pure policy for bounded send_failed self-heal.
+
+    retry        — exact draft may enter do_send(), which performs Avito readback
+                   before any POST;
+    handoff      — bounded retry budget exhausted;
+    skip_external — provider/tariff/access issue must wait for its own recovery;
+    skip_policy  — account is not currently allowed to auto-send.
+    """
+    err = str(send_error or "").lower()
+    if (
+        "avito 403" in err or "avito 402" in err or "forbidden" in err
+        or "subscription" in err or "подпис" in err
+        or "нет доступа" in err or "access denied" in err
+    ):
+        return "skip_external"
+    if not all((auto_send, owner_enabled, binding_enabled, schedule_active, entitlement_active)):
+        return "skip_policy"
+    if int(failure_count or 0) >= 3:
+        return "handoff"
+    return "retry"
+
+
+def _recover_send_failed_autosend(active_accounts, limit: int = 10) -> dict:
+    """MOP_SEND_FAILED_SELFHEAL_V1: bounded retry owned by Messenger.
+
+    No blind resend is possible here: the only external-send path is
+    mop_core.do_send(), whose send_failed branch first reads the authoritative
+    Avito chat and suppresses duplicates/superseded replies. This helper only
+    considers fresh, active, paid, auto-send accounts and caps the total
+    send_failed history before handing work to a manager.
+    """
+    from app.db.session import SessionLocal as _SL
+    from app import mop_core as _mc
+    from sqlalchemy import text as _sql
+
+    active = {str(x) for x in (active_accounts or set()) if str(x)}
+    stats = {
+        "checked": 0, "retried": 0, "recovered": 0, "deferred": 0,
+        "handoff": 0, "skip_external": 0, "skip_policy": 0,
+        "raced": 0,
+    }
+    if not active:
+        return stats
+
+    db = _SL()
+    try:
+        rows = db.execute(_sql("""
+            SELECT id,account_id,send_error,created_at,updated_at
+              FROM mop_drafts
+             WHERE status='send_failed'
+               AND created_at >= now()-interval '24 hours'
+             ORDER BY updated_at,id
+             LIMIT :n
+        """), {"n": max(1, min(int(limit or 10) * 5, 100))}).mappings().all()
+    finally:
+        db.close()
+
+    for item in rows:
+        aid = str(item.get("account_id") or "")
+        if aid not in active:
+            continue
+        stats["checked"] += 1
+        did = int(item["id"])
+
+        db = _SL()
+        try:
+            current = db.execute(_sql("""
+                SELECT id,status,send_error,reply_text
+                  FROM mop_drafts WHERE id=:i FOR UPDATE
+            """), {"i": did}).mappings().first()
+            if not current or str(current.get("status") or "") != "send_failed":
+                stats["raced"] += 1
+                continue
+
+            cfg = _mop_sales_settings_cfg(db, aid)
+            owner_enabled = bool(cfg.get("mop_enabled", cfg.get("enabled", True)))
+            auto_send = bool(cfg.get("auto_send", False))
+            binding_enabled = bool(db.execute(_sql(
+                "SELECT 1 FROM ai_bindings WHERE product='mop' AND account_id=:a LIMIT 1"
+            ), {"a": aid}).first())
+            schedule_active, _schedule = _mop_schedule_active(db, aid)
+            failure_count = int(db.execute(_sql("""
+                SELECT count(*) FROM mop_draft_events
+                 WHERE draft_id=:i AND event='send_failed'
+            """), {"i": did}).scalar() or 0)
+
+            decision = _mop_send_failed_recovery_decision(
+                send_error=str(current.get("send_error") or ""),
+                failure_count=failure_count,
+                auto_send=auto_send,
+                owner_enabled=owner_enabled,
+                binding_enabled=binding_enabled,
+                schedule_active=bool(schedule_active),
+                entitlement_active=True,
+            )
+            if decision == "skip_external":
+                stats["skip_external"] += 1
+                continue
+            if decision == "skip_policy":
+                stats["skip_policy"] += 1
+                continue
+            if decision == "handoff":
+                row, _ = _mc.set_status(
+                    db, did, "human_required", ("send_failed",), "handed_to_human",
+                    channel="mop_recovery", actor_type="system",
+                    actor_id="send_failed_selfheal",
+                    payload="bounded send_failed retry budget exhausted",
+                    meta={
+                        "policy_version": "MOP_SEND_FAILED_SELFHEAL_V1",
+                        "failure_count": failure_count,
+                        "owner_action_required": False,
+                    },
+                )
+                if row is not None:
+                    try:
+                        _mc.push_card(db, did)
+                    except Exception:
+                        pass
+                    stats["handoff"] += 1
+                continue
+
+            stats["retried"] += 1
+            sent, note = _mc.do_send(
+                db, did, "send_failed_selfheal", channel="mop_recovery"
+            )
+            status_after = str(db.execute(_sql(
+                "SELECT status FROM mop_drafts WHERE id=:i"
+            ), {"i": did}).scalar() or "")
+            if sent or status_after in {"sent", "no_reply_required"}:
+                stats["recovered"] += 1
+            elif status_after == "send_failed":
+                stats["deferred"] += 1
+            elif status_after == "human_required":
+                stats["handoff"] += 1
+            else:
+                stats["deferred"] += 1
+            if stats["retried"] >= max(1, min(int(limit or 10), 50)):
+                break
+        finally:
+            db.close()
+    return stats
+
+
 def _mop_unresolved_chat_handoff(db, account_id: str, chat_id: str) -> dict | None:
     """Return unresolved chat-level human handoff, if any.
 
@@ -4774,10 +4921,27 @@ def _messenger_poll_loop():
                     finally:
                         dbr.close()
                     xr = _recover_waiting_external_403(limit=20)
-                    if rr.get("checked") or nr.get("closed") or wr.get("checked") or xr.get("checked") or pr.get("checked"):
-                        print("MOP_STALE_RECOVERY checked=%s answered_externally=%s human_required=%s no_reply_closed=%s reasons=%s local_wait=%s provider_wait=%s 403_recovery=%s" %
+                    sr = _recover_send_failed_autosend(active_mop_accounts, limit=10)
+                    try:
+                        heartbeat(
+                            "runtime",
+                            "mop_send_failed_selfheal",
+                            state="degraded" if (sr.get("deferred") or sr.get("handoff")) else "ok",
+                            details={
+                                **dict(sr or {}),
+                                "active_mop_accounts": len(active_mop_accounts),
+                                "policy_version": "MOP_SEND_FAILED_SELFHEAL_V1",
+                            },
+                        )
+                    except Exception:
+                        pass
+                    if (
+                        rr.get("checked") or nr.get("closed") or wr.get("checked")
+                        or xr.get("checked") or pr.get("checked") or sr.get("checked")
+                    ):
+                        print("MOP_STALE_RECOVERY checked=%s answered_externally=%s human_required=%s no_reply_closed=%s reasons=%s local_wait=%s provider_wait=%s 403_recovery=%s send_failed_selfheal=%s" %
                               (rr.get("checked"), rr.get("answered_externally"), rr.get("human_required"),
-                               nr.get("closed"), nr.get("reasons"), wr, pr, xr),
+                               nr.get("closed"), nr.get("reasons"), wr, pr, xr, sr),
                               flush=True)
                 except Exception as exc:
                     print("MOP_STALE_RECOVERY_ERROR: %s" % repr(exc)[:200], flush=True)
