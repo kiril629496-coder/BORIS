@@ -5228,6 +5228,7 @@ def profitable_day_push(account_id: str, max_items: int = 2):
         cpl=spent/contacts
         if cpl>red*0.80: return {"status":"blocked","reason":"cpl_headroom_insufficient","cpl_rub":round(cpl,2),"red_cpl_rub":red,"changed_avito":False}
         if spent>=budget*0.90: return {"status":"blocked","reason":"budget_near_limit","spent_rub":spent,"budget_rub":budget,"changed_avito":False}
+        # MEASUREMENT_BACKLOG_GUARD_V2 compatibility marker.
         # PROFITABLE_DAY_CANONICAL_MEASUREMENT_CAP_V1:
         # All autonomous raise lanes share the same account-level evidence cap.
         # Do not let this helper advertise capacity 20 while final apply_one
