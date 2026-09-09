@@ -464,6 +464,7 @@ ck("ZERO_ACTIVE_INVENTORY_PRECEDES_OWNER_CONFIG", "MARKETER_ZERO_ACTIVE_INVENTOR
 ck("PAUSED_BY_OWNER_NOT_INCIDENT", "MARKETER_PAUSED_BY_OWNER_NOT_INCIDENT_V1" in roll and "'paused' if _paused_by_owner else 'waiting' if _expected_wait else 'blocked'" in roll)
 ck("EXPECTED_WAIT_NOT_BLOCKED", "MARKETER_EXPECTED_WAIT_NOT_BLOCKED_V1" in roll and "'no_active_items'" in roll and "'waiting' if _expected_wait" in roll)
 ck("SPEND_STALE_EXPECTED_WAIT", "MARKETER_SPEND_STALE_EXPECTED_WAIT_V1" in roll and "'spend_not_fresh'" in roll and "'waiting' if _expected_wait" in roll)
+ck("ADVISOR_INTERNAL_WAIT_PRECEDES_OWNER_BUDGET", "MARKETER_ADVISOR_INTERNAL_WAIT_PRECEDES_OWNER_BUDGET_V1" in roll and "_fresh_advisor_internal_money_wait" in roll and "'money_identity_internal_wait'" in roll and "owner_action_required" in roll and "age > 900" in roll)
 ck('AUTOPILOT_MODE_PRECEDES_OWNER_MONEY_CONFIG', 'AUTOPILOT_MODE_PRECEDES_OWNER_MONEY_CONFIG_V1' in roll and
    roll.index("if not bool(k.get('bid_autopilot'))") < roll.index('budget=float') and
    "'bid_autopilot_disabled'" in roll and "'autonomous_mode_disabled'" in roll)

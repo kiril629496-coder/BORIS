@@ -122,6 +122,7 @@ def _blocked_runtime_projection(account_id, reason, evidence=None):
     _expected_wait = str(reason) in {
         'no_active_items','stats_not_fresh','stats_spend_snapshot_skew',
         'spend_not_fresh','spend_signal_unverified','spend_provider_degraded',
+        'money_identity_internal_wait',
         'provider_stats_day_lagged','dedicated_stats_owner_not_completed',
     }
     now=datetime.now(timezone.utc).isoformat()
@@ -218,6 +219,46 @@ def _existing_spend_observation(db, account_id: str) -> dict:
     }
 
 
+def _fresh_advisor_internal_money_wait(db, account_id):
+    """Return fresh advisor proof that owner money input cannot unlock work now.
+
+    MARKETER_ADVISOR_INTERNAL_WAIT_PRECEDES_OWNER_BUDGET_V1:
+    cpx_advisor_runner executes before staged rollout in the canonical hourly
+    pipeline. When that same-cycle advisor proves zero writable active items and
+    explicitly says owner_action_required=false, rollout must not manufacture a
+    competing WAITING_OWNER budget task. This is owner-facing precedence only;
+    it never authorizes a raise and expires after 15 minutes.
+    """
+    advice=_load(db,account_id,'cpx_advice')
+    if not isinstance(advice,dict) or str(advice.get('account_id') or '')!=str(account_id):
+        return None
+    try:
+        raw=str(advice.get('generated_at') or '').strip()
+        dt=datetime.fromisoformat(raw.replace('Z','+00:00'))
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+        age=(datetime.now(timezone.utc)-dt.astimezone(timezone.utc)).total_seconds()
+    except Exception:
+        return None
+    if age < -60 or age > 900:
+        return None
+    mw=advice.get('money_writability') if isinstance(advice.get('money_writability'),dict) else {}
+    try:
+        writable=int(mw.get('canonical_writable_active') or 0)
+        readonly=int(mw.get('read_only_active') or 0)
+    except Exception:
+        return None
+    if writable!=0 or readonly<=0 or advice.get('owner_action_required') is not False:
+        return None
+    return {
+        'advisor_generated_at':advice.get('generated_at'),
+        'advisor_age_seconds':round(age,3),
+        'canonical_writable_active':writable,
+        'read_only_active':readonly,
+        'advisor_owner_action':advice.get('owner_action'),
+        'internal_self_heal':'money_identity_recheck_next_canonical_cycle',
+    }
+
+
 def _account_preflight(db,a):
     k=_load(db,a,'kpi_settings')
     # MARKETER_ENTITLEMENT_PRECEDES_OWNER_CONFIG_V1: never ask an owner to fill
@@ -269,6 +310,15 @@ def _account_preflight(db,a):
     budget=float(k.get('daily_budget_limit_rub') or 0)
     cap=float(k.get('hard_max_bid_rub') or 0)
     target=float(k.get('target_leads_per_day') or 0)
+
+    # Owner input has lower precedence than a fresh internal money-identity wait:
+    # changing budget cannot unlock a provider write while writable inventory is
+    # zero. Re-evaluate automatically next hourly cycle instead of making the
+    # owner operate an internal dependency.
+    _advisor_internal_wait=_fresh_advisor_internal_money_wait(db,a)
+    if _advisor_internal_wait is not None:
+        return False,'money_identity_internal_wait',_advisor_internal_wait
+
     if budget<=0:
         # ZERO_BUDGET_EXISTING_SPEND_TRUTH_V1: zero BORIS budget must not be
         # presented as zero real Avito spend. Existing placement/presence can
