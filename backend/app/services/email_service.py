@@ -67,7 +67,7 @@ def _as_list(value) -> list:
 
 
 def build_message(to, subject, body, html=None, from_address=None,
-                  from_name=None, reply_to=None, headers=None) -> EmailMessage:
+                  from_name=None, reply_to=None, headers=None, attachments=None) -> EmailMessage:
     addr, name, reply = sender()
     addr = from_address or addr
     name = from_name if from_name is not None else name
@@ -89,11 +89,24 @@ def build_message(to, subject, body, html=None, from_address=None,
     msg.set_content(body or "")
     if html:
         msg.add_alternative(html, subtype="html")
+    for item in (attachments or []):
+        path = item.get("path") if isinstance(item, dict) else str(item)
+        filename = (item.get("filename") if isinstance(item, dict) else None) or os.path.basename(path)
+        mime = (item.get("mime") if isinstance(item, dict) else None) or "application/pdf"
+        maintype, _, subtype = mime.partition("/")
+        with open(path, "rb") as fh:
+            data = fh.read()
+        if isinstance(item, dict) and item.get("inline") and item.get("cid") and html:
+            html_part = msg.get_payload()[-1] if msg.is_multipart() else None
+            if html_part is not None and hasattr(html_part, "add_related"):
+                html_part.add_related(data, maintype=maintype or "image", subtype=subtype or "png", cid=f"<{item['cid']}>", filename=filename, disposition="inline")
+                continue
+        msg.add_attachment(data, maintype=maintype or "application", subtype=subtype or "octet-stream", filename=filename)
     return msg
 
 
 def send_email(to, subject, body, html=None, from_address=None,
-               from_name=None, reply_to=None, headers=None) -> tuple:
+               from_name=None, reply_to=None, headers=None, attachments=None) -> tuple:
     """
     Возвращает (ok, reason, message_id).
     reason: ok | not_configured | no_recipient | <тип исключения>
@@ -109,16 +122,29 @@ def send_email(to, subject, body, html=None, from_address=None,
         return False, "no_recipient", ""
 
     msg = build_message(to, subject, body, html=html, from_address=from_address,
-                        from_name=from_name, reply_to=reply_to, headers=headers)
+                        from_name=from_name, reply_to=reply_to, headers=headers, attachments=attachments)
     message_id = msg.get("Message-ID", "")
 
+    phase = "connect"
     try:
         with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=DEFAULT_TIMEOUT) as server:
+            phase = "login"
             server.login(cfg["user"], cfg["password"])
+            phase = "sending"
             server.send_message(msg, to_addrs=recipients)
+            phase = "accepted"
     except Exception as exc:
         code = getattr(exc, "smtp_code", None)
         reason = type(exc).__name__ if code is None else "%s:%s" % (type(exc).__name__, code)
+        if phase == "accepted":
+            # DATA completed successfully. A later QUIT/socket-close failure must
+            # not turn an accepted message into an automatic duplicate retry.
+            logger.warning("email_service: письмо принято SMTP, ошибка закрытия (%s)", reason)
+            return True, "ok", message_id
+        if phase == "sending" and code is None:
+            # Transport died while DATA/send_message was in flight. Remote SMTP
+            # may already have accepted the message; outcome cannot be proven.
+            reason = "delivery_unknown:" + reason
         logger.warning("email_service: отправка не удалась (%s)", reason)
         return False, reason, message_id
 
