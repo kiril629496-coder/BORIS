@@ -1,0 +1,59 @@
+{
+  "bundle": "20260910-mop-speed-rules-final",
+  "verified_at_utc": "2026-09-10T06:25:00Z",
+  "files": [
+    {
+      "path": "backend/app/api/messenger.py",
+      "sha256": "87567cdf64629807c5b5f3c21acb09e1263a37d11144964f8e63a4cdfb04c490",
+      "bytes": 379859
+    },
+    {
+      "path": "backend/app/api/mop_combat_training.py",
+      "sha256": "68ab3f5a85139376859652d81639923ff71709608afc3b12b8e9a6721577d368",
+      "bytes": 55117
+    },
+    {
+      "path": "backend/app/services/sales_ai_router.py",
+      "sha256": "d9fb1c5349bce368ed3c20bae9b7417452253194d7170cadeeefa9512cdfac7b",
+      "bytes": 59233
+    },
+    {
+      "path": "backend/tests/test_mop_training_learning_fallback.py",
+      "sha256": "39d781f9d9d039a95376ae0317112bbf300180c581a7f1e01569ee4f4d8fc285",
+      "bytes": 1964
+    },
+    {
+      "path": "backend/tests/test_mop_qualification_fields.py",
+      "sha256": "f66f6e09a5e7b6b1467e4bd68b8e9755c07fb1682429a7e584f9fd64229633d1",
+      "bytes": 11129
+    },
+    {
+      "path": "backend/tests/test_mop_waiting_external_recovery.py",
+      "sha256": "ac4b5a507549a925107753cab0e54aa95a5391780746bd757573002804be4a16",
+      "bytes": 8393
+    },
+    {
+      "path": "backend/tests/test_sales_ai_router.py",
+      "sha256": "f2468530d4de285ccf4e771b4e44e75ffce91afba2d79d6f63107a73e9e8a648",
+      "bytes": 29479
+    },
+    {
+      "path": "frontend/app/messages/mop-training/page.tsx",
+      "sha256": "ec429fbe2d0be7a679c79e80dfdd9c1c798ab4a76b0f1df0449adddbf568f4c2",
+      "bytes": 62849
+    }
+  ],
+  "production_contract": {
+    "active_paid_mop_accounts": [
+      "antonybatono_78732",
+      "mbroker_27859",
+      "planetazayavki_65985",
+      "vasyailchenko_82650"
+    ],
+    "openai_state": "UNAVAILABLE_BILLING",
+    "regression": "93 passed",
+    "public_training_timeout": "25s (minified as 25e3)",
+    "scheduled_pending": 0,
+    "stale_mop_locks": 0
+  }
+}
