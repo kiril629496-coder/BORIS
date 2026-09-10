@@ -13,6 +13,7 @@ def ensure_schema(db):
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_replenish_runs' AND column_name='last_discovery_at')
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_replenish_runs' AND column_name='last_repair_at')
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_replenish_runs' AND column_name='discovery_cursor')
+      AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_replenish_runs' AND column_name='last_search_attempt_at')
     """)).scalar()
     if ready:
         return
@@ -22,6 +23,7 @@ def ensure_schema(db):
     db.execute(text("ALTER TABLE prospect_replenish_runs ADD COLUMN IF NOT EXISTS last_discovery_at TIMESTAMP"))
     db.execute(text("ALTER TABLE prospect_replenish_runs ADD COLUMN IF NOT EXISTS last_repair_at TIMESTAMP"))
     db.execute(text("ALTER TABLE prospect_replenish_runs ADD COLUMN IF NOT EXISTS discovery_cursor INTEGER NOT NULL DEFAULT 0"))
+    db.execute(text("ALTER TABLE prospect_replenish_runs ADD COLUMN IF NOT EXISTS last_search_attempt_at TIMESTAMP"))
     db.execute(text("""UPDATE prospect_replenish_runs
       SET last_discovery_at=COALESCE(last_discovery_at,last_run_at),
           last_repair_at=COALESCE(last_repair_at,last_run_at)
@@ -35,22 +37,40 @@ def ensure_schema(db):
       PRIMARY KEY(campaign_id,company_id))'''))
     db.commit()
 
+def _adaptive_discovery_hours(ready_now:int, min_ready:int, every_hours:float)->float:
+    """Increase only reserve discovery cadence while the ready pool is low."""
+    ratio=float(max(0,int(ready_now)))/float(max(1,int(min_ready)))
+    if ratio < 0.75:
+        return min(float(every_hours),0.5)
+    if ratio < 1.0:
+        return min(float(every_hours),1.0)
+    return float(every_hours)
+
 def tick(min_ready:int=100, every_hours:int=6, repair_every_minutes:int=60)->dict:
     db=SessionLocal(); pc.ensure_schema(db); ensure_schema(db)
     try:
         c=db.execute(text("""SELECT c.id,c.owner_id,c.niche,c.regions,c.min_quality_score,
           count(m.id) FILTER (WHERE m.status='ready') ready,
-          r.last_discovery_at,r.last_repair_at,COALESCE(r.discovery_cursor,0) discovery_cursor
+          r.last_discovery_at,r.last_search_attempt_at,r.last_repair_at,COALESCE(r.discovery_cursor,0) discovery_cursor
           FROM prospect_campaigns c LEFT JOIN prospect_campaign_members m ON m.campaign_id=c.id
           LEFT JOIN prospect_replenish_runs r ON r.campaign_id=c.id
           WHERE c.status='active'
             AND (r.last_repair_at IS NULL OR r.last_repair_at < NOW() - (:rm || ' minutes')::interval)
-          GROUP BY c.id,r.last_discovery_at,r.last_repair_at,r.discovery_cursor
+          GROUP BY c.id,r.last_discovery_at,r.last_search_attempt_at,r.last_repair_at,r.discovery_cursor
           HAVING count(m.id) FILTER (WHERE m.status='ready') < :mr
           ORDER BY count(m.id) FILTER (WHERE m.status='ready') ASC,c.id LIMIT 1"""),{'rm':str(repair_every_minutes),'mr':min_ready}).mappings().first()
         if not c:return {'status':'idle'}
         cid=int(c['id']); owner=int(c['owner_id']); niche=c['niche']; regions=list(c['regions'] or []); min_quality=int(c['min_quality_score'] or 55); discovery_cursor=int(c['discovery_cursor'] or 0)
-        discovery_due=(c['last_discovery_at'] is None) or db.execute(text("SELECT :d < NOW() - (:h || ' hours')::interval"),{'d':c['last_discovery_at'],'h':str(every_hours)}).scalar()
+        ready_now=int(c.get('ready') or 0)
+        # EMAIL_RESERVE_ADAPTIVE_DISCOVERY_V1: when the ready reserve is well
+        # below target, waiting three hours between discovery passes lets the
+        # campaign starve even though the minute worker is healthy. Increase
+        # only discovery cadence (never send volume): <75% target -> 30 min,
+        # 75-99% -> 60 min, target reached -> no discovery because this campaign
+        # is excluded by the HAVING clause above.
+        effective_every_hours=_adaptive_discovery_hours(ready_now,min_ready,every_hours)
+        last_search_attempt=c.get('last_search_attempt_at') or c.get('last_discovery_at')
+        discovery_due=(last_search_attempt is None) or db.execute(text("SELECT :d < NOW() - (:h || ' hours')::interval"),{'d':last_search_attempt,'h':str(effective_every_hours)}).scalar()
         db.execute(text("""INSERT INTO prospect_replenish_runs(campaign_id,last_run_at,last_repair_at)
           VALUES(:c,NOW(),NOW()) ON CONFLICT(campaign_id) DO UPDATE
           SET last_run_at=NOW(),last_repair_at=NOW(),updated_at=NOW()"""),{'c':cid});db.commit()
@@ -66,9 +86,9 @@ def tick(min_ready:int=100, every_hours:int=6, repair_every_minutes:int=60)->dic
         if discovery_due:
             db=SessionLocal(); ensure_schema(db)
             if search_degraded:
-                db.execute(text("UPDATE prospect_replenish_runs SET last_error='search_degraded',updated_at=NOW() WHERE campaign_id=:c"),{'c':cid})
+                db.execute(text("UPDATE prospect_replenish_runs SET last_search_attempt_at=NOW(),last_error='search_degraded',updated_at=NOW() WHERE campaign_id=:c"),{'c':cid})
             else:
-                db.execute(text("UPDATE prospect_replenish_runs SET last_discovery_at=NOW(),discovery_cursor=:cursor,last_error=NULL,updated_at=NOW() WHERE campaign_id=:c"),{'c':cid,'cursor':int(d.get('next_offset') or 0)})
+                db.execute(text("UPDATE prospect_replenish_runs SET last_search_attempt_at=NOW(),last_discovery_at=NOW(),discovery_cursor=:cursor,last_error=NULL,updated_at=NOW() WHERE campaign_id=:c"),{'c':cid,'cursor':int(d.get('next_offset') or 0)})
             db.commit(); db.close()
         # Reuse already discovered domains that still have no selected email and
         # consume any newly seeded canonical backlog. This keeps discovery source-
@@ -79,7 +99,7 @@ def tick(min_ready:int=100, every_hours:int=6, repair_every_minutes:int=60)->dic
           SELECT c.id FROM prospect_companies c
           WHERE c.owner_id=:o AND c.status='new'
             AND (c.city = ANY(:regions) OR cardinality(:regions)=0)
-            AND (c.search_query ILIKE '%' || :niche || '%' OR c.source='niche_discovery')
+            AND c.search_query ILIKE '%' || :niche || '%'
           ORDER BY c.discovery_score DESC NULLS LAST,c.id
           LIMIT 30
         """),{'o':owner,'regions':regions,'niche':niche}).all()]
@@ -95,7 +115,7 @@ def tick(min_ready:int=100, every_hours:int=6, repair_every_minutes:int=60)->dic
           WHERE c.owner_id=:o
             AND COALESCE(rs.attempts,0) < :max_attempts
             AND (cardinality(:regions)=0 OR c.city = ANY(:regions))
-            AND (c.search_query ILIKE '%' || :niche || '%' OR c.source='niche_discovery')
+            AND c.search_query ILIKE '%' || :niche || '%'
             AND NOT EXISTS(
               SELECT 1 FROM prospect_contacts p
               WHERE p.company_id=c.id AND p.kind='email'

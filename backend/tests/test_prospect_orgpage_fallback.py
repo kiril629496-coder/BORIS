@@ -61,3 +61,32 @@ def test_orgpage_bulk_includes_nerud_combines_category():
     src = __import__('inspect').getsource(p._orgpage_bulk_directory_results)
     assert "'kombinaty-nerudnykh-materialov'" in src
     assert "'kombinaty-nerudnykh-materialov':1" in src
+
+def test_orgpage_bulk_includes_broad_material_categories_with_bounded_pages():
+    src = __import__('inspect').getsource(p._orgpage_bulk_directory_results)
+    assert "'postavschiki-stroitelnykh'" in src
+    assert "'prodazha-stroitelnykh-materialov'" in src
+    assert "'postavschiki-stroitelnykh':10" in src
+    assert "'prodazha-stroitelnykh-materialov':10" in src
+    assert "_niche_search_result_relevant(niche,item)" in src
+
+
+def test_campaign_bulk_alias_accepts_historical_seed_phrase_only_for_bulk():
+    pats=p._campaign_search_query_patterns('Сыпучие материалы')
+    assert '%Сыпучие материалы%' in pats
+    assert '%сыпучие строительные материалы%' in pats
+    assert p._campaign_search_query_patterns('Мобильные приложения') == ['%Мобильные приложения%']
+
+def test_discovery_cursor_is_monotonic_for_directory_pagination():
+    src = __import__('inspect').getsource(p.discover_niche)
+    assert "+advance) % len(query_plan)" not in src
+    assert "max(0,int(query_offset or 0))+advance" in src
+    # Query-engine selection still wraps independently, so removing persisted
+    # cursor wrapping cannot walk outside the finite query plan.
+    assert "% len(query_plan)" in src
+
+def test_orgpage_bulk_includes_verified_dry_mix_category_with_bounded_pages():
+    src = __import__('inspect').getsource(p._orgpage_bulk_directory_results)
+    assert "'sukhie-stroitelnye-smesi'" in src
+    assert "'sukhie-stroitelnye-smesi':10" in src
+    assert "_niche_search_result_relevant(niche,item)" in src
