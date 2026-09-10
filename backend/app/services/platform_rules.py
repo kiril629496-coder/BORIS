@@ -952,6 +952,29 @@ def inspect_url_browser(url: str) -> dict:
         text_value = " ".join(page.locator("body").inner_text(timeout=5000).split())
         final_url = page.url
         status_code = response.status if response else 0
+        # Browser fallback must preserve the same href evidence as HTTP.
+        # Otherwise Cloudflare/403 sites can expose readable rules and live
+        # merchant links in Chromium but remain permanently REVIEW because the
+        # evidence disappears before the curated rule gate sees it.
+        try:
+            raw_links = page.eval_on_selector_all(
+                "a[href]",
+                "els => els.map(a => a.href).filter(Boolean)",
+            )
+        except Exception:
+            # Link extraction is extra evidence. It must never discard readable
+            # rule text when a site exposes an unusual DOM/API edge case.
+            raw_links = []
+        outbound_links = []
+        seen_links = set()
+        for value in raw_links or []:
+            value = str(value or "").strip()
+            if not value.startswith(("http://", "https://")) or value in seen_links:
+                continue
+            seen_links.add(value)
+            outbound_links.append(value)
+            if len(outbound_links) >= 300:
+                break
         browser.close()
     result = classify_rules(text_value)
     result.update({
@@ -960,6 +983,7 @@ def inspect_url_browser(url: str) -> dict:
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "text_sha256": hashlib.sha256(text_value.encode("utf-8")).hexdigest(),
         "text_excerpt": text_value[:50000],
+        "outbound_links": outbound_links,
         "transport": "browser_fallback",
     })
     return result

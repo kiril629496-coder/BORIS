@@ -205,10 +205,16 @@ def _strategic_reserve_snapshot() -> dict:
         if not niches:
             continue
 
-        all_sellable_sites.add(site)
+        strategic_match = False
         for niche in strategic_niches:
             if niche in niches:
                 coverage[niche].add(site)
+                strategic_match = True
+        # The 200-site strategic target is specifically the reusable
+        # goods/services pool. Allowed forums for unrelated niches must not
+        # inflate the unique-site progress counter.
+        if strategic_match:
+            all_sellable_sites.add(site)
 
     rows = {
         niche: {

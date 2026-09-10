@@ -1124,6 +1124,11 @@ def bootstrap_priority_snapshot(projects: list[dict] | None = None) -> dict[str,
     for project in active_projects:
         if not project_is_active(project):
             continue
+        # Internal inventory/marketing projects grow the reusable reserve, but
+        # they are not paying client demand and must never be labeled urgent.
+        # The global bootstrap queue still processes them as strategic reserve.
+        if str(project.get("plan_mode") or "") == "inventory":
+            continue
         project_id = str(project.get("id") or "")
         if not project_id:
             continue

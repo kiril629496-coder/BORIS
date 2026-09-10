@@ -50,6 +50,13 @@ class StrategicReserveTests(unittest.TestCase):
                 "publication_surfaces": [{"niches": ["goods", "services"]}],
             },
             {
+                "key": "unrelated_allowed",
+                "url": "https://unrelated.example.com/forum",
+                "channel_type": "forum",
+                "enabled_for_outreach": True,
+                "publication_surfaces": [{"niches": ["it"]}],
+            },
+            {
                 "key": "blocked",
                 "url": "https://blocked.example.com/forum",
                 "channel_type": "forum",
@@ -62,6 +69,7 @@ class StrategicReserveTests(unittest.TestCase):
             "goods_a_second_section": "allowed",
             "service_b": "allowed",
             "review_only": "review",
+            "unrelated_allowed": "allowed",
             "blocked": "blocked",
         }
         with (
@@ -83,6 +91,8 @@ class StrategicReserveTests(unittest.TestCase):
         self.assertFalse(snapshot["complete"])
         self.assertEqual(snapshot["target_total"], guard.STRATEGIC_RESERVE_TARGET * len(guard.STRATEGIC_RESERVE_NICHES))
         self.assertEqual(snapshot["allowed_unique_sites_total"], 2)
+        self.assertNotIn("unrelated.example.com", snapshot["formats"]["goods"]["sites"])
+        self.assertNotIn("unrelated.example.com", snapshot["formats"]["services"]["sites"])
         self.assertEqual(snapshot["total_deficit"], guard.STRATEGIC_RESERVE_TOTAL_TARGET - 2)
         self.assertEqual(snapshot["max_deficit"], snapshot["total_deficit"])
 

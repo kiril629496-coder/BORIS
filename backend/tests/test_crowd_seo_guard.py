@@ -2375,6 +2375,38 @@ class CrowdSeoGuardTests(unittest.TestCase):
         )
 
 
+    def test_bootstrap_priority_does_not_label_inventory_as_client_urgency(self):
+        project = {
+            "id": "crowd_inventory",
+            "site": "https://boris-ai.pro/",
+            "status": "expanding_publication_pool",
+            "content_status": "approved",
+            "plan_mode": "inventory",
+            "niche": "it",
+            "keywords": ["crm", "api"],
+            "target_count": 0,
+            "bonus_count": 0,
+            "offer_type": "services",
+            "publish_all_eligible": True,
+        }
+        queue = {"items": [{"platform": "reserve_forum"}]}
+        matches = [{
+            "platform": "reserve_forum",
+            "surface_id": "default",
+            "checkpoint": "captcha_required",
+            "publication_ready": False,
+            "relevance": 3,
+            "maturity_required": False,
+            "account_warming": False,
+        }]
+        with (
+            patch.object(guard.crowd_seo.marketplace, "platform_bootstrap_queue", return_value=queue),
+            patch.object(guard.crowd_seo, "_forum_matches", return_value=matches),
+        ):
+            snapshot = guard.crowd_seo.bootstrap_priority_snapshot([project])
+
+        self.assertEqual(snapshot, {})
+
     def test_bootstrap_priority_is_capped_to_real_project_plan(self):
         project = {
             "id": "crowd_plan",
@@ -2739,8 +2771,10 @@ class CrowdSeoGuardTests(unittest.TestCase):
             patch.object(guard.platform_rules,"latest",side_effect=lambda key: decisions.get(key)),
         ):
             snap=guard._strategic_reserve_snapshot()
-        self.assertGreaterEqual(snap["allowed_unique_sites_total"],200)
-        self.assertEqual(snap["total_deficit"],0)
+        # Unrelated business-only forums must not inflate the goods/services
+        # strategic union. Only 100 service + 60 goods sites count here.
+        self.assertEqual(snap["allowed_unique_sites_total"],160)
+        self.assertEqual(snap["total_deficit"],40)
         self.assertEqual(snap["formats"]["services"]["deficit"],0)
         self.assertEqual(snap["formats"]["goods"]["deficit"],40)
         self.assertEqual(snap["max_deficit"],40)
