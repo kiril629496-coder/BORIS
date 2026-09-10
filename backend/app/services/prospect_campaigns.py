@@ -720,6 +720,169 @@ def _clean_company_title(title, domain):
     if not title or len(title)>160: title=(domain or "Компания").split(".")[0]
     return title[:300]
 
+
+def _orgpage_bulk_supported(niche: str, regions: list[str] | None = None) -> bool:
+    """Bounded directory fallback for the currently active bulk-material niche.
+
+    OrgPage is discovery evidence only. We take the company's public website from
+    the directory card; email selection still happens later on the official site
+    through the canonical BORIS crawler/quality/suppression gates.
+    """
+    low=str(niche or '').lower().replace('ё','е')
+    bulk=any(x in low for x in (
+        'сыпуч', 'щеб', 'неруд', 'песок', 'бетон', 'цемент', 'керамзит',
+    ))
+    regs={str(x or '').strip().lower().replace('ё','е') for x in (regions or [])}
+    return bool(bulk and (not regs or 'москва' in regs))
+
+
+def _parse_orgpage_category_cards(html: str, region_slug: str = 'moskva') -> list[dict]:
+    """Extract unique OrgPage company-card URLs from a server-rendered category."""
+    from bs4 import BeautifulSoup
+    from urllib.parse import urlparse, urljoin
+    soup=BeautifulSoup(html or '', 'lxml')
+    out=[]; seen=set()
+    rx=re.compile(rf'^/{re.escape(region_slug)}/[^/?#]+-\d+\.html$')
+    for a in soup.find_all('a', href=True):
+        href=str(a.get('href') or '').strip()
+        full=urljoin('https://www.orgpage.ru/', href)
+        parsed=urlparse(full)
+        if (parsed.hostname or '').lower().removeprefix('www.') != 'orgpage.ru':
+            continue
+        if not rx.match(parsed.path or ''):
+            continue
+        key=parsed.path.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        title=re.sub(r'^\s*\d+\.\s*', '', a.get_text(' ', strip=True)).strip()
+        if not title:
+            continue
+        out.append({'title':title[:300], 'detail_url':full})
+    return out
+
+
+def _parse_orgpage_company_detail(html: str, detail_url: str = '') -> dict | None:
+    """Read only the official company website from an OrgPage company card."""
+    from bs4 import BeautifulSoup
+    from urllib.parse import urlparse
+    soup=BeautifulSoup(html or '', 'lxml')
+    title=''
+    h1=soup.find('h1')
+    if h1:
+        title=h1.get_text(' ', strip=True)
+    if not title and soup.title:
+        title=soup.title.get_text(' ', strip=True).split(' - ',1)[0].strip()
+    meta=soup.find('meta', attrs={'name':'description'})
+    evidence=[]
+    for node in soup.select('.company-about, .company-product__text'):
+        txt=' '.join(node.get_text(' ',strip=True).split())
+        if txt and txt not in evidence:
+            evidence.append(txt)
+    if evidence:
+        snippet=' | '.join(evidence)[:1800]
+    else:
+        snippet=str(meta.get('content') or '').strip() if meta else ''
+    candidates=[]
+    for a in soup.select('.company-information__site-text a[href], a.nofol-link[href]'):
+        candidates.append(str(a.get('href') or '').strip())
+    for link in soup.select('link[itemprop="url"][href]'):
+        candidates.append(str(link.get('href') or '').strip())
+    blocked={
+        'orgpage.ru','static.orgpage.ru','orgpage.usedocs.com','vk.com','vk.ru',
+        't.me','telegram.me','youtube.com','youtu.be','instagram.com','facebook.com',
+    }
+    for url in candidates:
+        if not url.startswith(('http://','https://')):
+            continue
+        host=(urlparse(url).hostname or '').lower().removeprefix('www.').rstrip('.')
+        if not host or host in blocked or host.endswith('.orgpage.ru'):
+            continue
+        return {
+            'url':url,
+            'domain':host,
+            'title':title[:500],
+            'snippet':snippet[:1000],
+            'search_provider':'orgpage_directory',
+            'source_url':detail_url or None,
+        }
+    return None
+
+
+def _orgpage_bulk_directory_results(niche: str, regions: list[str], *, max_results: int = 12,
+                                    offset: int = 0) -> list[dict]:
+    """Bounded, respectful OrgPage fallback used only when search engines fail."""
+    if not _orgpage_bulk_supported(niche, regions):
+        return []
+    import requests
+    from app.services.prospect_discovery import USER_AGENT, TIMEOUT
+    headers={'User-Agent':USER_AGENT, 'Accept-Language':'ru,en;q=0.7'}
+    categories=(
+        'postavschiki-sypuchikh',
+        'schebenochnye-zavody',
+        'postavschiki-betona-i-zhbi',
+        'tsement',
+        'kombinaty-nerudnykh-materialov',
+    )
+    session=requests.Session()
+    # Search discovery must not inherit the paid-AI proxy route. OrgPage is a
+    # public RU directory and direct egress keeps geography/relevance stable.
+    session.trust_env=False
+    cards=[]; seen_cards=set()
+    # Two category pages per pass are enough; cursor rotation covers the rest.
+    raw_offset=max(0,int(offset or 0))
+    cat_start=raw_offset % len(categories)
+    # OrgPage bulk categories currently expose one additional result page.
+    # Rotate page 1/2 with the existing cursor; never crawl unbounded pagination.
+    page=1+((raw_offset // len(categories)) % 2)
+    ordered=categories[cat_start:]+categories[:cat_start]
+    for cat in ordered[:2]:
+        _respect_search_interval()
+        effective_page=1 if cat == 'kombinaty-nerudnykh-materialov' else page
+        category_url=(
+            f'https://www.orgpage.ru/moskva/{cat}/'
+            if effective_page == 1 else f'https://www.orgpage.ru/moskva/{cat}/{effective_page}/'
+        )
+        r=session.get(
+            category_url,
+            headers=headers, timeout=TIMEOUT, allow_redirects=True,
+        )
+        if not (200 <= r.status_code < 300):
+            continue
+        for card in _parse_orgpage_category_cards(r.text, 'moskva'):
+            key=str(card.get('detail_url') or '').lower()
+            if key and key not in seen_cards:
+                seen_cards.add(key); cards.append(card)
+    if not cards:
+        return []
+    start=(raw_offset // (len(categories)*2)) % len(cards)
+    cards=cards[start:]+cards[:start]
+    out=[]; seen_domains=set()
+    # Bound detail-page traffic. The next replenisher pass rotates the cursor.
+    detail_budget=min(max(4,int(max_results)*2), 24)
+    for card in cards[:detail_budget]:
+        _respect_search_interval()
+        try:
+            r=session.get(card['detail_url'], headers=headers, timeout=TIMEOUT, allow_redirects=True)
+        except Exception:
+            continue
+        if not (200 <= r.status_code < 300):
+            continue
+        item=_parse_orgpage_company_detail(r.text, card['detail_url'])
+        if not item:
+            continue
+        domain=str(item.get('domain') or '').lower()
+        if not domain or domain in seen_domains or _search_domain_blocked(domain):
+            continue
+        seen_domains.add(domain)
+        if card.get('title') and not item.get('title'):
+            item['title']=card['title']
+        out.append(item)
+        if len(out)>=max(1,int(max_results)):
+            break
+    return out
+
+
 def _raw_search(query, max_results=25):
     """Public search with respectful DDG retry and an independent Bing HTML fallback."""
     import requests
@@ -1020,6 +1183,12 @@ def discover_niche(owner_id:int, niche:str, regions:list[str], target:int=100, m
             results=_raw_search(q,max_results=min(30,max(10,target-len(inserted))))
         except Exception as exc:
             search_failures.append({"query":q,"error":type(exc).__name__,"detail":str(exc)[:180]})
+            # DIRECTORY_DISCOVERY_EARLY_FALLBACK_V1: for the supported bulk
+            # niche, one confirmed full-provider failure is enough evidence to
+            # switch to the bounded directory fallback. Repeating the same
+            # blocked engines 10+ times only stalls the minute worker.
+            if isinstance(exc, ProspectSearchUnavailable) and _orgpage_bulk_supported(niche, regions):
+                break
             continue
         db=SessionLocal()
         try:
@@ -1052,7 +1221,58 @@ def discover_niche(owner_id:int, niche:str, regions:list[str], target:int=100, m
             db.close()
     search_health=get_search_health()
     search_degraded=bool(search_failures) and search_health.get("state")=="degraded"
-    next_offset=(max(0,int(query_offset or 0)) if search_degraded else ((max(0,int(query_offset or 0))+len(queries)) % len(query_plan))) if query_plan else 0
+
+    # DIRECTORY_DISCOVERY_SELFHEAL_V1: if all public search engines are blocked
+    # or geographically noisy, the current bulk-material campaign must not starve.
+    # OrgPage is used only to discover official company websites; the canonical
+    # crawler still verifies email/quality before a campaign member can be ready.
+    directory_advance=0
+    if search_degraded and len(inserted) < target and _orgpage_bulk_supported(niche, regions):
+        try:
+            directory_items=_orgpage_bulk_directory_results(
+                niche, regions,
+                max_results=min(12,max(1,target-len(inserted))),
+                offset=max(0,int(query_offset or 0)),
+            )
+        except Exception as exc:
+            directory_items=[]
+            search_failures.append({"query":"orgpage_directory","error":type(exc).__name__,"detail":str(exc)[:180]})
+        for item in directory_items:
+            if len(inserted)>=target:
+                break
+            if not _niche_search_result_relevant(niche,item):
+                semantic_rejected+=1
+                continue
+            db=SessionLocal()
+            try:
+                provider='orgpage_directory'; search_providers.add(provider)
+                prospecting.lock_company_domain(db,owner_id,item["domain"])
+                found=db.execute(text("""SELECT id FROM prospect_companies
+                  WHERE owner_id=:o AND lower(domain)=lower(:d)
+                  ORDER BY id LIMIT 1"""),{"o":owner_id,"d":item["domain"]}).scalar()
+                if found:
+                    db.commit(); existing.append(int(found)); continue
+                name=_clean_company_title(item.get("title"),item["domain"]); norm=prospecting.normalize_company_name(name)
+                search_tag=f"{niche} | orgpage_directory"
+                cid=db.execute(text("""INSERT INTO prospect_companies(owner_id,name,normalized_name,city,website,domain,status,source,source_url,discovery_status,discovery_provider,discovered_at,search_query,discovery_score)
+                  VALUES(:o,:n,:nn,'Москва',:w,:d,'new','niche_discovery',:src,'selected','orgpage_directory',NOW(),:q,72) RETURNING id"""),
+                  {"o":owner_id,"n":name,"nn":norm,"w":item["url"],"d":item["domain"],"src":item.get("source_url") or item["url"],"q":search_tag}).scalar_one()
+                db.commit(); inserted.append(int(cid))
+            except Exception:
+                db.rollback(); raise
+            finally:
+                db.close()
+        if directory_items:
+            previous_error=str(search_health.get('last_error') or '')
+            _set_search_health('ready','orgpage_directory',fallback_used=True,last_error=previous_error or 'public_search_degraded')
+            search_health=get_search_health(); search_degraded=False
+            # Advance farther than a single failed search query so the next
+            # replenisher pass rotates both category pair and card slice instead
+            # of rediscovering the same directory companies.
+            directory_advance=max(1,len(directory_items)+1)
+
+    advance=max(len(queries),directory_advance)
+    next_offset=(max(0,int(query_offset or 0)) if search_degraded else ((max(0,int(query_offset or 0))+advance) % len(query_plan))) if query_plan else 0
     return {
         "inserted":inserted,
         "existing":sorted(set(existing)),

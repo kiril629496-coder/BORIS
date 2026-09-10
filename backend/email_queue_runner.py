@@ -100,7 +100,7 @@ def main() -> int:
         # Keep a reserve above the visible 100-contact working target so normal
         # daily sending does not immediately drain the campaign below readiness.
         buffer_target=max(100,int(os.getenv('PROSPECT_READY_BUFFER_TARGET','120') or 120))
-        prospect_replenisher.tick(min_ready=buffer_target,every_hours=3)
+        prospect_replenisher.tick(min_ready=buffer_target,every_hours=3,repair_every_minutes=15)
     except Exception as exc:
         logging.warning("prospect replenisher failed (%s)", type(exc).__name__)
     if any(result.values()):
