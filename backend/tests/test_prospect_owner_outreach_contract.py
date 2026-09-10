@@ -369,6 +369,15 @@ class ProspectOwnerOutreachContractTest(unittest.TestCase):
         self.assertIn("content_guard_blocked", src)
         self.assertIn("return \"cancelled\"", src)
 
+    def test_email_health_detects_owner_ready_reserve_before_zero(self):
+        from app.services import reliability
+        src = inspect.getsource(reliability.email_delivery_health)
+        self.assertIn('EMAIL_READY_RESERVE_HEALTH_V1', src)
+        self.assertIn("'owner_ready_reserve':owner_ready_reserve", src)
+        self.assertIn("c.account_id='__owner_outreach__'", src)
+        self.assertIn("'critical' in reserve_states", src)
+        self.assertIn("'degraded' in reserve_states", src)
+
     def test_email_health_includes_daily_outcome_not_only_worker_liveness(self):
         from app.services import reliability
         src = inspect.getsource(reliability.email_delivery_health)

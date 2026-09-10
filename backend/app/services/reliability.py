@@ -1184,6 +1184,7 @@ def email_delivery_health() -> dict:
     smtp_probe_overdue=0
     mailbox_errors=[]
     mailbox_action_required=[]
+    owner_ready_reserve=[]
     try:
         from app.db.session import SessionLocal
         db=SessionLocal()
@@ -1212,6 +1213,26 @@ def email_delivery_health() -> dict:
             active_owner_ids=[int(x[0]) for x in db.execute(text(
                 "SELECT DISTINCT owner_id FROM prospect_campaigns WHERE status='active' AND owner_id IS NOT NULL"
             )).fetchall()]
+            # EMAIL_READY_RESERVE_HEALTH_V1: owner outreach must warn before the
+            # ready audience reaches zero. This is read-only detection; the
+            # canonical minute replenisher remains the only self-heal writer.
+            reserve_target=max(20,int(os.getenv('PROSPECT_READY_BUFFER_TARGET','120') or 120))
+            owner_ready_reserve=[dict(x) for x in db.execute(text("""SELECT
+              c.id campaign_id,c.owner_id,c.name,
+              count(m.id) FILTER (WHERE m.status='ready')::int AS ready,
+              CAST(:target AS integer) AS target,
+              rr.last_discovery_at,rr.last_search_attempt_at,rr.last_error,
+              CASE
+                WHEN count(m.id) FILTER (WHERE m.status='ready') = 0 THEN 'critical'
+                WHEN count(m.id) FILTER (WHERE m.status='ready') < LEAST(CAST(:target AS integer),GREATEST(20,c.daily_limit)) THEN 'degraded'
+                ELSE 'ok'
+              END AS state
+              FROM prospect_campaigns c
+              LEFT JOIN prospect_campaign_members m ON m.campaign_id=c.id
+              LEFT JOIN prospect_replenish_runs rr ON rr.campaign_id=c.id
+              WHERE c.status='active' AND c.account_id='__owner_outreach__'
+              GROUP BY c.id,rr.last_discovery_at,rr.last_search_attempt_at,rr.last_error
+              ORDER BY c.id"""),{'target':reserve_target}).mappings().all()]
             mailbox_row=db.execute(text("""SELECT
               count(*) FILTER (WHERE mb.smtp_last_error IS NOT NULL)::int AS smtp_bad,
               count(*) FILTER (WHERE mb.imap_last_error IS NOT NULL)::int AS imap_bad,
@@ -1323,6 +1344,7 @@ def email_delivery_health() -> dict:
     worker_required=bool(queued>0 or active_prospect_campaigns>0)
     daily_states=[str(x.get('state') or 'ok') for x in daily_outreach]
     copy_integrity_states=[str(x.get('state') or 'ok') for x in owner_copy_integrity]
+    reserve_states=[str(x.get('state') or 'ok') for x in owner_ready_reserve]
     if (
         stuck>0
         or (worker_required and not worker_alive)
@@ -1331,6 +1353,7 @@ def email_delivery_health() -> dict:
         or (active_owner_outreach_campaigns>0 and not bool(owner_volume_safety.get('healthy')))
         or 'critical' in daily_states
         or 'critical' in copy_integrity_states
+        or 'critical' in reserve_states
     ):
         state='critical'
     elif (
@@ -1345,6 +1368,7 @@ def email_delivery_health() -> dict:
         or mailbox_imap_stale>0
         or smtp_probe_overdue>0
         or 'degraded' in daily_states
+        or 'degraded' in reserve_states
     ):
         state='degraded'
     else:
@@ -1398,6 +1422,7 @@ def email_delivery_health() -> dict:
       'owner_volume_safety':owner_volume_safety,
       'daily_outreach':daily_outreach,
       'owner_copy_integrity':owner_copy_integrity,
+      'owner_ready_reserve':owner_ready_reserve,
       'auth_backoff':auth_backoff,'auth_max_attempts':auth_max_attempts,
       'reply_alert_delivery_unknown':reply_alert_delivery_unknown,'reply_alert_stuck':reply_alert_stuck,
       'reply_alert_email_dead_24h':reply_alert_email_dead,
