@@ -1,0 +1,12 @@
+[Unit]
+Description=BORIS Development Lead Radar daily shortlist
+After=network-online.target boris-backend.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/BORIS/backend
+EnvironmentFile=-/root/BORIS/backend/.env
+ExecStart=/root/BORIS/backend/venv/bin/python /root/BORIS/backend/development_lead_radar_runner.py --target 50
+User=root
+TimeoutStartSec=1200
