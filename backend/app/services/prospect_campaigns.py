@@ -823,6 +823,16 @@ def _orgpage_bulk_directory_results(niche: str, regions: list[str], *, max_resul
         'postavschiki-betona-i-zhbi',
         'tsement',
         'kombinaty-nerudnykh-materialov',
+        # Broader Moscow construction-material directories contain many real
+        # sand/gravel/concrete suppliers absent from the narrow rubrics.
+        # Every detail card must pass the positive bulk semantic gate.
+        'postavschiki-stroitelnykh',
+        'prodazha-stroitelnykh-materialov',
+        # Verified: 10 pages, a bounded subset contains cement/peskobeton/
+        # inert-material suppliers. The existing positive semantic gate below
+        # rejects generic finishing-material companies before they consume a
+        # result slot.
+        'sukhie-stroitelnye-smesi',
     )
     # Verified public pagination depth. Keep this explicit and bounded: the
     # replenisher reads at most two category pages per pass and never discovers
@@ -834,6 +844,9 @@ def _orgpage_bulk_directory_results(niche: str, regions: list[str], *, max_resul
         'postavschiki-betona-i-zhbi':2,
         'tsement':6,
         'kombinaty-nerudnykh-materialov':1,
+        'postavschiki-stroitelnykh':10,
+        'prodazha-stroitelnykh-materialov':10,
+        'sukhie-stroitelnye-smesi':10,
     }
     session=requests.Session()
     # Search discovery must not inherit the paid-AI proxy route. OrgPage is a
@@ -882,6 +895,10 @@ def _orgpage_bulk_directory_results(niche: str, regions: list[str], *, max_resul
             continue
         item=_parse_orgpage_company_detail(r.text, card['detail_url'])
         if not item:
+            continue
+        # DIRECTORY_POSITIVE_SEMANTIC_BUDGET_V1: broad directory rubrics are
+        # discovery-only; irrelevant cards cannot consume bounded result slots.
+        if not _niche_search_result_relevant(niche,item):
             continue
         domain=str(item.get('domain') or '').lower()
         if not domain or domain in seen_domains or _search_domain_blocked(domain):
@@ -1135,6 +1152,20 @@ def _company_outreach_block_reason(niche:str,item:dict)->str|None:
     return None
 
 
+def _campaign_search_query_patterns(niche:str)->list[str]:
+    """Stored-search aliases equivalent to one campaign niche.
+
+    Keep this narrower than discovery expansion: it admits already parsed
+    contacts only for equivalent historical search phrases.
+    """
+    base=(niche or '').strip()
+    terms=[base] if base else []
+    low=base.lower().replace('ё','е')
+    if 'сыпуч' in low and ('материал' in low or 'строит' in low):
+        terms.append('сыпучие строительные материалы')
+    return [f'%{x}%' for x in dict.fromkeys(x for x in terms if x)]
+
+
 def _niche_discovery_terms(niche:str)->list[str]:
     """Expand only well-known broad niches; generic niches keep one universal term."""
     base=(niche or '').strip()
@@ -1284,7 +1315,13 @@ def discover_niche(owner_id:int, niche:str, regions:list[str], target:int=100, m
             directory_advance=max(1,len(directory_items)+1)
 
     advance=max(len(queries),directory_advance)
-    next_offset=(max(0,int(query_offset or 0)) if search_degraded else ((max(0,int(query_offset or 0))+advance) % len(query_plan))) if query_plan else 0
+    # DIRECTORY_DISCOVERY_MONOTONIC_CURSOR_V1: keep the persisted cursor
+    # monotonic. The query-plan reader already applies modulo when choosing
+    # search-engine queries; wrapping here made the directory fallback restart
+    # from early category pages and starve after those domains were exhausted.
+    # A monotonic cursor lets bounded OrgPage pagination reach later verified
+    # pages while preserving the same per-pass request budget.
+    next_offset=(max(0,int(query_offset or 0)) if search_degraded else (max(0,int(query_offset or 0))+advance)) if query_plan else 0
     return {
         "inserted":inserted,
         "existing":sorted(set(existing)),
@@ -1344,9 +1381,9 @@ def build_audience(owner_id:int,campaign_id:int)->dict:
             AND NOT EXISTS(SELECT 1 FROM prospect_suppression s WHERE s.kind='email' AND s.normalized_value=pc.normalized_value)
             ORDER BY pc.quality_score DESC,pc.id LIMIT 1) pc ON true
           WHERE c.owner_id=:o
-          AND c.search_query ILIKE '%' || :niche || '%'
+          AND c.search_query ILIKE ANY(CAST(:niche_patterns AS text[]))
           AND (jsonb_array_length(CAST(:regions AS JSONB))=0 OR c.city IN (SELECT jsonb_array_elements_text(CAST(:regions AS JSONB))))
-          ORDER BY c.id"""),{"o":owner_id,"q":int(c["min_quality_score"]),"niche":c["niche"],"regions":json.dumps(c["regions"] or [],ensure_ascii=False)}).mappings().all()
+          ORDER BY c.id"""),{"o":owner_id,"q":int(c["min_quality_score"]),"niche_patterns":_campaign_search_query_patterns(c["niche"]),"regions":json.dumps(c["regions"] or [],ensure_ascii=False)}).mappings().all()
         active_company_domains={str(x[0] or "").strip().lower() for x in db.execute(text("""SELECT DISTINCT c.domain
           FROM prospect_campaign_members m JOIN prospect_companies c ON c.id=m.company_id
           WHERE m.campaign_id=:ca AND COALESCE(c.domain,'')<>''
