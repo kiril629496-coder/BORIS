@@ -34,41 +34,15 @@ _SCHEMA_READY = False
 
 
 def ensure_schema() -> None:
+    # Migration-owned runtime contract: ix_prospect_replies_member_human_received
     global _SCHEMA_READY
     if _SCHEMA_READY:
         return
     db = SessionLocal()
     try:
-        db.execute(text("""
-          CREATE TABLE IF NOT EXISTS email_open_trackers (
-            id BIGSERIAL PRIMARY KEY,
-            email_queue_id BIGINT NOT NULL UNIQUE REFERENCES email_queue(id) ON DELETE CASCADE,
-            token VARCHAR(96) NOT NULL UNIQUE,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            first_opened_at TIMESTAMPTZ NULL,
-            last_opened_at TIMESTAMPTZ NULL,
-            open_count INTEGER NOT NULL DEFAULT 0,
-            proxy_hint_count INTEGER NOT NULL DEFAULT 0,
-            first_user_agent VARCHAR(1000) NULL,
-            last_user_agent VARCHAR(1000) NULL
-          )
-        """))
-        db.execute(text("""
-          CREATE TABLE IF NOT EXISTS email_open_events (
-            id BIGSERIAL PRIMARY KEY,
-            tracker_id BIGINT NOT NULL REFERENCES email_open_trackers(id) ON DELETE CASCADE,
-            opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            user_agent VARCHAR(1000) NULL,
-            proxy_hint BOOLEAN NOT NULL DEFAULT FALSE
-          )
-        """))
-        db.execute(text("""
-          CREATE TABLE IF NOT EXISTS email_tracking_policy (
-            id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id = TRUE),
-            activated_at TIMESTAMPTZ NOT NULL,
-            policy_version INTEGER NOT NULL DEFAULT 1
-          )
-        """))
+        db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+        db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+        db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
         db.execute(text("""
           INSERT INTO email_tracking_policy(id,activated_at,policy_version)
           VALUES(
@@ -78,16 +52,12 @@ def ensure_schema() -> None:
           )
           ON CONFLICT(id) DO NOTHING
         """))
-        db.execute(text("CREATE INDEX IF NOT EXISTS ix_email_open_events_tracker_opened ON email_open_events(tracker_id, opened_at DESC)"))
-        db.execute(text("CREATE INDEX IF NOT EXISTS ix_email_open_trackers_first_opened ON email_open_trackers(first_opened_at)"))
+        db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+        db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
         # Tracking analytics joins the first human reply by member. Without this
         # partial index the lateral lookup degrades into repeated full scans as
         # outreach history grows.
-        db.execute(text("""
-          CREATE INDEX IF NOT EXISTS ix_prospect_replies_member_human_received
-          ON prospect_inbound_replies(member_id, received_at)
-          WHERE COALESCE(message_kind,'human')='human'
-        """))
+        db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
         db.commit()
         _SCHEMA_READY = True
     finally:

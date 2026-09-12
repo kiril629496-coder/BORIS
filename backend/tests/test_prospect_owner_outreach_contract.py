@@ -61,7 +61,7 @@ class ProspectOwnerOutreachContractTest(unittest.TestCase):
             lines=[x.strip() for x in v["body"].splitlines() if x.strip()]
             self.assertEqual(lines[-1], "https://boris-ai.pro/go/boris")
             self.assertEqual(v["body"].count("https://boris-ai.pro/go/boris"),1)
-            self.assertNotIn("https://boris-ai.pro/go/software",v["body"])
+            self.assertNotIn("https://boris-ai.pro/software-dev/",v["body"])
             self.assertLessEqual(len(v["subject"]),60)
         self.assertNotIn("Я создал BORIS — виртуальную команду маркетинга и продаж.", OWNER_OUTREACH_APPROVED_BODY)
 
@@ -374,7 +374,9 @@ class ProspectOwnerOutreachContractTest(unittest.TestCase):
         src = inspect.getsource(reliability.email_delivery_health)
         self.assertIn('EMAIL_READY_RESERVE_HEALTH_V1', src)
         self.assertIn("'owner_ready_reserve':owner_ready_reserve", src)
-        self.assertIn("c.account_id='__owner_outreach__'", src)
+        self.assertIn("mb.account_id='__owner_outreach__'", src)
+        self.assertIn("mb.id=c.mailbox_id", src)
+        self.assertNotIn("c.account_id='__owner_outreach__'", src)
         self.assertIn("'critical' in reserve_states", src)
         self.assertIn("'degraded' in reserve_states", src)
 

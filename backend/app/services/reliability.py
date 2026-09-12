@@ -22,6 +22,7 @@ from sqlalchemy import text, func
 from app.models.background_job import BackgroundJob
 from app.models.reliability import (ReliabilityCircuit, ReliabilityEvent, ReliabilityFlag,
                                     ReliabilityKillSwitch, ReliabilityHeartbeat, ReliabilityRetryBudget)
+from app.services.exception_observability import observe_suppressed
 
 _trace_id_var = contextvars.ContextVar("boris_trace_id", default=None)
 _heartbeat_write_cache: dict[str, float] = {}
@@ -47,6 +48,32 @@ def get_trace_id() -> str:
         value = new_trace_id()
         _trace_id_var.set(value)
     return value
+
+
+def json_safe(value):
+    """Return a JSON/JSONB-safe diagnostic copy without hiding useful values.
+
+    Operational evidence often contains datetime/UUID/Path/Decimal-like values
+    sourced directly from runtime objects. A diagnostic payload must never be
+    able to crash the reliability/control-plane writer. Primitive values are
+    preserved; mappings/sequences are normalized recursively; objects with an
+    ISO representation keep it, and other uncommon values fall back to string.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [json_safe(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (uuid.UUID, Path)):
+        return str(value)
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def job_priority(kind: str) -> int:
@@ -85,7 +112,7 @@ def record_event(db, module: str, event_type: str, message: str = "", *,
         trace_id=(trace_id or get_trace_id()), account_id=account_id,
         module=str(module or "system")[:64], event_type=str(event_type or "event")[:64],
         severity=str(severity or "info")[:16], state=str(state or "open")[:32],
-        message=(message or "")[:4000], details_json=(details or {}),
+        message=(message or "")[:4000], details_json=json_safe(details or {}),
     )
     db.add(row)
     db.flush()
@@ -345,13 +372,13 @@ def dependency_call(dependency: str, fn, *args, threshold: int = 5, cooldown_sec
                         if _when.tzinfo is None:
                             _when = _when.replace(tzinfo=timezone.utc)
                         _retry = max(0, int((_when.astimezone(timezone.utc)-datetime.now(timezone.utc)).total_seconds()))
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=374)
             try:
                 from app.services.avito_account_throttle import record_account_throttle
                 _retry = record_account_throttle(str(account_id), _retry or 30, source=str(dependency or "avito")[:70]+"_429")
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=379)
             raise ProviderDeferred(str(dependency or "avito"), int(_retry or 30))
     except Exception as exc:
         # Phase 2 failure: persist outcome in a fresh short transaction.
@@ -691,8 +718,8 @@ def _provider_tenant_identity(provider: str, account_id: str | None) -> str:
             uid_keys = [k for k in _tenant_keys(str(account_id)) if str(k).startswith("uid:")]
             if uid_keys:
                 tenant = sorted(uid_keys)[0][:96]
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=720)
     return tenant
 
 
@@ -1043,8 +1070,8 @@ def capacity_health(db) -> dict:
             vals[k] = int(v.strip().split()[0])
         mem_total = int(vals.get("MemTotal", 0))
         mem_available = int(vals.get("MemAvailable", 0))
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1072)
     mem_used_pct = round((1 - mem_available / mem_total) * 100, 1) if mem_total else 0.0
     try:
         max_conn = int(db.execute(text("SHOW max_connections")).scalar() or 100)
@@ -1120,8 +1147,8 @@ def job_execution_metrics(db, hours: int = 24) -> dict:
             for key, value in values.items():
                 totals[key] += value
                 row[key] += value
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1149)
     # Idempotency cache records exact recent-hit timestamps; each hit is one paid
     # generation the worker did not repeat after a crash/retry.
     try:
@@ -1142,8 +1169,8 @@ def job_execution_metrics(db, hours: int = 24) -> dict:
                 except Exception:
                     continue
         totals["avoided_paid_generations"] = avoided
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1171)
     totals["hours"] = hours
     totals["by_kind"] = by_kind
     return totals
@@ -1206,10 +1233,19 @@ def email_delivery_health() -> dict:
             stuck=int(email_age_row.get('stuck') or 0)
             scheduled_future=int(email_age_row.get('scheduled_future') or 0)
             active_prospect_campaigns=int(db.execute(text("SELECT count(*) FROM prospect_campaigns WHERE status='active'")).scalar() or 0)
-            active_owner_outreach_campaigns=int(db.execute(text(
-                "SELECT count(*) FROM prospect_campaigns "
-                "WHERE status='active' AND account_id='__owner_outreach__'"
-            )).scalar() or 0)
+            # Owner outreach is defined by the canonical owner mailbox, not by
+            # prospect_campaigns.account_id. Development outreach intentionally
+            # has no Avito account_id but uses the same owner mailbox and must be
+            # included in email health/volume monitoring.
+            active_owner_outreach_campaigns=int(db.execute(text("""SELECT count(*)
+              FROM prospect_campaigns c
+              WHERE c.desired_status='active'
+                AND EXISTS(
+                  SELECT 1 FROM client_mailboxes mb
+                  WHERE mb.id=c.mailbox_id
+                    AND mb.account_id='__owner_outreach__'
+                    AND mb.status='active'
+                )""")).scalar() or 0)
             active_owner_ids=[int(x[0]) for x in db.execute(text(
                 "SELECT DISTINCT owner_id FROM prospect_campaigns WHERE status='active' AND owner_id IS NOT NULL"
             )).fetchall()]
@@ -1230,7 +1266,13 @@ def email_delivery_health() -> dict:
               FROM prospect_campaigns c
               LEFT JOIN prospect_campaign_members m ON m.campaign_id=c.id
               LEFT JOIN prospect_replenish_runs rr ON rr.campaign_id=c.id
-              WHERE c.status='active' AND c.account_id='__owner_outreach__'
+              WHERE c.desired_status='active'
+                AND EXISTS(
+                  SELECT 1 FROM client_mailboxes mb
+                  WHERE mb.id=c.mailbox_id
+                    AND mb.account_id='__owner_outreach__'
+                    AND mb.status='active'
+                )
               GROUP BY c.id,rr.last_discovery_at,rr.last_search_attempt_at,rr.last_error
               ORDER BY c.id"""),{'target':reserve_target}).mappings().all()]
             mailbox_row=db.execute(text("""SELECT
@@ -1249,7 +1291,7 @@ def email_delivery_health() -> dict:
               WHERE mb.status='active'
                 AND EXISTS(
                   SELECT 1 FROM prospect_campaigns c
-                  WHERE c.status='active' AND c.mailbox_id=mb.id
+                  WHERE c.desired_status='active' AND c.mailbox_id=mb.id
                 )""")).mappings().one()
             mailbox_smtp_unhealthy=int(mailbox_row.get('smtp_bad') or 0)
             mailbox_imap_unhealthy=int(mailbox_row.get('imap_bad') or 0)
@@ -1264,7 +1306,7 @@ def email_delivery_health() -> dict:
                 AND (mb.smtp_last_error IS NOT NULL OR mb.imap_last_error IS NOT NULL)
                 AND EXISTS(
                   SELECT 1 FROM prospect_campaigns c
-                  WHERE c.status='active' AND c.mailbox_id=mb.id
+                  WHERE c.desired_status='active' AND c.mailbox_id=mb.id
                 )
               ORDER BY mb.updated_at DESC,mb.id
               LIMIT 10""")).mappings().all()]
@@ -1288,8 +1330,8 @@ def email_delivery_health() -> dict:
                 AND status='dead' AND updated_at>=NOW()-INTERVAL '24 hours'""")).scalar() or 0)
         finally:
             db.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1317)
 
     if mailbox_errors:
         try:
@@ -1306,8 +1348,8 @@ def email_delivery_health() -> dict:
                             'kind':kind,
                             'checked_at':item.get(f'{channel}_last_checked_at'),
                         })
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=1335)
 
     if active_owner_outreach_campaigns:
         try:

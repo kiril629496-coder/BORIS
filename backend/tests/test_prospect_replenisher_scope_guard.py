@@ -17,7 +17,13 @@ def test_degraded_search_has_attempt_timestamp_backoff():
 
 def test_schema_contains_search_attempt_timestamp():
     src=inspect.getsource(r.ensure_schema)
-    assert "ADD COLUMN IF NOT EXISTS last_search_attempt_at TIMESTAMP" in src
+    assert "last_search_attempt_at" in src
+    assert "ADD COLUMN IF NOT EXISTS last_search_attempt_at" not in src
+    # Runtime DDL was intentionally removed: canonical migration 049 owns this
+    # column so the minute worker never takes ALTER TABLE locks.
+    from pathlib import Path
+    migration=(Path(__file__).resolve().parents[1] / "migrations" / "049_runtime_schema_baseline_contract.sql").read_text()
+    assert "last_search_attempt_at" in migration
 
 def test_adaptive_discovery_cadence_only_accelerates_low_reserve():
     assert r._adaptive_discovery_hours(60,120,3)==0.5

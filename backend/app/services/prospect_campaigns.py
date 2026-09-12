@@ -16,70 +16,9 @@ from app.services.owner_outreach_policy import (
     OWNER_OUTREACH_HARD_MAX_DAILY,
     canonical_policy_state,
 )
+from app.services.exception_observability import observe_suppressed
 
-SCHEMA = r"""
-CREATE TABLE IF NOT EXISTS prospect_campaigns (
- id BIGSERIAL PRIMARY KEY,
- owner_id BIGINT NOT NULL,
- name VARCHAR(300) NOT NULL,
- niche VARCHAR(300) NOT NULL,
- regions JSONB NOT NULL DEFAULT '[]'::jsonb,
- status VARCHAR(32) NOT NULL DEFAULT 'draft',
- daily_limit INTEGER NOT NULL DEFAULT 50,
- per_domain_daily_limit INTEGER NOT NULL DEFAULT 1,
- min_quality_score INTEGER NOT NULL DEFAULT 55,
- subject_template TEXT NOT NULL,
- body_template TEXT NOT NULL,
- ab_variants JSONB NOT NULL DEFAULT '[]'::jsonb,
- attachment_path TEXT,
- discovered_count INTEGER NOT NULL DEFAULT 0,
- ready_count INTEGER NOT NULL DEFAULT 0,
- created_at TIMESTAMP NOT NULL DEFAULT NOW(),
- updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
- activated_at TIMESTAMP,
- paused_at TIMESTAMP,
- copy_revision_status VARCHAR(32),
- copy_revision_version VARCHAR(16),
- copy_revision_needed_at TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS prospect_campaign_members (
- id BIGSERIAL PRIMARY KEY,
- campaign_id BIGINT NOT NULL REFERENCES prospect_campaigns(id) ON DELETE CASCADE,
- company_id BIGINT NOT NULL REFERENCES prospect_companies(id) ON DELETE CASCADE,
- contact_id BIGINT REFERENCES prospect_contacts(id) ON DELETE SET NULL,
- email VARCHAR(320),
- email_domain VARCHAR(255),
- quality_score INTEGER,
- status VARCHAR(32) NOT NULL DEFAULT 'ready',
- skip_reason TEXT,
- email_queue_id BIGINT,
- queued_at TIMESTAMP,
- sent_at TIMESTAMP,
- reply_status VARCHAR(32),
- replied_at TIMESTAMP,
- ab_variant VARCHAR(8),
- copy_version VARCHAR(16),
- created_at TIMESTAMP NOT NULL DEFAULT NOW(),
- updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
- UNIQUE(campaign_id, company_id),
- UNIQUE(campaign_id, contact_id)
-);
-CREATE INDEX IF NOT EXISTS ix_pcm_campaign_status ON prospect_campaign_members(campaign_id,status);
-CREATE INDEX IF NOT EXISTS ix_pcm_domain ON prospect_campaign_members(campaign_id,email_domain,status);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_pcm_campaign_email_active
-ON prospect_campaign_members(campaign_id, lower(email))
-WHERE email IS NOT NULL AND (sent_at IS NOT NULL OR status IN ('ready','queued','sent'));
-CREATE TABLE IF NOT EXISTS prospect_owner_daily_limits (
- owner_id BIGINT NOT NULL,
- service_date DATE NOT NULL,
- daily_cap INTEGER NOT NULL CHECK (daily_cap > 0 AND daily_cap <= 1000),
- timezone VARCHAR(64) NOT NULL DEFAULT 'Europe/Moscow',
- created_at TIMESTAMP NOT NULL DEFAULT NOW(),
- updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
- PRIMARY KEY(owner_id,service_date)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_prospect_suppression_kind_value ON prospect_suppression(kind,normalized_value);
-"""
+SCHEMA = 'SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED ux_pcm_campaign_email_active lower(email) */'
 
 BAD_SEARCH_DOMAINS = prospect_discovery.BAD_DOMAINS | {
     "hh.ru","2gis.ru","zoon.ru","promportal.su","pulscen.ru","all.biz",
@@ -558,10 +497,7 @@ def _ensure_owner_copy_db_locks(db):
     variants_literal="'" + variants_json.replace("'", "''") + "'::jsonb"
     body_literals=",".join("'" + x.replace("'", "''") + "'" for x in OWNER_OUTREACH_APPROVED_BODIES)
 
-    db.execute(text("""
-      ALTER TABLE prospect_campaigns
-      DROP CONSTRAINT IF EXISTS prospect_campaigns_owner_body_exact_v1
-    """))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
 
     db.execute(text("""
       UPDATE prospect_campaigns
@@ -580,22 +516,8 @@ def _ensure_owner_copy_db_locks(db):
         )
     """),{"body":body,"variants":variants_json})
 
-    db.execute(text(f"""
-      ALTER TABLE prospect_campaigns
-      ADD CONSTRAINT prospect_campaigns_owner_body_exact_v1
-      CHECK (
-        account_id IS DISTINCT FROM '__owner_outreach__'
-        OR (
-          body_template = {body_literal}
-          AND attachment_path IS NULL
-          AND ab_variants = {variants_literal}
-        )
-      ) NOT VALID
-    """))
-    db.execute(text("""
-      ALTER TABLE prospect_campaigns
-      VALIDATE CONSTRAINT prospect_campaigns_owner_body_exact_v1
-    """))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
 
     db.execute(text("""
       DROP TRIGGER IF EXISTS trg_owner_outreach_queue_copy_guard_v1 ON email_queue
@@ -653,7 +575,7 @@ def _ensure_owner_copy_db_locks(db):
             END IF;
             IF position('href="https://boris-ai.pro/go/boris"' in COALESCE(NEW.html_body,''))=0
                OR position('cid:boris-owner-banner-' in COALESCE(NEW.html_body,''))=0
-               OR position('https://boris-ai.pro/go/software' in COALESCE(NEW.html_body,''))>0
+               OR position('https://boris-ai.pro/software-dev/' in COALESCE(NEW.html_body,''))>0
             THEN
               RAISE EXCEPTION 'OWNER_OUTREACH_LINK_LOCK_V2';
             END IF;
@@ -672,6 +594,11 @@ def _ensure_owner_copy_db_locks(db):
 
 
 def ensure_schema(db):
+    # Migration-owned stale-cap cleanup contract (do not execute on hot path):
+    # DROP CONSTRAINT IF EXISTS prospect_campaigns_owner_outreach_daily_limit_max30
+    # DROP CONSTRAINT IF EXISTS prospect_campaigns_owner_outreach_daily_limit_min30
+    # ADD CONSTRAINT prospect_campaigns_owner_outreach_daily_limit_max20
+    # VALIDATE CONSTRAINT prospect_campaigns_owner_outreach_daily_limit_max20
     # Hot path: no DDL when the owner campaign already has the exact six-copy
     # rotation, strict banner/link trigger and the canonical daily cap.
     ready=db.execute(text("""SELECT
@@ -681,6 +608,9 @@ def ensure_schema(db):
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_campaigns' AND column_name='account_id')
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_campaigns' AND column_name='mailbox_id')
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_campaigns' AND column_name='ab_variants')
+      AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_campaigns' AND column_name='desired_status')
+      AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_campaigns' AND column_name='status_reason')
+      AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_campaigns' AND column_name='status_source')
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_campaign_members' AND column_name='ab_variant')
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_campaign_members' AND column_name='copy_version')
       AND to_regclass('public.ux_pcm_campaign_email_active') IS NOT NULL
@@ -739,27 +669,29 @@ def ensure_schema(db):
 
     for stmt in [x.strip() for x in SCHEMA.split(";") if x.strip()]:
         db.execute(text(stmt))
-    db.execute(text("ALTER TABLE prospect_campaigns ADD COLUMN IF NOT EXISTS account_id VARCHAR(255)"))
-    db.execute(text("ALTER TABLE prospect_campaigns ADD COLUMN IF NOT EXISTS mailbox_id BIGINT"))
-    db.execute(text("ALTER TABLE prospect_campaigns ADD COLUMN IF NOT EXISTS ab_variants JSONB NOT NULL DEFAULT '[]'::jsonb"))
-    db.execute(text("ALTER TABLE prospect_campaigns ADD COLUMN IF NOT EXISTS copy_revision_status VARCHAR(32)"))
-    db.execute(text("ALTER TABLE prospect_campaigns ADD COLUMN IF NOT EXISTS copy_revision_version VARCHAR(16)"))
-    db.execute(text("ALTER TABLE prospect_campaigns ADD COLUMN IF NOT EXISTS copy_revision_needed_at TIMESTAMP"))
-    db.execute(text("ALTER TABLE prospect_campaign_members ADD COLUMN IF NOT EXISTS ab_variant VARCHAR(8)"))
-    db.execute(text("ALTER TABLE prospect_campaign_members ADD COLUMN IF NOT EXISTS copy_version VARCHAR(16)"))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text("UPDATE prospect_campaigns SET desired_status=status WHERE desired_status IS NULL"))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
 
-    db.execute(text("ALTER TABLE prospect_campaigns DROP CONSTRAINT IF EXISTS prospect_campaigns_owner_outreach_daily_limit_max30"))
-    db.execute(text("ALTER TABLE prospect_campaigns DROP CONSTRAINT IF EXISTS prospect_campaigns_owner_outreach_daily_limit_min30"))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
     db.execute(text("""UPDATE prospect_campaigns SET daily_limit=LEAST(daily_limit,:cap),updated_at=NOW()
       WHERE account_id='__owner_outreach__' AND daily_limit>:cap"""),{'cap':OWNER_OUTREACH_MAX_DAILY})
     cap_guard=db.execute(text("""SELECT 1 FROM pg_constraint
       WHERE conrelid='public.prospect_campaigns'::regclass
         AND conname='prospect_campaigns_owner_outreach_daily_limit_max20'""")).first()
     if not cap_guard:
-        db.execute(text(f"""ALTER TABLE prospect_campaigns
-          ADD CONSTRAINT prospect_campaigns_owner_outreach_daily_limit_max20
-          CHECK (account_id IS DISTINCT FROM '__owner_outreach__' OR daily_limit <= {OWNER_OUTREACH_MAX_DAILY}) NOT VALID"""))
-    db.execute(text("ALTER TABLE prospect_campaigns VALIDATE CONSTRAINT prospect_campaigns_owner_outreach_daily_limit_max20"))
+        db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
     _ensure_owner_copy_db_locks(db)
     db.commit()
 
@@ -1483,7 +1415,7 @@ def build_audience(owner_id:int,campaign_id:int)->dict:
                 "company_domain_skipped":company_domain_skipped}
     finally: db.close()
 
-def set_status(owner_id:int,campaign_id:int,status:str):
+def set_status(owner_id:int,campaign_id:int,status:str,source:str="control"):
     if status not in {"draft","active","paused","completed"}: raise ValueError("bad status")
     db=SessionLocal(); ensure_schema(db)
     try:
@@ -1504,8 +1436,66 @@ def set_status(owner_id:int,campaign_id:int,status:str):
                     errors.append("base:attachment_path_forbidden")
                 if errors:
                     raise ValueError("owner_outreach_content_contract:"+",".join(errors))
-        n=db.execute(text("""UPDATE prospect_campaigns SET status=:s,updated_at=NOW(),activated_at=CASE WHEN :s='active' AND activated_at IS NULL THEN NOW() ELSE activated_at END,paused_at=CASE WHEN :s='paused' THEN NOW() ELSE paused_at END WHERE id=:c AND owner_id=:o"""),{"s":status,"c":campaign_id,"o":owner_id}).rowcount; db.commit(); return bool(n)
+        reason=("manual_pause" if status=="paused" else None)
+        n=db.execute(text("""UPDATE prospect_campaigns SET
+          status=:s,desired_status=:s,status_reason=:r,status_source=:src,updated_at=NOW(),
+          activated_at=CASE WHEN :s='active' AND activated_at IS NULL THEN NOW() ELSE activated_at END,
+          paused_at=CASE WHEN :s='paused' THEN NOW() WHEN :s='active' THEN NULL ELSE paused_at END
+          WHERE id=:c AND owner_id=:o"""),
+          {"s":status,"r":reason,"src":str(source or "control")[:64],"c":campaign_id,"o":owner_id}).rowcount
+        db.commit(); return bool(n)
     finally: db.close()
+
+
+def reconcile_desired_campaign_states(owner_id:int|None=None)->dict:
+    """Recover unexplained pauses without overriding an intentional or safety pause."""
+    db=SessionLocal(); ensure_schema(db)
+    try:
+        where="desired_status='active' AND status='paused' AND status_reason IS NULL"
+        params={}
+        if owner_id is not None:
+            where += " AND owner_id=:o"; params['o']=int(owner_id)
+        rows=[dict(x) for x in db.execute(text(f"""SELECT id,owner_id,mailbox_id,account_id,
+          subject_template,body_template,ab_variants,attachment_path
+          FROM prospect_campaigns WHERE {where} ORDER BY id"""),params).mappings().all()]
+    finally:
+        db.close()
+    resumed=[]; blocked={}
+    for row in rows:
+        cid=int(row['id']); mailbox_id=row.get('mailbox_id')
+        if not mailbox_id:
+            blocked[cid]='mailbox_required'; continue
+        hdb=SessionLocal()
+        try:
+            health=hdb.execute(text("""SELECT smtp_last_error,imap_last_error FROM client_mailboxes
+              WHERE id=:m AND status='active'"""),{'m':int(mailbox_id)}).mappings().first()
+        finally:
+            hdb.close()
+        if not health:
+            blocked[cid]='mailbox_required'; continue
+        if health.get('smtp_last_error') or health.get('imap_last_error'):
+            blocked[cid]='mailbox_unhealthy'; continue
+        if str(row.get('account_id') or '')=='__owner_outreach__':
+            errors=validate_owner_outreach_copy_set(
+                str(row.get('subject_template') or ''),str(row.get('body_template') or ''),
+                list(row.get('ab_variants') or []),campaign_id=cid,
+            )
+            if row.get('attachment_path'):
+                errors.append('base:attachment_path_forbidden')
+            if errors:
+                blocked[cid]='content_contract'; continue
+        wdb=SessionLocal()
+        try:
+            changed=wdb.execute(text("""UPDATE prospect_campaigns SET status='active',paused_at=NULL,
+              status_source='self_heal',updated_at=NOW()
+              WHERE id=:c AND desired_status='active' AND status='paused' AND status_reason IS NULL"""),
+              {'c':cid}).rowcount or 0
+            wdb.commit()
+            if changed: resumed.append(cid)
+        finally:
+            wdb.close()
+    return {'checked':len(rows),'resumed':resumed,'blocked':blocked}
+
 
 def suppress_in_db(db,kind:str,value:str,reason:str="opt_out"):
     norm=prospecting.normalize_email(value) if kind=="email" else prospecting.normalize_phone(value)
@@ -1896,7 +1886,7 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
                   )
                   OR position('href="https://boris-ai.pro/go/boris"' in COALESCE(q.html_body,''))=0
                   OR position('cid:boris-owner-banner-' in COALESCE(q.html_body,''))=0
-                  OR position('https://boris-ai.pro/go/software' in COALESCE(q.html_body,''))>0
+                  OR position('https://boris-ai.pro/software-dev/' in COALESCE(q.html_body,''))>0
                   OR CASE WHEN jsonb_typeof(q.attachments)='array' THEN jsonb_array_length(q.attachments) ELSE -1 END <> 1
                   OR COALESCE(q.attachments->0->>'inline','false') <> 'true'
                   OR COALESCE(q.attachments->0->>'mime','') <> 'image/jpeg'
@@ -1998,7 +1988,7 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
                 )
                 OR position('href="https://boris-ai.pro/go/boris"' in COALESCE(q.html_body,''))=0
                 OR position('cid:boris-owner-banner-' in COALESCE(q.html_body,''))=0
-                OR position('https://boris-ai.pro/go/software' in COALESCE(q.html_body,''))>0
+                OR position('https://boris-ai.pro/software-dev/' in COALESCE(q.html_body,''))>0
                 OR CASE WHEN jsonb_typeof(q.attachments)='array' THEN jsonb_array_length(q.attachments) ELSE -1 END <> 1
                 OR COALESCE(q.attachments->0->>'inline','false') <> 'true'
                 OR COALESCE(q.attachments->0->>'mime','') <> 'image/jpeg'
@@ -2046,7 +2036,7 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
             AND position('data-boris-open-tracking="1"' in COALESCE(q.html_body,''))>0
             AND position('href="https://boris-ai.pro/go/boris"' in COALESCE(q.html_body,''))>0
             AND position('cid:boris-owner-banner-' in COALESCE(q.html_body,''))>0
-            AND position('https://boris-ai.pro/go/software' in COALESCE(q.html_body,''))=0
+            AND position('https://boris-ai.pro/software-dev/' in COALESCE(q.html_body,''))=0
             AND CASE WHEN jsonb_typeof(q.attachments)='array' THEN jsonb_array_length(q.attachments) ELSE -1 END=1
             AND COALESCE(q.attachments->0->>'filename','') IN ('boris_routine_email650.jpg','boris_scale_email650.jpg','boris_complex_email650.jpg','boris_competitors_email650.jpg')
         """),{"o":int(owner_id)}).scalar()
@@ -2067,7 +2057,7 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
                     )
                     AND position('href="https://boris-ai.pro/go/boris"' in COALESCE(q.html_body,''))>0
                     AND position('cid:boris-owner-banner-' in COALESCE(q.html_body,''))>0
-                    AND position('https://boris-ai.pro/go/software' in COALESCE(q.html_body,''))=0
+                    AND position('https://boris-ai.pro/software-dev/' in COALESCE(q.html_body,''))=0
                     AND CASE WHEN jsonb_typeof(q.attachments)='array' THEN jsonb_array_length(q.attachments) ELSE -1 END=1
                     AND COALESCE(q.attachments->0->>'filename','') IN ('boris_routine_email650.jpg','boris_scale_email650.jpg','boris_complex_email650.jpg','boris_competitors_email650.jpg')
                   )
@@ -2622,7 +2612,7 @@ def _html_email(body:str, banner_cid:str='', footer:str='', brand_subtitle:str='
         escaped=_h.escape(value)
         for url in (
             'https://boris-ai.pro/go/boris',
-            'https://boris-ai.pro/go/software',
+            'https://boris-ai.pro/software-dev/',
         ):
             safe=_h.escape(url)
             escaped=escaped.replace(
@@ -2721,14 +2711,14 @@ def _owner_outreach_contract(subject:str, body:str, html:str, attachments:list|N
         errors.append('owner_link_not_last_line')
     if body_locked.count(approved_url) != 1:
         errors.append('owner_link_count_invalid')
-    if 'https://boris-ai.pro/go/software' in body_locked:
+    if 'https://boris-ai.pro/software-dev/' in body_locked:
         errors.append('software_url_forbidden_owner_outreach')
 
     from app.services import email_tracking as _email_tracking
     policy_html=_email_tracking.strip_approved_tracking_pixel(html)
     if '<a href="https://boris-ai.pro/go/boris"' not in policy_html:
         errors.append('owner_link_not_clickable')
-    if 'href="https://boris-ai.pro/go/software"' in policy_html:
+    if 'href="https://boris-ai.pro/software-dev/"' in policy_html:
         errors.append('software_link_forbidden_owner_outreach')
 
     combined=(subject_text+'\n'+body_locked+'\n'+policy_html).lower()
@@ -2851,17 +2841,32 @@ def repair_owner_cross_campaign_duplicates(db, owner_id:int, limit:int=1000)->di
 
 
 def repair_irrelevant_ready_members(db,campaign:dict,limit:int=1000)->int:
-    """Skip only high-confidence non-company ready rows; never touch sent rows."""
+    """Skip high-confidence irrelevant ready rows before pacing/SMTP selection."""
     cap=max(1,min(int(limit),5000))
-    rows=db.execute(text("""SELECT m.id,pc.name,pc.domain
+    rows=db.execute(text("""SELECT m.id,m.company_id,m.contact_id,m.email,m.email_domain,
+      pc.name,pc.domain,pc.website,pc.source,pc.search_query,
+      ct.source_url AS contact_source
       FROM prospect_campaign_members m
       JOIN prospect_companies pc ON pc.id=m.company_id
+      LEFT JOIN prospect_contacts ct ON ct.id=m.contact_id
       WHERE m.campaign_id=:c AND m.status='ready'
       ORDER BY m.id LIMIT :lim"""),
       {'c':int(campaign['id']),'lim':cap}).mappings().all()
     bad=[]
+    low_niche=str(campaign.get('niche') or '').lower().replace('ё','е')
+    development_campaign=('заказн' in low_niche and 'разработ' in low_niche)
     for raw in rows:
         row=dict(raw)
+        if development_campaign:
+            try:
+                from app.services.development_lead_radar import _is_dev_vendor
+                if _is_dev_vendor(row):
+                    bad.append((int(row['id']),'development_vendor_competitor'))
+                    continue
+            except Exception as _suppressed_exc:
+                # Keep the generic guard below; the final pre-SMTP gate still fails closed.
+                # The architecture contract forbids silent broad-exception swallowing.
+                observe_suppressed(__name__, _suppressed_exc, line=2942)
         reason=_company_outreach_block_reason(
             str(campaign.get('niche') or ''),
             {'title':row.get('name'),'domain':row.get('domain')},
@@ -2996,6 +3001,74 @@ def campaign_deliverability(db,campaign_id:int)->dict:
 def _final_company_relevance_gate_before_send(row:dict,niche:str)->tuple[bool,str|None]:
     """Last non-network company relevance gate before queue creation."""
     current=dict(row or {})
+    low_niche=str(niche or '').lower().replace('ё','е')
+    development_campaign=('заказн' in low_niche and 'разработ' in low_niche)
+
+    if development_campaign:
+        db=SessionLocal()
+        try:
+            full=db.execute(text("""SELECT c.id,c.name,c.domain,c.website,c.source,c.search_query,
+              pc.source_url contact_source
+              FROM prospect_companies c
+              LEFT JOIN prospect_contacts pc ON pc.id=:ct
+              WHERE c.id=:co"""),{
+                'co':int(current.get('company_id') or 0),
+                'ct':int(current.get('contact_id') or 0),
+            }).mappings().first()
+            if full:
+                try:
+                    from app.services.development_lead_radar import _is_dev_vendor
+                    vendor=bool(_is_dev_vendor(dict(full)))
+                except Exception:
+                    # Fail closed only on explicit old contaminated discovery
+                    # signature if the richer classifier is temporarily unavailable.
+                    vendor=(
+                        str(full.get('source') or '')!='development_curated'
+                        and 'заказная разработка saas, мобильных приложений и автоматизации'
+                            in str(full.get('search_query') or '').lower().replace('ё','е')
+                    )
+                if vendor:
+                    result=db.execute(text("""UPDATE prospect_campaign_members
+                      SET status='skipped',skip_reason='development_vendor_competitor_final',updated_at=NOW()
+                      WHERE id=:i AND status='ready'"""),{'i':int(current['id'])})
+                    if int(result.rowcount or 0)>0:
+                        db.execute(text("""UPDATE prospect_campaigns
+                          SET ready_count=(SELECT count(*) FROM prospect_campaign_members
+                                           WHERE campaign_id=:c AND status='ready'),updated_at=NOW()
+                          WHERE id=:c"""),{'c':int(current.get('campaign_id') or 0)})
+                    db.commit()
+                    return False,'development_vendor_competitor_final'
+
+                # Provenance check: if recipient email uses a different domain,
+                # it is still allowed when that address was actually published
+                # on the company's own site (franchise/holding domains are common).
+                from urllib.parse import urlparse
+                company_domain=str(full.get('domain') or '').lower().removeprefix('www.')
+                email_domain=str(current.get('email_domain') or '').lower().removeprefix('www.')
+                source_host=(urlparse(str(full.get('contact_source') or '')).hostname or '').lower().removeprefix('www.')
+                email_related=bool(company_domain and email_domain and (
+                    email_domain==company_domain or email_domain.endswith('.'+company_domain)
+                    or company_domain.endswith('.'+email_domain)
+                ))
+                source_official=bool(company_domain and source_host and (
+                    source_host==company_domain or source_host.endswith('.'+company_domain)
+                    or company_domain.endswith('.'+source_host)
+                ))
+                if not email_related and not source_official:
+                    result=db.execute(text("""UPDATE prospect_campaign_members
+                      SET status='skipped',skip_reason='development_contact_provenance_mismatch',updated_at=NOW()
+                      WHERE id=:i AND status='ready'"""),{'i':int(current['id'])})
+                    if int(result.rowcount or 0)>0:
+                        db.execute(text("""UPDATE prospect_campaigns
+                          SET ready_count=(SELECT count(*) FROM prospect_campaign_members
+                                           WHERE campaign_id=:c AND status='ready'),updated_at=NOW()
+                          WHERE id=:c"""),{'c':int(current.get('campaign_id') or 0)})
+                    db.commit()
+                    return False,'development_contact_provenance_mismatch'
+            db.rollback()
+        finally:
+            db.close()
+
     reason=_company_outreach_block_reason(
         niche,
         {'title':current.get('company') or '', 'domain':current.get('company_domain') or ''},
@@ -3129,8 +3202,8 @@ def _owner_feeder_lock(owner_id:int):
                 try:
                     conn.execute(text('SELECT pg_advisory_unlock(:ns,:owner)'),
                                  {'ns':884422921,'owner':int(owner_id)})
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=3265)
             conn.close()
     return _lock()
 
@@ -3172,7 +3245,7 @@ def _development_personalized_body(company_id:int, company_name:str, fallback_bo
         parts.append(f'Предварительный ориентир по подобному MVP: {lo:,}–{hi:,} ₽. Точную оценку даём только после короткого разбора задачи.'.replace(',', ' '))
     parts.append('Мы занимаемся заказной разработкой SaaS-платформ, мобильных приложений, CRM, личных кабинетов, внутренних систем и интеграций. Типовые технические модули не пишем заново без необходимости — основное время уходит на вашу бизнес-логику.')
     parts.append('Если актуально, ответьте на это письмо несколькими предложениями о текущем процессе или задаче. Подготовлю структуру MVP, этапы, сроки и вилку стоимости.')
-    parts.append('Подробнее: https://boris-ai.pro/go/software')
+    parts.append('Подробнее: https://boris-ai.pro/software-dev/')
     parts.append('Если предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.')
     parts.append('Кирилл')
     body='\n\n'.join(x for x in parts if x).strip()
@@ -3184,7 +3257,7 @@ def _development_outreach_contract(subject:str,body:str,html:str,attachments:lis
     errors=[]; low=(str(subject or '')+'\n'+str(body or '')+'\n'+str(html or '')).lower().replace('ё','е')
     for token in ('я создал boris','виртуальную команду маркетинга','ai-авитолог','виртуальный роп','/go/boris'):
         if token in low: errors.append('development_forbidden_boris_copy:'+token)
-    if 'boris-ai.pro/go/software' not in low:
+    if 'boris-ai.pro/software-dev/' not in low:
         errors.append('development_software_link_required')
     if 'разработ' not in low:
         errors.append('development_offer_required')
@@ -3370,7 +3443,10 @@ def tick_campaign(campaign_id:int,max_enqueue:int=10)->dict:
             copy_subject_src=str((ab or {}).get('subject') or c.get('subject_template') or '')
             copy_body_src=str((ab or {}).get('body') or c.get('body_template') or '')
             personalized_development=False
-            if is_development and not ab:
+            if is_development:
+                # A/B in the development funnel controls the subject/analytics,
+                # not whether the recipient gets a generic body. Every company
+                # email must use its latest Lead Radar brief when available.
                 rendered_fallback=_render(copy_body_src,row_ctx).strip()
                 copy_body_src,personalized_development=_development_personalized_body(
                     int(r.get('company_id') or 0),str(r.get('company') or ''),rendered_fallback
@@ -3400,7 +3476,7 @@ def tick_campaign(campaign_id:int,max_enqueue:int=10)->dict:
             )
             if ab:
                 subject=_render_subject(str(ab.get('subject') or ''),row_ctx,1)
-                body=_render(str(ab.get('body') or ''),row_ctx).strip()
+                body=(copy_body_src if is_development and personalized_development else _render(str(ab.get('body') or ''),row_ctx).strip())
             elif paid_copy_enabled:
                 try:
                     subject,body=_generate_openai_email_copy(
@@ -3468,7 +3544,7 @@ def tick_campaign(campaign_id:int,max_enqueue:int=10)->dict:
                 html=_html_email(
                     body,'','',brand_subtitle='Разработка программных продуктов',brand_note='',
                     marketing_banner_cid=cid,
-                    marketing_banner_href='https://boris-ai.pro/go/software',
+                    marketing_banner_href='https://boris-ai.pro/software-dev/',
                     marketing_banner_alt='Разработка программных продуктов под бизнес',
                 )
             else:
@@ -3495,7 +3571,9 @@ def tick_campaign(campaign_id:int,max_enqueue:int=10)->dict:
                 if development_errors:
                     pdb=SessionLocal()
                     try:
-                        pdb.execute(text("UPDATE prospect_campaigns SET status='paused',paused_at=NOW(),updated_at=NOW() WHERE id=:c"),{'c':campaign_id})
+                        pdb.execute(text("""UPDATE prospect_campaigns SET status='paused',paused_at=NOW(),updated_at=NOW(),
+                          status_reason='development_content_contract_failed',status_source='safety'
+                          WHERE id=:c"""),{'c':campaign_id})
                         pdb.commit()
                     finally:
                         pdb.close()

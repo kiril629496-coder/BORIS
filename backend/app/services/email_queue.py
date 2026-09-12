@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.db.session import SessionLocal
 from app.services import email_service as _es
+from app.services.exception_observability import observe_suppressed
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,20 @@ def enqueue_email(to, subject, body, html=None, from_address=None, from_name=Non
     return {"id": queue_id, "status": "queued", "duplicate": False}
 
 
+def _mailbox_health_before_smtp(db, mailbox_id):
+    if not mailbox_id:
+        return {'allowed':True}
+    row=db.execute(text("""SELECT status,smtp_last_error,imap_last_error
+      FROM client_mailboxes WHERE id=:m"""),{'m':int(mailbox_id)}).mappings().first()
+    if not row or str(row.get('status') or '')!='active':
+        return {'allowed':False,'reason':'mailbox_inactive'}
+    if row.get('smtp_last_error'):
+        return {'allowed':False,'reason':'mailbox_smtp_unhealthy','error':str(row.get('smtp_last_error') or '')[:160]}
+    if row.get('imap_last_error'):
+        return {'allowed':False,'reason':'mailbox_imap_unhealthy','error':str(row.get('imap_last_error') or '')[:160]}
+    return {'allowed':True}
+
+
 def _deliver(db, row) -> str:
     """Одна попытка отправки уже захваченной строки. Возвращает новый статус."""
     (queue_id, to_addr, subject, body, html, fa, fn, rt, hd, attempts,
@@ -312,14 +327,24 @@ def _deliver(db, row) -> str:
         db.commit()
 
     if mailbox_id:
+        health=_mailbox_health_before_smtp(db,mailbox_id)
+        if not health.get('allowed'):
+            err=('MAILBOX_HEALTH_BLOCKED:'+str(health.get('reason') or 'unknown'))[:255]
+            db.execute(text("""UPDATE email_queue
+              SET status='queued',last_error=:e,next_attempt_at=NOW()+INTERVAL '60 minutes',updated_at=NOW()
+              WHERE id=:i AND status='sending'"""),{'e':err,'i':queue_id})
+            _log_event(db,queue_id,'mailbox_health_blocked',details=str(health)[:500])
+            db.commit()
+            return 'retrying'
         from app.services.client_mailboxes import send_outbound
         ok, reason, message_id = send_outbound(
             int(mailbox_id), to_addr, subject, body, html=html,
-            reply_to=rt, headers=headers, attachments=attachments)
+            reply_to=rt, headers=headers, attachments=attachments,from_name=fn)
     else:
         ok, reason, message_id = _es.send_email(
             to_addr, subject, body, html=html,
-            from_address=fa, from_name=fn, reply_to=rt, headers=headers, attachments=attachments)
+            from_address=fa, from_name=fn, reply_to=rt, headers=headers, attachments=attachments,
+            tenant_scope=f"email_queue:{int(queue_id)}")
 
     attempts = (attempts or 0) + 1
 
@@ -509,8 +534,8 @@ def touch_heartbeat():
     try:
         with open(HEARTBEAT, "w", encoding="utf-8") as fh:
             fh.write(datetime.now().isoformat())
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=535)
 
 
 def queue_stats() -> dict:

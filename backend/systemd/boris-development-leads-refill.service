@@ -1,0 +1,12 @@
+[Unit]
+Description=BORIS Development Lead Radar verified reserve refill
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/BORIS/backend
+EnvironmentFile=-/root/BORIS/backend/.env
+ExecStart=/root/BORIS/backend/venv/bin/python /root/BORIS/backend/development_lead_radar_runner.py --refill-only --no-discovery --target 50 --min-ready 30
+User=root
+TimeoutStartSec=180

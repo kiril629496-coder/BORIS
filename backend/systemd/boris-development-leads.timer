@@ -1,0 +1,11 @@
+[Unit]
+Description=Build BORIS development lead shortlist before outreach window
+
+[Timer]
+OnCalendar=*-*-* 05:35:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=boris-development-leads.service
+
+[Install]
+WantedBy=timers.target

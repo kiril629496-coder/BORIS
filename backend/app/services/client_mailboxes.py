@@ -11,80 +11,9 @@ from email.utils import parseaddr
 from sqlalchemy import text
 from app.crypto_utils import encrypt_secret, decrypt_secret
 from app.db.session import SessionLocal
+from app.services.exception_observability import observe_suppressed
 
-SCHEMA="""
-CREATE TABLE IF NOT EXISTS client_mailboxes (
- id BIGSERIAL PRIMARY KEY,
- owner_user_id BIGINT NOT NULL,
- account_id VARCHAR(255) NOT NULL,
- email_address VARCHAR(320) NOT NULL,
- display_name VARCHAR(255),
- smtp_host VARCHAR(255) NOT NULL,
- smtp_port INTEGER NOT NULL DEFAULT 465,
- smtp_ssl BOOLEAN NOT NULL DEFAULT TRUE,
- imap_host VARCHAR(255) NOT NULL,
- imap_port INTEGER NOT NULL DEFAULT 993,
- imap_ssl BOOLEAN NOT NULL DEFAULT TRUE,
- username VARCHAR(320) NOT NULL,
- secret_encrypted TEXT NOT NULL,
- status VARCHAR(32) NOT NULL DEFAULT 'active',
- last_imap_uid BIGINT NOT NULL DEFAULT 0,
- last_checked_at TIMESTAMP,
- last_error TEXT,
- created_at TIMESTAMP NOT NULL DEFAULT NOW(),
- updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
- UNIQUE(owner_user_id, account_id, email_address)
-);
-CREATE TABLE IF NOT EXISTS prospect_inbound_replies (
- id BIGSERIAL PRIMARY KEY,
- mailbox_id BIGINT NOT NULL REFERENCES client_mailboxes(id) ON DELETE CASCADE,
- campaign_id BIGINT REFERENCES prospect_campaigns(id) ON DELETE SET NULL,
- member_id BIGINT REFERENCES prospect_campaign_members(id) ON DELETE SET NULL,
- message_uid BIGINT NOT NULL,
- message_id TEXT,
- in_reply_to TEXT,
- from_email VARCHAR(320),
- subject TEXT,
- body_preview TEXT,
- crm_lead_id BIGINT,
- alert_status VARCHAR(32) NOT NULL DEFAULT 'pending',
- received_at TIMESTAMP,
- created_at TIMESTAMP NOT NULL DEFAULT NOW(),
- UNIQUE(mailbox_id,message_uid)
-);
-CREATE TABLE IF NOT EXISTS prospect_reply_alerts (
- id BIGSERIAL PRIMARY KEY,
- reply_id BIGINT NOT NULL REFERENCES prospect_inbound_replies(id) ON DELETE CASCADE,
- account_id VARCHAR(255),
- telegram_chat_id VARCHAR(255),
- status VARCHAR(32) NOT NULL DEFAULT 'pending',
- error TEXT,
- created_at TIMESTAMP NOT NULL DEFAULT NOW(),
- sent_at TIMESTAMP,
- UNIQUE(reply_id)
-);
-CREATE TABLE IF NOT EXISTS mailbox_sent_copy_queue (
- id BIGSERIAL PRIMARY KEY,
- mailbox_id BIGINT NOT NULL REFERENCES client_mailboxes(id) ON DELETE CASCADE,
- message_id TEXT,
- mime_bytes BYTEA NOT NULL,
- status VARCHAR(32) NOT NULL DEFAULT 'pending',
- attempts INTEGER NOT NULL DEFAULT 0,
- last_error TEXT,
- created_at TIMESTAMP NOT NULL DEFAULT NOW(),
- updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
- next_attempt_at TIMESTAMP,
- UNIQUE(mailbox_id,message_id)
-);
-ALTER TABLE manager_leads ADD COLUMN IF NOT EXISTS lead_source VARCHAR(64);
-ALTER TABLE prospect_inbound_replies ADD COLUMN IF NOT EXISTS message_kind VARCHAR(32) NOT NULL DEFAULT 'human';
-ALTER TABLE prospect_reply_alerts ADD COLUMN IF NOT EXISTS attempted_at TIMESTAMPTZ;
-ALTER TABLE prospect_reply_alerts ADD COLUMN IF NOT EXISTS email_queue_id BIGINT;
-ALTER TABLE client_mailboxes ADD COLUMN IF NOT EXISTS smtp_last_checked_at TIMESTAMP;
-ALTER TABLE client_mailboxes ADD COLUMN IF NOT EXISTS smtp_last_error TEXT;
-ALTER TABLE client_mailboxes ADD COLUMN IF NOT EXISTS imap_last_checked_at TIMESTAMP;
-ALTER TABLE client_mailboxes ADD COLUMN IF NOT EXISTS imap_last_error TEXT;
-"""
+SCHEMA='SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'
 
 def ensure_schema(db):
     ready=db.execute(text("""SELECT
@@ -92,6 +21,13 @@ def ensure_schema(db):
       AND to_regclass('public.prospect_inbound_replies') IS NOT NULL
       AND to_regclass('public.prospect_reply_alerts') IS NOT NULL
       AND to_regclass('public.mailbox_sent_copy_queue') IS NOT NULL
+      AND to_regclass('public.owner_mailbox_transport_drift_events') IS NOT NULL
+      AND EXISTS(
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='public.client_mailboxes'::regclass
+          AND conname='client_mailboxes_owner_transport_canonical_v1'
+      )
+      AND to_regclass('public.uq_client_mailboxes_owner_outreach_single_v1') IS NOT NULL
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='mailbox_sent_copy_queue' AND column_name='next_attempt_at')
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_inbound_replies' AND column_name='message_kind')
       AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='prospect_reply_alerts' AND column_name='attempted_at')
@@ -106,13 +42,44 @@ def ensure_schema(db):
         return
     for stmt in [x.strip() for x in SCHEMA.split(';') if x.strip()]:
         db.execute(text(stmt))
+    # Owner-outreach canonical routing is deliberately NOT authored by the
+    # application role. The root-owned systemd preflight
+    # scripts/owner_email_db_guard.sh installs the postgres-owned DB guards.
+    # This keeps ordinary API/QA/deploy code from redefining transport policy.
     db.commit()
 
 def _fernet_ready(): return bool(os.environ.get('FERNET_KEY'))
 
+
+def _mailbox_password(row:dict)->str:
+    """Reuse BORIS' working global SMTP secret for owner outreach without copying it into DB."""
+    if str(row.get('account_id') or '')=='__owner_outreach__':
+        env_user=(os.getenv('SMTP_USER') or '').strip().lower()
+        env_host=(os.getenv('SMTP_HOST') or '').strip().lower()
+        row_user=str(row.get('username') or '').strip().lower()
+        row_host=str(row.get('smtp_host') or '').strip().lower()
+        if env_user and env_host and row_user==env_user and row_host==env_host:
+            pw=os.getenv('SMTP_PASS') or os.getenv('SMTP_PASSWORD') or ''
+            if pw:
+                return pw
+    return decrypt_secret(row['secret_encrypted'])
+
+
+def _mailbox_reply_to(row:dict, explicit=None):
+    if explicit:
+        return explicit
+    if str(row.get('account_id') or '')=='__owner_outreach__':
+        configured=(os.getenv('PROSPECT_OUTREACH_REPLY_TO') or '').strip()
+        if configured:
+            return configured
+    return row.get('email_address')
+
+
 def save_mailbox(owner_user_id:int, account_id:str, *, email_address:str, display_name:str|None,
                  smtp_host:str,smtp_port:int,imap_host:str,imap_port:int,username:str,password:str,
                  smtp_ssl:bool=True,imap_ssl:bool=True)->int:
+    if account_id == '__owner_outreach__':
+        raise ValueError('owner_outreach_transport_is_system_managed')
     if not _fernet_ready(): raise RuntimeError('FERNET_KEY is required for client mailbox secrets')
     db=SessionLocal(); ensure_schema(db)
     try:
@@ -181,7 +148,7 @@ def mailbox_error_kind(reason:str|None)->str|None:
     if not low:
         return None
     if (
-        'application password is required' in low
+        ('application password is required' in low or 'application password required' in low)
         or 'parol prilozheniya' in low
         or 'парол' in low and 'прилож' in low
     ):
@@ -194,7 +161,7 @@ def mailbox_error_kind(reason:str|None)->str|None:
 def test_mailbox(mailbox_id:int)->dict:
     r=_row(mailbox_id)
     if not r: return {'smtp':False,'imap':False,'reason':'mailbox_not_found'}
-    pw=decrypt_secret(r['secret_encrypted']); out={'smtp':False,'imap':False}
+    pw=_mailbox_password(r); out={'smtp':False,'imap':False}
     try:
         cls=smtplib.SMTP_SSL if r['smtp_ssl'] else smtplib.SMTP
         with cls(r['smtp_host'],r['smtp_port'],timeout=20) as s:
@@ -219,7 +186,7 @@ def probe_smtp_health(mailbox_id:int)->dict:
     if not r:
         return {'ok':False,'reason':'mailbox_not_found'}
     try:
-        pw=decrypt_secret(r['secret_encrypted'])
+        pw=_mailbox_password(r)
         cls=smtplib.SMTP_SSL if r['smtp_ssl'] else smtplib.SMTP
         with cls(r['smtp_host'],r['smtp_port'],timeout=20) as smtp:
             if not r['smtp_ssl']:
@@ -232,6 +199,182 @@ def probe_smtp_health(mailbox_id:int)->dict:
         reason=_smtp_failure_reason(exc,'login')
         _set_mailbox_channel_health(mailbox_id,'smtp',ok=False,error=reason)
         return {'ok':False,'reason':reason}
+
+def _canonical_owner_transport()->dict|None:
+    """Canonical owner-outreach transport backed by BORIS' working global mailbox secret."""
+    host=(os.getenv('SMTP_HOST') or '').strip()
+    user=(os.getenv('SMTP_USER') or '').strip()
+    password=os.getenv('SMTP_PASS') or os.getenv('SMTP_PASSWORD') or ''
+    address=(os.getenv('EMAIL_FROM_ADDRESS') or user).strip()
+    imap_host=(os.getenv('PROSPECT_OWNER_IMAP_HOST') or '').strip()
+    if not (host and user and password and address and imap_host):
+        return None
+    try:
+        smtp_port=int(os.getenv('SMTP_PORT') or 465)
+        imap_port=int(os.getenv('PROSPECT_OWNER_IMAP_PORT') or 993)
+    except Exception:
+        return None
+    return {
+        'email_address':address.lower(),
+        'smtp_host':host.lower(),'smtp_port':smtp_port,'smtp_ssl':True,
+        'imap_host':imap_host.lower(),'imap_port':imap_port,'imap_ssl':True,
+        'username':user,
+        'password':password,
+    }
+
+
+def _probe_transport_config(cfg:dict)->dict:
+    """Verify replacement SMTP+IMAP before any production mailbox metadata is changed."""
+    out={'smtp':False,'imap':False,'imap_cursor':0}
+    try:
+        with smtplib.SMTP_SSL(cfg['smtp_host'],int(cfg['smtp_port']),timeout=20) as smtp:
+            smtp.login(cfg['username'],cfg['password']); smtp.noop()
+        out['smtp']=True
+    except Exception as exc:
+        out['smtp_error']=_smtp_failure_reason(exc,'login')
+    try:
+        m=imaplib.IMAP4_SSL(cfg['imap_host'],int(cfg['imap_port']))
+        m.login(cfg['username'],cfg['password'])
+        st,data=m.status('INBOX','(UIDNEXT)')
+        if st=='OK' and data:
+            raw=(data[0].decode('utf-8','ignore') if isinstance(data[0],bytes) else str(data[0]))
+            match=re.search(r'UIDNEXT\s+(\d+)',raw,re.I)
+            if match:
+                out['imap_cursor']=max(0,int(match.group(1))-1)
+        m.logout(); out['imap']=True
+    except Exception as exc:
+        out['imap_error']=_mailbox_exception_reason(exc)
+    return out
+
+
+def ensure_owner_outreach_transport()->dict:
+    """Self-heal a broken owner mailbox onto the verified canonical BORIS transport.
+
+    Healthy alternate mailboxes are never replaced. A switch occurs only when
+    the current owner-outreach transport is unhealthy AND the canonical SMTP
+    and IMAP both pass a live authentication probe first.
+    """
+    cfg=_canonical_owner_transport()
+    if not cfg:
+        return {'checked':0,'switched':0,'status':'canonical_transport_not_configured'}
+    db=SessionLocal(); ensure_schema(db)
+    try:
+        rows=[dict(x) for x in db.execute(text("""SELECT id,email_address,smtp_host,smtp_port,smtp_ssl,
+          imap_host,imap_port,imap_ssl,username,smtp_last_error,imap_last_error
+          FROM client_mailboxes
+          WHERE account_id='__owner_outreach__' AND status='active'
+          ORDER BY id""")).mappings().all()]
+    finally:
+        db.close()
+    switched=0; results={}
+    probe=None
+    for r in rows:
+        mailbox_id=int(r['id'])
+        matches=(
+            str(r.get('email_address') or '').lower()==cfg['email_address']
+            and str(r.get('smtp_host') or '').lower()==cfg['smtp_host']
+            and int(r.get('smtp_port') or 0)==int(cfg['smtp_port'])
+            and bool(r.get('smtp_ssl'))
+            and str(r.get('imap_host') or '').lower()==cfg['imap_host']
+            and int(r.get('imap_port') or 0)==int(cfg['imap_port'])
+            and bool(r.get('imap_ssl'))
+            and str(r.get('username') or '').lower()==str(cfg['username']).lower()
+        )
+        if matches:
+            results[mailbox_id]={'status':'canonical'}
+            continue
+        unhealthy=bool(r.get('smtp_last_error') or r.get('imap_last_error'))
+        allow_failover=str(os.getenv('PROSPECT_OWNER_ALLOW_TRANSPORT_FAILOVER') or '').strip().lower() in {'1','true','yes','on'}
+        if not allow_failover:
+            if unhealthy:
+                results[mailbox_id]={
+                    'status':'alternate_unhealthy_failover_disabled',
+                    'smtp_error':r.get('smtp_last_error'),'imap_error':r.get('imap_last_error'),
+                }
+            else:
+                results[mailbox_id]={'status':'alternate_healthy_not_touched'}
+            continue
+        # Explicit owner opt-in makes the canonical BORIS transport authoritative.
+        # A concurrent raw/API rewrite back to an old mailbox must not silently
+        # win merely because it cleared health errors. Probe canonical first,
+        # then restore it before bootstrap/feeder work in the same minute cycle.
+        if probe is None:
+            probe=_probe_transport_config(cfg)
+        if not (probe.get('smtp') and probe.get('imap')):
+            results[mailbox_id]={
+                'status':'canonical_probe_failed',
+                'smtp':bool(probe.get('smtp')),'imap':bool(probe.get('imap')),
+                'smtp_error':probe.get('smtp_error'),'imap_error':probe.get('imap_error'),
+            }
+            continue
+        wdb=SessionLocal(); ensure_schema(wdb)
+        try:
+            wdb.execute(text("""UPDATE client_mailboxes SET
+              email_address=:e,smtp_host=:sh,smtp_port=:sp,smtp_ssl=TRUE,
+              imap_host=:ih,imap_port=:ip,imap_ssl=TRUE,username=:u,
+              last_imap_uid=:cursor,last_checked_at=NOW(),last_error=NULL,
+              smtp_last_checked_at=NOW(),smtp_last_error=NULL,
+              imap_last_checked_at=NOW(),imap_last_error=NULL,updated_at=NOW()
+              WHERE id=:i AND status='active'"""),{
+                'e':cfg['email_address'],'sh':cfg['smtp_host'],'sp':cfg['smtp_port'],
+                'ih':cfg['imap_host'],'ip':cfg['imap_port'],'u':cfg['username'],
+                'cursor':int(probe.get('imap_cursor') or 0),'i':mailbox_id,
+            })
+            wdb.commit(); switched+=1
+            results[mailbox_id]={'status':'switched_to_canonical','imap_cursor':int(probe.get('imap_cursor') or 0)}
+        except Exception:
+            wdb.rollback(); raise
+        finally:
+            wdb.close()
+    return {'checked':len(rows),'switched':switched,'results':results}
+
+
+def reconcile_owner_campaign_mailbox_health()->dict:
+    """Pause owner-mailbox campaigns on transport failure and resume only these pauses after recovery."""
+    db=SessionLocal(); ensure_schema(db)
+    try:
+        rows=[dict(x) for x in db.execute(text("""SELECT
+          c.id,c.status,c.desired_status,c.status_reason,c.mailbox_id,
+          m.status AS mailbox_status,m.smtp_last_error,m.imap_last_error
+          FROM prospect_campaigns c
+          JOIN client_mailboxes m ON m.id=c.mailbox_id
+          WHERE m.account_id='__owner_outreach__'
+            AND c.desired_status='active'
+            AND (c.status='active' OR c.status_reason='mailbox_auth_blocked')
+          ORDER BY c.id""")).mappings().all()]
+        paused=[]; resumed=[]; blocked={}
+        for r in rows:
+            unhealthy=(
+                str(r.get('mailbox_status') or '')!='active'
+                or bool(r.get('smtp_last_error'))
+                or bool(r.get('imap_last_error'))
+            )
+            cid=int(r['id'])
+            if unhealthy:
+                blocked[cid]={
+                    'smtp':str(r.get('smtp_last_error') or '')[:160] or None,
+                    'imap':str(r.get('imap_last_error') or '')[:160] or None,
+                }
+                if str(r.get('status') or '')=='active':
+                    changed=db.execute(text("""UPDATE prospect_campaigns
+                      SET status='paused',paused_at=COALESCE(paused_at,NOW()),
+                          status_reason='mailbox_auth_blocked',status_source='mailbox_guard',updated_at=NOW()
+                      WHERE id=:c AND desired_status='active' AND status='active'"""),{'c':cid}).rowcount or 0
+                    if changed: paused.append(cid)
+            elif str(r.get('status') or '')=='paused' and str(r.get('status_reason') or '')=='mailbox_auth_blocked':
+                changed=db.execute(text("""UPDATE prospect_campaigns
+                  SET status='active',paused_at=NULL,status_reason=NULL,
+                      status_source='mailbox_guard_recovered',updated_at=NOW()
+                  WHERE id=:c AND desired_status='active' AND status='paused'
+                    AND status_reason='mailbox_auth_blocked'"""),{'c':cid}).rowcount or 0
+                if changed: resumed.append(cid)
+        db.commit()
+        return {'checked':len(rows),'paused':paused,'resumed':resumed,'blocked':blocked}
+    except Exception:
+        db.rollback(); raise
+    finally:
+        db.close()
+
 
 def recheck_unhealthy_smtp(limit:int=20,cooldown_minutes:int=15)->dict:
     """Retry only unhealthy SMTP auth/connectivity, rate-limited and send-free."""
@@ -276,7 +419,7 @@ def _sent_folder(m):
         try:
             st,_=m.status(candidate,'(MESSAGES)')
             if st=='OK': return candidate
-        except Exception: pass
+        except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=476)
     return None
 
 def _append_sent_copy(r, pw, raw_bytes:bytes)->tuple[bool,str]:
@@ -334,7 +477,7 @@ def flush_sent_copies(limit:int=20)->dict:
                 db.execute(text("UPDATE mailbox_sent_copy_queue SET status='dead',attempts=attempts+1,last_error='mailbox_not_found',next_attempt_at=NULL,updated_at=now() WHERE id=:i"),{'i':row['id']}); db.commit()
             finally: db.close()
             dead+=1; continue
-        ok,reason=_append_sent_copy(r,decrypt_secret(r['secret_encrypted']),bytes(row['mime_bytes']))
+        ok,reason=_append_sent_copy(r,_mailbox_password(r),bytes(row['mime_bytes']))
         attempt=int(row.get('attempts') or 0)+1
         terminal=attempt>=5
         db=SessionLocal()
@@ -375,7 +518,7 @@ def _drafts_folder(m):
         try:
             st,_=m.status(candidate,'(MESSAGES)')
             if st=='OK': return candidate
-        except Exception: pass
+        except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=575)
     return None
 
 def save_draft(mailbox_id:int,to,subject,body,html=None,reply_to=None,headers=None,attachments=None):
@@ -383,10 +526,10 @@ def save_draft(mailbox_id:int,to,subject,body,html=None,reply_to=None,headers=No
     r=_row(mailbox_id)
     if not r: return False,'mailbox_not_found',''
     from app.services.email_service import build_message
-    msg=build_message(to,subject,body,html=html,from_address=r['email_address'],from_name=r.get('display_name'),reply_to=reply_to or r['email_address'],headers=headers,attachments=attachments)
+    msg=build_message(to,subject,body,html=html,from_address=r['email_address'],from_name=r.get('display_name'),reply_to=_mailbox_reply_to(r,reply_to),headers=headers,attachments=attachments)
     mid=msg.get('Message-ID',''); raw=msg.as_bytes()
     try:
-        pw=decrypt_secret(r['secret_encrypted'])
+        pw=_mailbox_password(r)
         cls=imaplib.IMAP4_SSL if r['imap_ssl'] else imaplib.IMAP4
         m=cls(r['imap_host'],r['imap_port']); m.login(r['username'],pw)
         box=_drafts_folder(m)
@@ -427,39 +570,45 @@ def _smtp_failure_reason(exc:Exception, phase:str)->str:
     return reason
 
 
-def send_outbound(mailbox_id:int,to,subject,body,html=None,reply_to=None,headers=None,attachments=None):
+def send_outbound(mailbox_id:int,to,subject,body,html=None,reply_to=None,headers=None,attachments=None,from_name=None):
     r=_row(mailbox_id)
     if not r: return False,'mailbox_not_found',''
-    from app.services.email_service import build_message
-    msg=build_message(to,subject,body,html=html,from_address=r['email_address'],from_name=r.get('display_name'),reply_to=reply_to or r['email_address'],headers=headers,attachments=attachments)
+    from app.services.email_service import build_message, _smtp_transport_send, SMTPTransportFailure
+    msg=build_message(to,subject,body,html=html,from_address=r['email_address'],from_name=(from_name if from_name is not None else r.get('display_name')),reply_to=_mailbox_reply_to(r,reply_to),headers=headers,attachments=attachments)
     mid=msg.get('Message-ID',''); raw=msg.as_bytes()
-    phase='connect'
+    pw=_mailbox_password(r)
     try:
-        pw=decrypt_secret(r['secret_encrypted'])
-        cls=smtplib.SMTP_SSL if r['smtp_ssl'] else smtplib.SMTP
-        with cls(r['smtp_host'],r['smtp_port'],timeout=20) as smtp:
-            if not r['smtp_ssl']:
-                phase='starttls'; smtp.starttls()
-            phase='login'; smtp.login(r['username'],pw)
-            phase='sending'; smtp.send_message(msg); phase='accepted'
+        _smtp_transport_send(
+            msg,
+            tenant_scope=f"mailbox:{int(mailbox_id)}",
+            host=r['smtp_host'],
+            port=int(r['smtp_port']),
+            username=r['username'],
+            password=pw,
+            use_ssl=bool(r['smtp_ssl']),
+            starttls=not bool(r['smtp_ssl']),
+            timeout=20,
+        )
+    except SMTPTransportFailure as wrapped:
+        failure=_smtp_failure_reason(wrapped.original,wrapped.phase)
+        try:
+            _set_mailbox_channel_health(mailbox_id,'smtp',ok=False,error=failure)
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=651)
+        return False,failure,mid
     except Exception as e:
-        if phase=='accepted':
-            # SMTP accepted DATA; only session shutdown failed. Treat delivery as
-            # successful and let the Sent-copy queue repair IMAP evidence later.
-            phase='accepted_after_close_error'
-        else:
-            failure=_smtp_failure_reason(e,phase)
-            try:
-                _set_mailbox_channel_health(mailbox_id,'smtp',ok=False,error=failure)
-            except Exception:
-                pass
-            return False,failure,mid
+        failure=_smtp_failure_reason(e,'connect')
+        try:
+            _set_mailbox_channel_health(mailbox_id,'smtp',ok=False,error=failure)
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=651)
+        return False,failure,mid
     # Health bookkeeping must never turn an already accepted SMTP delivery into
     # an ambiguous queue result. Persist it best-effort after DATA acceptance.
     try:
         _set_mailbox_channel_health(mailbox_id,'smtp',ok=True)
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=658)
     ok,reason=_append_sent_copy(r,pw,raw)
     if not ok:
         _queue_sent_copy(mailbox_id,mid,raw,reason)
@@ -520,8 +669,8 @@ def _body_preview(msg):
                 cleaned=_strip_quoted_history(decoded)
                 if cleaned:
                     parts.append(cleaned)
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=720)
     # Some mail clients send reply text as HTML only. Falling back to stripped
     # HTML keeps opt-outs and sales intent visible instead of creating an empty
     # generic lead. Plain text remains authoritative when present.
@@ -561,8 +710,8 @@ def _delivery_recipient(msg, preview:str='')->str|None:
                             addr=parseaddr(raw)[1]
                             if addr:
                                 candidates.append(addr)
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=761)
     blob=' '.join([
         str(msg.get('Final-Recipient') or ''),
         str(msg.get('Original-Recipient') or ''),
@@ -615,8 +764,8 @@ def _machine_reply_kind(msg, sender:str, subject:str, preview:str)->str|None:
                         v=str(block.get(h) or '').strip()
                         if v:
                             delivery_meta.append(v)
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=815)
         delivery_blob=' '.join([subject_low,preview_low,' '.join(delivery_meta).lower()])
         permanent=bool(re.search(r'(^|\s)5\.\d+\.\d+(\s|$)',delivery_blob)) or any(x in delivery_blob for x in (
             '5.1.1','5.0.0','550 ','user unknown','unknown user',
@@ -697,6 +846,14 @@ def _merge_sales_stage(current:str|None, desired:str)->str:
     cur=str(current or 'новый')
     return cur if rank.get(cur,0) >= rank.get(desired,0) else desired
 
+def _reply_funnel_label(db, campaign_id):
+    row=db.execute(text("SELECT name,niche FROM prospect_campaigns WHERE id=:i"),{'i':int(campaign_id)}).mappings().first() or {}
+    blob=(str(row.get('name') or '')+' '+str(row.get('niche') or '')).lower().replace('ё','е')
+    if 'разработ' in blob and any(x in blob for x in ('saas','мобильн','заказн','программ')):
+        return 'разработка ПО'
+    return 'BORIS'
+
+
 def _match_member(db, mailbox_id, sender, in_reply_to):
     if in_reply_to:
         r=db.execute(text("""SELECT m.id member_id,m.campaign_id,m.company_id,m.email recipient_email,c.account_id FROM prospect_campaign_members m JOIN prospect_campaigns c ON c.id=m.campaign_id JOIN email_queue q ON q.id=m.email_queue_id WHERE c.mailbox_id=:mb AND q.provider_message_id=:mid ORDER BY m.id DESC LIMIT 1"""),{'mb':mailbox_id,'mid':in_reply_to.strip()}).mappings().first()
@@ -706,10 +863,23 @@ def _match_member(db, mailbox_id, sender, in_reply_to):
 def _crm_and_alert(db, reply_id, match, sender, subject, preview):
     if not match: return None
     company=db.execute(text('SELECT name,website FROM prospect_companies WHERE id=:i'),{'i':match['company_id']}).mappings().first() or {}
-    owner=db.execute(text('SELECT owner_id FROM prospect_campaigns WHERE id=:i'),{'i':match['campaign_id']}).scalar()
+    campaign=db.execute(text('SELECT owner_id,account_id,niche,name FROM prospect_campaigns WHERE id=:i'),{'i':match['campaign_id']}).mappings().first() or {}
+    owner=campaign.get('owner_id')
     manager_email=db.execute(text('SELECT email FROM users WHERE id=:i'),{'i':owner}).scalar()
-    lead=db.execute(text('SELECT id,status FROM manager_leads WHERE manager_email=:me AND lower(email)=lower(:e) ORDER BY id DESC LIMIT 1'),{'me':manager_email,'e':sender}).mappings().first()
-    comment=f"Ответ на email-рассылку BORIS. Тема: {subject}. Ответ: {preview[:700]}"
+    funnel_label=_reply_funnel_label(db,match['campaign_id'])
+    if funnel_label=='разработка ПО':
+        lead=db.execute(text("""SELECT id,status FROM manager_leads
+          WHERE manager_email=:me AND lower(email)=lower(:e)
+            AND account_id IS NULL AND lower(coalesce(niche,'')) LIKE '%разработ%'
+          ORDER BY id DESC LIMIT 1"""),{'me':manager_email,'e':sender}).mappings().first()
+    else:
+        campaign_account=campaign.get('account_id')
+        lead=db.execute(text("""SELECT id,status FROM manager_leads
+          WHERE manager_email=:me AND lower(email)=lower(:e)
+            AND ((:a IS NULL AND account_id IS NULL) OR account_id=:a)
+          ORDER BY id DESC LIMIT 1"""),{'me':manager_email,'e':sender,'a':campaign_account}).mappings().first()
+    comment=f"Ответ на email-рассылку: {funnel_label}. Тема: {subject}. Ответ: {preview[:700]}"
+    lead_source_value=('email_outreach_development' if funnel_label=='разработка ПО' else 'email_outreach_boris')
 
     if _is_opt_out(preview):
         # Explicit refusal is a global do-not-contact signal. Apply suppression in
@@ -718,7 +888,7 @@ def _crm_and_alert(db, reply_id, match, sender, subject, preview):
         suppress_in_db(db,'email',sender,'recipient_opt_out')
         db.execute(text("UPDATE prospect_campaign_members SET status='suppressed',reply_status='opt_out',replied_at=NOW(),skip_reason='recipient_opt_out',updated_at=NOW() WHERE id=:i"),{'i':match['member_id']})
         if lead:
-            db.execute(text("UPDATE manager_leads SET status=CASE WHEN status IN ('оплатил','сделка') THEN status ELSE 'отказ' END,comment=:c,lead_source=coalesce(lead_source,'email_outreach'),updated_at=NOW() WHERE id=:i"),{'c':comment,'i':lead['id']})
+            db.execute(text("UPDATE manager_leads SET status=CASE WHEN status IN ('оплатил','сделка') THEN status ELSE 'отказ' END,comment=:c,lead_source=coalesce(lead_source,:ls),updated_at=NOW() WHERE id=:i"),{'c':comment,'i':lead['id'],'ls':lead_source_value})
             lead_id=int(lead['id'])
             db.execute(text("UPDATE manager_notes SET done=TRUE WHERE manager_email=:me AND lead_id=:l AND kind='reminder' AND COALESCE(done,FALSE)=FALSE"),{'me':manager_email,'l':lead_id})
             db.execute(text("INSERT INTO manager_notes(manager_email,lead_id,client_account_id,kind,text) VALUES(:me,:l,:a,'note',:t)"),{'me':manager_email,'l':lead_id,'a':match['account_id'],'t':'Email: клиент отказался от дальнейших сообщений. Адрес добавлен в стоп-лист BORIS.'})
@@ -731,10 +901,10 @@ def _crm_and_alert(db, reply_id, match, sender, subject, preview):
     previous_stage=str((lead or {}).get('status') or '')
     if lead:
         final_stage=_merge_sales_stage(previous_stage,desired_stage)
-        db.execute(text("UPDATE manager_leads SET status=:st,comment=:c,lead_source=coalesce(lead_source,'email_outreach'),updated_at=NOW() WHERE id=:i"),{'st':final_stage,'c':comment,'i':lead['id']}); lead_id=int(lead['id'])
+        db.execute(text("UPDATE manager_leads SET status=:st,comment=:c,lead_source=coalesce(lead_source,:ls),updated_at=NOW() WHERE id=:i"),{'st':final_stage,'c':comment,'i':lead['id'],'ls':lead_source_value}); lead_id=int(lead['id'])
     else:
         final_stage=desired_stage
-        lead_id=int(db.execute(text("""INSERT INTO manager_leads(manager_email,email,company,site,niche,comment,status,account_id,lead_source) SELECT :me,:e,pc.name,pc.website,ca.niche,:c,:st,ca.account_id,'email_outreach' FROM prospect_companies pc JOIN prospect_campaigns ca ON ca.id=:campaign WHERE pc.id=:company RETURNING id"""),{'me':manager_email,'e':sender,'c':comment,'st':final_stage,'campaign':match['campaign_id'],'company':match['company_id']}).scalar_one())
+        lead_id=int(db.execute(text("""INSERT INTO manager_leads(manager_email,email,company,site,niche,comment,status,account_id,lead_source) SELECT :me,:e,pc.name,pc.website,ca.niche,:c,:st,ca.account_id,:ls FROM prospect_companies pc JOIN prospect_campaigns ca ON ca.id=:campaign WHERE pc.id=:company RETURNING id"""),{'me':manager_email,'e':sender,'c':comment,'st':final_stage,'campaign':match['campaign_id'],'company':match['company_id'],'ls':lead_source_value}).scalar_one())
     reminder_text='Клиент готов к созвону / встрече — согласовать время сегодня' if final_stage=='целевое действие' else ('Квалифицированный ответ на email — связаться сегодня' if final_stage=='квалифицирован' else 'Новый ответ на email-рассылку — связаться с лидом сегодня')
     # Keep exactly one active email follow-up reminder per lead. A hotter reply
     # upgrades the existing task instead of creating another open reminder.
@@ -768,20 +938,33 @@ def _reply_alert_flush_lock():
         finally:
             if got:
                 try: conn.execute(text("SELECT pg_advisory_unlock(:k)"),{'k':884422923})
-                except Exception: pass
+                except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=988)
             conn.close()
     return _lock()
 
 
+def _reply_alert_emails(row:dict)->list[str]:
+    configured=(os.getenv('PROSPECT_REPLY_ALERT_EMAILS') or '').strip()
+    raw=re.split(r'[,;\s]+',configured) if configured else []
+    if not raw:
+        raw=[str(row.get('owner_email') or '').strip()]
+    out=[]
+    for value in raw:
+        email=str(value or '').strip().lower()
+        if email and '@' in email and email not in out:
+            out.append(email)
+    return out
+
+
 def _queue_reply_alert_fallback(row:dict, alert_text:str)->dict|None:
     """Queue one idempotent owner-email fallback after ambiguous Telegram delivery."""
-    owner_email=str(row.get('owner_email') or '').strip()
-    if not owner_email:
+    recipients=_reply_alert_emails(row)
+    if not recipients:
         return None
     from app.services.email_queue import enqueue_email
     q=enqueue_email(
-        owner_email,
-        'Новый лид из email-рассылки BORIS',
+        recipients,
+        ('Новый лид: разработка ПО' if 'разработка ПО' in alert_text else 'Новый лид из email-рассылки BORIS'),
         alert_text,
         source='prospect_reply_alert_fallback',
         idempotency_key=f"prospect_reply_alert_fallback:{row['reply_id']}",
@@ -842,7 +1025,7 @@ def _flush_alerts(limit=20):
             try:
                 raw=db.execute(text("""SELECT a.id,a.reply_id,a.telegram_chat_id,a.status alert_status,
                   r.from_email,r.subject,r.crm_lead_id,l.status crm_status,
-                  ca.owner_id,u.email owner_email
+                  ca.owner_id,ca.name campaign_name,ca.niche campaign_niche,u.email owner_email
                   FROM prospect_reply_alerts a
                   JOIN prospect_inbound_replies r ON r.id=a.reply_id
                   JOIN prospect_campaigns ca ON ca.id=r.campaign_id
@@ -863,7 +1046,9 @@ def _flush_alerts(limit=20):
 
             stage=str(row.get('crm_status') or 'новый')
             stage_label='Целевое действие' if stage=='целевое действие' else ('Квалифицированный лид' if stage=='квалифицирован' else 'Новый лид')
-            alert_text=f"{stage_label} из email-рассылки BORIS. Ответил: {row['from_email']}. Тема: {row['subject'] or '—'}. CRM lead: #{row['crm_lead_id']}. Нужно связаться сегодня."
+            campaign_blob=(str(row.get('campaign_name') or '')+' '+str(row.get('campaign_niche') or '')).lower().replace('ё','е')
+            funnel_label='разработка ПО' if ('разработ' in campaign_blob and any(x in campaign_blob for x in ('saas','мобильн','заказн','программ'))) else 'BORIS'
+            alert_text=f"{stage_label} из email-рассылки: {funnel_label}. Ответил: {row['from_email']}. Тема: {row['subject'] or '—'}. CRM lead: #{row['crm_lead_id']}. Нужно связаться сегодня."
             channel=None; error=None; ambiguous=False; email_queue_id=None
             fallback_mode=(str(row.get('alert_status') or '')=='pending_email_fallback')
             try:
@@ -878,15 +1063,26 @@ def _flush_alerts(limit=20):
                     from app.telegram_bot import send_telegram_message
                     thread_id=int(os.getenv('PROSPECT_REPORT_TG_THREAD_ID','1747') or 1747) if str(row['telegram_chat_id'])==str(os.getenv('PROSPECT_REPORT_TG_CHAT_ID','-1003952038222')) else None
                     # No SQLAlchemy SessionLocal is alive during this network call.
-                    resp=send_telegram_message(str(row['telegram_chat_id']),f"🔥 <b>{stage_label} из email-рассылки</b>\n\nОтветил: {row['from_email']}\nТема: {row['subject'] or '—'}\nCRM lead: #{row['crm_lead_id']}\n\nНужно связаться сегодня.",thread_id=thread_id)
+                    resp=send_telegram_message(str(row['telegram_chat_id']),f"🔥 <b>{stage_label}: {funnel_label}</b>\n\nОтветил: {row['from_email']}\nТема: {row['subject'] or '—'}\nCRM lead: #{row['crm_lead_id']}\n\nНужно связаться сегодня.",thread_id=thread_id)
                     if not (isinstance(resp,dict) and resp.get('ok')):
                         raise RuntimeError('telegram_alert_failed')
                     channel='telegram'
+                    duplicate_recipients=_reply_alert_emails(row)
+                    if duplicate_recipients:
+                        from app.services.email_queue import enqueue_email
+                        enqueue_email(
+                            duplicate_recipients,
+                            ('Новый лид: разработка ПО' if 'разработка ПО' in alert_text else 'Новый лид из email-рассылки BORIS'),
+                            alert_text,
+                            source='prospect_reply_alert_copy',
+                            idempotency_key=f"prospect_reply_alert_copy:{row['reply_id']}",
+                            send_now=False,
+                        )
                 else:
-                    owner_email=str(row.get('owner_email') or '').strip()
-                    if not owner_email: raise RuntimeError('no notification channel')
+                    recipients=_reply_alert_emails(row)
+                    if not recipients: raise RuntimeError('no notification channel')
                     from app.services.email_queue import enqueue_email
-                    q=enqueue_email(owner_email,'Новый лид из email-рассылки BORIS',alert_text,source='prospect_reply_alert',idempotency_key=f"prospect_reply_alert:{row['reply_id']}",send_now=False)
+                    q=enqueue_email(recipients,'Новый лид из email-рассылки BORIS',alert_text,source='prospect_reply_alert',idempotency_key=f"prospect_reply_alert:{row['reply_id']}",send_now=False)
                     if not q.get('id'): raise RuntimeError('email alert enqueue failed')
                     channel='email_queued'
                     email_queue_id=int(q['id'])
@@ -988,16 +1184,42 @@ def _oldest_unseen_uids(raw_uids,max_messages:int)->list:
     return list(raw_uids or [])[:cap]
 
 
+def _effective_imap_cursor(stored_uid:int, uidnext:int|None)->int:
+    """Recover a cursor that belongs to another IMAP UID space.
+
+    UID values are mailbox-local. If a provider switch leaves a cursor greater
+    than or equal to the current server's UIDNEXT, replay this inbox from UID 1.
+    Reply reconciliation is idempotent, so replay is safer than skipping future
+    replies until the new provider eventually reaches an impossible old UID.
+    """
+    stored=max(0,int(stored_uid or 0))
+    if uidnext is None:
+        return stored
+    nxt=max(1,int(uidnext))
+    return 0 if stored >= nxt else stored
+
+
 def poll_mailbox(mailbox_id:int,max_messages:int=50)->dict:
     """Fetch IMAP bytes first, then reconcile each reply in short DB transactions."""
     r=_row(mailbox_id)
     if not r: return {'checked':0,'replies':0,'reason':'not_found'}
-    pw=decrypt_secret(r['secret_encrypted']); checked=replies=0
+    pw=_mailbox_password(r); checked=replies=0
     max_uid=int(r.get('last_imap_uid') or 0); fetched=[]
     try:
         # Phase 1: external IMAP only. No SessionLocal transaction is alive here.
         cls=imaplib.IMAP4_SSL if r['imap_ssl'] else imaplib.IMAP4
         m=cls(r['imap_host'],r['imap_port']); m.login(r['username'],pw); m.select('INBOX')
+        uidnext=None
+        try:
+            st_status,status_data=m.status('INBOX','(UIDNEXT)')
+            if st_status=='OK' and status_data:
+                raw_status=(status_data[0].decode('utf-8','ignore') if isinstance(status_data[0],bytes) else str(status_data[0]))
+                match_uidnext=re.search(r'UIDNEXT\s+(\d+)',raw_status,re.I)
+                if match_uidnext:
+                    uidnext=int(match_uidnext.group(1))
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=1216)
+        max_uid=_effective_imap_cursor(max_uid,uidnext)
         start=max(1,max_uid+1); typ,data=m.uid('search',None,f'UID {start}:*')
         uids=_oldest_unseen_uids((data[0].split() if typ=='OK' and data and data[0] else []),max_messages)
         cursor_uid=max_uid

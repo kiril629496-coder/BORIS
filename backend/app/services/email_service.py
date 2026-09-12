@@ -105,8 +105,57 @@ def build_message(to, subject, body, html=None, from_address=None,
     return msg
 
 
+class SMTPTransportFailure(RuntimeError):
+    def __init__(self, phase: str, original: Exception):
+        super().__init__(type(original).__name__)
+        self.phase = str(phase or "unknown")
+        self.original = original
+
+
+def _smtp_transport_send(msg, *, tenant_scope: str, host: str, port: int,
+                         username: str, password: str, use_ssl: bool = True,
+                         starttls: bool = False, timeout: int = DEFAULT_TIMEOUT,
+                         recipients=None) -> None:
+    """Canonical physical SMTP writer for BORIS.
+
+    Every caller must supply a non-empty tenant/service scope. The helper treats
+    DATA acceptance as success even when SMTP session shutdown later fails.
+    """
+    tenant = str(tenant_scope or "").strip()
+    if not tenant:
+        raise ValueError("tenant_scope_required:EMAIL_SEND")
+    smtp = None
+    phase = "connect"
+    accepted = False
+    try:
+        cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+        smtp = cls(str(host), int(port), timeout=int(timeout))
+        if starttls and not use_ssl:
+            phase = "starttls"
+            smtp.starttls()
+        phase = "login"
+        smtp.login(str(username), str(password))
+        phase = "sending"
+        smtp.send_message(msg, to_addrs=recipients)
+        accepted = True
+        phase = "accepted"
+    except Exception as exc:
+        raise SMTPTransportFailure(phase, exc) from exc
+    finally:
+        if smtp is not None:
+            try:
+                smtp.quit()
+            except Exception:
+                if not accepted:
+                    try:
+                        smtp.close()
+                    except Exception as close_exc:
+                        logger.warning("email_service: SMTP close failed after unsuccessful send (%s)", type(close_exc).__name__)
+
+
 def send_email(to, subject, body, html=None, from_address=None,
-               from_name=None, reply_to=None, headers=None, attachments=None) -> tuple:
+               from_name=None, reply_to=None, headers=None, attachments=None,
+               *, tenant_scope: str) -> tuple:
     """
     Возвращает (ok, reason, message_id).
     reason: ok | not_configured | no_recipient | <тип исключения>
@@ -125,28 +174,30 @@ def send_email(to, subject, body, html=None, from_address=None,
                         from_name=from_name, reply_to=reply_to, headers=headers, attachments=attachments)
     message_id = msg.get("Message-ID", "")
 
-    phase = "connect"
     try:
-        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=DEFAULT_TIMEOUT) as server:
-            phase = "login"
-            server.login(cfg["user"], cfg["password"])
-            phase = "sending"
-            server.send_message(msg, to_addrs=recipients)
-            phase = "accepted"
-    except Exception as exc:
+        _smtp_transport_send(
+            msg,
+            tenant_scope=tenant_scope,
+            host=cfg["host"],
+            port=cfg["port"],
+            username=cfg["user"],
+            password=cfg["password"],
+            use_ssl=True,
+            starttls=False,
+            timeout=DEFAULT_TIMEOUT,
+            recipients=recipients,
+        )
+    except SMTPTransportFailure as wrapped:
+        exc = wrapped.original
         code = getattr(exc, "smtp_code", None)
         reason = type(exc).__name__ if code is None else "%s:%s" % (type(exc).__name__, code)
-        if phase == "accepted":
-            # DATA completed successfully. A later QUIT/socket-close failure must
-            # not turn an accepted message into an automatic duplicate retry.
-            logger.warning("email_service: письмо принято SMTP, ошибка закрытия (%s)", reason)
-            return True, "ok", message_id
-        if phase == "sending" and code is None:
-            # Transport died while DATA/send_message was in flight. Remote SMTP
-            # may already have accepted the message; outcome cannot be proven.
+        if wrapped.phase == "sending" and code is None:
             reason = "delivery_unknown:" + reason
         logger.warning("email_service: отправка не удалась (%s)", reason)
         return False, reason, message_id
+    except Exception as exc:
+        logger.warning("email_service: отправка не удалась (%s)", type(exc).__name__)
+        return False, type(exc).__name__, message_id
 
     logger.info("email_service: письмо отправлено, получателей %d", len(recipients))
     return True, "ok", message_id

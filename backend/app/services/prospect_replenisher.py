@@ -4,6 +4,7 @@ from app.db.session import SessionLocal
 from app.services import prospect_campaigns as pc
 
 def ensure_schema(db):
+    # Canonical migration 049 owns the last_search_attempt_at column on prospect_replenish_runs.
     # Minute-worker hot path: never execute DDL once the canonical replenisher
     # schema is complete. CREATE/ALTER IF NOT EXISTS still takes relation locks
     # and can stall unrelated prospecting API requests under concurrency.
@@ -17,24 +18,16 @@ def ensure_schema(db):
     """)).scalar()
     if ready:
         return
-    db.execute(text('''CREATE TABLE IF NOT EXISTS prospect_replenish_runs (
-      campaign_id BIGINT PRIMARY KEY, last_run_at TIMESTAMP, last_inserted INTEGER NOT NULL DEFAULT 0,
-      last_parsed INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at TIMESTAMP NOT NULL DEFAULT NOW())'''))
-    db.execute(text("ALTER TABLE prospect_replenish_runs ADD COLUMN IF NOT EXISTS last_discovery_at TIMESTAMP"))
-    db.execute(text("ALTER TABLE prospect_replenish_runs ADD COLUMN IF NOT EXISTS last_repair_at TIMESTAMP"))
-    db.execute(text("ALTER TABLE prospect_replenish_runs ADD COLUMN IF NOT EXISTS discovery_cursor INTEGER NOT NULL DEFAULT 0"))
-    db.execute(text("ALTER TABLE prospect_replenish_runs ADD COLUMN IF NOT EXISTS last_search_attempt_at TIMESTAMP"))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
     db.execute(text("""UPDATE prospect_replenish_runs
       SET last_discovery_at=COALESCE(last_discovery_at,last_run_at),
           last_repair_at=COALESCE(last_repair_at,last_run_at)
       WHERE last_discovery_at IS NULL OR last_repair_at IS NULL"""))
-    db.execute(text('''CREATE TABLE IF NOT EXISTS prospect_repair_state (
-      campaign_id BIGINT NOT NULL,
-      company_id BIGINT NOT NULL,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      last_attempt_at TIMESTAMP,
-      last_success_at TIMESTAMP,
-      PRIMARY KEY(campaign_id,company_id))'''))
+    db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
     db.commit()
 
 def _adaptive_discovery_hours(ready_now:int, min_ready:int, every_hours:float)->float:
@@ -55,6 +48,11 @@ def tick(min_ready:int=100, every_hours:int=6, repair_every_minutes:int=60)->dic
           FROM prospect_campaigns c LEFT JOIN prospect_campaign_members m ON m.campaign_id=c.id
           LEFT JOIN prospect_replenish_runs r ON r.campaign_id=c.id
           WHERE c.status='active'
+            -- Development outreach has its own buyer-oriented radar/refill.
+            -- The generic replenisher searches by campaign.niche and would turn
+            -- the offer text "custom software development" into a vendor query,
+            -- discovering competing software agencies instead of buyers.
+            AND c.name <> 'Кирилл · разработка SaaS/App'
             AND (r.last_repair_at IS NULL OR r.last_repair_at < NOW() - (:rm || ' minutes')::interval)
           GROUP BY c.id,r.last_discovery_at,r.last_search_attempt_at,r.last_repair_at,r.discovery_cursor
           HAVING count(m.id) FILTER (WHERE m.status='ready') < :mr

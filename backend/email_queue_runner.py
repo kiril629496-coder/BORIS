@@ -40,20 +40,28 @@ def main() -> int:
         # Sending without the DB-final guard would make the owner an operator.
         return 2
 
-    try:
-        from app.services import prospect_bootstrap
-        prospect_bootstrap.tick()
-    except Exception as exc:
-        logging.warning("prospect bootstrap failed (%s)", type(exc).__name__)
-    # Repair SMTP auth/connectivity before the feeder makes a send decision.
-    # LOGIN/NOOP only: no test message is sent.
+    # Repair the owner outreach transport before bootstrap or the feeder makes
+    # any mailbox decision. With explicit owner failover opt-in the canonical
+    # BORIS mailbox is authoritative and is live-probed before restoration.
     try:
         from app.services import client_mailboxes
+        transport_repair=client_mailboxes.ensure_owner_outreach_transport()
+        if int((transport_repair or {}).get("switched") or 0)>0:
+            print("owner outreach transport self-healed:", transport_repair)
+        from app.services import prospect_bootstrap
+        prospect_bootstrap.tick()
+        from app.services import prospect_campaigns
+        state_repair=prospect_campaigns.reconcile_desired_campaign_states()
+        if list((state_repair or {}).get("resumed") or []):
+            print("prospect campaign state self-healed:", state_repair)
         smtp_recheck=client_mailboxes.recheck_unhealthy_smtp(limit=20,cooldown_minutes=15)
         if int((smtp_recheck or {}).get("checked") or 0)>0:
             print("mailbox smtp recheck:", smtp_recheck)
+        mailbox_campaign_guard=client_mailboxes.reconcile_owner_campaign_mailbox_health()
+        if list((mailbox_campaign_guard or {}).get('paused') or []) or list((mailbox_campaign_guard or {}).get('resumed') or []):
+            print("owner mailbox campaign guard:", mailbox_campaign_guard)
     except Exception as exc:
-        logging.warning("mailbox smtp recheck failed (%s)", type(exc).__name__)
+        logging.exception("mailbox transport self-heal/recheck failed: %s", exc)
     # Reuse this existing minute worker as campaign feeder; active campaigns only.
     # This is deliberately not a second scheduler.
     try:
@@ -73,6 +81,9 @@ def main() -> int:
         from app.services import client_mailboxes
         client_mailboxes.poll_all(limit=50)
         client_mailboxes.flush_sent_copies(limit=20)
+        mailbox_campaign_guard=client_mailboxes.reconcile_owner_campaign_mailbox_health()
+        if list((mailbox_campaign_guard or {}).get('paused') or []) or list((mailbox_campaign_guard or {}).get('resumed') or []):
+            print("owner mailbox campaign guard after IMAP:", mailbox_campaign_guard)
     except Exception as exc:
         logging.warning("client mailboxes poll failed (%s)", type(exc).__name__)
     # Process due outbound mail before any slow discovery/replenishment work.
@@ -100,7 +111,7 @@ def main() -> int:
         # Keep a reserve above the visible 100-contact working target so normal
         # daily sending does not immediately drain the campaign below readiness.
         buffer_target=max(100,int(os.getenv('PROSPECT_READY_BUFFER_TARGET','120') or 120))
-        prospect_replenisher.tick(min_ready=buffer_target,every_hours=3)
+        prospect_replenisher.tick(min_ready=buffer_target,every_hours=3,repair_every_minutes=15)
     except Exception as exc:
         logging.warning("prospect replenisher failed (%s)", type(exc).__name__)
     if any(result.values()):
