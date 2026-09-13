@@ -241,3 +241,18 @@ def test_certifier_uses_normalized_project_keywords_for_selection():
     assert captured["keywords"] == ["normalized-keyword"]
     assert row["matched_slots_total"] == 1
     assert row["capacity_ok"] is True
+
+
+def test_external_submission_snapshot_uses_latest_state_per_platform():
+    attempts = [
+        {"platform": "guest_verified", "action": "verify_publication", "status": "verified", "url": "https://x/post", "created_at": "2026-09-13T12:03:00+00:00"},
+        {"platform": "guest_verified", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://x/add", "created_at": "2026-09-13T12:00:00+00:00"},
+        {"platform": "guest_conti", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://conti/add", "created_at": "2026-09-13T12:02:00+00:00"},
+        {"platform": "guest_mail", "action": "guest_catalog_email_submit", "status": "submitted_pending_email", "url": "https://mail/add", "created_at": "2026-09-13T12:01:00+00:00"},
+    ]
+    with patch.object(cert.marketplace, "list_attempts", return_value=attempts):
+        snap = cert._external_submissions_snapshot()
+    assert snap["pending_total"] == 2
+    assert [x["platform"] for x in snap["pending"]] == ["guest_conti", "guest_mail"]
+    assert snap["verified_total"] == 1
+    assert snap["verified"][0]["platform"] == "guest_verified"

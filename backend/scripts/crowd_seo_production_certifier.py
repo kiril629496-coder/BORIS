@@ -272,6 +272,54 @@ def _project_row(project: dict, capacity: dict) -> dict:
     }
 
 
+def _external_submissions_snapshot() -> dict:
+    """Summarize latest external guest/catalog submission state per platform.
+
+    The attempt ledger is append-only.  Older pending rows must not keep a
+    platform pending after a later verification/failure record exists.
+    """
+    latest = {}
+    for row in marketplace.list_attempts(limit=1000):
+        platform = str(row.get("platform") or "").strip()
+        if not platform or platform in latest:
+            continue
+        action = str(row.get("action") or "")
+        status = str(row.get("status") or "")
+        if (
+            action in {"guest_catalog_submit", "guest_catalog_email_submit", "verify_publication"}
+            or platform.startswith("guest_")
+        ):
+            latest[platform] = row
+    pending = []
+    verified = []
+    terminal = []
+    for platform, row in latest.items():
+        status = str(row.get("status") or "")
+        item = {
+            "platform": platform,
+            "status": status,
+            "url": row.get("url"),
+            "created_at": row.get("created_at"),
+        }
+        if status.startswith("submitted_pending") or status == "submitted":
+            pending.append(item)
+        elif status == "verified":
+            verified.append(item)
+        elif status in {"blocked", "failed", "rejected", "terminal"}:
+            terminal.append(item)
+    pending.sort(key=lambda x: str(x.get("platform") or ""))
+    verified.sort(key=lambda x: str(x.get("platform") or ""))
+    terminal.sort(key=lambda x: str(x.get("platform") or ""))
+    return {
+        "pending_total": len(pending),
+        "verified_total": len(verified),
+        "terminal_total": len(terminal),
+        "pending": pending,
+        "verified": verified,
+        "terminal": terminal,
+    }
+
+
 def main() -> int:
     projects = [p for p in crowd_seo.list_projects() if crowd_seo.project_is_active(p)]
     capacities = {x.get("project"): x for x in crowd_seo.capacity_snapshot()}
@@ -282,6 +330,7 @@ def main() -> int:
     guardian = _guardian_state()
     timer = _timer_state()
     bootstrap = marketplace.platform_bootstrap_queue()
+    external_submissions = _external_submissions_snapshot()
 
     infrastructure_ok = bool(
         rows
@@ -310,6 +359,7 @@ def main() -> int:
         "projects": rows,
         "guardian": guardian,
         "guardian_timer": timer,
+        "external_submissions": external_submissions,
         "bootstrap": {
             "needed": bootstrap.get("needed"),
             "human_action_required": bootstrap.get("human_action_required"),
