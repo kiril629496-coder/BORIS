@@ -194,5 +194,31 @@ class BudgetResumeTests(unittest.TestCase):
 
 
 
+    def test_completed_queue_stays_complete_before_cpl_gate(self):
+        yesterday = (
+            datetime.now(ZoneInfo("Europe/Moscow")).date() - timedelta(days=1)
+        ).isoformat()
+        state = {
+            "brake_day_msk": yesterday,
+            "status": "paused_daily_cpl_above_limit",
+            "items": {
+                "1": {"item_id": 1, "status": "restored"},
+                "2": {"item_id": 2, "status": "already_promoted"},
+            },
+        }
+        with patch.object(resume, "_load_resume_state", return_value=state), \
+             patch.object(resume, "_fresh_business_gate") as gate, \
+             patch.object(resume, "_set_state_status") as set_status, \
+             patch.object(resume, "_token") as token:
+            out = resume.resume_account("qa_resume", apply=True)
+        self.assertEqual(out["status"], "complete")
+        self.assertEqual(out["pending_before"], 0)
+        gate.assert_not_called()
+        token.assert_not_called()
+        set_status.assert_called_once()
+        self.assertEqual(set_status.call_args.args[:2], ("qa_resume", "complete"))
+
+
+
 if __name__ == "__main__":
     unittest.main()

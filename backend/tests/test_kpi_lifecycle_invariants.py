@@ -319,7 +319,8 @@ def test_non_money_effect_check_advances_existing_disjoint_obligation_before_new
     src = Path("app/api/avito.py").read_text(encoding="utf-8")
     assert "KPI_NON_MONEY_PARALLEL_EXISTING_OBLIGATION_V1" in src
     i = src.index("KPI_NON_MONEY_PARALLEL_EXISTING_OBLIGATION_V1")
-    block = src[i:i+5200]
+    end = src.index("# -------------------------------------------------\n            # Rollback lifecycle", i)
+    block = src[i:end]
     assert '"publish_requested": 40' in block
     assert '"feed_applied": 30' in block
     assert '"safe_feed_ready": 20' in block
@@ -2168,3 +2169,17 @@ def test_experiment_journal_escalates_only_real_mapping_gap():
     assert "'mapping_capacity_gap'" in s
     assert "if mapping_gap>0 and title_severity.startswith('degraded')" in s
     assert 'if writable_gap>0' not in s
+
+
+def test_fact_guard_terminal_hypothesis_advances_to_next_safe_content_step():
+    src = Path("app/api/avito.py").read_text(encoding="utf-8")
+    assert "KPI_FACT_GUARD_TERMINAL_ADVANCE_V1" in src
+    i = src.index("KPI_FACT_GUARD_TERMINAL_ADVANCE_V1")
+    block = src[i:i+2200]
+    assert 'terminal_noop_or_unpublishable' in block
+    assert 'fact_guard_rejected_twice' in block
+    assert '_prepare_action_hist == "prepare_weak_titles"' in block
+    assert '_failed_title_item_ids.update(_prepare_item_ids_hist)' in block
+    assert '_prepare_action_hist == "prepare_weak_descriptions"' in block
+    assert '_failed_description_item_ids.update(_prepare_item_ids_hist)' in block
+    assert 'ai_failed' not in block

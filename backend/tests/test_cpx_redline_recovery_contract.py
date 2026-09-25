@@ -38,7 +38,8 @@ def test_zero_contact_evidence_threshold_still_precedes_red_cpl_lower_lane():
     block = s[start:end]
     assert "elif v7 < MIN_VIEWS_FOR_JUDGEMENT_7D:" in block
     assert "elif v7 < ARCHIVE_MIN_VIEWS_7D:" in block
-    assert "elif _is_archived(db, account_id, iid):" in block
+    assert "CPX_ARCHIVE_PROVIDER_TRUTH_OVERRIDES_STALE_FLAG_V1" in block
+    assert 'elif _is_archived(db, account_id, iid) and not bool(entry.get("promotion_active")):' in block
 
 
 def test_measurement_supersede_requires_exact_item_provider_query_scope():
@@ -112,6 +113,47 @@ def test_red_cpl_lower_is_not_frozen_by_raise_measurement_backlog():
     assert diagnostics["measurement_cap"] == 2
 
 
+
+def test_red_cpl_lower_executes_even_when_raise_measurement_slots_are_free():
+    from unittest.mock import patch
+    import cpx_advisor_runner as runner
+
+    class _DB:
+        def close(self):
+            pass
+
+    intraday = {
+        "kpi_pace": {"state": "BEHIND"},
+        "decision": "HOLD_RAISE",
+        "selected_for_execution": 0,
+        "candidates_total": 288,
+        "top": [],
+        "mandate": {"max_actions_run": 5},
+    }
+    recs = {"lower": [{
+        "id": 7614370111,
+        "bid_rub": 22.0,
+        "promotion_active": True,
+        "reason_code": "red_cpl_paid_zero_contact_waste",
+    }]}
+    advice = {
+        "measurement_cycle": {
+            "waiting": 0,
+            "backlog_compaction": {"cap": 2},
+        }
+    }
+    with patch("app.db.session.SessionLocal", return_value=_DB()), \
+         patch("app.services.intraday.select_intraday_raise_candidates", return_value=intraday):
+        plan, mode, diagnostics = runner._build_plan("qa_red_cpl_free_slots", recs, advice=advice)
+
+    assert plan == [({"id": 7614370111, "source": "red_cpl_recovery"}, "lower")]
+    assert mode.startswith("RED_CPL_RECOVERY:")
+    assert diagnostics["reason"] == "red_cpl_lower_proven_waste"
+    assert diagnostics["planned_after_guard"] == 1
+    assert diagnostics["measurement_waiting"] == 0
+    assert diagnostics["measurement_cap"] == 2
+
+
 def test_raise_measurement_backlog_still_blocks_when_no_red_cpl_lower_exists():
     from unittest.mock import patch
     import cpx_advisor_runner as runner
@@ -154,3 +196,64 @@ def test_advisor_queries_full_active_promotion_inventory_in_bounded_chunks():
     assert "_chunk_ids = item_ids[_pos:_pos + 200]" in s
     assert "_bids_queried_item_ids.update(" in s
     assert "len(_bids_queried_item_ids) == len(set(item_ids))" in s
+
+
+def test_red_cpl_planner_skips_item_with_active_lower_measurement():
+    from unittest.mock import patch
+    import cpx_advisor_runner as runner
+
+    class _DB:
+        def close(self):
+            pass
+
+    intraday = {
+        "kpi_pace": {"state": "BEHIND"},
+        "decision": "HOLD_RAISE",
+        "selected_for_execution": 0,
+        "candidates_total": 20,
+        "top": [],
+        "mandate": {"max_actions_run": 5},
+    }
+    recs = {"lower": [
+        {
+            "id": 7998207247,
+            "bid_rub": 12.0,
+            "promotion_active": True,
+            "reason_code": "red_cpl_paid_zero_contact_waste",
+            "boris_measure_status": "waiting_measurement",
+        },
+        {
+            "id": 2879185343,
+            "bid_rub": 19.0,
+            "promotion_active": True,
+            "reason_code": "red_cpl_paid_zero_contact_waste",
+            "boris_measure_status": None,
+        },
+    ]}
+    advice = {
+        "measurement_cycle": {
+            "waiting": 2,
+            "backlog_compaction": {"cap": 2},
+        }
+    }
+    with patch("app.db.session.SessionLocal", return_value=_DB()), \
+         patch("app.services.intraday.select_intraday_raise_candidates", return_value=intraday):
+        plan, mode, diagnostics = runner._build_plan("qa_red_cpl_measure_lock", recs, advice=advice)
+
+    assert plan == [({"id": 2879185343, "source": "red_cpl_recovery"}, "lower")]
+    assert mode.startswith("RED_CPL_RECOVERY:")
+    assert diagnostics["planned_after_guard"] == 1
+
+
+def test_advisor_filters_active_lower_measurement_before_red_cpl_classification():
+    s = _src()
+    marker = s.index("RED_CPL_LOWER_MEASURE_LOCK_FILTER_V1")
+    red_today = s.index("RED_CPL_CURRENT_DAY_PAID_WASTE_V1")
+    historical = s.index("UNDER_KPI_GROWTH_BEFORE_SHRINK_V1")
+    assert marker < red_today < historical
+    block = s[marker:red_today]
+    assert 'entry.get("boris_measure_status")' in block
+    assert 'str(last_action or "") == "lower"' in block
+    assert 'entry["reason_code"] = "measure_locked"' in block
+    assert "watching.append(entry)" in block
+    assert "continue" in block
