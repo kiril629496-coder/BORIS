@@ -178,3 +178,16 @@ backend/scripts/phone-mcn-company-card-send.py
 backend/scripts/phone-mcn-tariff-import.py
 backend/tools/live_guest_batch.py
 backend/tools/run_nerud_outreach_test.py
+
+# --- classified local-only QA/preview artifacts ---
+_qa_sales_ai_v2*/
+frontend/patch_*.py
+frontend/public/andrey-preview/
+frontend/public/banners-demo/
+frontend/public/downloads/
+frontend/public/portfolio/
+backend/contracts/
+backend/outreach_runs/
+backend/rop_reports/
+backend/incident_*/
+boris_ops/OPERATIONS_ACCEPTANCE_MATRIX.json
