@@ -4,6 +4,7 @@
 иконка -> текст (Montserrat) -> сборка в PNG.
 """
 
+import hashlib
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -24,6 +25,19 @@ SAFE_MARGIN_RATIO = 0.06
 
 # Запрещённые Avito символы, которые не должны попасть в текст баннера
 FORBIDDEN_SEQUENCES = ["->", ">>", "—>", "→"]
+
+
+def _paid_image_cache_path(account_id: str, purpose: str, prompt: str, model: str, quality: str, size: str) -> str:
+    """Stable, account-scoped artifact identity for paid AI image backgrounds."""
+    if not account_id:
+        # generate_ai_image is fail-closed without account_id; keep path generation
+        # equally strict so a shared anonymous cache can never cross tenants.
+        raise ValueError("account_id required for paid image cache")
+    raw = "|".join([str(account_id), str(purpose), str(model), str(quality), str(size), str(prompt)])
+    key = hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
+    root = os.path.join(BASE_DIR, "images", "_generated_cache", "banner_generator", str(purpose))
+    os.makedirs(root, exist_ok=True)
+    return os.path.join(root, key + ".png")
 
 
 def sanitize_text(text: str) -> str:
@@ -92,7 +106,7 @@ def generate_infographic_banner(
     subtitle_color: str = "#F0F0F0",
     photo_source: str = "ai",
     ai_quality: str = "medium",
-    ai_model: str = "gpt-image-2",
+    ai_model: str = "gpt-image-1-mini",
     own_photo_path: str = None, account_id: str = None, operation: str = "генерация изображения",
 ) -> str:
     """
@@ -115,9 +129,9 @@ def generate_infographic_banner(
         photo_path = own_photo_path
     elif photo_query:
         if photo_source == "ai":
-            ai_prompt = f"{photo_query}, photorealistic, professional advertising photography, vivid colors, high quality, natural lighting, square composition"
+            ai_prompt = f"{photo_query}, photorealistic, professional advertising photography, vivid colors, high quality, natural lighting, square composition. ABSOLUTELY NO TEXT, NO LETTERS, NO WORDS, NO NUMBERS, NO PRICES, NO LABELS, NO SIGNS, NO LOGOS, NO WATERMARKS; background visual only, all advertising copy is added later by BORIS locally."
             photo_path = generate_ai_image(
-                ai_prompt, "/tmp/_banner_bg_photo_ai.png",
+                ai_prompt, _paid_image_cache_path(account_id, "square_bg", ai_prompt, ai_model, ai_quality, "1024x1024"),
                 size="1024x1024", quality=ai_quality, model=ai_model, account_id=account_id, operation=operation,
             )
         else:
@@ -169,12 +183,12 @@ def generate_infographic_banner(
 
     # Заголовок
     max_text_width = size - 2 * margin
-    title_font = fit_text_font(draw, title, FONT_BLACK, max_text_width, int(size * 0.09))
+    title_font = fit_text_font(draw, title, FONT_BLACK, max_text_width, int(size * 0.09), min_size=max(52, int(size * 0.048)))
     draw_text_with_shadow(draw, (margin, plate_top + int(size * 0.06)), title, title_font)
 
     # Подзаголовок
     if subtitle:
-        sub_font = fit_text_font(draw, subtitle, FONT_BOLD, max_text_width, int(size * 0.045))
+        sub_font = fit_text_font(draw, subtitle, FONT_BOLD, max_text_width, int(size * 0.045), min_size=max(36, int(size * 0.033)))
         bbox = draw.textbbox((0, 0), title, font=title_font)
         title_h = bbox[3] - bbox[1]
         sub_y = plate_top + int(size * 0.06) + title_h + int(size * 0.03)
@@ -473,10 +487,10 @@ def _generate_single_slide(
     photo_path = None
     if photo_query:
         if photo_source == "ai":
-            ai_prompt = f"{photo_query}, photorealistic, professional advertising photography, high quality, natural lighting"
+            ai_prompt = f"{photo_query}, photorealistic, professional advertising photography, high quality, natural lighting. ABSOLUTELY NO TEXT, NO LETTERS, NO WORDS, NO NUMBERS, NO PRICES, NO LABELS, NO SIGNS, NO LOGOS, NO WATERMARKS; background visual only, all advertising copy is added later by BORIS locally."
             photo_path = generate_ai_image(
                 ai_prompt,
-                f"/tmp/_slide_ai_{abs(hash(photo_query))}.png",
+                _paid_image_cache_path(account_id, "slide_bg", ai_prompt, ai_model, ai_quality, "1024x1024"),
                 size="1024x1024",
                 quality=ai_quality,
                 model=ai_model, account_id=account_id, operation=operation,
@@ -614,71 +628,83 @@ def generate_carousel_banner_v2(
     return saved_paths
 
 
-def generate_ai_image(prompt: str, save_path: str, size: str = "1024x1024", quality: str = "low", model: str = "gpt-image-1-mini", account_id: str = None, operation: str = "генерация изображения") -> str | None:
+def generate_ai_image(
+    prompt: str,
+    save_path: str,
+    size: str = "1024x1024",
+    quality: str = "low",
+    model: str = "gpt-image-1-mini",
+    account_id: str = None,
+    operation: str = "генерация изображения",
+    burst_override: bool = False,
+) -> str | None:
     """
-    Генерирует изображение через OpenAI Images API (GPT Image).
-    quality: 'low' | 'medium' | 'high'. model: 'gpt-image-1-mini' (дёшево) | 'gpt-image-2' (флагман).
-    Возвращает путь к сохранённому файлу или None при ошибке.
-    """
-    import requests
-    import base64
-    from proxy_pool import get_intl_requests_proxies
+    BORIS_O510_FINANCIAL_IMAGE_ADAPTER_R55_V2
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
+    Backward-compatible public API.
+
+    Старый внешний контракт:
+        generate_ai_image(...) -> str | None
+
+    Реальный production image generation:
+        app.services.image_service.generate_banner_financially_guarded
+
+    Финансовая защита остаётся в image_service.
+
+    FAIL CLOSED:
+        account_id отсутствует -> генерация не выполняется.
+    """
+
+    if not account_id:
+        print(
+            "[generate_ai_image] BLOCKED: account_id is required",
+            flush=True,
+        )
         return None
 
-    max_attempts = 3
-    logged = set()
-    for attempt in range(1, max_attempts + 1):
-        try:
-            proxies = get_intl_requests_proxies()  # СВЕЖИЙ случайный порт на КАЖДУЮ попытку -
-            # раньше порт брался один раз до цикла, и retry был бесполезен против мёртвого порта
-            resp = requests.post(
-                "https://api.openai.com/v1/images/generations",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": model, "prompt": prompt, "size": size, "quality": quality, "n": 1},
-                proxies=proxies,
-                timeout=240,
-            )
-            if resp.status_code != 200:
-                print(f"[generate_ai_image] Попытка {attempt}: статус {resp.status_code}, {resp.text[:200]}", flush=True)
-                continue
-            rid = resp.headers.get("x-request-id")
-            try:
-                data = resp.json()
-                img_b64 = (data.get("data") or [{}])[0].get("b64_json")
-            except Exception as _pe:
-                img_b64 = None
-                print(f"[generate_ai_image] Попытка {attempt}: ответ 200, но разбор не удался: {str(_pe)[:120]}", flush=True)
-            if not img_b64:
-                print(f"[generate_ai_image] Попытка {attempt}: ответ 200 без b64_json (request_id={rid}) - расход не записан", flush=True)
-                continue
-            # провайдер вернул ОПЛАЧИВАЕМЫЙ результат - учитываем ДО локальной обработки
-            if rid not in logged:
-                try:
-                    from app.usage import log_usage as _log_img
-                    _log_img(account_id, "openai", model, operation,
-                             images=1, request_id=rid,
-                             size=size, quality=quality)
-                    if rid:
-                        logged.add(rid)
-                except Exception as _ue:
-                    print("[usage]", str(_ue)[:100], flush=True)
-            try:
-                decoded = base64.b64decode(img_b64)
-                with open(save_path, "wb") as f:
-                    f.write(decoded)
-            except Exception as _fe:
-                print(f"[generate_ai_image] Попытка {attempt}: ответ учтён, но файл не сохранён: {str(_fe)[:120]}", flush=True)
-                continue
-            print(f"[generate_ai_image] Сгенерировано через {model}/{quality} (попытка {attempt}): «{prompt[:60]}...»", flush=True)
-            return save_path
-        except Exception as e:
-            print(f"[generate_ai_image] Попытка {attempt} не удалась: {e}", flush=True)
-            continue
+    from app.db.session import SessionLocal
+    from app.services.image_service import (
+        generate_banner_financially_guarded,
+    )
 
-    return None
+    db = SessionLocal()
+
+    try:
+        result = generate_banner_financially_guarded(
+            db=db,
+            account_id=account_id,
+            prompt=prompt,
+            save_path=save_path,
+            model=model,
+            quality=quality,
+            size=size,
+            operation=operation,
+            burst_override=burst_override,
+        )
+
+        if not isinstance(result, dict):
+            print(
+                "[generate_ai_image] BLOCKED: invalid core result",
+                flush=True,
+            )
+            return None
+
+        if not result.get("ok"):
+            print(
+                "[generate_ai_image] image core failed: "
+                + str(result.get("error")),
+                flush=True,
+            )
+            return None
+
+        return result.get("path")
+
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
 
 
 def _generate_diagonal_slide(
@@ -720,9 +746,9 @@ def _generate_diagonal_slide(
     photo_path = None
     if photo_query:
         if photo_source == "ai":
-            ai_prompt = f"{photo_query}, photorealistic, professional advertising photography, high quality, natural lighting"
+            ai_prompt = f"{photo_query}, photorealistic, professional advertising photography, high quality, natural lighting. ABSOLUTELY NO TEXT, NO LETTERS, NO WORDS, NO NUMBERS, NO PRICES, NO LABELS, NO SIGNS, NO LOGOS, NO WATERMARKS; background visual only, all advertising copy is added later by BORIS locally."
             photo_path = generate_ai_image(
-                ai_prompt, f"/tmp/_diag_ai_{abs(hash(photo_query))}.png",
+                ai_prompt, _paid_image_cache_path(account_id, "diag_bg", ai_prompt, "gpt-image-1-mini", ai_quality, "1024x1024"),
                 size="1024x1024", quality=ai_quality, model="gpt-image-1-mini", account_id=account_id, operation=operation,
             )
         else:

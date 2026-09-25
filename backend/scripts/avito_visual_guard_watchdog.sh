@@ -22,9 +22,13 @@ trap 'rm -f "$OUT"' EXIT
   run_step() {
     local name="$1"; shift
     echo "[$STAMP] STEP $name START"
-    if ! "$@"; then
-      local rc=$?
+    set +e
+    "$@"
+    local rc=$?
+    set -e
+    if (( rc != 0 )); then
       echo "[$STAMP] STEP $name FAIL rc=$rc"
+      # Preserve the failing step name and its real exit code in the watchdog log.
       exit 97
     fi
     echo "[$STAMP] STEP $name PASS"

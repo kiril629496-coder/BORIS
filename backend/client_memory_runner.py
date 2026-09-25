@@ -210,9 +210,17 @@ def extract_dialogs(db, acc):
                 if len(t) >= 12:
                     pending = (t, ts, title)
             elif pending and len(t) >= 20:
+                # BORIS_FAQ_REAL_ANSWER: менеджер сначала уточняет ("Вас аренда
+                # интересует?") - это не ответ и не знание. Пропускаем до
+                # четырёх уточнений подряд, дальше вопрос бракуем.
+                if not _is_real_answer(t):
+                    skipped += 1
+                    if skipped > 4:
+                        pending, skipped = None, 0
+                    continue
                 pairs.append({"chat": chat, "q": pending[0], "a": t,
                               "ts": pending[1], "title": pending[2]})
-                pending = None
+                pending, skipped = None, 0
     for p in pairs:
         ref = "chat:%s" % p["chat"]
         n += add(db, acc, "faq", p["q"][:200], p["a"], "dialog", ref,

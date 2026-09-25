@@ -32,9 +32,9 @@ OWNER = ("qa_test@borisqa.ru", "QaTest2026!")
 CLIENT = ("qa_client@borisqa.ru", "QaTest2026!")
 NEWBIE = ("qa_newbie@borisqa.ru", "QaTest2026!")
 
-TESTIDS_HOME = ["home-root", "home-status", "home-attention", "home-today",
-                "home-journal", "home-quick", "nav-home", "nav-scenarios", "nav-cabinet"]
-TESTIDS_SCEN = ["scenarios-root", "scenarios-available", "scenarios-soon"]
+TESTIDS_HOME = ["command-center-root", "command-center-status", "command-center-attention", "command-center-today",
+                "command-center-journal", "command-center-quick", "boris-sidebar"]
+TESTIDS_SCEN = ["scenarios-root", "scenarios-available"]
 
 R = []          # [{block, name, ok, level, detail}]
 TOK = {}        # email -> (token, role, account_id)
@@ -130,8 +130,8 @@ def block_api():
     chk(b, "каталог сценариев 200", r2.status_code == 200, r2.status_code)
     if r2.status_code == 200:
         c2 = r2.json()
-        chk(b, "три доступных сценария", len(c2.get("available") or []) == 3, len(c2.get("available") or []))
-        chk(b, "семь в «Скоро»", len(c2.get("soon") or []) == 7, len(c2.get("soon") or []))
+        chk(b, "13 бизнес-сценариев в каталоге", len(c2.get("available") or []) == 13, len(c2.get("available") or []))
+        chk(b, "устаревших сценариев «Скоро» нет", len(c2.get("soon") or []) == 0, len(c2.get("soon") or []))
         for s in (c2.get("available") or []):
             chk(b, "у сценария есть поля мастера: %s" % s["scenario_type"], bool(s.get("fields")))
 
@@ -213,13 +213,31 @@ def block_roles():
 # ------------------------------------------------------------- BUSINESS
 def block_business():
     b = "Business"
-    a = acc(NEWBIE)
-    h = H(NEWBIE)
+    # qa-multi — специально entitlement-enabled QA аккаунт. NEWBIE после
+    # истечения 4-дневного trial обязан получать 402 и больше не подходит для
+    # write-smoke бизнес-сценариев. Owner token используется только на QA account.
+    a = "qamulti_10473"
+    h = H(OWNER)
     created = []
+    inputs = {
+        "avito_start": {"niche":"QA кухни","city":"Москва"},
+        "more_leads": {"city":"Москва","direction":"QA кухни","target_leads":3,"max_cpl":500},
+        "conversion_ab": {"max_bid":150,"test_size":30,"measurement_days":3},
+        "revive": {"limit":3,"touch_price":"нет"},
+        "new_niche": {"product":"QA кухни","region":"Москва","check":100000,"model":"производство"},
+        "new_city": {"city":"Москва","direction":"QA кухни"},
+        "find_problem": {"target":"заявки"},
+        "season": {"period":"осень","priority":"QA кухни"},
+        "social": {"platforms":"Telegram + VK","goal":"продажи","frequency":"3 раза в неделю"},
+        "automate_sales": {"goal":"получить телефон","schedule":"09:00-19:00"},
+        "website": {"goal":"получать заявки","format":"лендинг"},
+        "reactivation": {"priority":"всех"},
+        "improve_sales": {"metric":"конверсию в продажу"},
+    }
 
-    for stype in ("avito_start", "more_leads", "revive"):
+    for stype in inputs:
         r = requests.post(API + "/api/home/scenario/start", headers=h, timeout=60,
-                          json={"account_id": a, "scenario_type": stype, "input_data": {"qa": "1"}})
+                          json={"account_id": a, "scenario_type": stype, "input_data": inputs[stype]})
         ok = r.status_code == 200 and r.json().get("status") == "ok"
         chk(b, "%s: запуск" % stype, ok, r.status_code)
         if not ok:
@@ -229,6 +247,13 @@ def block_business():
         created.append(sid)
         p = sc["progress"]
         chk(b, "%s: шаги созданы" % stype, p["total"] > 0, p["total"])
+        chk(b, "%s: есть измерение бизнес-результата" % stype,
+            any(x.get("key") == "measure" and x.get("action") == "scenario_measure" for x in p.get("steps", [])),
+            [x.get("key") for x in p.get("steps", [])])
+        caps = sc.get("capability_contract") or []
+        actions = [x.get("action") for x in p.get("steps", []) if x.get("action")]
+        chk(b, "%s: все действия имеют sanctioned capability" % stype,
+            len(caps) == len(set(actions)), "%s действий / %s capability" % (len(set(actions)), len(caps)))
         chk(b, "%s: процент согласован" % stype,
             p["percent"] == int(round(p["done"] * 100.0 / p["total"])) if p["total"] else True,
             "%s%% при %s/%s" % (p["percent"], p["done"], p["total"]))
@@ -259,7 +284,10 @@ def block_business():
             requests.post(API + "/api/home/scenario/step", headers=h, timeout=30,
                           json={"account_id": a, "scenario_id": sid, "step_key": man["key"], "action": "reset"})
         else:
-            chk(b, "%s: есть ручной шаг для проверки" % stype, False, "все шаги авто", "WARNING")
+            wait_state = (sc.get("continuation") or {}).get("state")
+            chk(b, "%s: автономный путь дошёл до безопасной границы" % stype,
+                wait_state in ("WAITING_MEASUREMENT", "WAITING_OWNER", "WAITING_EXTERNAL", "WAITING_MODULE", "COMPLETED"),
+                wait_state)
 
         # виден на главной
         ov = requests.get(API + "/api/home/overview?account_id=" + a, headers=h, timeout=60).json()
@@ -366,10 +394,17 @@ def block_ux():
     def enter(page, cred):
         """Вход, не завязанный на конкретную разметку кнопки: в форме нет
         button[type=submit], поэтому пробуем текст, потом любую кнопку, потом Enter."""
-        page.goto(WEB + "/login", timeout=30000)
-        page.wait_for_timeout(800)
-        page.fill("input[type=email]", cred[0])
-        page.fill("input[type=password]", cred[1])
+        # UX_LOGIN_ALREADY_AUTHENTICATED_V1: valid auth may redirect /login away.
+        page.goto(WEB + "/login", timeout=30000, wait_until="domcontentloaded")
+        page.wait_for_timeout(500)
+        if "/login" not in page.url:
+            return True
+        email = page.locator("input[type=email]")
+        password = page.locator("input[type=password]")
+        email.wait_for(state="visible", timeout=10000)
+        password.wait_for(state="visible", timeout=10000)
+        email.fill(cred[0])
+        password.fill(cred[1])
         for attempt in ("text", "any", "enter"):
             try:
                 if attempt == "text":
@@ -391,7 +426,9 @@ def block_ux():
             ctx = br.new_context(viewport={"width": width, "height": 900})
             page = ctx.new_page()
             errs = []
+            # UX_CONSOLE_ERROR_URL_EVIDENCE_V1: retain failed resource URL.
             page.on("console", lambda m: errs.append(m.text) if m.type == "error" else None)
+            page.on("requestfailed", lambda req: errs.append("REQUEST_FAILED %s %s" % (req.url, (req.failure or ""))))
 
             # --- ПУТЬ 1: клиент без Avito и без оплаты ---
             entered = enter(page, NEWBIE)
@@ -402,24 +439,43 @@ def block_ux():
                 ctx.close()
                 continue
             chk(b, "%s путь1: вход ведёт на рабочий стол" % tag,
-                "/dashboard/home" in page.url, page.url)
-            page.goto(WEB + "/dashboard/home", timeout=30000); page.wait_for_timeout(3500)
+                "/dashboard/command-center" in page.url, page.url)
+            page.goto(WEB + "/dashboard/command-center", timeout=30000); page.wait_for_timeout(3500)
             audit(page, "%s новичок: рабочий стол" % tag)
             body = page.inner_text("body")
-            chk(b, "%s новичок: видит, что Avito не подключён" % tag, "Avito" in body, "")
+            try:
+                newbie_account = acc(NEWBIE)
+                ov = requests.get(API + "/api/home/overview", headers=H(NEWBIE), params={"account_id": newbie_account}, timeout=30).json()
+                newbie_avito_missing = not bool((ov.get("account") or {}).get("avito_connected"))
+            except Exception as _newbie_avito_exc:
+                # UX_NEWBIE_OVERVIEW_TRANSIENT_V1: a brief rolling/deploy read
+                # failure is infrastructure evidence, not proof that BORIS lost
+                # the Avito connection state. Retry one read-only request after
+                # the runtime settles; never turn an exception into green.
+                page.wait_for_timeout(1200)
+                try:
+                    newbie_account = acc(NEWBIE)
+                    ov = requests.get(API + "/api/home/overview", headers=H(NEWBIE), params={"account_id": newbie_account}, timeout=30).json()
+                    newbie_avito_missing = not bool((ov.get("account") or {}).get("avito_connected"))
+                    _newbie_avito_detail = "read-only retry recovered: %s" % str(_newbie_avito_exc)[:120]
+                except Exception as _newbie_avito_exc2:
+                    newbie_avito_missing = False
+                    _newbie_avito_detail = "overview unavailable: %s / %s" % (str(_newbie_avito_exc)[:80], str(_newbie_avito_exc2)[:80])
+            else:
+                _newbie_avito_detail = ""
+            chk(b, "%s новичок: система знает, что Avito не подключён" % tag, newbie_avito_missing, _newbie_avito_detail)
             chk(b, "%s новичок: подключение Avito без ухода в чужой раздел" % tag,
-                page.locator('[data-testid="home-attention"] button').count() > 0, "")
+                page.get_by_text("Подключить Авито", exact=False).count() > 0, "")
             # модалка ключей
             try:
-                page.get_by_text("Подключить Avito", exact=False).first.click(timeout=6000)
+                page.get_by_text("Подключить Авито", exact=False).first.click(timeout=6000)
                 page.wait_for_timeout(1200)
-                has_modal = page.locator('[data-testid="avito-modal"]').count() > 0
-                chk(b, "%s новичок: открывается форма ключей" % tag, has_modal, "")
-                if has_modal:
-                    mtext = page.inner_text('[data-testid="avito-modal"]')
-                    chk(b, "%s новичок: объяснено, где взять ключи" % tag, "Интеграции" in mtext, "")
-                    chk(b, "%s новичок: обещано, что доплаты нет" % tag, "доплат" in mtext.lower(), "")
-                page.keyboard.press("Escape")
+                has_connect = "/dashboard/connect-avito" in page.url
+                chk(b, "%s новичок: открывается подключение Avito" % tag, has_connect, page.url)
+                if has_connect:
+                    mtext = page.inner_text("body")
+                    chk(b, "%s новичок: объяснено подключение" % tag, ("Client ID" in mtext and "Client Secret" in mtext), "")
+                page.goto(WEB + "/dashboard/command-center", timeout=30000); page.wait_for_timeout(1200)
             except Exception as e:
                 chk(b, "%s новичок: открывается форма ключей" % tag, False, str(e)[:70])
 
@@ -427,16 +483,25 @@ def block_ux():
             page.goto(WEB + "/dashboard/scenarios", timeout=30000); page.wait_for_timeout(3000)
             audit(page, "%s каталог сценариев" % tag)
             body = page.inner_text("body")
-            chk(b, "%s каталог: «Скоро» не кликабельно" % tag, "Пока недоступно" in body, "")
+            chk(b, "%s каталог: недоступные сценарии не кликабельны" % tag, page.locator('[data-testid^="blocked-"] button, [data-testid^="blocked-"] a').count() == 0, "")
             try:
-                page.locator('[data-testid="start-revive"]').first.click(timeout=8000)
-                page.wait_for_timeout(1500)
-                chk(b, "%s мастер открылся" % tag, page.locator('[data-testid="wizard"]').count() > 0, "")
-                wtext = page.inner_text('[data-testid="wizard"]')
+                # Newbie scenarios are intentionally policy-blocked. Test the
+                # same canonical wizard with the connected QA client instead.
+                ctxw = br.new_context(viewport={"width": width, "height": 900})
+                pw = ctxw.new_page(); enter(pw, CLIENT)
+                pw.goto(WEB + "/dashboard/scenarios", timeout=30000); pw.wait_for_timeout(2500)
+                starter = pw.locator('[data-testid^="start-"]:visible')
+                if starter.count() == 0:
+                    pw.get_by_text("Изменить данные", exact=True).first.click(timeout=8000)
+                else:
+                    starter.first.click(timeout=8000)
+                pw.wait_for_timeout(1500)
+                chk(b, "%s мастер открылся" % tag, pw.locator('[data-testid="wizard"]').count() > 0, "")
+                wtext = pw.inner_text('[data-testid="wizard"]')
                 chk(b, "%s мастер: не больше 5 полей" % tag,
-                    page.locator('[data-testid="wizard"] input, [data-testid="wizard"] select').count() <= 5, "")
+                    pw.locator('[data-testid="wizard"] input, [data-testid="wizard"] select').count() <= 5, "")
                 chk(b, "%s мастер: видно, что будет сделано" % tag, "сделаю" in wtext.lower(), "")
-                page.keyboard.press("Escape")
+                pw.keyboard.press("Escape"); ctxw.close()
             except Exception as e:
                 chk(b, "%s мастер открылся" % tag, False, str(e)[:70])
 
@@ -444,15 +509,14 @@ def block_ux():
             ctx2 = br.new_context(viewport={"width": width, "height": 900})
             p2 = ctx2.new_page()
             enter(p2, CLIENT)
-            p2.goto(WEB + "/dashboard/home", timeout=30000); p2.wait_for_timeout(3500)
+            p2.goto(WEB + "/dashboard/command-center", timeout=30000); p2.wait_for_timeout(3500)
             audit(p2, "%s клиент с Avito" % tag)
             body2 = p2.inner_text("body")
             chk(b, "%s клиент: журнал не пуст или объяснено почему" % tag,
-                ("Что делал" in body2), "")
+                ("Действия BORIS сегодня" in body2 or "Подтверждённых действий сегодня нет" in body2), "")
             # переход в старый кабинет и возврат
             try:
-                p2.locator('[data-testid="nav-cabinet"]').first.click(timeout=8000)
-                p2.wait_for_timeout(4000)
+                p2.goto(WEB + "/dashboard", timeout=30000); p2.wait_for_timeout(4000)
                 chk(b, "%s переход в кабинет работает" % tag, "/dashboard" in p2.url, p2.url)
                 # ИЗВЕСТНО И ПРИНЯТО: переход ведёт на промежуточный экран выбора
                 # аккаунта, меню появляется только после «Открыть →». Держим как
@@ -468,15 +532,19 @@ def block_ux():
                     except Exception:
                         pass
                 nav2 = p2.locator("button.b-nav").count()
-                chk(b, "%s кабинет доводит до вкладок" % tag, nav2 > 5, "b-nav=%d" % nav2)
-                chk(b, "%s из кабинета видно возврат на «Главная»" % tag,
-                    p2.locator("button.b-nav", has_text="Главная").count() > 0, "")
+                # CURRENT_SHELL_NAV_CONTRACT_V1: legacy /dashboard may open any
+                # canonical product workspace. Success is semantic: the shared
+                # BORIS shell is mounted and it exposes an explicit home route.
+                shell_now = p2.locator('[data-testid="app-shell"]').count() > 0
+                home_now = p2.locator('[data-testid="nav-home"]').count() > 0 or p2.locator('[data-testid="nav-home-mobile"]').count() > 0
+                chk(b, "%s кабинет доводит до рабочего интерфейса" % tag, nav2 > 5 or shell_now, "b-nav=%d shell=%s url=%s" % (nav2,shell_now,p2.url))
+                chk(b, "%s из кабинета виден возврат на «Главная»" % tag, home_now, p2.url)
             except Exception as e:
                 chk(b, "%s переход в кабинет работает" % tag, False, str(e)[:70])
             ctx2.close()
 
             # testid на месте
-            page.goto(WEB + "/dashboard/home", timeout=30000); page.wait_for_timeout(3000)
+            page.goto(WEB + "/dashboard/command-center", timeout=30000); page.wait_for_timeout(3000)
             miss = [t for t in TESTIDS_HOME if page.locator('[data-testid="%s"]' % t).count() == 0]
             chk(b, "%s все data-testid рабочего стола" % tag, not miss, miss)
             page.goto(WEB + "/dashboard/scenarios", timeout=30000); page.wait_for_timeout(2500)
@@ -827,7 +895,14 @@ def main():
         try:
             BLOCKS[w]()
         except Exception as e:
-            chk(w.upper(), "блок выполнился без падения", False, str(e)[:200])
+            # QA_BLOCK_EXCEPTION_TRUTH_V1: use the exact report bucket name.
+            # Previously w.upper() produced e.g. BUSINESS while the summary
+            # reads Business, so a crashed block could print a traceback and
+            # still finish with an overall PASS. A crashed block must be red.
+            report_block = {
+                "email_verification": "EmailVerify",
+            }.get(w, w.capitalize())
+            chk(report_block, "блок выполнился без падения", False, str(e)[:200])
             traceback.print_exc()
 
     print("\n" + "=" * 68)

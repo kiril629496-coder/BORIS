@@ -61,8 +61,12 @@ def main():
     billing=(ROOT/'app/api/billing.py').read_text(encoding='utf-8')
     checks.append(check('BILLING_USAGE_IDEMPOTENCY_V1' in billing and 'boris_billing_usage_intents' in billing and 'idempotency_replay' in billing,
                         'tariff_usage_has_durable_idempotency_ledger'))
-    checks.append(check('BILLING_USAGE_IDEMPOTENCY_SELF_HEAL_V1' in billing and 'CREATE TABLE IF NOT EXISTS boris_billing_usage_intents' in billing,
-                        'tariff_usage_idempotency_schema_self_heals'))
+    migration_049=(ROOT/'migrations/049_runtime_schema_baseline_contract.sql').read_text(encoding='utf-8')
+    checks.append(check(
+        'BORIS_SCHEMA_MIGRATION_049_OWNED' in billing
+        and 'CREATE TABLE IF NOT EXISTS boris_billing_usage_intents' not in billing
+        and 'public.boris_billing_usage_intents' in migration_049,
+        'tariff_usage_idempotency_schema_is_migration_owned'))
     checks.append(check('billing_pending_banners_key' in camp and 'idempotency_key=_pending_banner_billing_key' in camp,
                         'campaign_pending_banner_charge_replays_same_economic_intent'))
     checks.append(check('campaign_account_scope_mismatch' in camp and 'campaign_item_selection_invalid' in camp,
@@ -327,6 +331,10 @@ def main():
         checks.append(check(n==0,'active_source_laundering_zero',n))
         n=int(db.execute(text("select count(*) from media_assets where deleted_at is null and storage_key ~ 'banners/campaign_openai/campaign_[0-9]+_item_[0-9]+_[0-9]{10,}\\.png$'")).scalar() or 0)
         checks.append(check(n==0,'legacy_timestamp_active_banners_zero',n))
+        billing_usage_cols={r[0] for r in db.execute(text("select column_name from information_schema.columns where table_schema='public' and table_name='boris_billing_usage_intents'")).fetchall()}
+        billing_usage_needed={'id','account_id','unit','idempotency_key','amount','result_json','created_at'}
+        checks.append(check(billing_usage_needed.issubset(billing_usage_cols),
+                            'tariff_usage_idempotency_schema_present_in_db',sorted(billing_usage_cols)))
         trigger_names={r[0] for r in db.execute(text("select tgname from pg_trigger where not tgisinternal and tgname like 'trg_boris_guard_%'")).fetchall()}
         needed={'trg_boris_guard_canonical_avito_storage','trg_boris_guard_legacy_avito_media_asset','trg_boris_guard_legacy_avito_media_link','trg_boris_guard_legacy_banner_row'}
         checks.append(check(needed.issubset(trigger_names),'db_last_line_guards_present',sorted(trigger_names)))

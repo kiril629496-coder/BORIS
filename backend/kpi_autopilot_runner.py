@@ -12,7 +12,14 @@ API_BASE = "http://localhost:8000"
 def get_all_account_ids():
     conn = psycopg2.connect(DB_DSN)
     cur = conn.cursor()
-    cur.execute("SELECT account_id FROM accounts")
+    cur.execute("""
+        SELECT a.account_id FROM accounts a
+         WHERE NOT EXISTS (
+             SELECT 1 FROM reliability_kill_switches r
+              WHERE r.account_id=a.account_id AND r.blocked=true
+                AND r.module IN ('actions','marketing','background')
+         )
+    """)
     ids = [row[0] for row in cur.fetchall()]
     cur.close()
     conn.close()

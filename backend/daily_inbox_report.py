@@ -7,7 +7,7 @@
 import datetime, sys, time, zoneinfo
 from sqlalchemy import text
 from app.db.session import SessionLocal
-from app.api.inbox_daily import build_report
+from app.api.inbox_daily import build_report, send_owner_daily_report
 
 FORCE = "--force" in sys.argv
 DRY = "--dry-run" in sys.argv
@@ -116,4 +116,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--owner-portfolio" in sys.argv:
+        result = send_owner_daily_report(force=FORCE)
+        print(result)
+        raise SystemExit(0 if result.get("status") == "ok" else 1)
     main()

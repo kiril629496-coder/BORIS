@@ -3,4 +3,9 @@ uvicorn[standard]
 sqlalchemy
 psycopg2-binary
 pydantic
-openai
+openaitelethon==1.44.0
+pytest==8.3.5
+
+faster-whisper==1.2.1
+
+pywebpush==2.5.0

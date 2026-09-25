@@ -26,11 +26,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -45,6 +46,8 @@ except Exception:  # noqa: BLE001
     pass
 
 from app.monitoring import alerts, budget, dedupe, llm, store                   # noqa: E402
+from app.monitoring.stage2 import prepare_raw_items, enrich_normalized_message
+from app.monitoring.quality import classify as quality_classify
 from app.monitoring.base import ScannerError, SourceRef                 # noqa: E402
 from app.monitoring.rules import (                                      # noqa: E402
     NORMALIZER, SearchRule, evaluate, rules_hash,
@@ -56,6 +59,14 @@ LOG_PATH = os.getenv("MONITOR_LOG", "/root/BORIS/backend/logs/monitor.log")
 # кривое правило не должно сжечь бюджет
 LLM_MIN_SCORE = int(os.getenv("MONITOR_LLM_MIN_SCORE", "40"))
 LLM_MAX_PER_RUN = int(os.getenv("MONITOR_LLM_MAX_PER_RUN", "40"))
+MAX_MESSAGE_AGE_DAYS = int(os.getenv("MONITOR_MAX_MESSAGE_AGE_DAYS", "14"))
+PRE_LLM_REJECT_MARKERS = (
+    "предлагаю услуги", "оказываю услуги", "я авитолог", "работаю авитологом",
+    "я маркетолог", "я директолог", "мы маркетологи", "мы директологи", "мы авитологи",
+    "ищем сотрудника", "ищем в команду", "требуется сотрудник", "отклик на вакансию",
+    "присылайте резюме", "отправляйте резюме", "вакансия:",
+    "служба по контракту", "службу по контракту", "набор на службу", "военная служба",
+)
 FIX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "app", "monitoring", "fixtures")
 
@@ -118,9 +129,10 @@ def process_source(cur, scanner, source: SourceRef, raw_items: list[dict],
     """
     max_id = source.last_seen_external_id or 0
 
-    for raw in raw_items:
+    for raw in prepare_raw_items(raw_items):
         stats["scanned_messages"] += 1
         msg = scanner.normalize(raw, source)
+        msg = enrich_normalized_message(msg, raw)
         if msg is None:
             continue
 
@@ -132,6 +144,14 @@ def process_source(cur, scanner, source: SourceRef, raw_items: list[dict],
             continue
         max_id = max(max_id, ext_num)
 
+        # First scan of a newly discovered source can contain hundreds of old posts.
+        # Advance the source checkpoint, but do not spend rules/LLM budget on stale leads.
+        if msg.posted_at and MAX_MESSAGE_AGE_DAYS > 0:
+            age_sec=(datetime.now(timezone.utc)-msg.posted_at).total_seconds()
+            if age_sec > MAX_MESSAGE_AGE_DAYS*86400:
+                stats["stale_skipped"] = stats.get("stale_skipped",0) + 1
+                continue
+
         res = evaluate(
             msg.text, rules, platform=msg.platform, source_id=source.id,
             source_kind=source.source_kind, source_weight=source_weight,
@@ -142,12 +162,39 @@ def process_source(cur, scanner, source: SourceRef, raw_items: list[dict],
 
         stats["matched_messages"] += 1
 
+        low_text=' '.join(str(msg.text or '').lower().split())
+        if any(marker in low_text for marker in PRE_LLM_REJECT_MARKERS):
+            stats["pre_llm_rejected"] = stats.get("pre_llm_rejected",0) + 1
+            stats["quality_rejected"] = stats.get("quality_rejected",0) + 1
+            log.info("[pre-llm-drop] %s/%s marker_noise", source.title, msg.external_message_id)
+            continue
+
         # смысловая группа: тот же текст под другим id объединяется, но НЕ теряется
         dgroup = dedupe.duplicates_group(msg.platform, msg.text, msg.posted_at)
 
         analysis = {}
         budget_block = None  # None | monthly_budget | daily_analysis_limit | monthly_analysis_limit
-        wants_llm = res.score_total >= LLM_MIN_SCORE and stats["llm_calls"] < LLM_MAX_PER_RUN
+
+        # Deterministic quality pre-gate. Obvious demand and obvious noise do not
+        # need an LLM call: this makes the sales monitor faster and avoids paid
+        # classification on phrases that rules can resolve safely.
+        deterministic = quality_classify(msg.text, None, res.score_total)
+        if deterministic["reject"]:
+            stats["quality_rejected"] = stats.get("quality_rejected", 0) + 1
+            stats["llm_avoided"] = stats.get("llm_avoided", 0) + 1
+            log.info(
+                "[quality-drop-pre] %s/%s score=%s reasons=%s",
+                source.title, msg.external_message_id, res.score_total,
+                deterministic.get("reasons"),
+            )
+            continue
+        if deterministic["qualified"]:
+            analysis = {"intent": "buy_service", "source": "deterministic_quality_gate"}
+            stats["llm_avoided"] = stats.get("llm_avoided", 0) + 1
+            wants_llm = False
+        else:
+            wants_llm = res.score_total >= LLM_MIN_SCORE and stats["llm_calls"] < LLM_MAX_PER_RUN
+
         if wants_llm and write:
             # финансовый + технические предохранители ДО вызова модели
             verdict = budget.check_budget(cur)
@@ -160,13 +207,45 @@ def process_source(cur, scanner, source: SourceRef, raw_items: list[dict],
                     alerts.send_text(_budget_alert_text(verdict))
                     budget.mark_notified(cur, key)
         if wants_llm and budget_block is None:
+            paid_intent_key=hashlib.sha256(json.dumps({
+                "policy":"monitor-llm-intent-v1","platform":msg.platform,
+                "source_id":str(source.id),"external_message_id":str(msg.external_message_id),
+                "text":msg.text or "","rules_hash":rhash,
+            },ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")).hexdigest()
             analysis = llm.analyze(
                 msg.text, res.terms, res.score_breakdown, res.bucket_label,
-                source_title=source.title or "",
+                source_title=source.title or "", paid_intent_key=paid_intent_key,
             )
             stats["llm_calls"] += 1
             if analysis.get("source") == "llm":
                 stats["llm_ok"] += 1
+
+        # QUALITY_GATE_V2
+        quality_result = quality_classify(
+            msg.text,
+            analysis.get("intent"),
+            res.score_total,
+        )
+
+        if not quality_result["qualified"]:
+            stats["quality_rejected"] = (
+                stats.get("quality_rejected", 0) + 1
+            )
+
+            log.info(
+                "[quality-drop] %s/%s score=%s intent=%s reasons=%s",
+                source.title,
+                msg.external_message_id,
+                res.score_total,
+                analysis.get("intent"),
+                quality_result.get("reasons"),
+            )
+
+            continue
+
+        stats["quality_qualified"] = (
+            stats.get("quality_qualified", 0) + 1
+        )
 
         if not write:
             log.info("[dry] %s/%s %s баллов: %s | %s",
@@ -268,11 +347,24 @@ def cmd_fixtures(write: bool = True) -> int:
                     )
                     if write:
                         store.bump_source_cursor(cur, source.id, max_id)
+                        con.commit()
                 except ScannerError as e:
                     errors.append({"source": source.title, "error": str(e)})
                     if write:
                         store.bump_source_cursor(cur, source.id, None, error=str(e))
+                        con.commit()
 
+            if write and platform=='telegram':
+                store.set_runtime_state(cur,'telegram_source_cadence_last',json.dumps({
+                    'selected_sources':int(stats.get('scanned_sources',0) or 0),
+                    'deferred_sources':int(stats.get('cadence_deferred_sources',0) or 0),
+                    'active_sources':int((stats.get('scanned_sources',0) or 0)+(stats.get('cadence_deferred_sources',0) or 0)),
+                    'cadence_min':max(15,int(os.getenv('TG_SOURCE_LOW_ACTIVITY_CADENCE_MIN','30') or 30)),
+                    'scanned_messages':int(stats.get('scanned_messages',0) or 0),
+                    'matched_messages':int(stats.get('matched_messages',0) or 0),
+                    'new_messages':int(stats.get('new_messages',0) or 0),
+                    'finished_at':datetime.now(timezone.utc).isoformat(),
+                },ensure_ascii=False,sort_keys=True))
             if write and run_id:
                 store.finish_run(cur, run_id, stats, errors)
     finally:
@@ -307,6 +399,27 @@ def cmd_scan(platform: str, limit: int, write: bool) -> int:
         print("Пока ключей нет — проверять конвейер режимом --fixtures.")
         return 2
 
+    if platform == 'telegram':
+        state_con=store.connect()
+        try:
+            with state_con, state_con.cursor() as state_cur:
+                raw=store.get_runtime_state(state_cur,'telegram_scan_cooldown_until')
+                if raw:
+                    try:
+                        until=datetime.fromisoformat(str(raw).replace('Z','+00:00'))
+                        if until.tzinfo is None:
+                            until=until.replace(tzinfo=timezone.utc)
+                        now=datetime.now(timezone.utc)
+                        if until > now:
+                            remaining=max(1,int((until-now).total_seconds()))
+                            print(f'TELEGRAM_SCAN=COOLDOWN remaining={remaining}s until={until.isoformat()}')
+                            return 0
+                    except Exception:
+                        pass
+                    store.set_runtime_state(state_cur,'telegram_scan_cooldown_until',None)
+        finally:
+            state_con.close()
+
     from app.monitoring.telegram import build_client
     client = build_client(session, int(api_id), api_hash)
     scanner = TelegramScanner(client)
@@ -320,18 +433,91 @@ def cmd_scan(platform: str, limit: int, write: bool) -> int:
     try:
         with con, con.cursor() as cur:
             if not store.try_lock_run(cur):
+                print("TELEGRAM_SCAN=SKIP scanner_lock_busy")
                 print("Другой прогон уже идёт — выхожу, ничего не трогая.")
                 return 0
             rules = [SearchRule.from_row(r) for r in store.load_rules(cur)]
             if not rules:
                 print("Нет активных правил")
                 return 2
+            if platform=='telegram' and write:
+                store.ensure_source_scan_stats_schema(cur)
+                con.commit()
             rhash = rules_hash(rules)
             run_id = store.start_run(cur, platform, "scheduled") if write else None
+            # Do not hold an idle PostgreSQL transaction while Telegram/network/LLM
+            # work runs for minutes. The advisory lock is session-scoped and survives
+            # commits; committing here and after each source prevents SSL/proxy
+            # idle-in-transaction disconnects from killing the sales scan.
+            if write:
+                con.commit()
 
-            for srow in store.claim_sources(cur, platform):
+            # Bootstrap stable Telegram access_hash values from dialogs already
+            # available to the authorized user session. This is intentionally not
+            # Global Search and never joins anything. It only runs while at least
+            # one active source still lacks a cached hash, and prevents StringSession
+            # from falling back to ResolveUsername after a cooldown expires.
+            if platform == 'telegram':
+                cur.execute("""
+                    SELECT count(*) FROM monitor_sources
+                    WHERE platform='telegram' AND is_active=true
+                      AND external_id LIKE '-100%'
+                      AND COALESCE(payload->>'telegram_access_hash','')=''
+                """)
+                missing_hashes=int(cur.fetchone()[0] or 0)
+                if missing_hashes:
+                    try:
+                        from telethon.errors import FloodWaitError
+                        from telethon.utils import get_peer_id
+                        client.connect()
+                        hydrated=0
+                        for dialog in client.iter_dialogs(limit=500):
+                            entity=dialog.entity
+                            access_hash=getattr(entity,'access_hash',None)
+                            if not access_hash:
+                                continue
+                            external_id=str(get_peer_id(entity))
+                            cur.execute("""UPDATE monitor_sources
+                                SET payload=COALESCE(payload,'{}'::jsonb) || jsonb_build_object('telegram_access_hash',%s),updated_at=NOW()
+                                WHERE platform='telegram' AND is_active=true AND external_id=%s
+                                  AND COALESCE(payload->>'telegram_access_hash','')=''""",
+                                (str(access_hash),external_id))
+                            hydrated += int(cur.rowcount or 0)
+                        if write:
+                            con.commit()
+                        print(f'TELEGRAM_HASH_BOOTSTRAP=PASS missing={missing_hashes} hydrated={hydrated}')
+                    except FloodWaitError as e:
+                        retry_after=max(300,int(e.seconds or 0))
+                        until=datetime.now(timezone.utc)+timedelta(seconds=retry_after)
+                        if write:
+                            store.set_runtime_state(cur,'telegram_scan_cooldown_until',until.isoformat()); con.commit()
+                        print(f'TELEGRAM_HASH_BOOTSTRAP=COOLDOWN retry_after={retry_after}s')
+                        return 0
+                    except Exception as e:
+                        # Fail closed: scanner itself will skip numeric channels without
+                        # hashes instead of resolving usernames and extending throttling.
+                        log.warning('telegram access-hash bootstrap degraded: %s',type(e).__name__)
+
+            claimed_sources=store.claim_sources(cur, platform)
+            if platform=='telegram':
+                cur.execute("SELECT count(*) FROM monitor_sources WHERE platform='telegram' AND is_active=true")
+                active_source_count=int(cur.fetchone()[0] or 0)
+                stats['cadence_deferred_sources']=max(0,active_source_count-len(claimed_sources))
+                print(f"TG_SOURCE_CADENCE selected={len(claimed_sources)} deferred={stats['cadence_deferred_sources']} active={active_source_count} min={max(15,int(os.getenv('TG_SOURCE_LOW_ACTIVITY_CADENCE_MIN','30') or 30))}")
+            for srow in claimed_sources:
                 source = SourceRef.from_row(srow)
+                # Numeric Telegram channels without a cached access_hash are
+                # deliberately fail-closed in TelegramScanner to avoid
+                # ResolveUsername/FloodWait. Do not count or mark those as
+                # successfully scanned until discovery/bootstrap hydrates them.
+                if platform == 'telegram' and source.external_id and str(source.external_id).startswith('-100') and not (source.payload or {}).get('telegram_access_hash'):
+                    stats["unresolved_sources"] = stats.get("unresolved_sources", 0) + 1
+                    continue
                 stats["scanned_sources"] += 1
+                source_scanned_before=int(stats.get('scanned_messages',0) or 0)
+                source_matched_before=int(stats.get('matched_messages',0) or 0)
+                source_new_before=int(stats.get('new_messages',0) or 0)
+                raw_items=[]
                 try:
                     raw_items = scanner.fetch_new(source, limit=limit)
                     max_id = process_source(
@@ -340,14 +526,33 @@ def cmd_scan(platform: str, limit: int, write: bool) -> int:
                     )
                     if write:
                         store.bump_source_cursor(cur, source.id, max_id)
+                        if platform=='telegram':
+                            store.bump_source_scan_stats(
+                                cur,source.id,raw_messages=len(raw_items),
+                                processed_messages=int(stats.get('scanned_messages',0) or 0)-source_scanned_before,
+                                matched_messages=int(stats.get('matched_messages',0) or 0)-source_matched_before,
+                                new_messages=int(stats.get('new_messages',0) or 0)-source_new_before,
+                            )
+                        con.commit()
                 except ScannerError as e:
-                    # ошибка одного источника не останавливает прогон
+                    # Small source errors do not stop the run. A long Telegram FloodWait
+                    # is account/global throttling, so persist cooldown and stop hammering.
                     log.warning("источник %s: %s", source.title, e)
                     errors.append({"source": source.title, "error": str(e),
                                    "retry_after": e.retry_after})
-                    stats["flood_wait_seconds"] += int(e.retry_after or 0)
+                    retry_after=int(e.retry_after or 0)
+                    stats["flood_wait_seconds"] += retry_after
                     if write:
                         store.bump_source_cursor(cur, source.id, None, error=str(e))
+                        if platform=='telegram':
+                            store.bump_source_scan_stats(cur,source.id,raw_messages=len(raw_items),error=str(e))
+                        if platform=='telegram' and retry_after >= 300:
+                            until=datetime.now(timezone.utc)+timedelta(seconds=retry_after)
+                            store.set_runtime_state(cur,'telegram_scan_cooldown_until',until.isoformat())
+                        con.commit()
+                    if platform=='telegram' and retry_after >= 300:
+                        log.warning("Telegram global cooldown until %s", until.isoformat() if write else f'+{retry_after}s')
+                        break
 
             if write and run_id:
                 store.finish_run(cur, run_id, stats, errors)

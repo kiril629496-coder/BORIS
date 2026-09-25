@@ -93,10 +93,10 @@ def _reset_fixture_state(cur) -> int:
     """
     ids = _fixture_source_ids()
     cur.execute("DELETE FROM leads WHERE message_id IN "
-                "(SELECT id FROM monitor_messages WHERE source_id = ANY(%s))", (ids,))
-    cur.execute("DELETE FROM monitor_messages WHERE source_id = ANY(%s)", (ids,))
+                "(SELECT id FROM monitor_messages WHERE source_id = ANY(%s::uuid[]))", (ids,))
+    cur.execute("DELETE FROM monitor_messages WHERE source_id = ANY(%s::uuid[])", (ids,))
     cur.execute("UPDATE monitor_sources SET last_seen_external_id = NULL, "
-                "last_scanned_at = NULL WHERE id = ANY(%s)", (ids,))
+                "last_scanned_at = NULL WHERE id = ANY(%s::uuid[])", (ids,))
     store.recount_contacts(cur)
     return len(ids)
 

@@ -233,6 +233,36 @@ def _build_plan(acc, recs, advice=None):
     except Exception:
         _measurement_waiting, _measurement_cap = 0, 2
     if _measurement_waiting >= max(1, _measurement_cap):
+        # RED_CPL_LOWER_BYPASSES_RAISE_MEASUREMENT_WAIT_V1:
+        # Saturated causal slots exist to stop OVER-PARALLEL RAISES. They must
+        # never freeze a bounded spend-reducing recovery when account CPL is
+        # already red and Advisor has proven an active paid zero-contact waste
+        # item. Execute at most one lower; never archive and never raise here.
+        _red_cpl_lower = [
+            it for it in (recs.get("lower") or [])
+            if isinstance(it, dict)
+            and it.get("id")
+            and it.get("bid_rub")
+            and bool(it.get("promotion_active"))
+            and str(it.get("reason_code") or "") == "red_cpl_paid_zero_contact_waste"
+            and str(it.get("boris_measure_status") or "") != "waiting_measurement"
+        ]
+        if _red_cpl_lower:
+            _chosen = _red_cpl_lower[0]
+            diagnostics.update({
+                "planned_after_guard": 1,
+                "proven_after_guard": 0,
+                "micro_proven_after_guard": 0,
+                "reason": "red_cpl_lower_during_raise_measurement_wait",
+                "measurement_waiting": _measurement_waiting,
+                "measurement_cap": _measurement_cap,
+                "next_action": "execute_one_guarded_red_cpl_lower",
+            })
+            return [({"id": int(_chosen["id"]), "source": "red_cpl_recovery"}, "lower")], (
+                f"RED_CPL_RECOVERY: заняты {_measurement_waiting}/{_measurement_cap} "
+                "слотов измерения повышений; новые повышения запрещены, BORIS "
+                "снижает одну доказанно неэффективную платную ставку"
+            ), diagnostics
         diagnostics.update({
             "planned_after_guard": 0,
             "proven_after_guard": 0,
@@ -247,6 +277,41 @@ def _build_plan(acc, recs, advice=None):
             "слотов денежных измерений; BORIS ждёт доказательства и возобновит "
             "повышения автоматически"
         ), diagnostics
+
+    # RED_CPL_LOWER_GENERAL_V1:
+    # Red account CPL is a spend-efficiency problem. If Advisor has already
+    # proven one active paid zero-contact waste item, schedule exactly ONE
+    # bounded lower even when raise-measurement slots are free. Previously this
+    # lane existed only inside the saturated-backlog branch, so accounts such as
+    # PBI could expose a valid lower recommendation yet execute zero actions.
+    # The actual write still goes through apply_one -> canonical money guards,
+    # <=10% step, fresh spend/stats, mandate, balance and post-write verification.
+    _red_cpl_lower_general = [
+        it for it in (recs.get("lower") or [])
+        if isinstance(it, dict)
+        and it.get("id")
+        and it.get("bid_rub")
+        and bool(it.get("promotion_active"))
+        and str(it.get("reason_code") or "") == "red_cpl_paid_zero_contact_waste"
+        and str(it.get("boris_measure_status") or "") != "waiting_measurement"
+    ]
+    if _red_cpl_lower_general:
+        _chosen = _red_cpl_lower_general[0]
+        diagnostics.update({
+            "planned_after_guard": 1,
+            "proven_after_guard": 0,
+            "micro_proven_after_guard": 0,
+            "reason": "red_cpl_lower_proven_waste",
+            "measurement_waiting": _measurement_waiting,
+            "measurement_cap": _measurement_cap,
+            "next_action": "execute_one_guarded_red_cpl_lower",
+        })
+        return [({"id": int(_chosen["id"]), "source": "red_cpl_recovery"}, "lower")], (
+            "RED_CPL_RECOVERY: CPL выше красной линии; BORIS не отключает "
+            "продвижение массово и не повышает ставки, а снижает одну "
+            "доказанно неэффективную платную ставку и затем измеряет эффект"
+        ), diagnostics
+
     cap = int((r.get("mandate") or {}).get("max_actions_run") or MAX_ITEMS_PER_CYCLE)
     if r.get("decision") == "RAISE_CANDIDATES":
         top = [c for c in (r.get("top") or []) if c.get("status") == "eligible"]
@@ -611,7 +676,14 @@ def main():
                 print(f"  {acc}: ОШИБКА {str(e)[:150]}")
             finally:
                 runtime["finished_at"] = datetime.now().isoformat()
-                _save_runtime(cur, conn, acc, runtime)
+                # CPX_RUNNER_DRY_RUN_NO_RUNTIME_MUTATION_V1:
+                # A preview must never replace the production heartbeat with
+                # apply_enabled=false / would_apply values. Only the canonical
+                # money-capable service run owns virtual_marketer_runtime.
+                if APPLY:
+                    _save_runtime(cur, conn, acc, runtime)
+                else:
+                    print("    dry-run: production runtime heartbeat not persisted")
     finally:
         cur.close()
         conn.close()

@@ -12,14 +12,18 @@ from app.services.control_plane_adapters_ext import marketing_service_entitlemen
 MSK=ZoneInfo("Europe/Moscow")
 STATE_KEY="late_day_spend_boost_state"
 LEARNING_KEY="late_day_spend_learning"
-# INTRADAY_SPEND_PACING_START_V1:
-# Start budget pacing after the morning learning window, not only in the evening.
-# A raise is still impossible without fresh stats/spend, unmet lead KPI, safe CPL,
-# proven conversion evidence, active promotion, measurement clearance and every
-# final apply_one money guard. Budget is a ceiling; under-spend is only a reason
-# to accelerate proven converters while KPI is behind.
-BOOST_START_HOUR=10
-MAX_ITEMS_PER_ACCOUNT_CYCLE=8
+# INTRADAY_SPEND_PACING_START_V1 / DAILY_BUDGET_TARGET_PACING_V1:
+# The owner-defined daily budget is both the hard ceiling and the delivery target.
+# BORIS aims to finish each Moscow day inside 95-100% of the authorized budget,
+# targeting ~98% to leave a small provider/reporting-lag reserve. KPI/CPL decide
+# where money is allocated, never whether an otherwise funded account is allowed
+# to chronically under-spend. Money authority, live balance, max bid, <=10% steps,
+# write capability and fresh provider truth remain mandatory.
+BOOST_START_HOUR=8
+PACING_MIN_DAILY_RATIO=0.95
+PACING_TARGET_DAILY_RATIO=0.98
+MAX_ITEMS_PER_ACCOUNT_CYCLE=2
+MAX_PACING_ITEMS_PER_DAY=2
 API_BASES=("http://127.0.0.1:8000","http://127.0.0.1:8001")
 
 def _load(db,a,k):
@@ -54,7 +58,8 @@ def _pacing_ratio(now_msk):
     # the Moscow day already elapsed. Near midnight the expected share tends
     # to 100%, so a 70% spend ratio is still recognized as meaningful lag.
     seconds = now_msk.hour * 3600 + now_msk.minute * 60 + now_msk.second
-    return max(0.0, min(1.0, seconds / 86400.0))
+    elapsed = max(0.0, min(1.0, seconds / 86400.0))
+    return max(0.0, min(PACING_TARGET_DAILY_RATIO, elapsed * PACING_TARGET_DAILY_RATIO))
 
 def _catchup_intensity(spend_ratio, now_msk):
     expected = _pacing_ratio(now_msk)
@@ -65,10 +70,19 @@ def _catchup_intensity(spend_ratio, now_msk):
     boost = 50 if relative_gap >= 0.50 else 40 if relative_gap >= 0.30 else 30
     return boost, expected, relative_gap
 
-def _eligible_pool(advice, winner_ids=None, continuing_boost_ids=None, measurement_clear_ids=None):
+def _eligible_pool(advice, winner_ids=None, continuing_boost_ids=None, measurement_clear_ids=None,
+                   allow_exploration=False, exclude_ids=None):
+    """Rank pacing candidates: proven converters first, bounded exploration second.
+
+    DAILY_BUDGET_SELF_LEARNING_V1: red CPL/KPI completion never freezes the whole
+    account. Proven losers are excluded; under-tested active listings may receive
+    one bounded pacing step so BORIS keeps learning while delivering the budget.
+    Standard waiting measurements remain isolated.
+    """
     winner_ids={int(x) for x in (winner_ids or set()) if str(x).isdigit()}
     continuing_boost_ids={int(x) for x in (continuing_boost_ids or set()) if str(x).isdigit()}
     measurement_clear_ids={int(x) for x in (measurement_clear_ids or set()) if str(x).isdigit()}
+    exclude_ids={int(x) for x in (exclude_ids or set()) if str(x).isdigit()}
     recs=(advice or {}).get("recommendations") or {}; by={}
     for group in ("raise","watching","lower","archive_candidates","lower_or_archive"):
         for x in recs.get(group) or []:
@@ -76,27 +90,31 @@ def _eligible_pool(advice, winner_ids=None, continuing_boost_ids=None, measureme
             iid=x.get("item_id") or x.get("id")
             try:iid=int(iid); bid=float(x.get("bid_rub") or 0)
             except Exception:continue
-            if bid<=0 or not bool(x.get("promotion_active")):continue
-            # LATE_DAY_CAUSAL_POOL_V2: evening catch-up spends only on a
-            # currently promoted listing with observed demand evidence.
-            contacts_7d=int(x.get("contacts_7d") or 0)
-            if contacts_7d<=0:continue
-            # LATE_DAY_ONE_STEP_THEN_MEASURE_V2: waiting measurement is binding.
-            # Evening under-spend is not permission to stack hourly money changes
-            # on one listing before the first causal result exists.
+            if iid in exclude_ids or bid<=0 or not bool(x.get("promotion_active")):continue
             if (str(x.get("boris_measure_status") or "") == "waiting_measurement"
-                    and iid not in measurement_clear_ids): continue
-            # LATE_DAY_LIVE_CONVERTER_FALLBACK_V1: scaling may use either durable
-            # winner memory OR strong current conversion evidence. This avoids
-            # spending on weak ads while allowing a live converter that has not
-            # yet accumulated a finalized historical experiment verdict.
+                    and iid not in measurement_clear_ids):continue
+            contacts_7d=int(x.get("contacts_7d") or 0); views_7d=int(x.get("views_7d") or 0)
             today_contacts=int(x.get("contacts") or 0)
-            live_converter=bool(today_contacts>0 or (contacts_7d>=2 and int(x.get("views_7d") or 0)>=5))
-            if iid not in winner_ids and not live_converter:continue
-            score=(1,contacts_7d,int(x.get("views_7d") or 0))
-            if iid not in by or score>by[iid][0]:by[iid]=(score,{**x,"id":iid,"bid_rub":bid})
+            live_converter=bool(today_contacts>0 or (contacts_7d>=2 and views_7d>=5))
+            proven=bool(iid in winner_ids or live_converter)
+            if not proven:
+                if not allow_exploration:continue
+                # A zero-contact listing with >=20 recent views already has enough
+                # negative evidence; spending shifts elsewhere instead of repeating it.
+                if contacts_7d<=0 and views_7d>=20:continue
+                if group not in {"raise","watching"}:continue
+            lane="winner" if proven else "exploration"
+            score=(2 if proven else 1, contacts_7d, -views_7d if not proven else views_7d)
+            row={**x,"id":iid,"bid_rub":bid,"pacing_lane":lane}
+            if iid not in by or score>by[iid][0]:by[iid]=(score,row)
     vals=[v[1] for v in by.values()]
-    vals.sort(key=lambda x:(not bool(x.get("winner_memory")),-int(x.get("contacts_7d") or 0),-int(x.get("views_7d") or 0),int(x["id"])))
+    vals.sort(key=lambda x:(
+        0 if int(x.get("id")) in continuing_boost_ids else 1,
+        0 if x.get("pacing_lane")=="winner" else 1,
+        -int(x.get("contacts_7d") or 0),
+        int(x.get("views_7d") or 0) if x.get("pacing_lane")=="exploration" else -int(x.get("views_7d") or 0),
+        int(x["id"]),
+    ))
     return vals
 
 def _rotate_one_measurement_slot_for_pacing(
@@ -373,10 +391,12 @@ def boost_evening(now_msk, account_filter=None):
             _item_signal_current = str(ds.get("stats_date") or "") == marketing_today_iso()
             contacts=sum(int(x.get("contacts") or 0) for x in active) if _item_signal_current else 0
             if not _item_signal_current:continue
-            if contacts>=target:continue
             cpl=(spent/contacts) if contacts>0 else None
-            if cpl is not None and cpl>red:continue
-            if contacts<=0 and spent>=1.10*red:continue
+            # DAILY_BUDGET_TARGET_OVERRIDES_FREEZE_V1: KPI/CPL are optimization
+            # signals, not permission to leave an authorized budget idle. Red CPL
+            # switches allocation into winner/rotation/exploration mode below.
+            red_cpl_mode=bool(cpl is not None and red>0 and cpl>red)
+            zero_lead_mode=bool(contacts<=0 and red>0 and spent>=1.10*red)
             # Build durable winner memory from finalized bid experiments.
             # Latest verdict wins; an older success cannot override a newer loss.
             learning=_load(db,a,"cpx_learning_journal") or []
@@ -394,9 +414,13 @@ def boost_evening(now_msk, account_filter=None):
             # optional late-day accelerator until a later helpful verdict exists.
             _late_learning=_load(db,a,LEARNING_KEY) or []
             _late_learning=[x for x in _late_learning if isinstance(x,dict)] if isinstance(_late_learning,list) else []
-            _recent_verdicts=[str(x.get("verdict") or "") for x in _late_learning[-2:]]
-            if len(_recent_verdicts)>=2 and all(v=="no_lead_after_boost" for v in _recent_verdicts):
-                continue
+            _recent_learning=_late_learning[-2:]
+            _negative_boost_ids=set()
+            for _rec in _recent_learning:
+                if str(_rec.get("verdict") or "")!="no_lead_after_boost":continue
+                for _iid in (_rec.get("boosted_items") or []):
+                    try:_negative_boost_ids.add(int(_iid))
+                    except Exception:pass
             state=_load(db,a,STATE_KEY) or {}
             if str(state.get("day_msk") or "")!=now_msk.date().isoformat():state={"day_msk":now_msk.date().isoformat(),"status":"active","items":{}}
             # LATE_DAY_ONE_STEP_THEN_MEASURE_V2: no blind continuation cohort.
@@ -404,7 +428,8 @@ def boost_evening(now_msk, account_filter=None):
             # converter may rotate its own >12h unresolved slot once/day under a
             # severe pacing gap + very strong CPL headroom. The replacement still
             # consumes the same slot and passes every final money guard.
-            continuing_boost_ids=set()
+            _state_items=state.get("items") if isinstance(state.get("items"),dict) else {}
+            continuing_boost_ids={int(i) for i,m in _state_items.items() if str(i).isdigit() and isinstance(m,dict) and m.get("baseline_bid_rub") is not None}
             _pacing_advice=_late_day_pacing_advice(_load(db,a,"cpx_advice") or {}, winner_ids=winner_ids)
             rotation=_rotate_one_measurement_slot_for_pacing(
                 db,a,_pacing_advice,state,now_msk,
@@ -414,9 +439,17 @@ def boost_evening(now_msk, account_filter=None):
             _clear_ids=set(rotation.get("rotated_item_ids") or [])
             pool=_eligible_pool(_pacing_advice, winner_ids=winner_ids,
                                 continuing_boost_ids=continuing_boost_ids,
-                                measurement_clear_ids=_clear_ids)
+                                measurement_clear_ids=_clear_ids,
+                                allow_exploration=True,
+                                exclude_ids=_negative_boost_ids)
+            # Keep at most two pacing items per Moscow day. Existing pacing items
+            # are continued first; only the remaining slots may admit exploration.
+            _existing=[x for x in pool if int(x.get("id")) in continuing_boost_ids]
+            _new=[x for x in pool if int(x.get("id")) not in continuing_boost_ids]
+            _room=max(0,MAX_PACING_ITEMS_PER_DAY-len(continuing_boost_ids))
+            pool=_existing + _new[:_room]
             if not pool:continue
-            state.update({"status":"active","spend_plan_rub":budget,"spent_at_check_rub":round(spent,2),"contacts_at_check":contacts,"spend_ratio":round(ratio,4),"expected_spend_ratio":round(expected_ratio,4),"pacing_gap_ratio":round(pacing_gap,4),"target_uplift_pct":target_boost,"last_boost_check_msk":now_msk.isoformat()}); _save(db,a,STATE_KEY,state)
+            state.update({"status":"active","policy":"DAILY_BUDGET_TARGET_PACING_V1","spend_plan_rub":budget,"spend_target_ratio":PACING_TARGET_DAILY_RATIO,"spend_min_ratio":PACING_MIN_DAILY_RATIO,"spent_at_check_rub":round(spent,2),"contacts_at_check":contacts,"spend_ratio":round(ratio,4),"expected_spend_ratio":round(expected_ratio,4),"pacing_gap_ratio":round(pacing_gap,4),"target_uplift_pct":target_boost,"red_cpl_mode":red_cpl_mode,"zero_lead_mode":zero_lead_mode,"excluded_negative_boost_ids":sorted(_negative_boost_ids),"last_boost_check_msk":now_msk.isoformat()}); _save(db,a,STATE_KEY,state)
             cohort=max(1,min(MAX_ITEMS_PER_ACCOUNT_CYCLE,math.ceil(len(pool)*target_boost/100.0))); candidates=[]
             for x in pool:
                 iid=str(x["id"]); meta=(state.get("items") or {}).get(iid) or {}; baseline=meta.get("baseline_bid_rub"); last=meta.get("last_bid_rub"); current=float(last if last is not None else x.get("bid_rub") or 0); achieved=((current/float(baseline)-1.0)*100.0) if baseline else 0.0
@@ -431,7 +464,15 @@ def boost_evening(now_msk, account_filter=None):
             candidates.sort(key=lambda z:(z[0],not bool(z[1].get("winner_memory")),-int(z[1].get("contacts_7d") or 0)))
             applied=blocked=0; details=[]
             for _,x in candidates[:cohort]:
-                iid=int(x["id"]); payload={"account_id":a,"item_id":iid,"action":"raise","actor_type":"boris_auto","trigger":"late_day_spend_catchup","source":"late_day_spend_catchup","max_bid_delta_pct":int(x.get("step_pct") or target_boost),"temporary_boost_target_pct":target_boost,"request_id":f"late-boost:{a}:{now_msk.date().isoformat()}:{now_msk.hour}:{iid}"}
+                # LATE_DAY_HOURLY_RUN_ID_V1: make the first request-id token
+                # unique per Moscow hour. Both the Python autonomy guard and the
+                # atomic DB receipt guard use that token as the logical run id for
+                # generic sources. The legacy `late-boost:<account>:...` shape
+                # collapsed every evening cycle into one lifetime run, causing a
+                # later natural hour to be rejected as item_already_changed_in_run.
+                # This changes identity only; <=10% step, daily budget, balance,
+                # hard bid cap and daily action caps remain authoritative.
+                iid=int(x["id"]); _late_run=f"late-boost-{now_msk.strftime('%Y%m%d%H')}"; payload={"account_id":a,"item_id":iid,"action":"raise","actor_type":"boris_auto","trigger":"late_day_spend_catchup","source":"late_day_spend_catchup","max_bid_delta_pct":int(x.get("step_pct") or target_boost),"temporary_boost_target_pct":target_boost,"request_id":f"{_late_run}:{a}:{iid}"}
                 try:
                     r=_post("/api/cpx_advisor/apply_one",payload); body=r.json() if r.content else {}; status=str(body.get("status") or "")
                     _real_change = bool(status=="ok" and body.get("old_bid_rub") is not None and body.get("new_bid_rub") is not None and float(body.get("new_bid_rub"))>float(body.get("old_bid_rub")))

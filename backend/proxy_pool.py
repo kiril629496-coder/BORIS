@@ -1,5 +1,6 @@
 """Резидентный прокси-пул для обхода блокировок Avito (капча/фингерпринт)."""
 
+import asyncio
 import os
 import random
 import threading
@@ -9,14 +10,26 @@ load_dotenv()
 PROXY_HOST = os.getenv("PROXY_HOST")
 PROXY_PORT_MIN = int(os.getenv("PROXY_PORT_MIN", 10000))
 PROXY_PORT_MAX = int(os.getenv("PROXY_PORT_MAX", 10999))
+PROXY_PORT = int(os.getenv("PROXY_PORT", "0") or 0)
 PROXY_USER = os.getenv("PROXY_USER")
+
+
+def _avito_candidate_ports() -> list[int]:
+    """Return the actual configured Avito proxy endpoints.
+
+    PROXY_PORT is authoritative for providers that expose one static endpoint;
+    the legacy range is used only when no explicit port is configured.
+    """
+    if PROXY_PORT > 0:
+        return [PROXY_PORT]
+    return list(range(PROXY_PORT_MIN, PROXY_PORT_MAX + 1))
 PROXY_PASS = os.getenv("PROXY_PASS")
 
 
 def get_random_proxy_url():
     if not all([PROXY_HOST, PROXY_USER, PROXY_PASS]):
         return None
-    port = random.randint(PROXY_PORT_MIN, PROXY_PORT_MAX)
+    port = random.choice(_avito_candidate_ports())
     return f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{port}"
 
 
@@ -30,7 +43,7 @@ def get_requests_proxies():
 def get_playwright_proxy():
     if not all([PROXY_HOST, PROXY_USER, PROXY_PASS]):
         return None
-    port = random.randint(PROXY_PORT_MIN, PROXY_PORT_MAX)
+    port = random.choice(_avito_candidate_ports())
     return {
         "server": f"http://{PROXY_HOST}:{port}",
         "username": PROXY_USER,
@@ -123,40 +136,154 @@ def calc_intl_proxy_cost_rub(bytes_count: int) -> float:
     return round(gb * INTL_PROXY_COST_PER_GB_RUB, 4)
 
 
-# ===== ПОИСК ЧИСТОГО ПОРТА (Avito банит ~94% IP пула, ~6% чистые) =====
+# ===== VALIDATED AVITO ROUTE POOL =====
 import time as _time
-_clean_port_cache = {"port": None, "ts": 0}
-_CLEAN_TTL = 600  # 10 минут — держим найденный чистый порт, не перебираем каждый раз
+_clean_port_cache: dict[str, dict] = {}
+_CLEAN_TTL = 600
+_avito_proxy_health = {"state": "unknown", "checked_at": 0.0, "detail": None, "open_ports": 0, "tested_ports": 0}
 
 
-async def find_clean_port(max_tries: int = 20):
-    """Перебирает порты пула, возвращает первый, который Avito не банит. Кэширует на 10 мин."""
-    global _clean_port_cache
-    now = _time.time()
-    if _clean_port_cache["port"] and (now - _clean_port_cache["ts"]) < _CLEAN_TTL:
-        return _clean_port_cache["port"]
+def get_avito_proxy_health() -> dict:
+    """Return a secret-free diagnostic snapshot for the Avito route pool."""
+    return dict(_avito_proxy_health)
+
+
+async def _tcp_port_open(host: str, port: int, timeout: float = 1.5) -> bool:
+    try:
+        _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, int(port)), timeout=timeout)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+async def avito_proxy_port_reachable(port: int, timeout: float = 1.5) -> bool:
+    """Check one pinned proxy port without touching Avito or exposing credentials."""
+    if not PROXY_HOST:
+        return False
+    try:
+        return await _tcp_port_open(PROXY_HOST, int(port), timeout=timeout)
+    except Exception:
+        return False
+
+
+async def probe_avito_proxy_transport(sample_size: int = 8) -> dict:
+    """Fast transport preflight before launching Chromium.
+
+    If every sampled proxy port refuses TCP, there is no value in starting dozens
+    of Playwright instances. This turns a multi-minute fake "Avito block" into a
+    precise infrastructure state in a few seconds.
+    """
+    global _avito_proxy_health
     if not all([PROXY_HOST, PROXY_USER, PROXY_PASS]):
+        _avito_proxy_health = {
+            "state": "not_configured", "checked_at": _time.time(), "detail": "proxy_pool_not_configured",
+            "open_ports": 0, "tested_ports": 0,
+        }
+        return dict(_avito_proxy_health)
+    ports = _avito_candidate_ports()
+    if not ports:
+        _avito_proxy_health = {
+            "state": "transport_down", "checked_at": _time.time(), "detail": "empty_port_range",
+            "open_ports": 0, "tested_ports": 0,
+        }
+        return dict(_avito_proxy_health)
+    sample = random.sample(ports, min(max(1, int(sample_size)), len(ports)))
+    results = await asyncio.gather(*[_tcp_port_open(PROXY_HOST, p) for p in sample])
+    open_count = sum(1 for ok in results if ok)
+    _avito_proxy_health = {
+        "state": "transport_ok" if open_count else "transport_down",
+        "checked_at": _time.time(),
+        "detail": None if open_count else "proxy_connection_refused_or_unreachable",
+        "open_ports": open_count,
+        "tested_ports": len(sample),
+    }
+    return dict(_avito_proxy_health)
+
+
+async def find_clean_port(max_tries: int = 20, exclude_ports: set[int] | None = None, cache_key: str = "global", force_refresh: bool = False):
+    """Return one Avito-usable proxy port with transport-aware diagnostics.
+
+    Ports are sampled without replacement. ``cache_key`` keeps sticky validated
+    routes independent between client accounts; ``exclude_ports`` prevents two
+    active accounts from being assigned the same exit while capacity is available.
+    """
+    global _clean_port_cache, _avito_proxy_health
+    now = _time.time()
+    exclude_ports = {int(p) for p in (exclude_ports or set())}
+    cache_key = str(cache_key or "global")[:160]
+    cached = _clean_port_cache.get(cache_key) or {}
+    if (not force_refresh and cached.get("port")
+            and int(cached.get("port")) not in exclude_ports
+            and (now - float(cached.get("ts") or 0)) < _CLEAN_TTL):
+        return int(cached["port"])
+    health = await probe_avito_proxy_transport(sample_size=min(8, max(2, int(max_tries))))
+    if health.get("state") != "transport_ok":
         return None
+
+    ports = [p for p in _avito_candidate_ports() if p not in exclude_ports]
+    random.shuffle(ports)
+    ports = ports[:min(max(1, int(max_tries)), len(ports))]
     from playwright.async_api import async_playwright
+    blocked = auth_or_proxy = transport_errors = 0
     async with async_playwright() as pw:
-        for _ in range(max_tries):
-            port = random.randint(PROXY_PORT_MIN, PROXY_PORT_MAX)
+        for port in ports:
+            browser = None
             try:
-                b = await pw.chromium.launch(headless=True, args=["--no-sandbox"],
-                        proxy={"server": f"http://{PROXY_HOST}:{port}", "username": PROXY_USER, "password": PROXY_PASS})
-                pg = await b.new_page()
-                await pg.goto("https://www.avito.ru/autoload/documentation/templates/107132", timeout=22000, wait_until="domcontentloaded")
-                t = (await pg.title()).lower()
-                await b.close()
-                if "ограничен" not in t and not ("доступ" in t and "проблема" in t):
-                    _clean_port_cache = {"port": port, "ts": now}
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox"],
+                    proxy={"server": f"http://{PROXY_HOST}:{port}", "username": PROXY_USER, "password": PROXY_PASS},
+                )
+                page = await browser.new_page()
+                response = await page.goto("https://www.avito.ru/", timeout=16000, wait_until="domcontentloaded")
+                body = (await page.locator("body").inner_text(timeout=5000)).lower()
+                title = (await page.title()).lower()
+                status = response.status if response else 0
+                bad_markers = ("доступ ограничен", "проблема с ip", "firewallcaptcha", "geetest_captcha")
+                is_blocked = any(x in body or x in title for x in bad_markers)
+                if status == 407:
+                    auth_or_proxy += 1
+                elif status and status < 500 and not is_blocked:
+                    _clean_port_cache[cache_key] = {"port": port, "ts": _time.time()}
+                    _avito_proxy_health = {
+                        "state": "ready", "checked_at": _time.time(), "detail": None,
+                        "open_ports": health.get("open_ports", 0), "tested_ports": health.get("tested_ports", 0),
+                    }
                     return port
-            except Exception:
-                try:
-                    await b.close()
-                except Exception:
-                    pass
-                continue
+                elif is_blocked:
+                    blocked += 1
+                else:
+                    transport_errors += 1
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "407" in msg or "proxy authentication" in msg:
+                    auth_or_proxy += 1
+                elif "proxy" in msg or "connection" in msg or "tunnel" in msg:
+                    transport_errors += 1
+                else:
+                    blocked += 1
+            finally:
+                if browser is not None:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+    if auth_or_proxy and auth_or_proxy >= max(blocked, transport_errors):
+        state, detail = "auth_failed", "proxy_authentication_failed"
+    elif transport_errors and transport_errors >= blocked:
+        state, detail = "transport_degraded", "proxy_transport_failed_during_validation"
+    else:
+        state, detail = "avito_blocked", "no_avito_usable_exit"
+    _avito_proxy_health = {
+        "state": state, "checked_at": _time.time(), "detail": detail,
+        "open_ports": health.get("open_ports", 0), "tested_ports": health.get("tested_ports", 0),
+        "blocked_attempts": blocked, "transport_errors": transport_errors, "auth_errors": auth_or_proxy,
+    }
     return None
 
 

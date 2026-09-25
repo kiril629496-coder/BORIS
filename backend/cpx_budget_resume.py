@@ -51,7 +51,19 @@ SAFETY_RATIO = 0.90
 
 
 def _token(account_id: str) -> str:
-    raw = get_avito_token(account_id)
+    # TOKEN_RETRY_ACCOUNT_ISOLATION_V1: retry only token acquisition, never
+    # replay a compensation action whose provider outcome could be unknown.
+    for attempt in range(3):
+        try:
+            raw = get_avito_token(account_id)
+            break
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            print(json.dumps({"account_id": account_id, "stage": "resume_token",
+                              "status": "retry" if attempt < 2 else "degraded",
+                              "reason": type(exc).__name__, "attempt": attempt + 1}), flush=True)
+            if attempt == 2:
+                raise
+            __import__("time").sleep(2 ** attempt)
     if isinstance(raw, dict):
         return str(raw.get("access_token") or raw.get("token") or "")
     return str(raw or "")
@@ -130,6 +142,63 @@ def _set_state_status(account_id: str, status: str, **extra) -> None:
     _save_resume_state(account_id, state)
 
 
+def _resume_money_signal_gate(db, account_id: str, today_msk: str) -> tuple[bool, dict]:
+    """Money-signal gate with a narrow midnight compensation exception.
+
+    Avito can keep the item-stats provider day on yesterday for a short period
+    after the Moscow commercial day has already rolled. For ordinary NEW raises
+    this remains fail-closed. For exact prior-day budget-resume compensation we
+    may proceed only when the spend sample is fresh for today, provider stats are
+    complete/fresh/coherent but exactly one day behind, shared throttle is clear,
+    and current-day spend is still <=5% of the owner budget. Yesterday's contacts
+    are never counted as today's KPI in this mode.
+    """
+    from datetime import date as _date, timedelta as _td
+    from app.services.marketing_signal_guard import money_raise_signals_eligible
+    ok, evidence = money_raise_signals_eligible(
+        db, account_id, max_age_seconds=FRESH_SECONDS, max_snapshot_skew_seconds=300
+    )
+    if ok:
+        return True, evidence
+    try:
+        actual_today = datetime.now(MOSCOW).date().isoformat()
+        if str(today_msk) != actual_today:
+            return False, evidence
+        limit = float(effective_daily_budget_limit(db, account_id) or 0)
+        spend = latest_confirmed_spend(db, account_id, max_age_seconds=FRESH_SECONDS) or {}
+        spent = float(spend.get("spent_today_rub"))
+        stats = (evidence or {}).get("stats") if isinstance((evidence or {}).get("stats"), dict) else {}
+        expected_prev = (_date.fromisoformat(today_msk) - _td(days=1)).isoformat()
+        safe = bool(
+            limit > 0
+            and str(spend.get("status") or "") == "ok"
+            and str(spend.get("spending_date") or "") == str(today_msk)
+            and spent >= 0
+            and spent <= limit * 0.05 + 1e-9
+            and bool((evidence or {}).get("spend_ok"))
+            and bool((evidence or {}).get("coherent"))
+            and bool((evidence or {}).get("throttle_clear"))
+            and str(stats.get("reason") or "") == "provider_stats_day_lagged"
+            and bool(stats.get("complete"))
+            and str(stats.get("provider_stats_day") or "") == expected_prev
+            and str(stats.get("marketing_day") or "") == str(today_msk)
+        )
+        if not safe:
+            return False, evidence
+        detail = dict(evidence or {})
+        detail.update({
+            "reason":"midnight_provider_day_lag_compensation",
+            "compensation_only":True,
+            "today_contacts_unknown":True,
+            "spent_today_rub":spent,
+            "daily_budget_limit_rub":limit,
+            "max_bootstrap_spend_rub":round(limit * 0.05, 2),
+        })
+        return True, detail
+    except Exception:
+        return False, evidence
+
+
 def _fresh_business_gate(db, account_id: str, today_msk: str) -> tuple[bool, str, dict]:
     limit = effective_daily_budget_limit(db, account_id)
     if not limit or float(limit) <= 0:
@@ -174,10 +243,7 @@ def _fresh_business_gate(db, account_id: str, today_msk: str) -> tuple[bool, str
     # a real money raise. Individually fresh spend and stats are insufficient if
     # they describe materially different provider moments. Reuse the canonical
     # <=15m freshness + <=5m snapshot-skew proof used by other paid lanes.
-    from app.services.marketing_signal_guard import money_raise_signals_eligible
-    _signals_ok, _signals = money_raise_signals_eligible(
-        db, account_id, max_age_seconds=FRESH_SECONDS, max_snapshot_skew_seconds=300
-    )
+    _signals_ok, _signals = _resume_money_signal_gate(db, account_id, today_msk)
     if not _signals_ok:
         return False, "money_signal_stale_or_degraded", {
             "money_signal": _signals,
@@ -187,7 +253,11 @@ def _fresh_business_gate(db, account_id: str, today_msk: str) -> tuple[bool, str
 
     kpi = _kpi(db, account_id)
     items = stats.get("items") if isinstance(stats.get("items"), list) else []
-    contacts = sum(int((x or {}).get("contacts") or 0) for x in items if isinstance(x, dict))
+    _midnight_comp = bool((_signals or {}).get("compensation_only"))
+    # Never reinterpret yesterday's provider contacts as today's KPI.
+    contacts = None if _midnight_comp else sum(
+        int((x or {}).get("contacts") or 0) for x in items if isinstance(x, dict)
+    )
     try:
         target = float(kpi.get("target_leads_per_day") or 0)
     except Exception:
@@ -196,8 +266,8 @@ def _fresh_business_gate(db, account_id: str, today_msk: str) -> tuple[bool, str
         max_cpl = float(kpi.get("max_cost_per_lead_rub") or 0)
     except Exception:
         max_cpl = 0.0
-    cpl = (spent / contacts) if contacts > 0 else None
-    if target > 0 and contacts >= target:
+    cpl = (spent / contacts) if contacts is not None and contacts > 0 else None
+    if contacts is not None and target > 0 and contacts >= target:
         return False, "daily_kpi_met", {
             "contacts_today": contacts, "target_leads_per_day": target,
             "spent_today_rub": spent,
@@ -207,7 +277,7 @@ def _fresh_business_gate(db, account_id: str, today_msk: str) -> tuple[bool, str
             "contacts_today": contacts, "cpl_rub": round(cpl, 2),
             "max_cpl_rub": max_cpl, "spent_today_rub": spent,
         }
-    if contacts <= 0 and max_cpl > 0 and spent >= 1.10 * max_cpl:
+    if contacts is not None and contacts <= 0 and max_cpl > 0 and spent >= 1.10 * max_cpl:
         return False, "zero_lead_economic_emergency", {
             "contacts_today": 0, "spent_today_rub": spent, "max_cpl_rub": max_cpl,
         }
@@ -219,6 +289,8 @@ def _fresh_business_gate(db, account_id: str, today_msk: str) -> tuple[bool, str
         "spent_today_rub": spent,
         "daily_budget_limit_rub": float(limit),
         "stats_age_seconds": round(stats_age, 1),
+        "money_signal_mode": (_signals or {}).get("reason"),
+        "provider_day_lag_compensation": bool(_midnight_comp),
     }
 
 
@@ -327,6 +399,27 @@ def resume_account(account_id: str, apply: bool = False) -> dict:
     if not brake_day:
         out["status"] = "invalid_resume_state"
         return out
+    # CPX_BUDGET_RESUME_COMPLETE_PRE_GATE_V1:
+    # Once every durable item is already terminal, this queue is finished.
+    # Do not re-run today's CPL/budget gate first: that can regress a completed
+    # compensation state back to paused_daily_cpl_above_limit even though there
+    # is no money action left to perform. Completion is read-only truth.
+    items = state.get("items")
+    if not isinstance(items, dict):
+        out["status"] = "invalid_resume_items"
+        return out
+    pending = [
+        dict(v) for v in items.values()
+        if isinstance(v, dict) and str(v.get("status") or "") in
+        {"braked", "resume_retry", "provider_accepted", "verify_pending"}
+    ]
+    pending.sort(key=lambda x: int(x.get("item_id") or 0))
+    out["pending_before"] = len(pending)
+    if not pending:
+        out["status"] = "complete"
+        _set_state_status(account_id, "complete", completed_at=now_utc.isoformat())
+        return out
+
     _zero_budget_brake = str(state.get("brake_reason") or "") == "explicit_zero_budget"
     # ZERO_BUDGET_SAME_DAY_AUTHORIZED_RESUME_V1:
     # A normal budget-exhaustion brake must wait for the next Moscow day because
@@ -350,28 +443,29 @@ def resume_account(account_id: str, apply: bool = False) -> dict:
         _set_state_status(account_id, out["status"], last_gate=gate)
         return out
 
-    items = state.get("items")
-    if not isinstance(items, dict):
-        out["status"] = "invalid_resume_items"
-        return out
-    pending = [
-        dict(v) for v in items.values()
-        if isinstance(v, dict) and str(v.get("status") or "") in
-        {"braked", "resume_retry", "provider_accepted", "verify_pending"}
-    ]
-    pending.sort(key=lambda x: int(x.get("item_id") or 0))
-    out["pending_before"] = len(pending)
-    if not pending:
-        out["status"] = "complete"
-        _set_state_status(account_id, "complete", completed_at=now_utc.isoformat())
-        return out
-
     retry = int(account_throttle_remaining(account_id) or 0)
     if retry > 0:
         out["status"] = "deferred_avito_throttle"
         out["retry_after_seconds"] = retry
         return out
-    tok = _token(account_id)
+    try:
+        tok = _token(account_id)
+    except ProviderDeferred as exc:
+        out.update(status="deferred_avito_throttle", stage="resume_token",
+                   reason="provider_deferred", retry_after_seconds=int(exc.retry_after_seconds))
+        if apply:
+            _set_state_status(account_id, out["status"], last_token_error="provider_deferred")
+        return out
+    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        out.update(status="degraded", stage="resume_token", reason=type(exc).__name__,
+                   retryable=True, token_attempts=3)
+        out["errors"].append("resume_token:" + type(exc).__name__)
+        # No bid request or receipt was created. Preserve every item and its
+        # existing receipt; the next canonical hour may resume normally.
+        if apply:
+            _set_state_status(account_id, "degraded", last_token_error=out["reason"],
+                              last_token_error_at=now_utc.isoformat())
+        return out
     if not tok:
         out["status"] = "blocked_no_avito_token"
         return out
@@ -408,16 +502,36 @@ def resume_account(account_id: str, apply: bool = False) -> dict:
             for entry in active_pending:
                 iid = int(entry.get("item_id"))
                 p = promo_map.get(iid) or {}
-                if p.get("manualPromotion") or p.get("autoPromotion"):
+                manual = p.get("manualPromotion") if isinstance(p.get("manualPromotion"), dict) else {}
+                auto = p.get("autoPromotion") if isinstance(p.get("autoPromotion"), dict) else {}
+                try:
+                    exact_snapshot = int(entry.get("bid_penny") or 0)
+                    live_manual = int(manual.get("bidPenny") or 0) if manual else 0
+                except Exception:
+                    exact_snapshot = 0; live_manual = 0
+                if manual or auto:
+                    # CPX_BUDGET_RESUME_EXACT_EXISTING_VERIFY_V1: merely having
+                    # some promotion is not proof of restoration. If BORIS later
+                    # created a different low bid after the incident (PBI: 9 ₽ vs
+                    # exact 29 ₽), keep the item in the compensation queue.
+                    if exact_snapshot > 0 and live_manual != exact_snapshot:
+                        pending_entry = dict(entry)
+                        pending_entry["current_bid_penny"] = live_manual
+                        pending_entry["existing_promotion_mismatch"] = True
+                        candidates.append(pending_entry)
+                        continue
                     out["already_promoted"] += 1
                     if apply:
                         _mark_state_item(
                             account_id, iid, "already_promoted",
                             restored_at=now_utc.isoformat(),
-                            restore_reason="promotion_already_present",
+                            restore_reason="promotion_already_present_exact",
+                            observed_bid_penny=live_manual or None,
                         )
                     continue
-                candidates.append(entry)
+                pending_entry = dict(entry)
+                pending_entry["current_bid_penny"] = 0
+                candidates.append(pending_entry)
             out["candidates"] = len(candidates)
             if not apply:
                 out["status"] = "would_resume" if candidates else "nothing_to_resume"
@@ -510,13 +624,10 @@ def resume_account(account_id: str, apply: bool = False) -> dict:
                     # canonical spend/stats pair afterwards, at the final local
                     # DB boundary, so a pair that crossed the 15m/5m limits while
                     # waiting can never authorize a restore write.
-                    from app.services.marketing_signal_guard import money_raise_signals_eligible as _resume_signals_ok
                     _signal_db = SessionLocal()
                     try:
-                        _final_signal_ok, _final_signal = _resume_signals_ok(
-                            _signal_db, account_id,
-                            max_age_seconds=FRESH_SECONDS,
-                            max_snapshot_skew_seconds=300,
+                        _final_signal_ok, _final_signal = _resume_money_signal_gate(
+                            _signal_db, account_id, today_msk
                         )
                     finally:
                         _signal_db.close()
@@ -865,7 +976,13 @@ def main() -> int:
         accounts = _accounts(args.account.strip() or None)
         print(f"CPX_BUDGET_RESUME accounts={len(accounts)} apply={args.apply}", flush=True)
         for account_id in accounts:
-            out = resume_account(account_id, apply=args.apply)
+            try:
+                out = resume_account(account_id, apply=args.apply)
+            except Exception as exc:
+                # Isolate unexpected account failures too, but keep nonzero exit
+                # status so an internal bug never becomes a false healthy cycle.
+                out = {"account_id": account_id, "status": "error",
+                       "stage": "budget_resume", "reason": type(exc).__name__}
             print(json.dumps(out, ensure_ascii=False, default=str), flush=True)
             if out.get("status") in {"error", "invalid_resume_state", "invalid_resume_items"}:
                 failures.append(account_id)

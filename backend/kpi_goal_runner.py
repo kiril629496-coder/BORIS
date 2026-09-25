@@ -52,6 +52,43 @@ def log(msg: str):
     )
 
 
+def _notify_budget_block(account_id: str, target_leads: float = 0.0):
+    """Visible, deduplicated owner escalation for red KPI with no money authority."""
+    try:
+        from app.services.notification_store import append_notification
+        db = SessionLocal()
+        try:
+            day = datetime.now(timezone.utc).date().isoformat()
+            target = int(target_leads) if float(target_leads or 0).is_integer() else float(target_leads or 0)
+            append_notification(
+                db,
+                account_id,
+                {
+                    "ts": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "kind": "marketing_budget_block",
+                    "text": (
+                        f"⚠️ KPI по лидам не достигнут (цель: {target}/день), но дневной рекламный бюджет не задан. "
+                        "BORIS сохранил текущие продвижения и продолжает бесплатные действия, но не имеет права повышать ставки без вашего разрешения. "
+                        "Задайте дневной бюджет, если хотите разрешить автоматический разгон ставок."
+                    ),
+                    "read": False,
+                    "related_results": [
+                        {
+                            "type": "marketing_budget_block",
+                            "action": "set_daily_budget",
+                            "current_promotions_preserved": True,
+                        }
+                    ],
+                },
+                idempotency_key=f"marketing-budget-block:{account_id}:{day}",
+                commit=True,
+            )
+        finally:
+            db.close()
+    except Exception as exc:
+        log(f"[{account_id}] BUDGET_BLOCK_NOTIFY_FAIL {type(exc).__name__}:{str(exc)[:160]}")
+
+
 def get_goal_auto_accounts():
     """Production virtual-marketer scope.
 
@@ -876,7 +913,8 @@ def main():
             if _measurement_backlog_wait:
                 log(f"[{account_id}] MONEY_MEASUREMENT_WAIT: waiting={bootstrap.get('waiting_measurements')} cap={bootstrap.get('measurement_cap')}; new raise hypotheses paused until automatic measurement sweep frees capacity")
             if _force_non_money:
-                log(f"[{account_id}] MONEY_POLICY_BLOCK: {_bootstrap_reason}; paid bootstrap/ramp skipped, content/lifecycle continues")
+                log(f"[{account_id}] MONEY_POLICY_BLOCK: {_bootstrap_reason}; existing promotions preserved, paid increases blocked, content/lifecycle continues")
+                _notify_budget_block(account_id, float(acc.get("target_leads_per_day") or 0))
             elif _bs in {"error", "blocked"}:
                 _br = _bootstrap_reason or "new feed first-bid bootstrap blocked"
                 log(f"[{account_id}] FIRST_BID_INCIDENT: {_br}")

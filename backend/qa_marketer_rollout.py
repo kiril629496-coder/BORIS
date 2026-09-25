@@ -236,6 +236,7 @@ ck("ACCOUNT_RAISE_MEASUREMENT_BACKLOG_SELF_HEAL", "ACCOUNT_RAISE_MEASUREMENT_BAC
 ck("ACCOUNT_MEASUREMENT_BACKLOG_PLAN_HOLD", "MARKETER_ACCOUNT_MEASUREMENT_BACKLOG_PLAN_HOLD_V1" in runner and "MEASUREMENT_WAIT:" in runner and "account_measurement_backlog_wait" in runner and "measurement_sweep_then_retry_automatically" in runner)
 ck("ROLLOUT_GUARD_V1_COMPAT_MARKER", "ROLLOUT_GUARD_BLOCK_NOT_FAILURE_V1" in roll and "ROLLOUT_GUARD_BLOCK_NOT_FAILURE_V2" in roll)
 ck("MARKETER_CURRENT_PROMOTION_TRUTH", "MARKETER_CURRENT_PROMOTION_TRUTH_V2" in runner and "promotion_active" in runner)
+ck("CPX_ARCHIVE_PROVIDER_TRUTH_OVERRIDES_STALE_FLAG", "CPX_ARCHIVE_PROVIDER_TRUTH_OVERRIDES_STALE_FLAG_V1" in advisor and 'and not bool(entry.get("promotion_active"))' in advisor)
 ck('MARKETER_PUSH_MAX_CPL_KEYS_QUOTED', "headroom.get('actual_cpl_rub')" in runner and "headroom.get('red_cpl_rub')" in runner and 'headroom.get(actual_cpl_rub)' not in runner and 'headroom.get(red_cpl_rub)' not in runner)
 ck('MARKETER_STATS_FRESH_15M_MUTATION','MARKETER_MUTATION_STATS_FRESH_15M_V1' in advisor and '_stats_age <= 900' in advisor and '_mut_stats_ok' in advisor)
 ck('MARKETER_ADVICE_STATS_FRESH_15M','MARKETER_ADVICE_STATS_FRESH_15M_V1' in advisor and 'money_stats_snapshot_eligible' in advisor and 'not _stats_money_fresh' in advisor)
@@ -275,7 +276,21 @@ ck('NATIVE_RECEIPT_MEASURE_UI_CONTINUITY',
    'NATIVE_RECEIPT_MEASURE_UI_CONTINUITY_V1' in advisor
    and '_receipt_backed_native_wait' in advisor
    and 'measure_matches_current = bool(_receipt_backed_native_wait)' in advisor)
-ck('AUTONOMY_ROUNDING_BYPASS_DISABLED_AT_CALLER','AUTONOMY_ROUNDING_BYPASS_DISABLED_AT_CALLER_V1' in advisor and '"hourly_feed_ramp": False' in advisor and '"fast_raise_rounding": False' in advisor)
+ck('LOW_BID_WHOLE_RUBLE_PROGRESS',
+   'LOW_BID_WHOLE_RUBLE_PROGRESS_V1' in advisor
+   and '_trusted_low_bid_rounding_sources' in advisor
+   and '"hourly_feed_ramp": bool(_low_bid_whole_ruble_rounding)' in advisor
+   and '"fast_raise_rounding": bool(_low_bid_whole_ruble_rounding)' in advisor
+   and 'allow_avito_rounding' in auto)
+ck('ACCOUNT_PROVEN_FIRST_BID_BASELINE',
+   'ACCOUNT_PROVEN_FIRST_BID_BASELINE_V1' in advisor
+   and 'working_bid_floor_rub' in advisor
+   and 'new_item_floor_bid = max(_provider_floor, int(_account_floor or 0))' in advisor)
+ck('FEED20_OWNER_WORKING_FIRST_BID_FLOOR',
+   'OWNER_WORKING_FIRST_BID_FLOOR_V1' in advisor
+   and 'str(body.source or "") == "feed20"' in advisor
+   and '_configured_working_floor_penny is not None' in advisor
+   and 'new_item_floor_bid = max(' in advisor)
 signal_guard=(ROOT/'app/services/marketing_signal_guard.py').read_text()
 action_log=(ROOT/'app/api/action_log_api.py').read_text()
 ck('MONEY_STATS_FRESH_HELPER','money_stats_snapshot_eligible' in signal_guard and 'max_age_seconds: float = 900.0' in signal_guard)
@@ -301,6 +316,9 @@ ck('OWNERLESS_SOAK_RETIRED', 'RETIRED_OWNERLESS_MARKETER_V1' in ownerless and 'B
 planeta_soak=(ROOT/'planeta_60m_autonomous_soak.py').read_text()
 ck('OWNERLESS_PLANETA_MONEY_SOAK_RETIRED','RETIRED_OWNERLESS_PLANETA_MONEY_SOAK_V1' in planeta_soak and 'BLOCKED_RETIRED_OWNERLESS_PLANETA_MONEY_SOAK' in planeta_soak)
 ck("NON_MONEY_MONEY_FENCE_POLICY_WAIT", "NON_MONEY_MONEY_FENCE_IS_POLICY_WAIT_V1" in (ROOT/"kpi_goal_runner.py").read_text())
+ck("LOW_WALLET_NON_MONEY_CONTINUATION", "KPI_LOW_WALLET_NON_MONEY_CONTINUATION_V1" in (ROOT/"app/api/avito.py").read_text() and "and not allow_stale_non_money" in (ROOT/"app/api/avito.py").read_text())
+ck("NON_MONEY_CPL_CONTENT_FALLBACK", "KPI_NON_MONEY_CPL_CONTENT_FALLBACK_V1" in (ROOT/"app/api/avito.py").read_text() and "non_money_cpl_content_fallback" in (ROOT/"app/api/avito.py").read_text())
+ck("FIRST_BID_ATOMIC_CAP_POLICY_BLOCK", "FIRST_BID_ATOMIC_CAP_POLICY_BLOCK_V1" in (ROOT/"app/api/cpx_advisor.py").read_text() and "first_bid_cross_source_hourly_limit" in (ROOT/"app/api/cpx_advisor.py").read_text())
 ck("NON_MONEY_MEASUREMENT_LIFECYCLE_SWEEP", "NON_MONEY_MEASUREMENT_LIFECYCLE_SWEEP_V1" in (ROOT/"kpi_goal_runner.py").read_text() and "/api/cpx_advisor/run" in (ROOT/"kpi_goal_runner.py").read_text())
 ck("NON_MONEY_FRESH_INVENTORY_PROVIDER_SKIP", "NON_MONEY_FRESH_INVENTORY_PROVIDER_SKIP_V1" in (ROOT/"kpi_goal_runner.py").read_text() and "_fresh_complete_active_inventory" in (ROOT/"kpi_goal_runner.py").read_text() and "NON_MONEY_INVENTORY_FROM_DAILY_STATS" in (ROOT/"kpi_goal_runner.py").read_text() and '"source": "fresh_complete_daily_stats"' in (ROOT/"kpi_goal_runner.py").read_text())
 ck("NON_MONEY_LOCK_WAIT_FOR_DEPLOY", "NON_MONEY_LOCK_WAIT_FOR_DEPLOY_V1" in (ROOT/"kpi_goal_runner.py").read_text() and "BORIS_KPI_NONMONEY_LOCK_WAIT_SEC" in (ROOT/"kpi_goal_runner.py").read_text() and "KPI_NON_MONEY_LOCK_ACQUIRED" in (ROOT/"kpi_goal_runner.py").read_text())
@@ -317,7 +335,7 @@ ck("GUARDIAN_BUDGET_BRAKE_SELF_HEAL", "GUARDIAN_BUDGET_BRAKE_SELF_HEAL_V1" in gu
 cap_reconciler=(ROOT/"cpx_cap_reconciler.py").read_text()
 ck("CPX_CAP_TRANSPORT_DEFERRED", "CPX_CAP_TRANSPORT_DEFERRED_V2" in cap_reconciler and 'result["status"] = "deferred"' in cap_reconciler and '"ConnectTimeout", "ReadTimeout", "ConnectError", "PoolTimeout"' in cap_reconciler)
 ck("CPX_CAP_SAFETY_LOWER_LANE", "CPX_CAP_SAFETY_LOWER_LANE_V1" in cap_reconciler and '"safety_lane": "lower_only"' in cap_reconciler and '"can_increase_spend": False' in cap_reconciler)
-ck("LATE_DAY_CAUSAL_POOL", "LATE_DAY_CAUSAL_POOL_V2" in (ROOT/"late_day_spend_controller.py").read_text() and "if contacts_7d<=0:continue" in (ROOT/"late_day_spend_controller.py").read_text() and "LATE_DAY_MEASUREMENT_BINDING_V3" in (ROOT/"late_day_spend_controller.py").read_text() and "LATE_DAY_LIVE_CONVERTER_FALLBACK_V1" in (ROOT/"late_day_spend_controller.py").read_text())
+ck("LATE_DAY_CAUSAL_POOL", "DAILY_BUDGET_SELF_LEARNING_V1" in (ROOT/"late_day_spend_controller.py").read_text() and "pacing_lane" in (ROOT/"late_day_spend_controller.py").read_text() and "views_7d>=20" in (ROOT/"late_day_spend_controller.py").read_text() and "waiting_measurement" in (ROOT/"late_day_spend_controller.py").read_text())
 ck("LATE_DAY_MONEY_CONTOUR_PROTECTED", "backend/late_day_spend_controller.py" in (ROOT/"app/ext_api/repo.py").read_text())
 ck("REACH_RESCUE_DAILY_GUARD", "REACH_RESCUE_DAILY_EVIDENCE_V2" in (ROOT/"app/services/intraday.py").read_text() and "REACH_RESCUE_ONE_HYPOTHESIS_PER_CYCLE_V2" in (ROOT/"cpx_advisor_runner.py").read_text() and "REACH_RESCUE_DAILY_MEASURE_V3" in (ROOT/"app/api/cpx_advisor.py").read_text())
 ck("NEW_FEED_RAMP_FRESH_SIGNAL", "NEW_FEED_RAMP_FRESH_SIGNAL_V4" in (ROOT/"app/api/cpx_advisor.py").read_text())
@@ -330,14 +348,14 @@ marketer_timer=Path('/etc/systemd/system/boris-ai-marketer.timer').read_text()
 guardian=Path('boris_guardian.py').read_text()
 ck('KPI_TIMER_SELF_HEAL_GUARDIAN','KPI_TIMER_SELF_HEAL_V2' in guardian and 'KPI_TIMER_SELF_HEAL_V1_TEST_CONTRACT' in guardian and 'if (not timer_active) or (not timer_enabled):' in guardian and "systemctl enable --now " in guardian and 'NextElapseUSecRealtime' in guardian and Path('/etc/systemd/system/boris-ai-marketer.timer.d/20-no-manual-stop.conf').exists() and 'RefuseManualStop=yes' in Path('/etc/systemd/system/boris-ai-marketer.timer.d/20-no-manual-stop.conf').read_text())
 marketer_pipe=(ROOT/'ai_marketer_hourly.sh').read_text()
-ck('LATE_DAY_SPEND_CATCHUP_POLICY','INTRADAY_SPEND_PACING_START_V1' in late_day and 'BOOST_START_HOUR=10' in late_day and 'LATE_DAY_SPEND_TIME_PACING_V1' in late_day and '_catchup_intensity(ratio, now_msk)' in late_day)
+ck('LATE_DAY_SPEND_CATCHUP_POLICY','DAILY_BUDGET_TARGET_PACING_V1' in late_day and 'BOOST_START_HOUR=8' in late_day and 'PACING_MIN_DAILY_RATIO=0.95' in late_day and 'PACING_TARGET_DAILY_RATIO=0.98' in late_day and 'LATE_DAY_SPEND_TIME_PACING_V1' in late_day and '_catchup_intensity(ratio, now_msk)' in late_day)
 ck('LATE_DAY_SPEND_TIME_PACING','expected_spend_ratio' in late_day and 'pacing_gap_ratio' in late_day and 'seconds / 86400.0' in late_day)
 ck('LATE_DAY_SPEND_EFFECT_LEARNING','LATE_DAY_SPEND_EFFECT_LEARNING_V1' in late_day and 'late_day_spend_learning' in late_day and 'contacts_at_check' in late_day and 'learn_previous_days(now)' in late_day)
-ck('LATE_DAY_NEGATIVE_FEEDBACK_FENCE','LATE_DAY_NEGATIVE_FEEDBACK_FENCE_V1' in late_day and "_recent_verdicts[-2:]" not in late_day and "all(v==\"no_lead_after_boost\" for v in _recent_verdicts)" in late_day)
+ck('LATE_DAY_NEGATIVE_FEEDBACK_FENCE','DAILY_BUDGET_SELF_LEARNING_V1' in late_day and '_negative_boost_ids' in late_day and 'exclude_ids=_negative_boost_ids' in late_day and 'all(v=="no_lead_after_boost" for v in _recent_verdicts)' not in late_day)
 ck('LATE_DAY_SPEND_FRESH_MONEY_PROOF','LATE_DAY_SPEND_FRESH_MONEY_PROOF_V1' in late_day and 'money_raise_signals_eligible' in late_day and 'max_age_seconds=900.0' in late_day)
 ck('LATE_DAY_CANONICAL_ENTITLEMENT','LATE_DAY_CANONICAL_SERVICE_ENTITLEMENT_V1' in late_day and 'marketing_service_entitlement' in late_day and 'blocked_entitlement' in late_day and 'changed_avito":False' in late_day)
 ck('LATE_DAY_ONE_STEP_MEASURE_POLICY','LATE_DAY_ONE_STEP_THEN_MEASURE_V2' in late_day and 'target_uplift_pct' in late_day and 'step_pct=min(int(target_boost),10)' in late_day and 'waiting_measurement' in late_day)
-ck('LATE_DAY_LIVE_CONVERTER_POLICY','LATE_DAY_LIVE_CONVERTER_FALLBACK_V1' in late_day and 'today_contacts>0' in late_day and 'contacts_7d>=2' in late_day)
+ck('LATE_DAY_LIVE_CONVERTER_POLICY','today_contacts>0' in late_day and 'contacts_7d>=2' in late_day and 'allow_exploration=True' in late_day and 'pacing_lane' in late_day)
 ck('LATE_DAY_MEASUREMENT_BINDING_POLICY','LATE_DAY_MEASUREMENT_BINDING_V3' in late_day and '_late_day_pacing_advice' in late_day and 'late_day_pacing_compatible' not in late_day)
 ck('BUDGET_BRAKE_MONOTONIC_OVERLIMIT','CPX_BUDGET_BRAKE_MONOTONIC_OVERLIMIT_V2' in budget_brake and 'stale_monotonic_overlimit_proof' in budget_brake)
 ck('BUDGET_BRAKE_SAFETY_LOWER_LANE','CPX_BUDGET_BRAKE_SAFETY_LOWER_LANE_V1' in budget_brake and '_remove(' in budget_brake and '_set_manual(' not in budget_brake and '"action":"raise"' not in budget_brake)
@@ -346,7 +364,11 @@ ck('LATE_DAY_SPEND_CATCHUP_GLOBAL_STEP','STRICT_STEP10_LATE_DAY_V1' in late_day 
 ck('LATE_DAY_SPEND_BASELINE_DURABLE','LATE_DAY_SPEND_BASELINE_DURABLE_V1' in advisor and 'baseline_bid_rub' in advisor)
 ck('LATE_DAY_SPEND_EXACT_RESET_COMPENSATION','LATE_DAY_SPEND_RESET_COMPENSATION_V1' in auto and 'allowed_late_day_exact_compensation' in auto and 'max_reset_drop_pct' in auto)
 ck('LATE_DAY_SPEND_IDEMPOTENT_NO_FAKE_STEP','LATE_DAY_SPEND_IDEMPOTENT_NO_FAKE_STEP_V1' in late_day and '_real_change' in late_day)
-ck('LATE_DAY_SPEND_DIRECT_30_50_SCOPE','STRICT_STEP10_LATE_DAY_V1' in late_day and 'target_boost, expected_ratio, pacing_gap = _catchup_intensity' in late_day and 'target_boost<=0' in late_day and 'if contacts>=target:continue' in late_day and 'if cpl is not None and cpl>red:continue' in late_day)
+ck('LATE_DAY_HOURLY_RUN_ID',
+   'LATE_DAY_HOURLY_RUN_ID_V1' in late_day
+   and 'late-boost-{now_msk.strftime' in late_day
+   and 'request_id":f"{_late_run}:{a}:{iid}"' in late_day)
+ck('LATE_DAY_SPEND_DIRECT_30_50_SCOPE','STRICT_STEP10_LATE_DAY_V1' in late_day and 'DAILY_BUDGET_TARGET_OVERRIDES_FREEZE_V1' in late_day and 'target_boost, expected_ratio, pacing_gap = _catchup_intensity' in late_day and 'target_boost<=0' in late_day and 'if contacts>=target:continue' not in late_day and 'if cpl is not None and cpl>red:continue' not in late_day)
 ck('LATE_DAY_SPEND_SHORT_ALIAS_WINDOW','LATE_DAY_SPEND_SHORT_ALIAS_WINDOW_V1' in advisor and '15.0 / 1440.0' in advisor)
 ck('LATE_DAY_SPEND_CONTENT_ISOLATION','LATE_DAY_SPEND_CONTENT_ISOLATION_V1' in avito and 'late_day_spend_boost_state' in avito)
 ck('LATE_DAY_SPEND_CANONICAL_WIRE','LATE_DAY_SPEND_RESET_WIRE_V1' in marketer_pipe and 'LATE_DAY_SPEND_CATCHUP_WIRE_V1' in marketer_pipe and '21:00:00 UTC' in marketer_timer)
@@ -471,7 +493,7 @@ ck('AUTOPILOT_MODE_PRECEDES_OWNER_MONEY_CONFIG', 'AUTOPILOT_MODE_PRECEDES_OWNER_
 ck('PAUSED_BY_OWNER_RUNTIME_TRUTH', 'PAUSED_BY_OWNER:' in roll and '_paused_by_owner' in roll and
    'owner_action_required' in roll and 'не будет автоматически повышать ставки, пока владелец не включит автопилот' in roll)
 ck('ZERO_BUDGET_EXISTING_SPEND_TRUTH', 'ZERO_BUDGET_EXISTING_SPEND_TRUTH_V1' in roll and "'budget_zero_existing_spend'" in roll and 'existing_placement_spend' in roll and 'boris_money_growth_blocked' in roll)
-ck('ZERO_BUDGET_EXISTING_CPX_BRAKE', 'ZERO_BUDGET_EXISTING_CPX_BRAKE_V1' in budget_brake and 'would_brake_zero_budget' in budget_brake and 'braked_zero_budget' in budget_brake and 'brake_reason="explicit_zero_budget"' in budget_brake and '_brake_explicit_zero_budget' in budget_brake)
+ck('ZERO_BUDGET_PRESERVES_EXISTING_CPX', 'ZERO_BUDGET_PRESERVE_EXISTING_CPX_V2' in budget_brake and 'existing_promotions_preserved' in budget_brake and 'zero_budget_growth_blocked_existing_preserved' in budget_brake and 'can_increase_spend' in budget_brake and '_brake_explicit_zero_budget' in budget_brake)
 ck('ZERO_BUDGET_SAME_DAY_AUTHORIZED_RESUME', 'ZERO_BUDGET_SAME_DAY_AUTHORIZED_RESUME_V1' in (ROOT/'cpx_budget_resume.py').read_text(encoding='utf-8') and 'explicit_zero_budget' in (ROOT/'cpx_budget_resume.py').read_text(encoding='utf-8') and 'zero_budget_same_day_resume_eligible' in (ROOT/'cpx_budget_resume.py').read_text(encoding='utf-8'))
 
 ck('STATIC_BLOCK_EXISTING_SPEND_HELPER', 'def _existing_spend_observation' in roll and 'primary_spend_type' in roll and 'spend_breakdown' in roll)
@@ -514,6 +536,15 @@ ck('PRESENCE_BUDGET_DRY_RUN_NO_MUTATION', 'PRESENCE_BUDGET_DRY_RUN_NO_MUTATION_V
    'mutate: bool = True' in money_policy_src and 'if mutate:' in money_policy_src and
    'mutate=bool(apply)' in budget_brake and 'would_freeze_additive_growth' in money_policy_src)
 ck('PAID_TARIFF_MANDATE_HOURLY_RECONCILE','PAID_TARIFF_MANDATE_HOURLY_RECONCILE_V1' in advisor and 'PAID_TARIFF_KPI_LATEST_SINGLETON_V1' in advisor and 'reconcile_paid_tariff_raise_mandates' in advisor and 'PAID_TARIFF_MANDATE_HOURLY_RECONCILE_WIRE_V1' in _hourly_src and 'paid_tariff_mandate_reconcile' in _hourly_src)
+# RED_CPL_LOWER_MEASURE_LOCK_FILTER_V1: planner/advisor must not repeatedly
+# select an item whose previous lower is still under causal measurement. The
+# final apply guard remains fail-closed; this earlier filter lets the next free
+# spend-reducing candidate progress instead of producing a permanent blocked loop.
+ck("RED_CPL_LOWER_MEASURE_LOCK_FILTER",
+   "RED_CPL_LOWER_MEASURE_LOCK_FILTER_V1" in advisor
+   and 'str(last_action or "") == "lower"' in advisor
+   and 'entry["reason_code"] = "measure_locked"' in advisor
+   and 'str(it.get("boris_measure_status") or "") != "waiting_measurement"' in runner)
 failed=[x for x in checks if not x[1]]
 print('QA_MARKETER_ROLLOUT=', 'PASS' if not failed else 'FAIL','checks=',len(checks),'failed=',len(failed))
 raise SystemExit(1 if failed else 0)

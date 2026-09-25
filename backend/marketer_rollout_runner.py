@@ -12,11 +12,13 @@ No global all-at-once money switch. Each cycle:
 The actual mutation always goes through cpx_advisor_runner -> apply_one -> autonomy guard.
 """
 from __future__ import annotations
-import json, subprocess, sys, math, time
+import json, subprocess, sys, math, time, os
 from datetime import datetime, timezone
 from pathlib import Path
 from sqlalchemy import text
-sys.path.insert(0, '/root/BORIS/backend')
+from sqlalchemy.exc import OperationalError
+RUNTIME_BACKEND = os.environ.get("BORIS_RUNTIME_BACKEND_ROOT", "/root/BORIS/backend")
+sys.path.insert(0, RUNTIME_BACKEND)
 from app.db.session import SessionLocal
 from app.models.storage import Storage
 from app.services.marketing_money_policy import latest_confirmed_spend, presence_budget_pressure
@@ -28,7 +30,7 @@ from app.api.cpx_advisor import hourly_account_low_views_ramp, profitable_day_pu
 STATE_KEY='marketer_rollout_state_v1'
 MAX_ACCOUNTS_PER_CYCLE=8
 CANARY_SAFE_CYCLES=3
-STABLE_MAX_ACTIONS=2
+STABLE_MAX_ACTIONS=5
 # OWNER_PRIORITY_GROWTH_ACCOUNTS_V1: owner explicitly asked these live clients to be
 # optimized urgently. This changes rotation priority only; it never bypasses
 # billing, KPI, fresh-money, hard-cap or autonomy guards.
@@ -42,8 +44,38 @@ OWNER_PRIORITY_MAX_PER_CYCLE=8
 # UNIFIED_STAGED_ALL_MARKETER_ACCOUNTS_V1
 
 
+def _release_read_tx(db):
+    """Release the physical coordinator DB connection before long provider work.
+
+    MARKETER_COORDINATOR_FRESH_SESSION_V2: rollback alone ends the SQL transaction
+    but the Session may keep/reuse the same physical SSL connection. PostgreSQL or
+    the network can close that socket while Avito/subprocess work runs, so the next
+    harmless read can abort the whole fleet. Session.close() safely rolls back any
+    read-only transaction and returns/discards the connection; SQLAlchemy checks out
+    a fresh connection on the next use of the same Session. Durable writes in this
+    runner commit explicitly before this boundary.
+    """
+    try:
+        db.close()
+    except Exception:
+        pass
+
+
 def _load(db,a,k):
-    r=db.execute(text("select value from storage where account_id=:a and key=:k order by id desc limit 1"),{'a':a,'k':k}).fetchone()
+    params={'a':a,'k':k}
+    stmt=text("select value from storage where account_id=:a and key=:k order by id desc limit 1")
+    try:
+        r=db.execute(stmt,params).fetchone()
+    except OperationalError:
+        # MARKETER_DB_READ_RECONNECT_V2: this is a pure SELECT, so one retry is
+        # safe. Close the Session's broken physical connection first; rollback
+        # alone can leave the same dead SSL socket attached to the Session. Never
+        # use this pattern for ambiguous provider writes or DB commits.
+        try:
+            db.close()
+        except Exception:
+            pass
+        r=db.execute(stmt,params).fetchone()
     if not r:return {}
     try:return json.loads(r[0] or '{}')
     except Exception:return {}
@@ -81,9 +113,8 @@ def _blocked_runtime_projection(account_id, reason, evidence=None):
             f"При бюджете BORIS 0 ₽ Avito уже списал {float(evidence.get('spent_today_rub') or 0):.0f} ₽ сегодня"
             + (f" (из них presence {float(evidence.get('presence_rub') or 0):.0f} ₽)." if evidence.get('presence_rub') is not None else ".")
             + " BORIS новые повышения ставок и рост числа объявлений не запускает; "
-              "активное CPX-продвижение автоматически снимается lower-only safety brake и остаётся выключенным до появления подтверждённого бюджета. "
-              "Если расход после этого продолжается, это отдельное базовое платное размещение/presence Avito: "
-              "его нужно изменить/отключить либо сознательно задать новый дневной бюджет."
+              "уже активное продвижение сохраняется как есть и не снимается автоматически только из-за нулевого бюджета. "
+              "Если нужно снова разрешить BORIS самостоятельно повышать ставки, задай подтверждённый дневной бюджет."
         ),
         'daily_budget_owner_provenance_missing': (
             f"Подтвердите сохранённый суточный рекламный бюджет {float(evidence.get('budget') or 0):.0f} ₽ "
@@ -716,6 +747,9 @@ def main():
         print('ROLLOUT_SELECTED',[(a,s,c,l) for a,s,c,l,_ in selected],flush=True)
         for a,stage,safe,live_successes,evidence in selected:
             max_actions=1 if stage!='stable' else STABLE_MAX_ACTIONS
+            # MARKETER_COORDINATOR_READ_TX_RELEASE_V1: do not pin a DB read
+            # transaction while account/provider work may take minutes.
+            _release_read_tx(db)
             # OWNER_PROFITABLE_DAY_SQUEEZE_V1
             growth=profitable_day_push(a,max_items=max_actions) or {}
             print('PROFITABLE_DAY_PUSH',a,json.dumps(growth,ensure_ascii=False,default=str)[:5000],flush=True)
@@ -766,11 +800,21 @@ def main():
                 _save(db,a,state)
                 print('ROLLOUT_RESULT',a,json.dumps(state,ensure_ascii=False,default=str)[:1800],flush=True)
                 continue
-            cmd=['/root/BORIS/backend/venv/bin/python','/root/BORIS/backend/cpx_advisor_runner.py','--apply','--account',a,'--max-actions',str(max_actions)]
+            # The child advisor can block on provider I/O for up to 240s. Release
+            # the coordinator read transaction before spawning it; `_runtime`
+            # below will transparently checkout/reconnect a fresh DB connection.
+            _release_read_tx(db)
+            cmd=['/root/BORIS/backend/venv/bin/python',os.path.join(RUNTIME_BACKEND,'cpx_advisor_runner.py'),'--apply','--account',a,'--max-actions',str(max_actions)]
             import os as _os_lane
             _env=dict(_os_lane.environ); _env["BORIS_MARKETER_MONEY_LANE"]="staged_rollout_v1"
+            # MARKETER_ROLLOUT_DB_SESSION_REFRESH_V1: provider/subprocess work can
+            # outlive PostgreSQL idle-in-transaction limits. End the coordinator
+            # read transaction before the long subprocess, then force a fresh
+            # connection before reading the runtime it produced.
+            db.rollback()
             p=subprocess.run(cmd,capture_output=True,text=True,timeout=240,env=_env)
             print(p.stdout[-5000:],flush=True)
+            db.rollback()
             rt=_runtime(db,a)
             applied=int(rt.get('applied') or 0); failed=int(rt.get('failed') or 0)
             blocked=int(rt.get('blocked') or 0); skipped=int(rt.get('skipped') or 0); planned=int(rt.get('planned') or 0)

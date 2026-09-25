@@ -3,6 +3,17 @@ set -u
 cd /root/BORIS/backend
 mkdir -p /root/BORIS/backend/logs
 exec >>/root/BORIS/backend/logs/ai_marketer_hourly.log 2>&1
+
+# AI_MARKETER_SERVICE_CALLER_FENCE_V1: the complete money pipeline may run only
+# inside the canonical timer-owned boris-ai-marketer.service cgroup.  This is
+# intentionally before the root lock, recovery marker and every money/provider
+# stage, so a direct shell/SentinelX invocation cannot create a second cycle.
+_ai_marketer_cgroup="$(cat /proc/self/cgroup 2>/dev/null || true)"
+if [[ "$_ai_marketer_cgroup" != *"boris-ai-marketer.service"* ]]; then
+  echo "BLOCKED_UNTRUSTED_AI_MARKETER_CALLER at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  exit 23
+fi
+unset _ai_marketer_cgroup
 LOCK=/tmp/boris_ai_marketer_hourly_root.lock
 exec 9>"$LOCK"
 flock -n 9 || { echo "AI_MARKETER_SKIP overlap $(date -u +%Y-%m-%dT%H:%M:%SZ)"; exit 0; }

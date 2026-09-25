@@ -1,5 +1,7 @@
 import os, time, datetime, html
 import sys
+from app.services.mass_ai_guard import qa_guarded_post as _qa_guarded_post
+from app.services.ai_privacy import sanitize_external_reference_image_bytes, safe_external_ai_payload
 QA_MODE = "ux" if "--ux" in sys.argv else "fast"
 for _l in open('/root/BORIS/backend/.env'):
     _l=_l.strip()
@@ -43,20 +45,38 @@ def ux_review(shot_path, persona="newbie"):
         from proxy_pool import get_intl_requests_proxies
         api_key=os.getenv("OPENAI_API_KEY")
         if not api_key or not os.path.exists(shot_path): return ""
-        b64=base64.b64encode(open(shot_path,"rb").read()).decode()
+        raw_image=open(shot_path,"rb").read()
+        safe_image, safe_mime = sanitize_external_reference_image_bytes(
+            raw_image, max_side=768, blur_radius=2.5
+        )
+        b64=base64.b64encode(safe_image).decode()
         _tail=(" Посмотри честно и коротко (маркеры '- '): что непонятно; куда нажать неочевидно; "
                "есть ли лишние или повторяющиеся кнопки; не перегружен ли экран; что упростить; понятно ли, как пользоваться и за что платить. "
                "Говори как обычный пользователь, не как дизайнер. Максимум 5 пунктов.")
         prompt = PERSONAS.get(persona, PERSONAS["newbie"]) + _tail
+        prompt, _privacy_vault = safe_external_ai_payload(prompt)
         proxies=get_intl_requests_proxies()
-        r=requests.post("https://api.openai.com/v1/chat/completions",
+        r=_qa_guarded_post(
+            requests.post,
+            "https://api.openai.com/v1/chat/completions",
+
             headers={"Authorization":"Bearer "+api_key,"Content-Type":"application/json"},
             json={"model":"gpt-4o-mini","messages":[{"role":"user","content":[
                 {"type":"text","text":prompt},
-                {"type":"image_url","image_url":{"url":"data:image/png;base64,"+b64}}]}],"max_tokens":350},
+                {"type":"image_url","image_url":{"url":"data:"+safe_mime+";base64,"+b64}}]}],"max_tokens":350},
             proxies=proxies, timeout=60)
         if r.status_code==200:
-            return r.json()["choices"][0]["message"]["content"].strip()
+            _d = r.json()
+            try:
+                sys.path.insert(0, "/root/BORIS/backend")
+                from app.usage import log_usage as _lg
+                _u = _d.get("usage") or {}
+                _lg("qa_internal", "openai", "gpt-4o-mini", "qa_ux_review_client",
+                    _u.get("prompt_tokens", 0), _u.get("completion_tokens", 0),
+                    request_id=r.headers.get("x-request-id"))
+            except Exception as _ue:
+                print("[usage qa]", str(_ue)[:100], flush=True)
+            return _d["choices"][0]["message"]["content"].strip()
         return "vision статус "+str(r.status_code)
     except Exception as e:
         return "UX-разбор не удался: "+str(e)[:80]

@@ -46,6 +46,40 @@ except Exception as e:
 S = {"диалогов": 0, "без изменений": 0, "чужая роль": 0, "чужой бизнес": 0,
      "cooldown": 0, "разобрано AI": 0, "создано": 0, "обновлено": 0, "ошибок": 0}
 
+# --- AI-БЮДЖЕТ -------------------------------------------------------------
+import uuid as _uuid
+from app.services import ai_budget as _budget
+
+_runs, _exhausted = {}, set()
+ANALYSIS_KOPEKS = 70  # факт по замеру 14.08: анализ gpt-5.4 стоит 43-66 коп., берём с запасом
+
+
+def _budget_allow(acc, planned):
+    """Разрешение на ОДИН платный анализ. Возвращает request_id либо None.
+
+    Резерв создаётся лениво — при первом реальном вызове для этого аккаунта,
+    когда бесплатные фильтры уже отсеяли лишнее."""
+    if acc in _exhausted:
+        return None
+    rid = _runs.get(acc)
+    if rid is None:
+        rid = "react:%s:%s" % (acc, _uuid.uuid4().hex[:8])
+        r = _budget.reserve(acc, "reactivation", OPERATION, rid,
+                            max(int(planned), 1) * ANALYSIS_KOPEKS)
+        if r.get("status") not in ("reserved", "exists"):
+            print("[budget] budget_reserve_blocked acc=%s статус=%s" % (acc, r.get("status")),
+                  flush=True)
+            _exhausted.add(acc)
+            return None
+        _runs[acc] = rid
+    a = _budget.allow_next(rid)
+    if not a.get("allowed"):
+        print("[budget] отказ acc=%s причина=%s" % (acc, a.get("reason")), flush=True)
+        _exhausted.add(acc)
+        return None
+    return _uuid.uuid4().hex
+# ---------------------------------------------------------------------------
+
 for acc in accounts:
     uid = own_avito_uid(db, acc)
     sets = account_item_sets(db, acc, uid)
@@ -78,7 +112,12 @@ for acc in accounts:
         S["разобрано AI"] += 1
         if not APPLY:
             continue
-        res = analyze(db, acc, chat, r["item_title"])
+        _rid = _budget_allow(acc, len(rows))
+        if _rid is None:
+            break          # бюджет аккаунта исчерпан — переходим к следующему
+        res = analyze(db, acc, chat, r["item_title"], request_id=_rid)
+        if res.get("paid"):
+            _budget.commit(_runs[acc], _rid)
         if not res["ok"]:
             S["ошибок"] += 1
             continue
@@ -143,7 +182,12 @@ for row in (db.execute(CHANGED, {"a": accounts}).fetchall() if accounts else [])
     S["переразобрано"] += 1
     if not APPLY:
         continue
-    res = analyze(db, acc, chat, None)
+    _rid = _budget_allow(acc, 1)
+    if _rid is None:
+        continue
+    res = analyze(db, acc, chat, None, request_id=_rid)
+    if res.get("paid"):
+        _budget.commit(_runs[acc], _rid)
     if not res["ok"]:
         S["ошибок"] += 1
         continue
@@ -155,6 +199,14 @@ for row in (db.execute(CHANGED, {"a": accounts}).fetchall() if accounts else [])
         {"r": d.get("reason"), "s": d.get("summary"), "c": d.get("confidence"),
          "p": bool(d.get("phone_received")), "m": int(last_msg), "i": cid})
     db.commit()
+
+# Освобождаем остатки резервов ПОСЛЕ обоих проходов: второй проход не вложен
+# в цикл по аккаунтам, и более раннее освобождение закрыло бы run досрочно.
+for _acc, _rid in _runs.items():
+    try:
+        _budget.release(_rid)
+    except Exception as _be:
+        print("[budget] release не удался acc=%s: %s" % (_acc, str(_be)[:80]), flush=True)
 
 after = db.execute(text("SELECT coalesce(sum(cost_rub),0) FROM api_usage"
                         " WHERE operation=:o"), {"o": OPERATION}).scalar()
