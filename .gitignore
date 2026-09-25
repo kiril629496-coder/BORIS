@@ -140,3 +140,17 @@ releases/
 software-site-build/
 software-site-deploy/
 backend/tests/*.tmp
+
+# --- production sync 2026-09-25: verified local build/recovery artifacts ---
+frontend/.boris-builds/
+frontend/.next*/
+frontend/_ux_recovery_backup_*/
+frontend/backups_*_before_*.tsx
+frontend/.tmp_review_*.html
+frontend/.boris_cc_live_*.cjs
+.boris-git-bundles/
+_backups/
+/boris.db
+backend/boris.db
+backend/ext_api.db
+backend/secrets/
