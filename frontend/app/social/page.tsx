@@ -1,15 +1,38 @@
 "use client";
+import { humanizeBusinessText } from "@/app/lib/humanizeBusinessText";
 import { useAccounts } from "../lib/AccountContext";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Icon, IconChip } from "../ui";
 
 const T = {
-  blue1:"#2F6FED", blue2:"#1E4FD8", purple1:"#7C5CFC", purple2:"#6344E8",
-  orange1:"#F79009", orange2:"#E8850B", green1:"#12B76A", green2:"#0E9457",
-  ink:"#1D2939", muted:"#667085", line:"#E3E7F0", bg:"#F5F7FB",
+  blue1:"var(--boris-primary)", blue2:"var(--boris-primary-hover)", purple1:"var(--boris-purple)", purple2:"#6f4bd9",
+  orange1:"var(--boris-warning)", orange2:"#c97308", green1:"var(--boris-success)", green2:"#11835f",
+  ink:"var(--boris-text-primary)", muted:"var(--boris-text-secondary)", line:"var(--boris-border)", bg:"var(--boris-background)",
 };
 
 type Project = any;
+
+function cleanPostText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function cleanSocialError(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw || /^[A-Z0-9_:-]+$/.test(raw)) return "Не удалось подготовить изображение для публикации";
+  return cleanPostText(humanizeBusinessText(raw, "Не удалось подготовить публикацию"));
+}
 
 export default function SocialPage() {
   const router = useRouter();
@@ -49,6 +72,7 @@ export default function SocialPage() {
   const [zoom, setZoom] = useState("");
   const [notice, setNotice] = useState("");
   const [autoHours, setAutoHours] = useState(0);
+  const [paidAuto, setPaidAuto] = useState(false);
   const [tzOffset, setTzOffset] = useState(3);
   const [editId, setEditId] = useState("");
   const [editText, setEditText] = useState("");
@@ -59,6 +83,21 @@ export default function SocialPage() {
     const t = typeof window !== "undefined" ? localStorage.getItem("boris_token") : null;
     if (!t) { router.push("/login"); return null; }
     return { Authorization: "Bearer " + t };
+  };
+
+  const openSocialPayment = async () => {
+    const h = auth(); if (!h || !account || busy) return;
+    const target = String(sel?.platforms || platforms || "both");
+    const pack = target === "tg" ? "post_tg" : target === "vk" ? "post_vk" : "post_both";
+    setBusy(true); setMsg("");
+    try {
+      const r = await fetch(`/api/payments/robokassa/link?account_id=${encodeURIComponent(account)}&pack=${encodeURIComponent(pack)}`, { headers:h });
+      const j = await jsonOrThrow(r);
+      if (!j?.url) throw new Error(j?.message || "Ссылка на оплату не получена");
+      window.location.href = j.url;
+    } catch (e: any) {
+      setMsg(e?.message || "Не удалось открыть оплату");
+    } finally { setBusy(false); }
   };
 
   const fillForm = (p: Project | null) => {
@@ -76,6 +115,7 @@ export default function SocialPage() {
     setContactVk(p ? (p.contact_vk || "") : "");
     setMode(p ? (p.mode || "auto") : "auto");
     setAutoHours(p ? Number(p.auto_publish_hours || 0) : 0);
+    setPaidAuto(p ? Boolean(p.paid_auto_generation) : false);
     setTzOffset(p ? Number(p.tz_offset ?? 3) : 3);
   };
 
@@ -145,6 +185,7 @@ export default function SocialPage() {
         contact_vk: contactVk.trim(),
         mode: mode,
         auto_publish_hours: autoHours,
+        paid_auto_generation: paidAuto,
         tz_offset: tzOffset,
       };
       if (selId && !creating) body.id = selId;
@@ -208,9 +249,10 @@ export default function SocialPage() {
       const j = await r.json();
       const res = j.results || {};
       const where = [res.tg ? "Telegram" : "", res.vk ? "ВКонтакте" : ""].filter(Boolean).join(" и ");
+      const publishError = j?.errors?.banner || Object.values(j?.errors || {}).filter(Boolean).join("; ");
       setNotice(j.status === "ok"
         ? "✅ Пост опубликован" + (where ? " в " + where : "") + " — он ушёл в канал и убран из черновиков"
-        : "⚠️ Не удалось опубликовать, попробуйте ещё раз");
+        : "⚠️ Не удалось опубликовать" + (publishError ? ": " + publishError : ", попробуйте ещё раз"));
       if (selId) await loadPosts(selId);
     } finally { setBusy(false); }
   };
@@ -297,10 +339,12 @@ export default function SocialPage() {
   const nextRun = (p: any) => {
     const hs = planHours(p);
     if (!hs.length) return "";
-    const now = new Date();
+    const offset = Number(p?.tz_offset ?? 3);
+    const local = new Date(Date.now() + offset * 60 * 60 * 1000);
+    const nowMinutes = local.getUTCHours() * 60 + local.getUTCMinutes();
     for (const t of hs) {
-      const d = new Date(); d.setHours(Number(t.slice(0, 2)), 0, 0, 0);
-      if (d > now) return "сегодня в " + t;
+      const mins = Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5) || 0);
+      if (mins >= nowMinutes) return "сегодня в " + t;
     }
     return "завтра в " + hs[0];
   };
@@ -329,7 +373,14 @@ export default function SocialPage() {
     try {
       const r = await fetch("/api/posting/posts/unpublish", { method:"POST", headers:{ ...h, "Content-Type":"application/json" }, body: JSON.stringify({ account_id: account, post_id: id }) });
       const j = await r.json();
-      setMsg(j.had_ids === false ? "Убрано из списка — id публикации не сохранён, удалите в канале вручную" : "✓ Удалено из канала");
+      if (j.had_ids === false) {
+        setMsg("У публикации нет сохранённых ID площадок — удалять на стороне канала нечего");
+      } else if (j.status === "ok") {
+        setMsg("✓ Удалено из Telegram и/или ВКонтакте");
+      } else {
+        const failed = Object.keys(j.errors || {}).map((k) => k === "tg" ? "Telegram" : k === "vk" ? "ВКонтакте" : k).join(", ");
+        setMsg("⚠️ Удалено не везде" + (failed ? ": повторю для " + failed : " — можно повторить"));
+      }
       if (selId) await loadPosts(selId);
     } finally { setBusy(false); }
   };
@@ -364,20 +415,21 @@ export default function SocialPage() {
     } finally { setBusy(false); }
   };
 
-  const pay = () => { setMsg("Оплата скоро будет доступна — пока запускайтесь через бесплатный тест 🎁"); };
-
   const sel = projects.find((p) => p.id === selId) || null;
   const running = selId ? !!runningIds[selId] : false;
   const runLog = selId ? (runLogs[selId] || "") : "";
   const drafts = (Array.isArray(posts) ? posts : []).filter((p: any) => p.status === "draft");
+  const partials = (Array.isArray(posts) ? posts : []).filter((p: any) => p.status === "partial");
+  const errors = (Array.isArray(posts) ? posts : []).filter((p: any) => p.status === "error");
   const published = (Array.isArray(posts) ? posts : []).filter((p: any) => p.status === "published");
+  const feedback = notice || msg;
   const card: any = { position:"relative", overflow:"hidden", background:"#fff", border:"1px solid " + T.line, borderRadius:"16px", padding:"24px" };
   const inp: any = { width:"100%", boxSizing:"border-box", padding:"10px 12px", borderRadius:"10px", border:"1px solid " + T.line, fontSize:"14px", fontFamily:"inherit" };
   const label: any = { fontSize:"13px", fontWeight:600, color:T.muted, marginBottom:"6px", display:"block" };
   const btn = (grad: string[]): any => ({ border:"none", borderRadius:"10px", padding:"12px 20px", fontSize:"14px", fontWeight:700, color:"#fff", background:"linear-gradient(135deg," + grad[0] + "," + grad[1] + ")", cursor: busy?"default":"pointer", opacity: busy?0.6:1 });
 
   const checkBlock = (kind: string, text: string, apply: (t: string) => void) => (
-    <div style={{ marginTop:"8px" }}>
+    <div className="boris-f3-a33b8fc2ff7780">
       <button className="soc-btn" disabled={checking} onClick={() => checkPrompt(kind, text)} style={{ border:"1px solid " + T.blue1, color:T.blue1, background:"#fff", borderRadius:"10px", padding:"8px 14px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>
         🧠 Проверить промт Борисом
       </button>
@@ -387,10 +439,10 @@ export default function SocialPage() {
             <div style={{ fontSize:"14px", color:T.muted }}>Борис читает промт…</div>
           ) : checkResult && checkResult.status === "ok" ? (
             <>
-              {checkResult.verdict && <div style={{ fontSize:"14px", fontWeight:700, marginBottom:"10px" }}>{checkResult.verdict}</div>}
+              {checkResult.verdict && <div className="boris-f3-0e6d61d56e4adc">{checkResult.verdict}</div>}
               {(checkResult.issues || []).map((it: any, i: number) => (
-                <div key={i} style={{ fontSize:"13px", marginBottom:"8px" }}>
-                  <div style={{ color:"#B42318" }}>• {it.problem}</div>
+                <div key={i} className="boris-f3-eebe60ffaadcb5">
+                  <div className="boris-f3-a151a787e37497">• {it.problem}</div>
                   <div style={{ color:T.muted, marginLeft:"14px" }}>→ {it.fix}</div>
                 </div>
               ))}
@@ -399,7 +451,7 @@ export default function SocialPage() {
               )}
             </>
           ) : (
-            <div style={{ fontSize:"14px", color:T.muted }}>{(checkResult && (checkResult.message || checkResult.status)) || "не удалось проверить"}</div>
+            <div style={{ fontSize:"14px", color:T.muted }}>{humanizeBusinessText(checkResult && (checkResult.message || checkResult.status), "Не удалось проверить")}</div>
           )}
         </div>
       )}
@@ -407,26 +459,27 @@ export default function SocialPage() {
   );
 
   return (
-    <div style={{ minHeight:"100vh", background:T.bg, padding:"28px 20px", fontFamily:"-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif", color:T.ink }}>
+    <div className="boris-product-route boris-social-page" style={{ minHeight:"100vh", background:T.bg, padding:"28px 20px", fontFamily:"var(--font-inter), Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif", color:T.ink }}>
       <style>{`
         .soc-btn { transition: filter .15s ease, transform .15s ease; }
         .soc-btn:hover { filter: brightness(1.07); transform: translateY(-1px); }
         .soc-in { transition: border-color .15s ease, box-shadow .15s ease; }
-        .soc-in:focus { outline:none; border-color:#2F6FED; box-shadow:0 0 0 3px rgba(47,111,237,.15); }
+        .soc-in:focus { outline:none; border-color:var(--boris-blue); box-shadow:0 0 0 3px rgba(47,111,237,.15); }
       `}</style>
-      <div style={{ maxWidth:"100%", margin:"0 auto", display:"flex", flexDirection:"column", gap:"16px" }}>
+      <div className="boris-f3-5020a5a4600a1c boris-social-reference-workspace">
 
-        <div><a href="/dashboard" style={{ fontSize:"14px", color:T.blue1, textDecoration:"none", fontWeight:600 }}>← Кабинет</a></div>
-
-        <div style={{ display:"flex", alignItems:"center", gap:"14px" }}>
-          <div style={{ width:"52px", height:"52px", borderRadius:"50%", background:"linear-gradient(135deg," + T.purple1 + "," + T.purple2 + ")", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"24px" }}>📣</div>
-          <div>
-            <div style={{ fontSize:"22px", fontWeight:800 }}>Социальные сети</div>
-            <div style={{ fontSize:"14px", color:T.muted }}>Борис сам пишет и публикует посты в Telegram и ВКонтакте — в стиле вашего канала.</div>
-          </div>
+        <div className="boris-reference-page-head boris-social-reference-head">
+          <div className="boris-reference-kicker">КОНТЕНТ И ПУБЛИКАЦИИ</div>
+          <h1>Социальные сети</h1>
+          <p>Создание, проверка и публикация постов в Telegram и ВКонтакте — в одном рабочем окне.</p>
         </div>
 
-        <div style={{ display:"flex", alignItems:"center", gap:"12px", flexWrap:"wrap" }}>
+        <button type="button" onClick={() => router.push('/dashboard/video-factory')} style={{ width:'100%', margin:'0 0 16px', border:'1px solid var(--boris-border)', borderRadius:'14px', background:'#fff', padding:'15px 18px', display:'flex', justifyContent:'space-between', alignItems:'center', gap:'12px', cursor:'pointer', textAlign:'left' }}>
+          <span><b style={{ display:'block', fontSize:'15px' }}>Видео / Reels / Shorts <span style={{ color:'#b54708', fontSize:'11px' }}>TEST</span></b><span style={{ display:'block', marginTop:'3px', fontSize:'13px', color:T.muted }}>Создание вертикальных роликов, Instagram Reels, YouTube Shorts и расписание публикаций.</span></span>
+          <span style={{ color:T.blue1, fontWeight:800 }}>Открыть →</span>
+        </button>
+
+        <div className="boris-f3-f1076067fe1ec6 boris-social-projectbar">
           <span style={{ fontSize:"13px", fontWeight:700, color:T.muted, textTransform:"uppercase", letterSpacing:".03em" }}>Проект</span>
           <select className="soc-in" style={{ ...inp, width:"auto", minWidth:"200px", cursor:"pointer" }} value={selId || ""} onChange={(e) => selectProject(e.target.value)}>
             {projects.length === 0 && <option value="">— проектов нет —</option>}
@@ -438,53 +491,64 @@ export default function SocialPage() {
         {(sel || creating) ? (
           <>
             {sel && (
-              <div style={{ ...card, background: sel.active ? "#F6FEF9" : "#FFFBFA", border:"1px solid " + (sel.active ? "#A6F4C5" : "#FEE4E2") }}>
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:"12px" }}>
+              <div className="boris-social-card boris-social-card-accent boris-social-status-card" style={{ ...card, background: sel.active ? "#F6FEF9" : "#FFFBFA", border:"1px solid " + (sel.active ? "#A6F4C5" : "#FEE4E2") }}>
+                <div className="boris-f3-5756a770169cea">
                   <div>
                     <div style={{ fontSize:"15px", fontWeight:700, color: sel.active ? T.green2 : "#B42318" }}>
-                      {sel.active ? "✅ Проект активен" : "⛔ Нужен тариф или бесплатный тест"}
+                      {sel.active ? "Проект активен" : "Нужен тариф или бесплатный тест"}
                     </div>
-                    <div style={{ fontSize:"14px", fontWeight:600, color: planHours(sel).length ? T.green2 : "#B54708", marginTop:"6px" }}>
-                      {planHours(sel).length
-                        ? "🟢 Автопостинг включён — Борис публикует сам каждый день в " + planHours(sel).join(" и ")
-                        : "⚪️ Автопостинг выключен — укажите время публикаций в настройках, и Борис начнёт постить сам"}
+                    <div style={{ fontSize:"14px", fontWeight:600, color: planHours(sel).length && sel.paid_auto_generation && sel.scheduler_ok ? T.green2 : "#B54708", marginTop:"6px" }}>
+                      {planHours(sel).length && sel.paid_auto_generation && sel.scheduler_ok
+                        ? "Автопилот работает — BORIS сам создаёт посты по расписанию " + planHours(sel).join(" и ")
+                        : planHours(sel).length && sel.paid_auto_generation
+                          ? "Автопилот настроен, но фоновый планировщик сейчас не подтверждает работу"
+                          : planHours(sel).length
+                            ? "Расписание задано, но автогенерация выключена — посты сами не создаются"
+                            : "Автопостинг выключен — укажите время публикаций и включите автогенерацию"}
                     </div>
-                    {planHours(sel).length > 0 && (
+                    {planHours(sel).length > 0 && sel.paid_auto_generation && sel.scheduler_ok && (
                       <div style={{ fontSize:"14px", color:T.muted, marginTop:"3px" }}>
-                        Ближайший пост — {nextRun(sel)} · {sel.mode === "moderate" ? "придёт сюда на утверждение" : "уйдёт в канал автоматически"}
+                        Следующая генерация — {nextRun(sel)} · {sel.mode === "moderate"
+                          ? (Number(sel.auto_publish_hours || 0) > 0 ? "черновик выйдет сам через " + Number(sel.auto_publish_hours) + " ч." : "черновик ждёт утверждения")
+                          : "публикация уйдёт в канал автоматически"}
                       </div>
                     )}
                     <div style={{ fontSize:"14px", color:T.muted, marginTop:"2px" }}>
-                      {sel.platforms === "tg" ? "✈️ Только Telegram" : sel.platforms === "vk" ? "🅥 Только ВКонтакте" : "✈️🅥 ВК + Telegram"}
+                      {sel.platforms === "tg" ? "Только Telegram" : sel.platforms === "vk" ? "Только ВКонтакте" : "ВКонтакте + Telegram"}
                       {" · "}
-                      {sel.mode === "moderate" ? "✋ На утверждение" : "Авто"}
+                      {sel.mode === "moderate" ? "На утверждение" : "Авто"}
                       {sel.left_today != null ? " · осталось сегодня: " + sel.left_today : ""}
                     </div>
                   </div>
-                  <div style={{ display:"flex", gap:"10px", flexWrap:"wrap" }}>
+                  <div className="boris-f3-88785587a0f4bb">
                     <button className="soc-btn" disabled={running} onClick={runNow} style={{ ...btn([T.green1, T.green2]), whiteSpace:"nowrap", opacity: running?0.6:1 }}>
-                      {running ? "⏳ Публикую…" : "▶️ Запустить сейчас"}
+                      {running ? "Публикую…" : "Запустить сейчас"}
                     </button>
-                    <button className="soc-btn" disabled={running} onClick={refresh} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"12px 18px", fontSize:"14px", fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>🔄 Статус</button>
+                    <button className="soc-btn" disabled={running} onClick={refresh} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"12px 18px", fontSize:"14px", fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>Обновить статус</button>
                   </div>
                 </div>
-                {runLog && (
-                  <pre style={{ marginTop:"14px", background:"#0F172A", color:"#E2E8F0", borderRadius:"10px", padding:"12px 14px", fontSize:"12px", lineHeight:1.5, maxHeight:"220px", overflow:"auto", whiteSpace:"pre-wrap" }}>{runLog}</pre>
-                )}
+                {running && runLog ? <div className="boris-social-background-status">BORIS выполняет задачу в фоне. Статус обновится автоматически.</div> : null}
               </div>
             )}
 
-            <div style={card}>
-              <div onClick={() => setOpen(!open)} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer", userSelect:"none" }}>
-                <div style={{ fontSize:"16px", fontWeight:800 }}>⚙️ Настройки проекта{sel ? " — " + (sel.name || "") : ""}</div>
+            {feedback && (
+              <div style={{ marginBottom:"14px", background: feedback.startsWith("⚠️") ? "#FFFAEB" : "#F6FEF9", border:"1px solid " + (feedback.startsWith("⚠️") ? "#FEDF89" : "#A6F4C5"), borderRadius:"12px", padding:"12px 16px", fontSize:"14px", fontWeight:600, color: feedback.startsWith("⚠️") ? "#B54708" : T.green2, display:"flex", justifyContent:"space-between", gap:"12px", alignItems:"flex-start" }}>
+                <span>{feedback}</span>
+                <span onClick={() => { setNotice(""); setMsg(""); }} style={{ cursor:"pointer", color:T.muted, fontWeight:400 }}>✕</span>
+              </div>
+            )}
+
+            <div className="boris-social-card boris-social-settings-card" style={card}>
+              <div onClick={() => setOpen(!open)} className="boris-f3-924fd8daa95655">
+                <div className="boris-f3-3df0eea15ca34a"><span className="boris-social-title-icon"><Icon name="settings" size={18} /></span>Настройки проекта{sel ? " — " + (sel.name || "") : ""}</div>
                 <div style={{ fontSize:"14px", color:T.blue1, fontWeight:700 }}>{open ? "Свернуть ▾" : "Развернуть ▸"}</div>
               </div>
-              {open && (<div style={{ marginTop:"18px" }}>
-              <div style={{ marginBottom:"16px" }}>
+              {open && (<div className="boris-f3-3517ec692dbecf">
+              <div className="boris-f3-7564ec607ed8ff">
                 <label style={label}>Название проекта</label>
                 <input className="soc-in" style={inp} value={name} onChange={(e) => setName(e.target.value)} placeholder="Например: От Души" />
               </div>
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"14px" }}>
+              <div className="boris-f3-f9e9829802291a">
                 <div>
                   <label style={label}>Telegram-канал (куда постить)</label>
                   <input className="soc-in" style={inp} value={channelTg} onChange={(e) => setChannelTg(e.target.value)} placeholder="@my_channel" />
@@ -496,7 +560,7 @@ export default function SocialPage() {
                     {vkName || "Номер группы определится сам — просто вставьте ссылку и кликните мимо поля."}
                   </div>
                 </div>
-                <div style={{ gridColumn:"1 / -1" }}>
+                <div className="boris-f3-a277c0166bedaa">
                   <label style={label}>Канал-образец стиля (Борис учится на его постах)</label>
                   <input className="soc-in" style={inp} value={styleSource} onChange={(e) => setStyleSource(e.target.value)} placeholder="@my_channel" />
                 </div>
@@ -520,8 +584,16 @@ export default function SocialPage() {
                   <label style={label}>Режим публикации</label>
                   <select className="soc-in" style={{ ...inp, cursor:"pointer" }} value={mode} onChange={(e) => setMode(e.target.value)}>
                     <option value="auto">Авто — публиковать сразу</option>
-                    <option value="moderate">✋ На утверждение — сначала черновик</option>
+                    <option value="moderate">На утверждение — сначала черновик</option>
                   </select>
+                </div>
+                <div>
+                  <label style={label}>Автогенерация по расписанию</label>
+                  <select className="soc-in" style={{ ...inp, cursor:"pointer" }} value={paidAuto ? "on" : "off"} onChange={(e) => setPaidAuto(e.target.value === "on")}>
+                    <option value="off">Выключена — только ручной запуск</option>
+                    <option value="on">Включена — BORIS сам создаёт посты</option>
+                  </select>
+                  <div style={{ fontSize:"12px", color:T.muted, marginTop:"5px" }}>Включайте только для проекта, где разрешены автоматические AI-генерации.</div>
                 </div>
                 <div>
                   <label style={label}>Автопубликация черновика</label>
@@ -529,6 +601,7 @@ export default function SocialPage() {
                     <option value="0">Нет — жду вашего решения</option>
                     <option value="1">Через 1 час</option>
                     <option value="2">Через 2 часа</option>
+                    <option value="3">Через 3 часа</option>
                     <option value="6">Через 6 часов</option>
                     <option value="24">Через сутки</option>
                   </select>
@@ -536,16 +609,16 @@ export default function SocialPage() {
                 <div>
                   <label style={label}>Источник картинки</label>
                   <select className="soc-in" style={{ ...inp, cursor:"pointer" }} value={imageSource} onChange={(e) => setImageSource(e.target.value)}>
-                    <option value="ai">🎨 Генерировать ИИ-баннер</option>
-                    <option value="pexels">📷 Фото со стока по теме</option>
+                    <option value="ai">Генерировать ИИ-баннер</option>
+                    <option value="pexels">Фото со стока по теме</option>
                   </select>
                 </div>
                 <div>
                   <label style={label}>Время публикаций (через запятую)</label>
                   <input className="soc-in" style={inp} value={times} onChange={(e) => setTimes(e.target.value)} placeholder="09:00, 19:00" />
                 </div>
-                <div style={{ marginTop:"12px" }}>
-                  <label style={{ fontSize:"13px", opacity:0.8 }}>Часовой пояс (время постов считается по нему)</label>
+                <div className="boris-f3-b6d781cbbc10a4">
+                  <label className="boris-f3-6e822202a7c2a5">Часовой пояс (время постов считается по нему)</label>
                   <select className="soc-in" style={{ ...inp, cursor:"pointer" }} value={String(tzOffset)} onChange={(e) => setTzOffset(Number(e.target.value))}>
                     <option value="2">Калининград (МСК−1)</option>
                     <option value="3">Москва (МСК)</option>
@@ -560,81 +633,118 @@ export default function SocialPage() {
                     <option value="12">Камчатка (МСК+9)</option>
                   </select>
                 </div>
-                <div style={{ gridColumn:"1 / -1" }}>
+                <div className="boris-f3-a277c0166bedaa">
                   <label style={label}>Темы постов (по одной в строке)</label>
                   <textarea className="soc-in" style={{ ...inp, minHeight:"84px", resize:"vertical" }} value={themes} onChange={(e) => setThemes(e.target.value)} placeholder={"поздравление с юбилеем\nстихи на день рождения"} />
                 </div>
-                <div style={{ gridColumn:"1 / -1" }}>
+                <div className="boris-f3-a277c0166bedaa">
                   <label style={label}>Указания Борису — как писать посты</label>
                   <textarea className="soc-in" style={{ ...inp, minHeight:"84px", resize:"vertical" }} value={textPrompt} onChange={(e) => setTextPrompt(e.target.value)} placeholder={"Пиши коротко и по-доброму, в конце — призыв заказать со ссылкой, 3-5 хэштегов."} />
                   {checkBlock("posts", textPrompt, setTextPrompt)}
                 </div>
-                <div style={{ gridColumn:"1 / -1" }}>
+                <div className="boris-f3-a277c0166bedaa">
                   <label style={label}>Указания Борису по баннеру — что рисовать</label>
                   <textarea className="soc-in" style={{ ...inp, minHeight:"84px", resize:"vertical" }} value={bannerPrompt} onChange={(e) => setBannerPrompt(e.target.value)} placeholder={"Фирменные цвета — тёплые пастельные, минимализм, крупный акцент на объекте. Без мелкого текста."} />
                   {checkBlock("banner", bannerPrompt, setBannerPrompt)}
                 </div>
               </div>
-              <div style={{ display:"flex", alignItems:"center", gap:"12px", marginTop:"16px", flexWrap:"wrap" }}>
+              <div className="boris-f3-7939306dd85aad">
                 <button className="soc-btn" disabled={busy} onClick={saveProject} style={btn([T.green1, T.green2])}>Сохранить проект</button>
                 {sel && <button className="soc-btn" disabled={busy} onClick={deleteProject} style={{ ...inp, width:"auto", border:"1px solid #FDA29B", color:"#B42318", background:"#FFFBFA", fontWeight:700, cursor:"pointer" }}>Удалить</button>}
-                {msg && <span style={{ fontSize:"14px", color: msg.indexOf("✓") === 0 ? T.green2 : T.muted }}>{msg}</span>}
               </div>
               </div>)}
             </div>
 
-            <div style={{ ...card, background:"linear-gradient(135deg,#FFFAEB,#FEF7E6)", border:"1px solid #FEDF89", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:"14px" }}>
+            <div className="boris-social-card boris-social-card-accent boris-social-trial-card" style={{ ...card, background:"linear-gradient(135deg,#FFFAEB,#FEF7E6)", border:"1px solid #FEDF89", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:"14px" }}>
               <div>
-                <div style={{ fontSize:"17px", fontWeight:800, color:"#B54708" }}>🎁 Запустить проект бесплатно</div>
-                <div style={{ fontSize:"14px", color:"#93370D", marginTop:"2px" }}>2 дня, до 6 постов. Оплата тарифа — скоро.</div>
+                <div className="boris-f3-64affd257171ce"><span className="boris-social-title-icon"><Icon name="award" size={18} /></span>Запустить проект бесплатно</div>
+                <div className="boris-f3-0b72695cac1ed1">3 дня, до 6 постов. После пробного периода можно сразу подключить тариф на 30 дней.</div>
               </div>
-              <div style={{ display:"flex", gap:"10px", flexWrap:"wrap" }}>
+              <div className="boris-f3-88785587a0f4bb">
                 <button className="soc-btn" disabled={busy || (sel && sel.plan === "trial")} onClick={startTrial} style={{ ...btn([T.orange1, T.orange2]), whiteSpace:"nowrap" }}>Начать бесплатно</button>
-                <button className="soc-btn" onClick={pay} style={{ border:"1px solid " + T.line, background:"#fff", color:T.muted, borderRadius:"10px", padding:"12px 20px", fontSize:"14px", fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>Оплатить тариф</button>
+                <button className="soc-btn" disabled={busy || !account} onClick={openSocialPayment} style={{ ...btn([T.blue1, T.blue2]), whiteSpace:"nowrap" }}>Оплатить тариф</button>
               </div>
             </div>
 
+            {sel && errors.length > 0 && (
+              <div className="boris-social-card boris-social-error-card" style={{ ...card, border:"1px solid #FECACA", background:"#FFF7F7" }}>
+                <div style={{ fontSize:"16px", fontWeight:800, marginBottom:"8px", color:"#991B1B" }}>Требует внимания ({errors.length})</div>
+                <div style={{ fontSize:"13px", color:T.muted, marginBottom:"14px" }}>
+                  Текст без баннера не публикуется. Ошибка сохранена, поэтому пост можно безопасно сгенерировать заново.
+                </div>
+                <div className="boris-f3-85e7427e7ff5bd">
+                  {errors.map((p: any) => (
+                    <div key={p.id} className="boris-social-post-card" style={{ border:"1px solid #FECACA", borderRadius:"12px", padding:"14px" }}>
+                      <div style={{ fontSize:"12px", color:T.muted }}>{p.created_at}{p.publish_at ? " · план: " + p.publish_at : ""}</div>
+                      <div style={{ marginTop:"6px", fontSize:"14px", color:T.ink, whiteSpace:"pre-wrap", maxHeight:"90px", overflow:"hidden" }}>{cleanPostText(p.preview || p.text)}</div>
+                      <div style={{ marginTop:"8px", fontSize:"13px", fontWeight:700, color:"#B42318" }}>{cleanSocialError(p.error)}</div>
+                      <div style={{ marginTop:"12px", display:"flex", gap:"8px", flexWrap:"wrap" }}>
+                        <button className="soc-btn" disabled={running || busy} onClick={runNow} style={{ ...btn([T.blue1, T.blue2]), padding:"8px 16px", fontSize:"13px" }}>Повторить генерацию</button>
+                        <button className="soc-btn boris-f3-990af6b92041d2" disabled={busy} onClick={() => removePost(p.id)}>Удалить запись</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {sel && partials.length > 0 && (
+              <div className="boris-social-card" style={{ ...card, border:"1px solid #FEDF89", background:"#FFFAEB" }}>
+                <div style={{ fontSize:"16px", fontWeight:800, marginBottom:"8px", color:"#B54708" }}>Доставлено частично ({partials.length})</div>
+                <div style={{ fontSize:"13px", color:T.muted, marginBottom:"14px" }}>
+                  Одна площадка уже получила пост. BORIS автоматически повторяет только недостающую площадку — успешная публикация не дублируется.
+                </div>
+                <div className="boris-f3-85e7427e7ff5bd">
+                  {partials.map((p: any) => (
+                    <div key={p.id} className="boris-social-post-card" style={{ border:"1px solid #FEDF89", borderRadius:"12px", padding:"14px" }}>
+                      <div style={{ fontSize:"12px", color:T.muted }}>{p.created_at}</div>
+                      <div style={{ marginTop:"6px", fontSize:"14px", color:T.ink, whiteSpace:"pre-wrap", maxHeight:"90px", overflow:"hidden" }}>{cleanPostText(p.preview || p.text)}</div>
+                      <div style={{ marginTop:"8px", fontSize:"13px", color:"#B54708" }}>{cleanSocialError(p.error)}</div>
+                      <div style={{ marginTop:"8px", fontSize:"12px", color:T.muted }}>
+                        {p.ids?.tg?.message_id ? "✓ Telegram уже доставлен  " : ""}{p.ids?.vk?.post_id ? "✓ ВКонтакте уже доставлен" : ""}
+                      </div>
+                      <button className="soc-btn" disabled={busy} onClick={() => publishPost(p.id)} style={{ ...btn([T.blue1, T.blue2]), padding:"8px 16px", fontSize:"13px", marginTop:"10px" }}>Повторить недостающую площадку</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {sel && drafts.length > 0 && (
-              <div style={card}>
-                <div style={{ fontSize:"16px", fontWeight:800, marginBottom:"14px" }}>✋ Черновики на утверждение ({drafts.length})</div>
-                {notice && (
-                  <div style={{ marginBottom:"14px", background:"#F6FEF9", border:"1px solid #A6F4C5", borderRadius:"12px", padding:"12px 16px", fontSize:"14px", fontWeight:600, color:T.green2, display:"flex", justifyContent:"space-between", gap:"12px" }}>
-                    <span>{notice}</span>
-                    <span onClick={() => setNotice("")} style={{ cursor:"pointer", color:T.muted, fontWeight:400 }}>✕</span>
-                  </div>
-                )}
-                <div style={{ display:"flex", flexDirection:"column", gap:"12px" }}>
+              <div className="boris-social-card boris-social-drafts-card" style={card}>
+                <div className="boris-f3-f07a74e8d6fda4"><span className="boris-social-title-icon"><Icon name="clock" size={18} /></span>Черновики на утверждение ({drafts.length})</div>
+                <div className="boris-f3-85e7427e7ff5bd">
                   {drafts.map((p) => (
-                    <div key={p.id} style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"14px", display:"flex", gap:"14px", alignItems:"flex-start" }}>
+                    <div key={p.id} className="boris-social-post-card" style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"14px", display:"flex", gap:"14px", alignItems:"flex-start" }}>
                       {p.banner && bannerUrls[p.banner] && (
-                        <div onClick={() => setZoom(bannerUrls[p.banner])} title="Открыть крупно" style={{ position:"relative", width:"110px", height:"110px", flexShrink:0, cursor:"zoom-in" }}>
-                          <img src={bannerUrls[p.banner]} alt="" style={{ width:"110px", height:"110px", objectFit:"cover", borderRadius:"8px" }} />
-                          <div style={{ position:"absolute", right:"5px", bottom:"5px", background:"rgba(15,23,42,.78)", color:"#fff", borderRadius:"7px", fontSize:"13px", padding:"2px 6px" }}>🔍</div>
+                        <div onClick={() => setZoom(bannerUrls[p.banner])} title="Открыть крупно" className="boris-f3-65b4c322b4b9bc">
+                          <img src={bannerUrls[p.banner]} alt=""  className="boris-f3-3a90ca11f543bc"/>
+                          <div className="boris-f3-31a0154f903402">🔍</div>
                         </div>
                       )}
-                      <div style={{ flex:1, minWidth:0 }}>
+                      <div className="boris-f3-0070778df76ac3">
                         <div style={{ fontSize:"12px", color:T.muted, marginBottom:"4px" }}>{p.created_at}</div>
-                        <div style={{ fontSize:"14px", color:T.ink, whiteSpace:"pre-wrap" }}>{p.preview || p.text}</div>
-                        <div style={{ display:"flex", gap:"10px", marginTop:"10px", flexWrap:"wrap" }}>
-                          <button className="soc-btn" disabled={busy} onClick={() => publishPost(p.id)} style={{ ...btn([T.green1, T.green2]), padding:"8px 16px", fontSize:"13px" }}>✅ Опубликовать</button>
-                          <button className="soc-btn" disabled={busy} onClick={() => { setEditId(editId === p.id ? "" : p.id); setEditText(p.text || ""); setSchedId(""); }} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>✏️ Редактировать</button>
-                          <button className="soc-btn" disabled={busy} onClick={() => { setSchedId(schedId === p.id ? "" : p.id); setSchedWhen((p.publish_at || "").replace(" ", "T")); setEditId(""); }} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>🕒 Когда разместить</button>
-                          <button className="soc-btn" disabled={busy} onClick={() => removePost(p.id)} style={{ border:"1px solid #FDA29B", color:"#B42318", background:"#fff", borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>🗑 Удалить</button>
+                        <div style={{ fontSize:"14px", color:T.ink, whiteSpace:"pre-wrap" }}>{cleanPostText(p.preview || p.text)}</div>
+                        <div className="boris-f3-fb169f62bbd1ce">
+                          <button className="soc-btn" disabled={busy} onClick={() => publishPost(p.id)} style={{ ...btn([T.green1, T.green2]), padding:"8px 16px", fontSize:"13px" }}>Опубликовать</button>
+                          <button className="soc-btn" disabled={busy} onClick={() => { setEditId(editId === p.id ? "" : p.id); setEditText(p.text || ""); setSchedId(""); }} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>Редактировать</button>
+                          <button className="soc-btn" disabled={busy} onClick={() => { setSchedId(schedId === p.id ? "" : p.id); setSchedWhen((p.publish_at || "").replace(" ", "T")); setEditId(""); }} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>Когда разместить</button>
+                          <button className="soc-btn boris-f3-990af6b92041d2" disabled={busy} onClick={() => removePost(p.id)}>Удалить</button>
                         </div>
                         {p.publish_at
                           ? <div style={{ fontSize:"13px", color:T.green2, marginTop:"8px" }}>🕒 Запланировано на {p.publish_at}</div>
                           : <div style={{ fontSize:"13px", color:T.muted, marginTop:"8px" }}>⏳ Если не изменить, пост выйдет автоматически. Можно отредактировать текст или задать своё время.</div>}
                         {editId === p.id && (
-                          <div style={{ marginTop:"10px" }}>
+                          <div className="boris-f3-726e8b317f3298">
                             <textarea className="soc-in" style={{ ...inp, minHeight:"170px", resize:"vertical" }} value={editText} onChange={(e) => setEditText(e.target.value)} />
-                            <div style={{ display:"flex", gap:"10px", marginTop:"8px" }}>
+                            <div className="boris-f3-ff3491edc4270f">
                               <button className="soc-btn" disabled={busy} onClick={() => saveEdit(p.id)} style={{ ...btn([T.green1, T.green2]), padding:"8px 16px", fontSize:"13px" }}>Сохранить текст</button>
                               <button className="soc-btn" onClick={() => setEditId("")} style={{ border:"1px solid " + T.line, background:"#fff", color:T.muted, borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>Отмена</button>
                             </div>
                           </div>
                         )}
                         {schedId === p.id && (
-                          <div style={{ marginTop:"10px", display:"flex", gap:"10px", alignItems:"center", flexWrap:"wrap" }}>
+                          <div className="boris-f3-481a83bf80ec38">
                             <input type="datetime-local" className="soc-in" style={{ ...inp, width:"auto" }} value={schedWhen} onChange={(e) => setSchedWhen(e.target.value)} />
                             <button className="soc-btn" disabled={busy} onClick={() => saveSchedule(p.id)} style={{ ...btn([T.blue1, T.blue2]), padding:"8px 16px", fontSize:"13px" }}>Запланировать</button>
                           </div>
@@ -646,21 +756,21 @@ export default function SocialPage() {
               </div>
             )}
             {sel && published.filter((x: any) => x.stats && x.stats.er != null && x.stats.reactions > 0).length > 0 && (
-              <div style={card}>
-                <div style={{ fontSize:"16px", fontWeight:800, marginBottom:"6px" }}>🏆 Лучшие посты</div>
+              <div className="boris-social-card boris-social-best-card" style={card}>
+                <div className="boris-f3-0af6424569e1b0"><span className="boris-social-title-icon"><Icon name="award" size={18} /></span>Лучшие посты</div>
                 <div style={{ fontSize:"13px", color:T.muted, marginBottom:"14px" }}>
                   Посты, на которые читатели откликались чаще всего. Борис учитывает именно их, когда пишет новые.
                 </div>
-                <div style={{ display:"flex", flexDirection:"column", gap:"10px" }}>
+                <div className="boris-f3-e1c29e9b863f3e">
                   {published
                     .filter((x: any) => x.stats && x.stats.er != null && x.stats.reactions > 0)
                     .sort((a: any, b: any) => (b.stats.er || 0) - (a.stats.er || 0))
                     .slice(0, 3)
                     .map((p: any, i: number) => (
-                      <div key={p.id} style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"12px 14px", display:"flex", gap:"12px", alignItems:"flex-start" }}>
-                        <div style={{ fontSize:"20px", flexShrink:0 }}>{["🥇","🥈","🥉"][i]}</div>
-                        <div style={{ flex:1, minWidth:0 }}>
-                          <div style={{ fontSize:"14px", color:T.ink, maxHeight:"44px", overflow:"hidden" }}>{p.text}</div>
+                      <div key={p.id} className="boris-social-post-card" style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"12px 14px", display:"flex", gap:"12px", alignItems:"flex-start" }}>
+                        <div className="boris-f3-34fc330001ffe6">{["🥇","🥈","🥉"][i]}</div>
+                        <div className="boris-f3-0070778df76ac3">
+                          <div style={{ fontSize:"14px", color:T.ink, maxHeight:"44px", overflow:"hidden" }}>{cleanPostText(p.text)}</div>
                           <div style={{ display:"flex", gap:"14px", marginTop:"8px", fontSize:"13px", color:T.muted, flexWrap:"wrap" }}>
                             <span>👁 {p.stats.views ?? 0}</span>
                             <span>❤️ {p.stats.likes ?? 0}</span>
@@ -675,20 +785,20 @@ export default function SocialPage() {
             )}
 
             {sel && published.length > 0 && (
-              <div style={card}>
-                <div style={{ fontSize:"16px", fontWeight:800, marginBottom:"14px" }}>📤 Опубликованные ({published.length})</div>
-                <div style={{ display:"flex", flexDirection:"column", gap:"12px" }}>
+              <div className="boris-social-card boris-social-published-card" style={card}>
+                <div className="boris-f3-f07a74e8d6fda4"><span className="boris-social-title-icon"><Icon name="send" size={18} /></span>Опубликованные ({published.length})</div>
+                <div className="boris-f3-85e7427e7ff5bd">
                   {published.map((p) => (
-                    <div key={p.id} style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"14px", display:"flex", gap:"14px", alignItems:"flex-start" }}>
+                    <div key={p.id} className="boris-social-post-card" style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"14px", display:"flex", gap:"14px", alignItems:"flex-start" }}>
                       {p.banner && bannerUrls[p.banner] && (
-                        <div onClick={() => setZoom(bannerUrls[p.banner])} title="Открыть крупно" style={{ position:"relative", width:"90px", height:"90px", flexShrink:0, cursor:"zoom-in" }}>
-                          <img src={bannerUrls[p.banner]} alt="" style={{ width:"90px", height:"90px", objectFit:"cover", borderRadius:"8px" }} />
-                          <div style={{ position:"absolute", right:"5px", bottom:"5px", background:"rgba(15,23,42,.78)", color:"#fff", borderRadius:"7px", fontSize:"13px", padding:"2px 6px" }}>🔍</div>
+                        <div onClick={() => setZoom(bannerUrls[p.banner])} title="Открыть крупно" className="boris-f3-7f0a41ed4a6b6c">
+                          <img src={bannerUrls[p.banner]} alt=""  className="boris-f3-5eaf4e405b26db"/>
+                          <div className="boris-f3-31a0154f903402">🔍</div>
                         </div>
                       )}
-                      <div style={{ flex:1, minWidth:0 }}>
+                      <div className="boris-f3-0070778df76ac3">
                         <div style={{ fontSize:"12px", color:T.muted, marginBottom:"4px" }}>{p.created_at}</div>
-                        <div style={{ fontSize:"14px", color:T.ink, whiteSpace:"pre-wrap", maxHeight:"90px", overflow:"hidden" }}>{p.text}</div>
+                        <div style={{ fontSize:"14px", color:T.ink, whiteSpace:"pre-wrap", maxHeight:"90px", overflow:"hidden" }}>{cleanPostText(p.preview || p.text)}</div>
                         {p.stats && (
                           <div style={{ display:"flex", gap:"14px", marginTop:"10px", flexWrap:"wrap", fontSize:"13px", color:T.muted, alignItems:"center" }}>
                             <span title="Просмотры">👁 {p.stats.views ?? 0}</span>
@@ -702,8 +812,8 @@ export default function SocialPage() {
                             )}
                           </div>
                         )}
-                        <div style={{ display:"flex", gap:"10px", marginTop:"10px", flexWrap:"wrap" }}>
-                          <button className="soc-btn" disabled={busy} onClick={() => unpublishPost(p.id)} style={{ border:"1px solid #FDA29B", color:"#B42318", background:"#fff", borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>🗑 Удалить из канала</button>
+                        <div className="boris-f3-fb169f62bbd1ce">
+                          <button className="soc-btn boris-f3-990af6b92041d2" disabled={busy} onClick={() => unpublishPost(p.id)}>Удалить из канала</button>
                         </div>
                       </div>
                     </div>
@@ -713,21 +823,21 @@ export default function SocialPage() {
             )}
           </>
         ) : (
-          <div style={{ ...card, textAlign:"center", padding:"40px 24px", color:T.muted }}>
-            <div style={{ fontSize:"40px", marginBottom:"10px" }}>📣</div>
+          <div className="boris-social-empty-card" style={{ ...card, textAlign:"center", padding:"40px 24px", color:T.muted }}>
+            <div className="boris-f3-b8518f37b1c769 boris-social-empty-icon"><IconChip name="ads" kind="info" size={52} /></div>
             <div style={{ fontSize:"16px", fontWeight:700, color:T.ink, marginBottom:"6px" }}>Пока нет ни одного проекта</div>
-            <div style={{ fontSize:"14px", marginBottom:"18px" }}>Создайте проект — задайте каналы, стиль и темы, и бот начнёт постить.</div>
+            <div className="boris-f3-d25bc62ee86bf2">Создайте проект — задайте каналы, стиль и темы, и бот начнёт постить.</div>
             <button className="soc-btn" onClick={newProject} style={btn([T.blue1, T.blue2])}>＋ Создать первый проект</button>
           </div>
         )}
 
         {zoom && (
-          <div onClick={() => setZoom("")} style={{ position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(15,23,42,.88)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:9999, cursor:"zoom-out", padding:"24px" }}>
-            <img src={zoom} alt="" style={{ maxWidth:"92vw", maxHeight:"92vh", borderRadius:"14px", boxShadow:"0 24px 70px rgba(0,0,0,.55)" }} />
+          <div onClick={() => setZoom("")} className="boris-f3-6dde08bc8427d8">
+            <img src={zoom} alt=""  className="boris-f3-e8d4dced5de9fe"/>
           </div>
         )}
 
-        {err && <div style={{ color:"#B42318", fontSize:"14px" }}>{err}</div>}
+        {err && <div className="boris-f3-78b52f936c764a">{err}</div>}
       </div>
     </div>
   );

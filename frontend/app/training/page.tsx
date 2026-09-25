@@ -3,9 +3,11 @@
 import { useAccounts } from "../lib/AccountContext";
 import { useEffect, useState, useCallback } from "react";
 import {
-  Page, PageHeader, Card, Button, Input, Badge, Alert, EmptyState, Kpi, KpiRow, Icon, Table,
+  Page, Card, Button, Input, Badge, Alert, EmptyState, Kpi, KpiRow, Icon, Table,
 } from "../ui";
 import { color, space, font } from "../ui/tokens";
+import SectionGuide from "../components/SectionGuide";
+import AppShell from "../components/shell/AppShell";
 
 type Src = {
   id: number; account_id: string; source_type: string; title: string; url: string;
@@ -122,13 +124,13 @@ export default function TrainingPage() {
   }, [accCtx.selectedAccountId]);
 
   return (
-    <Page>
-      <PageHeader
-        title="Центр обучения BORIS"
-        subtitle={accCtx.selectedAccount
-          ? accCtx.selectedAccount.name + " · " + acc
+    <AppShell
+      active="training"
+      title="Центр обучения BORIS"
+      subtitle={accCtx.selectedAccount
+          ? accCtx.selectedAccount.name
           : "Выберите аккаунт в панели сверху — BORIS покажет, что он о нём знает"}
-        actions={
+      headerExtra={
           <>
             <Button kind="ghost" onClick={() => load(acc)} disabled={busy || !acc}>
               Показать
@@ -142,14 +144,18 @@ export default function TrainingPage() {
               Изучить заново
             </Button>
           </>
-        } />
+        }
+    >
+      <Page>
+      <SectionGuide section="training" />
+
 
       {note ? <Alert kind={err ? "danger" : "success"}>{note}</Alert> : null}
 
       {sum ? (
         <>
           <Card style={{ marginBottom: space.lg }}>
-            <div style={font.h3 as React.CSSProperties}>
+            <div data-boris-g32b-page="training" style={font.h3 as React.CSSProperties}>
               BORIS знает ваш бизнес на {know}%
             </div>
             <div style={{ height: 10, borderRadius: 999, background: color.surfaceAlt,
@@ -201,7 +207,7 @@ export default function TrainingPage() {
                                       borderTop: i ? "1px solid " + color.line : "none" }}>
               <Badge kind={it.status === "conflict" ? "danger"
                           : it.status === "stale" ? "warning" : "info"}>{it.type}</Badge>
-              <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="boris-f3-0070778df76ac3">
                 <div style={{ ...font.bodyStrong, overflow: "hidden",
                               textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</div>
                 <div style={{ ...font.small, marginTop: 2, overflow: "hidden",
@@ -247,7 +253,7 @@ export default function TrainingPage() {
                rows={srcs.map((s) => {
                  const st = ST[s.status] || ST.connected;
                  return [
-                   <span key="t" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                   <span key="t" className="boris-f3-0d5ff492ea5c13">
                      <Icon name={ICON[s.source_type] || "file"} size={16} tone="muted" />
                      <b style={{ color: color.heading }}>{s.title}</b>
                    </span>,
@@ -273,7 +279,7 @@ export default function TrainingPage() {
                                   padding: "10px 0",
                                   borderTop: i ? "1px solid " + color.line : "none" }}>
               <Icon name={ICON[a.type] || "plus"} size={18} tone="accent" />
-              <div style={{ flex: 1 }}>
+              <div className="boris-f3-6253876a649a63">
                 <div style={font.bodyStrong as React.CSSProperties}>{a.title}</div>
                 <div style={font.small as React.CSSProperties}>{a.why}</div>
               </div>
@@ -283,5 +289,6 @@ export default function TrainingPage() {
         </Card>
       ) : null}
     </Page>
+    </AppShell>
   );
 }

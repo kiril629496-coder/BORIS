@@ -16,6 +16,7 @@ import {
   fetchOnboardingStatus,
   OnboardingStatus,
   OnboardingUnauthorized,
+  ROUTE_ANALYSIS,
   ROUTE_CABINET,
   ROUTE_LOGIN,
   ROUTE_SCENARIOS,
@@ -37,26 +38,26 @@ const CHANNELS: { key: string; label: string }[] = [
 
 const wrap: React.CSSProperties = {
   minHeight: "100vh",
-  background: "linear-gradient(160deg, #F6F7FB 0%, #E7EFFE 100%)",
+  background: "linear-gradient(160deg, var(--boris-bg) 0%, var(--boris-blue-soft) 100%)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
   padding: "32px 16px",
   fontFamily: "var(--font-inter), Arial, Helvetica, sans-serif",
-  color: "#14161A",
+  color: "var(--boris-text)",
 };
 const card: React.CSSProperties = {
   background: "#FFFFFF",
-  border: "1px solid #E3E7F0",
+  border: "1px solid var(--boris-border)",
   borderRadius: 16,
   padding: "32px 34px",
   width: "100%",
   maxWidth: 560,
 };
-const label: React.CSSProperties = { display: "block", fontSize: 13, color: "#667085", marginBottom: 6 };
+const label: React.CSSProperties = { display: "block", fontSize: 13, color: "var(--boris-text-2)", marginBottom: 6 };
 const input: React.CSSProperties = {
   width: "100%",
-  border: "1px solid #E3E7F0",
+  border: "1px solid var(--boris-border)",
   borderRadius: 10,
   padding: "11px 13px",
   fontSize: 15,
@@ -64,7 +65,7 @@ const input: React.CSSProperties = {
   boxSizing: "border-box",
 };
 const primary: React.CSSProperties = {
-  background: "#2F6FED",
+  background: "var(--boris-blue)",
   color: "#FFFFFF",
   border: "none",
   borderRadius: 10,
@@ -75,14 +76,21 @@ const primary: React.CSSProperties = {
 };
 const ghost: React.CSSProperties = {
   background: "#FFFFFF",
-  color: "#2F6FED",
-  border: "1.5px solid #2F6FED",
+  color: "var(--boris-blue)",
+  border: "1.5px solid var(--boris-blue)",
   borderRadius: 10,
   padding: "12px 22px",
   fontWeight: 700,
   fontSize: 15,
   cursor: "pointer",
 };
+
+function inferCityFromBusinessText(companyName: string, niche: string): string {
+  const raw = (companyName + " " + niche).toLowerCase();
+  if (/\b(спб|питер)\b|санкт[- ]?петербург/.test(raw)) return "Санкт-Петербург";
+  if (/\b(мск|москва|московский)\b/.test(raw)) return "Москва";
+  return "";
+}
 
 export default function OnboardingPage() {
   const router = useRouter();
@@ -121,11 +129,11 @@ export default function OnboardingPage() {
       .then(function (value) {
         if (!alive) return;
         if (value.status === "completed") {
-          router.replace(ROUTE_SCENARIOS);
+          window.location.replace(ROUTE_SCENARIOS);
           return;
         }
         if (value.status === "skipped_existing_user") {
-          router.replace(ROUTE_CABINET);
+          window.location.replace(ROUTE_CABINET);
           return;
         }
         applyStatus(value);
@@ -156,19 +164,35 @@ export default function OnboardingPage() {
 
   async function submitStep1() {
     setError("");
-    if (!companyName.trim() || !niche.trim() || !city.trim()) {
-      setError("Заполните название компании, нишу и город.");
+    const cleanCompanyName = companyName.trim();
+    const cleanNiche = niche.trim();
+    const inferredCity = city.trim() || inferCityFromBusinessText(cleanCompanyName, cleanNiche);
+
+    if (!cleanCompanyName || !cleanNiche) {
+      setError("Заполните название компании и чем вы занимаетесь.");
       return;
     }
+    if (!inferredCity) {
+      setError("Укажите город. BORIS не смог определить его автоматически.");
+      return;
+    }
+
+    if (!city.trim()) setCity(inferredCity);
     setBusy(true);
     try {
-      await saveOnboardingStep(1, {
-        company_name: companyName.trim(),
-        company_niche: niche.trim(),
-        city: city.trim(),
+      const saved = await saveOnboardingStep(1, {
+        company_name: cleanCompanyName,
+        company_niche: cleanNiche,
+        city: inferredCity,
         website: website.trim(),
         phone: phone.trim(),
       });
+      // Старые/повторные вкладки могут отправить шаг после того, как мастер
+      // уже завершён на сервере. Не оставляем пользователя на форме.
+      if (saved.status === "completed" || saved.status === "skipped_existing_user") {
+        window.location.replace(saved.status === "completed" ? ROUTE_SCENARIOS : ROUTE_CABINET);
+        return;
+      }
       setStep(2);
     } catch (err) {
       if (err instanceof OnboardingUnauthorized) { router.replace(ROUTE_LOGIN); return; }
@@ -194,7 +218,10 @@ export default function OnboardingPage() {
       await saveOnboardingStep(2, { channels: channels, channel_links: cleanLinks });
       await completeOnboarding();
       setPhase("done");
-      setTimeout(function () { router.replace(ROUTE_SCENARIOS); }, 1400);
+      // P0.3: после мастера человек идёт на персональный анализ,
+      // а не сразу в каталог. Повторный вход в /onboarding при completed
+      // по-прежнему ведёт в каталог — анализ второй раз не показываем.
+      setTimeout(function () { router.replace(ROUTE_ANALYSIS); }, 1400);
     } catch (err) {
       if (err instanceof OnboardingUnauthorized) { router.replace(ROUTE_LOGIN); return; }
       setError(describeOnboardingError(err));
@@ -207,7 +234,7 @@ export default function OnboardingPage() {
     return (
       <div style={wrap}>
         <div style={card}>
-          <div style={{ color: "#667085", fontSize: 15 }}>Загружаю мастер…</div>
+          <div style={{ color: "var(--boris-text-2)", fontSize: 15 }}>Загружаю мастер…</div>
         </div>
       </div>
     );
@@ -218,7 +245,7 @@ export default function OnboardingPage() {
       <div style={wrap}>
         <div style={card}>
           <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Не удалось открыть мастер</div>
-          <div style={{ color: "#667085", fontSize: 14, marginBottom: 20 }}>{error}</div>
+          <div style={{ color: "var(--boris-text-2)", fontSize: 14, marginBottom: 20 }}>{error}</div>
           <button style={primary} onClick={function () { setAttempt(function (n) { return n + 1; }); }}>
             Попробовать снова
           </button>
@@ -232,7 +259,7 @@ export default function OnboardingPage() {
       <div style={wrap}>
         <div style={card}>
           <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>Профиль бизнеса сохранён</div>
-          <div style={{ color: "#667085", fontSize: 15 }}>Перехожу к подходящим сценариям…</div>
+          <div style={{ color: "var(--boris-text-2)", fontSize: 15 }}>BORIS собирает персональный анализ и следующий шаг…</div>
         </div>
       </div>
     );
@@ -241,18 +268,18 @@ export default function OnboardingPage() {
   return (
     <div style={wrap}>
       <div style={card}>
-        <div style={{ fontSize: 13, color: "#667085", marginBottom: 6 }}>Шаг {step} из 2</div>
+        <div style={{ fontSize: 13, color: "var(--boris-text-2)", marginBottom: 6 }}>Шаг {step} из 2</div>
         <div
-          style={{ height: 4, background: "#E3E7F0", borderRadius: 4, marginBottom: 22 }}
+          style={{ height: 4, background: "var(--boris-border)", borderRadius: 4, marginBottom: 22 }}
           aria-hidden="true"
         >
-          <div style={{ height: 4, width: step === 1 ? "50%" : "100%", background: "#2F6FED", borderRadius: 4 }} />
+          <div style={{ height: 4, width: step === 1 ? "50%" : "100%", background: "var(--boris-blue)", borderRadius: 4 }} />
         </div>
 
         {step === 1 ? (
           <div>
             <h1 style={{ fontSize: 22, margin: "0 0 6px" }}>Расскажите о компании</h1>
-            <p style={{ color: "#667085", fontSize: 14, margin: "0 0 22px" }}>
+            <p style={{ color: "var(--boris-text-2)", fontSize: 14, margin: "0 0 22px" }}>
               Это займёт минуту. По этим данным BORIS подберёт подходящие сценарии.
             </p>
 
@@ -280,7 +307,7 @@ export default function OnboardingPage() {
         ) : (
           <div>
             <h1 style={{ fontSize: 22, margin: "0 0 6px" }}>Где вы уже продаёте</h1>
-            <p style={{ color: "#667085", fontSize: 14, margin: "0 0 20px" }}>
+            <p style={{ color: "var(--boris-text-2)", fontSize: 14, margin: "0 0 20px" }}>
               Отметьте площадки. Ссылки можно не заполнять — добавите позже.
             </p>
 

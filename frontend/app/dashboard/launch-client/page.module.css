@@ -1,0 +1,307 @@
+.page {
+  min-height: 100%;
+  padding: 28px;
+  background: #f6f8fc;
+  color: #172033;
+}
+
+.header {
+  max-width: 1180px;
+  margin: 0 auto 22px;
+}
+
+.header h1 {
+  margin: 6px 0 8px;
+  font-size: 30px;
+  line-height: 1.15;
+  font-weight: 750;
+}
+
+.header p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--boris-text-muted);
+  line-height: 1.55;
+}
+
+.eyebrow {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #2563eb;
+}
+
+.card,
+.actionCard {
+  max-width: 1180px;
+  margin: 0 auto 16px;
+  padding: 22px;
+  background: #ffffff;
+  border: 1px solid #e9edf5;
+  border-radius: 18px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.05);
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.card:hover,
+.actionCard:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 34px rgba(15, 23, 42, 0.08);
+}
+
+.cardHeader {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
+.cardHeader h2,
+.actionCard h2 {
+  margin: 0 0 5px;
+  font-size: 18px;
+}
+
+.cardHeader p,
+.actionCard p {
+  margin: 0;
+  color: var(--boris-text-muted);
+  line-height: 1.45;
+}
+
+.iconChip {
+  display: flex;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  border-radius: 11px;
+  background: #eef4ff;
+  color: #2563eb;
+  font-weight: 750;
+  font-size: 13px;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  gap: 12px;
+}
+
+.select {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 13px;
+  border: 1px solid #dce2ec;
+  border-radius: 11px;
+  background: #fff;
+  color: #172033;
+  font-size: 14px;
+  outline: none;
+}
+
+.select:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.09);
+}
+
+.primaryButton,
+.secondaryButton {
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: transform 140ms ease, opacity 140ms ease;
+}
+
+.primaryButton {
+  border: 0;
+  background: #2563eb;
+  color: #fff;
+}
+
+.secondaryButton {
+  border: 1px solid #d7dfec;
+  background: #fff;
+  color: #172033;
+}
+
+.primaryButton:hover:not(:disabled),
+.secondaryButton:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.statusBox {
+  padding: 18px;
+  border-radius: 14px;
+  border: 1px solid transparent;
+}
+
+.ready {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.warning {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.blocked {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.statusTitle {
+  margin-bottom: 5px;
+  font-size: 18px;
+  font-weight: 750;
+}
+
+.statusReason {
+  color: var(--boris-text-2);
+}
+
+.reasonCode {
+  margin-top: 10px;
+  color: var(--boris-text-soft);
+  font-size: 12px;
+}
+
+.list {
+  display: grid;
+  gap: 10px;
+}
+
+.listItem {
+  display: flex;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid #edf0f5;
+  border-radius: 12px;
+  background: #fbfcfe;
+}
+
+.listItem p {
+  margin: 4px 0 0;
+  color: var(--boris-text-muted);
+  font-size: 13px;
+}
+
+.listNumber {
+  display: flex;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  border-radius: 9px;
+  background: #eef4ff;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.actionCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.actionCard > div {
+  max-width: 760px;
+}
+
+.errorCard {
+  border-color: #fecaca;
+  background: #fffafa;
+}
+
+.errorCard strong {
+  color: #b42318;
+}
+
+.errorCard p {
+  margin: 5px 0 0;
+  color: #7a271a;
+}
+
+@media (max-width: 760px) {
+  .page {
+    padding: 18px 14px;
+  }
+
+  .controls {
+    grid-template-columns: 1fr;
+  }
+
+  .actionCard {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .primaryButton {
+    width: 100%;
+  }
+}
+
+
+/* ==========================================================
+   BORIS_F2C_VISIBLE_NORMALIZATION_V1
+   Visible canonical BORIS surface bridge.
+   ========================================================== */
+
+.actionCard,
+.card,
+.errorCard {
+  background: var(--boris-card-bg, #ffffff);
+  border: 1px solid var(--boris-card-border, var(--boris-border));
+  border-radius: var(--boris-card-radius, 16px);
+  box-shadow: var(--boris-card-shadow);
+}
+
+.actionCard {
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease;
+}
+
+.actionCard:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--boris-card-shadow-hover);
+  border-color: rgba(47, 111, 237, 0.20);
+}
+
+.select {
+  min-height: var(--boris-control-height, 40px);
+  color: var(--boris-text);
+  background: var(--boris-control-bg, #ffffff);
+  border: 1px solid var(--boris-border);
+  border-radius: var(--boris-control-radius, 10px);
+}
+
+/* LAUNCH CLIENT — OWNER WORKSPACE / FLUID REFERENCE 2026-08-28 */
+.page { width:100%; max-width:none; padding:18px 0 28px; background:transparent; }
+.header,.card,.actionCard { width:100%; max-width:none; }
+.header { margin:0 0 14px; padding:18px 20px; border:1px solid #e0e8f3; border-radius:18px; background:linear-gradient(180deg,#fff,#fbfdff); box-shadow:0 8px 25px rgba(31,58,103,.045); }
+.header h1 { font-size:26px; font-weight:650; letter-spacing:-.02em; }
+.header p { max-width:900px; color:#718097; font-size:14px; font-weight:400; }
+.eyebrow { font-size:11px; font-weight:650; letter-spacing:.08em; }
+.card,.actionCard { padding:18px 20px; border-color:#e0e8f3; box-shadow:0 7px 22px rgba(31,58,103,.04); }
+.cardHeader h2,.actionCard h2 { font-size:17px; font-weight:650; }
+.cardHeader p,.actionCard p,.statusReason,.listItem p { font-weight:400; color:#718097; }
+.iconChip,.listNumber { font-weight:650; }
+.statusTitle { font-weight:650; }
+.primaryButton,.secondaryButton { font-weight:600; }
+.errorCard { border-left:4px solid #ef4444; }
+.errorCard strong { font-size:15px; font-weight:650; }
+@media(max-width:760px){ .page{padding:10px 0 20px}.header,.card,.actionCard{border-radius:14px;padding:15px}.header h1{font-size:23px} }
+/* LAUNCH CLIENT — OWNER WORKSPACE / FLUID REFERENCE END */

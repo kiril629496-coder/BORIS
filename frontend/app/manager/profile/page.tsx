@@ -2,10 +2,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const CARD: any = { background: "#FFFFFF", border: "1px solid #E3E7F0", borderRadius: 16,
+const CARD: any = { background: "#FFFFFF", border: "1px solid var(--boris-border)", borderRadius: 16,
   padding: 24, position: "relative", overflow: "hidden" };
-const H: any = { fontSize: 18, color: "#1D2939", margin: "0 0 14px", fontWeight: 700 };
-const INP: any = { padding: "10px 12px", border: "1.5px solid #E3E7F0", borderRadius: 10, fontSize: 15, width: "100%" };
+const H: any = { fontSize: 18, color: "var(--boris-text)", margin: "0 0 14px", fontWeight: 700 };
+const INP: any = { padding: "10px 12px", border: "1.5px solid var(--boris-border)", borderRadius: 10, fontSize: 15, width: "100%" };
 
 export default function ProfilePage() {
   const router = useRouter();
@@ -81,48 +81,43 @@ export default function ProfilePage() {
     if (el && el.scrollTop + el.clientHeight >= el.scrollHeight - 40) setReadEnd(true);
   };
 
-  if (!p) return <div style={{ padding: 40, color: "#667085" }}>Загрузка…</div>;
+  if (!p) return <div data-boris-g33="manager-profile" className="boris-f3-854e69659fafc8">Загрузка…</div>;
 
   return (
-    <div className="b-mgr-wrap" style={{ maxWidth: "100%", padding: "clamp(16px,3vw,32px) clamp(12px,2.5vw,36px) 60px",
-      fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", color: "#101828" }}>
+    <div className="b-mgr-wrap boris-f3-687e573a4cf13b">
 
-      <div className="b-mgr-hero" style={{ background: "linear-gradient(135deg,#2F6FED,#1E4FD8)", borderRadius: 20,
-        padding: "28px 32px", color: "#fff", marginBottom: 24, display: "flex",
-        justifyContent: "space-between", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+      <div className="b-mgr-hero boris-f3-9a771c9d7c218b">
         <div>
-          <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em" }}>Данные обо мне</div>
-          <div style={{ opacity: 0.85, fontSize: 15 }}>
+          <div className="boris-f3-05435878a10f53">Данные обо мне</div>
+          <div className="boris-f3-70e4bdb187a357">
             {nda && nda["принято"] ? "Коммерческая тайна принята" : "Коммерческая тайна не принята"}
           </div>
         </div>
-        <button className="b-mgr-btn" onClick={() => router.push("/manager")}
-          style={{ border: "1.5px solid rgba(255,255,255,0.6)", background: "transparent", color: "#fff",
-            borderRadius: 10, padding: "10px 18px", cursor: "pointer", fontWeight: 600 }}>Назад</button>
+        <button className="b-mgr-btn boris-f3-a9d1549ee372ad" onClick={() => router.push("/manager")}
+>Назад</button>
       </div>
 
       {nda && !nda["принято"] ? (
-        <div style={{ marginBottom: 24 }}>
-          <h3 style={{ ...H, color: "#B42318" }}>Сначала примите коммерческую тайну</h3>
-          <div className="b-mgr-card" style={CARD}>
+        <div className="boris-f3-a097a3f007033c">
+          <h3 data-boris-g33-heading="1" style={{ ...H, color: "#B42318" }}>Сначала примите коммерческую тайну</h3>
+          <div data-boris-g33-card="1" className="b-mgr-card boris-g1-card" style={CARD}>
             <div ref={box} onScroll={onScroll}
-              style={{ maxHeight: 340, overflowY: "auto", background: "#F8FAFF", borderRadius: 12,
-                padding: 18, whiteSpace: "pre-wrap", fontSize: 15, lineHeight: 1.7, color: "#344054" }}>
+ className="boris-f3-5604e561d9b53e">
               {nda["текст"]}
             </div>
-            <div style={{ color: "#667085", fontSize: 14, marginTop: 10 }}>
+            <div className="boris-f3-5c604f80dd30b9">
               Версия {nda["версия"]}. {readEnd ? "Документ прочитан до конца." : "Пролистайте документ до конца."}
             </div>
             <label style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 14, cursor: readEnd ? "pointer" : "default" }}>
               <input type="checkbox" checked={agree} disabled={!readEnd} onChange={e => setAgree(e.target.checked)}
-                style={{ marginTop: 4, width: 18, height: 18 }} />
-              <span style={{ fontSize: 15, color: readEnd ? "#1D2939" : "#98A2B3" }}>
+  className="boris-f3-1de64d931e4ff7"/>
+              <span style={{ fontSize: 15, color: readEnd ? "var(--boris-text)" : "var(--boris-text-3)" }}>
                 Я полностью прочитал соглашение, понимаю его содержание и обязуюсь соблюдать.
                 Мне известно об ответственности за разглашение, в том числе по ст. 183 УК РФ.
               </span>
             </label>
-            <button className="b-mgr-btn" onClick={acceptNda} disabled={!readEnd || !agree}
-              style={{ marginTop: 14, background: (readEnd && agree) ? "#2F6FED" : "#98A2B3", color: "#fff",
+            <button data-boris-g33-interactive="1" data-boris-g33-card="1" className="b-mgr-btn" onClick={acceptNda} disabled={!readEnd || !agree}
+              style={{ marginTop: 14, background: (readEnd && agree) ? "var(--boris-blue)" : "var(--boris-text-3)", color: "#fff",
                 border: "none", borderRadius: 10, padding: "11px 22px",
                 cursor: (readEnd && agree) ? "pointer" : "default", fontWeight: 700 }}>Принимаю</button>
           </div>
@@ -130,19 +125,19 @@ export default function ProfilePage() {
       ) : null}
 
       {nda && nda["принято"] ? (
-        <div className="b-mgr-card" style={{ ...CARD, marginBottom: 24, background: "#ECFDF3", border: "1px solid #ABEFC6" }}>
-          <div style={{ color: "#067647", fontWeight: 600 }}>
+        <div data-boris-g33-card="1" className="b-mgr-card boris-g1-card" style={{ ...CARD, marginBottom: 24, background: "#ECFDF3", border: "1px solid #ABEFC6" }}>
+          <div className="boris-f3-0e17be08ccf945">
             Коммерческая тайна принята {nda["когда"] ? String(nda["когда"]).replace("T", " ").slice(0, 16) : ""} · версия {nda["версия"]}
           </div>
-          <div style={{ color: "#12805C", fontSize: 14, marginTop: 4 }}>
+          <div className="boris-f3-39f4993ad5fb2e">
             Дата, время и IP зафиксированы. Обязательства действуют весь срок работы и три года после.
           </div>
         </div>
       ) : null}
 
-      <h3 style={H}>Личные данные</h3>
-      <div className="b-mgr-card" style={{ ...CARD, marginBottom: 24 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,230px),1fr))", gap: 12 }}>
+      <h3 data-boris-g33-heading="1" style={H}>Личные данные</h3>
+      <div data-boris-g33-card="1" className="b-mgr-card boris-g1-card" style={{ ...CARD, marginBottom: 24 }}>
+        <div className="boris-f3-ef731a5e7e9ead">
           <input style={INP} placeholder="Фамилия" value={p["фамилия"] || ""} onChange={e => f("фамилия", e.target.value)} />
           <input style={INP} placeholder="Имя" value={p["имя"] || ""} onChange={e => f("имя", e.target.value)} />
           <input style={INP} placeholder="Отчество" value={p["отчество"] || ""} onChange={e => f("отчество", e.target.value)} />
@@ -156,12 +151,12 @@ export default function ProfilePage() {
           value={p["соцсети"] || ""} onChange={e => f("соцсети", e.target.value)} />
       </div>
 
-      <h3 style={H}>Паспортные данные</h3>
-      <div className="b-mgr-card" style={{ ...CARD, marginBottom: 24 }}>
-        <div style={{ color: "#667085", fontSize: 14, marginBottom: 12 }}>
+      <h3 data-boris-g33-heading="1" style={H}>Паспортные данные</h3>
+      <div data-boris-g33-card="1" className="b-mgr-card boris-g1-card" style={{ ...CARD, marginBottom: 24 }}>
+        <div className="boris-f3-0622f8a0c53da4">
           Хранятся в зашифрованном виде. Скан загружать не нужно.
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,200px),1fr))", gap: 12 }}>
+        <div className="boris-f3-07738f8c98ab1d">
           <input style={INP} placeholder="Серия" value={p["паспорт_серия"] || ""} onChange={e => f("паспорт_серия", e.target.value)} />
           <input style={INP} placeholder="Номер" value={p["паспорт_номер"] || ""} onChange={e => f("паспорт_номер", e.target.value)} />
           <input style={INP} type="date" value={p["паспорт_дата_выдачи"] || ""} onChange={e => f("паспорт_дата_выдачи", e.target.value)} />
@@ -171,29 +166,26 @@ export default function ProfilePage() {
           value={p["паспорт_кем_выдан"] || ""} onChange={e => f("паспорт_кем_выдан", e.target.value)} />
       </div>
 
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 28 }}>
-        <button className="b-mgr-btn" onClick={save} style={{ background: "#2F6FED", color: "#fff", border: "none",
-          borderRadius: 10, padding: "11px 22px", cursor: "pointer", fontWeight: 700 }}>Сохранить данные</button>
+      <div className="boris-f3-059df1ee8dead5">
+        <button className="b-mgr-btn boris-f3-f6bf24ae7396c1" onClick={save}>Сохранить данные</button>
         {msg ? <span style={{ color: msg === "Сохранено" ? "#12805C" : "#B42318" }}>{msg}</span> : null}
       </div>
 
-      <h3 style={H}>Близкие родственники</h3>
-      <div className="b-mgr-card" style={CARD}>
-        <div style={{ color: "#667085", fontSize: 14, marginBottom: 14 }}>
+      <h3 data-boris-g33-heading="1" style={H}>Близкие родственники</h3>
+      <div data-boris-g33-card="1" className="b-mgr-card boris-g1-card" style={CARD}>
+        <div className="boris-f3-4beb2b8821a308">
           Данные другого человека можно внести только с его согласия — он должен знать, что вы их передаёте.
         </div>
         {rel.map(r => (
-          <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 10,
-            padding: "10px 0", borderTop: "1px solid #EAECF0", flexWrap: "wrap" }}>
-            <div style={{ fontSize: 15 }}>
+          <div key={r.id} className="boris-f3-7bce70397eb6c4">
+            <div className="boris-f3-e49c04bf11ac05">
               <b>{r["кто"]}</b> · {r["фио"]}{r["телефон"] ? " · " + r["телефон"] : ""}
-              <span style={{ color: "#12805C", fontSize: 13 }}> · согласие получено{r["согласие_дата"] ? " " + String(r["согласие_дата"]).slice(0, 10) : ""}</span>
+              <span className="boris-f3-68f2158b741975"> · согласие получено{r["согласие_дата"] ? " " + String(r["согласие_дата"]).slice(0, 10) : ""}</span>
             </div>
-            <button onClick={() => delRel(r.id)} style={{ background: "#fff", border: "1.5px solid #F04438",
-              color: "#B42318", borderRadius: 10, padding: "6px 14px", cursor: "pointer", fontSize: 14 }}>Удалить</button>
+            <button onClick={() => delRel(r.id)} className="boris-f3-407dba4efe75ad">Удалить</button>
           </div>
         ))}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(min(100%,200px),1fr))", gap: 12, marginTop: 16 }}>
+        <div className="boris-f3-9ea84cffc5c555">
           <select style={INP} value={nr.relation} onChange={e => setNr({ ...nr, relation: e.target.value })}>
             <option>супруг(а)</option><option>отец</option><option>мать</option>
             <option>сын</option><option>дочь</option><option>экстренный контакт</option>
@@ -201,13 +193,13 @@ export default function ProfilePage() {
           <input style={INP} placeholder="ФИО" value={nr.fio} onChange={e => setNr({ ...nr, fio: e.target.value })} />
           <input style={INP} placeholder="Телефон" value={nr.phone} onChange={e => setNr({ ...nr, phone: e.target.value })} />
         </div>
-        <label style={{ display: "flex", gap: 10, alignItems: "flex-start", marginTop: 12, cursor: "pointer" }}>
+        <label className="boris-f3-1c7c57b544bc18">
           <input type="checkbox" checked={nr.consent} onChange={e => setNr({ ...nr, consent: e.target.checked })}
-            style={{ marginTop: 4, width: 18, height: 18 }} />
-          <span style={{ fontSize: 15 }}>Подтверждаю, что получил согласие этого человека на передачу его данных.</span>
+  className="boris-f3-1de64d931e4ff7"/>
+          <span className="boris-f3-e49c04bf11ac05">Подтверждаю, что получил согласие этого человека на передачу его данных.</span>
         </label>
-        <button className="b-mgr-btn" onClick={addRel} disabled={!nr.consent}
-          style={{ marginTop: 12, background: nr.consent ? "#2F6FED" : "#98A2B3", color: "#fff", border: "none",
+        <button data-boris-g33-interactive="1" data-boris-g33-card="1" className="b-mgr-btn" onClick={addRel} disabled={!nr.consent}
+          style={{ marginTop: 12, background: nr.consent ? "var(--boris-blue)" : "var(--boris-text-3)", color: "#fff", border: "none",
             borderRadius: 10, padding: "10px 20px", cursor: nr.consent ? "pointer" : "default", fontWeight: 700 }}>Добавить</button>
       </div>
     </div>

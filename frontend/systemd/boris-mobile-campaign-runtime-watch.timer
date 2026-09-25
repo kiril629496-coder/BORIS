@@ -1,0 +1,12 @@
+[Unit]
+Description=Run BORIS mobile + campaign runtime watch every 30 minutes
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=30min
+RandomizedDelaySec=90
+Persistent=true
+Unit=boris-mobile-campaign-runtime-watch.service
+
+[Install]
+WantedBy=timers.target

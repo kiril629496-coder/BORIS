@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "BORIS Browser Gateway",
+  "version": "3.0.0",
+  "description": "BORIS Browser Gateway: Avito, почта, соцсети, Crowd onboarding и визуальный QA.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "alarms",
+    "activeTab",
+    "tabCapture",
+    "offscreen",
+    "downloads",
+    "<all_urls>"
+  ],
+  "host_permissions": [
+    "https://boris-ai.pro/*",
+    "https://www.avito.ru/*",
+    "https://avito.ru/*",
+    "https://mail.yandex.ru/*",
+    "https://id.yandex.ru/*",
+    "https://passport.yandex.ru/*",
+    "https://accounts.google.com/*",
+    "https://myaccount.google.com/*",
+    "https://mail.google.com/*",
+    "https://studio.youtube.com/*",
+    "https://www.youtube.com/*",
+    "https://youtube.com/*",
+    "https://vk.com/*",
+    "https://web.telegram.org/*",
+    "https://e.mail.ru/*",
+    "https://account.mail.ru/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "BORIS Browser Gateway"
+  }
+}

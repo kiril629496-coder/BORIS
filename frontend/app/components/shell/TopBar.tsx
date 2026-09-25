@@ -1,10 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import css from "./shell.module.css";
+import AccountSelector from "./AccountSelector";
+import { useAccounts } from "../../lib/AccountContext";
 import { apiGet, getAccount, getRole, openRoute } from "../../lib/api";
+import GlobalLogoutButton from "./GlobalLogoutButton";
 
-type Props = { title: string; subtitle?: string; onBurger: () => void; onSwitch: () => void };
+type Props = { title: string; subtitle?: string; onBurger: () => void; onSwitch?: () => void;
+  extra?: ReactNode;
+};
 
 function hello() {
   const h = new Date().getHours();
@@ -14,7 +19,8 @@ function hello() {
   return "Добрый вечер";
 }
 
-export default function TopBar({ title, subtitle, onBurger, onSwitch }: Props) {
+export default function TopBar({ title, subtitle, onBurger, onSwitch, extra}: Props) {
+  const { selectedAccountId, setSelectedAccount } = useAccounts();
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [unread, setUnread] = useState(0);
@@ -28,10 +34,10 @@ export default function TopBar({ title, subtitle, onBurger, onSwitch }: Props) {
   useEffect(() => {
     apiGet("/api/accounts/list").then((d: any) => {
       const list = (d && d.accounts) || [];
-      const mine = list.find((a: any) => a.account_id === getAccount());
+      const mine = list.find((a: any) => a.account_id === (selectedAccountId || getAccount()));
       if (mine && mine.role) setAccRole(mine.role);
     }).catch(() => {});
-  }, []);
+  }, [selectedAccountId]);
   useEffect(() => {
     apiGet("/api/crm/today").then((d: any) => {
       if (d && d.status === "ok") setCrm(d);
@@ -40,7 +46,7 @@ export default function TopBar({ title, subtitle, onBurger, onSwitch }: Props) {
 
   useEffect(() => {
     setRole(getRole());
-    const acc = getAccount();
+    const acc = selectedAccountId || getAccount();
     if (!acc) return;
     apiGet("/api/home/overview?account_id=" + encodeURIComponent(acc)).then((d: any) => {
       if (d && d.status === "ok") {
@@ -49,7 +55,7 @@ export default function TopBar({ title, subtitle, onBurger, onSwitch }: Props) {
         if (n) setUnread(parseInt(String(n.title).replace(/\D/g, ""), 10) || 0);
       }
     });
-  }, []);
+  }, [selectedAccountId]);
 
   const roleRu = accRole === "employee" ? "Сотрудник"
     : accRole === "owner" ? "Руководитель"
@@ -66,7 +72,12 @@ export default function TopBar({ title, subtitle, onBurger, onSwitch }: Props) {
       </div>
 
       <div className={css.topActions}>
-        <button className={css.ghost} onClick={onSwitch} data-testid="to-old">Старый интерфейс</button>
+        <AccountSelector
+          account={selectedAccountId || ""}
+          onAccountChange={setSelectedAccount}
+        />
+        {extra && <div className={css.topExtra}>{extra}</div>}
+        {onSwitch ? <button className={css.ghost} onClick={onSwitch}>Переключить интерфейс</button> : null}
         <span style={{ position: "relative" }}>
           <button className={css.iconBtn} data-testid="crm-bell"
                   aria-label="Напоминания" title="Напоминания"
@@ -83,29 +94,30 @@ export default function TopBar({ title, subtitle, onBurger, onSwitch }: Props) {
           </button>
           {bellOpen ? (
             <div style={{ position: "absolute", right: 0, top: 40, width: 320, zIndex: 60,
-                          background: "#FFFFFF", border: "1px solid #E3E7F0",
+                          background: "#FFFFFF", border: "1px solid var(--boris-border)",
                           borderRadius: 12, boxShadow: "0 8px 24px rgba(16,24,40,0.12)",
                           padding: "12px 14px", textAlign: "left" }}>
               <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>
                 Напоминания
               </div>
               {!crm || !crm["задачи"] || crm["задачи"].length === 0 ? (
-                <div style={{ fontSize: 13, color: "#98A2B3" }}>На сегодня задач нет</div>
+                <div style={{ fontSize: 13, color: "var(--boris-text-3)" }}>На сегодня задач нет</div>
               ) : crm["задачи"].map((t: any) => (
                 <div key={t.id} onClick={() => openRoute("/messages")}
-                     style={{ borderTop: "1px solid #F2F4F7", padding: "8px 0",
+                     style={{ borderTop: "1px solid var(--boris-border-soft)", padding: "8px 0",
                               cursor: "pointer" }}>
                   <div style={{ fontSize: 13, fontWeight: 600,
                                 color: t["просрочено"] ? "#D92D20" : "#067647" }}>
                     {t["время"] ? t["время"] + " · " : ""}{t["заголовок"]}
                   </div>
-                  <div style={{ fontSize: 12, color: "#98A2B3" }}>{t["аккаунт"]}</div>
+                  <div style={{ fontSize: 12, color: "var(--boris-text-3)" }}>{t["аккаунт"]}</div>
                 </div>
               ))}
             </div>
           ) : null}
         </span>
-        <button className={css.iconBtn} aria-label="Помощь" title="Помощь">?</button>
+        <button className={css.iconBtn} aria-label="Помощь" title="Помощь" onClick={() => openRoute("/support")}>?</button>
+        <GlobalLogoutButton />
         <div className={css.user}>
           <span className={css.userName}>{name || "Аккаунт"}</span>
           <span className={css.userRole}>{roleRu}</span>

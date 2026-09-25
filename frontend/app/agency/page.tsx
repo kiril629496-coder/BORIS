@@ -60,96 +60,94 @@ const HOVER = `
 .b-ag-btn { transition: transform .18s cubic-bezier(.34,1.56,.64,1), box-shadow .18s ease; }
 .b-ag-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(16,24,40,.14); }
 `;
-  const card: any = { background: "#FFFFFF", border: "1px solid #E3E7F0", borderRadius: 16, padding: "22px 24px", position: "relative", overflow: "hidden" };
+  const card: any = { background: "#FFFFFF", border: "1px solid var(--boris-border)", borderRadius: 16, padding: "22px 24px", position: "relative", overflow: "hidden" };
   const money = (n: any) => (Number(n) || 0).toLocaleString("ru-RU") + " \u20BD";
 
-  if (err) return <div style={{ padding: 40, color: "#B42318" }}>{err}</div>;
-  if (!data) return <div style={{ padding: 40, color: "#667085" }}>Загрузка…</div>;
+  if (err) return <div className="boris-f3-ddfbf53220e06f">{err}</div>;
+  if (!data) return <div className="boris-f3-854e69659fafc8">Загрузка…</div>;
 
   return (
-    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "28px 20px 60px",
-                  fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif", color: "#101828" }}>
+    <div className="boris-f3-969bbd8b9ad4ce">
       <style dangerouslySetInnerHTML={{ __html: HOVER }} />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
-        <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>Мои аккаунты</h1>
+      <div className="boris-f3-64ed56d7822636">
+        <h1 className="boris-f3-099e185f4df478">Мои аккаунты</h1>
         <button onClick={() => router.push("/dashboard")}
-          style={{ border: "1px solid #D0D5DD", background: "#fff", borderRadius: 8,
-                   padding: "8px 14px", cursor: "pointer", color: "#475467" }}>В кабинет</button>
+ className="boris-f3-a7b849c9695f3b">В кабинет</button>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 14, marginBottom: 20 }}>
+      <div className="boris-f3-d01dee0f0e5c30">
         <div className="b-ag-card" style={card}>
-          <div style={{ position: "absolute", top: -30, right: -30, width: 90, height: 90, borderRadius: "50%", background: "linear-gradient(135deg,#4C8DFF,#2F6FED)", opacity: 0.08 }} />
-          <div style={{ width: 44, height: 44, borderRadius: "50%", background: "linear-gradient(135deg,#4C8DFF,#2F6FED)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 12 }}>🏢</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: "#1D2939", letterSpacing: "-0.02em" }}>{data["аккаунтов"]}</div>
-          <div style={{ fontSize: 14, color: "#667085", marginTop: 2 }}>аккаунтов</div>
+          <div  className="boris-f3-33c29569f4a764"/>
+          <div className="boris-f3-08f009b795c643">🏢</div>
+          <div className="boris-f3-175c77b3fec00c">{data["аккаунтов"]}</div>
+          <div className="boris-f3-7d1cfed0dd4f28">аккаунтов</div>
         </div>
         <div className="b-ag-card" style={card}>
-          <div style={{ position: "absolute", top: -30, right: -30, width: 90, height: 90, borderRadius: "50%", background: "linear-gradient(135deg,#9B87F5,#7C5CFC)", opacity: 0.08 }} />
-          <div style={{ width: 44, height: 44, borderRadius: "50%", background: "linear-gradient(135deg,#9B87F5,#7C5CFC)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 12 }}>💳</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: "#1D2939", letterSpacing: "-0.02em" }}>
+          <div  className="boris-f3-9448ebed6526ed"/>
+          <div className="boris-f3-de396af9715221">💳</div>
+          <div className="boris-f3-175c77b3fec00c">
             {data["из_них_платных"] ? money(data["цена_за_аккаунт"]) : "По договору"}
           </div>
-          <div style={{ fontSize: 14, color: "#667085", marginTop: 2 }}>
+          <div className="boris-f3-7d1cfed0dd4f28">
             {data["из_них_платных"] ? "за аккаунт · Тариф 1" : "тариф и оплата"}
           </div>
         </div>
         <div className="b-ag-card" style={card}>
-          <div style={{ position: "absolute", top: -30, right: -30, width: 90, height: 90, borderRadius: "50%", background: "linear-gradient(135deg,#32D583,#12805C)", opacity: 0.08 }} />
-          <div style={{ width: 44, height: 44, borderRadius: "50%", background: "linear-gradient(135deg,#32D583,#12805C)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 12 }}>💰</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: "#1D2939", letterSpacing: "-0.02em" }}>
+          <div  className="boris-f3-9774f493ed4b2a"/>
+          <div className="boris-f3-1d9cee7d690987">💰</div>
+          <div className="boris-f3-175c77b3fec00c">
             {data["из_них_платных"] ? money(data["к_оплате_за_период"]) : "\u2014"}
           </div>
-          <div style={{ fontSize: 14, color: "#667085", marginTop: 2 }}>
+          <div className="boris-f3-7d1cfed0dd4f28">
             {data["из_них_платных"] ? "к оплате за период" : "счёт выставляется вручную"}
           </div>
         </div>
         <div className="b-ag-card" style={card}>
-          <div style={{ position: "absolute", top: -30, right: -30, width: 90, height: 90, borderRadius: "50%", background: "linear-gradient(135deg,#FDB022,#F79009)", opacity: 0.08 }} />
-          <div style={{ width: 44, height: 44, borderRadius: "50%", background: "linear-gradient(135deg,#FDB022,#F79009)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 12 }}>⏳</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: "#1D2939", letterSpacing: "-0.02em" }}>{data["дней_до_конца_периода"] ?? "—"}</div>
-          <div style={{ fontSize: 14, color: "#667085", marginTop: 2 }}>дней до списания</div>
+          <div  className="boris-f3-b9f3f1733e5a8c"/>
+          <div className="boris-f3-d0660dc5c6beb9">⏳</div>
+          <div className="boris-f3-175c77b3fec00c">{data["дней_до_конца_периода"] ?? "—"}</div>
+          <div className="boris-f3-7d1cfed0dd4f28">дней до списания</div>
         </div>
       </div>
 
       <div style={{ ...card, marginBottom: 18 }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>Подключить ещё аккаунт</div>
+        <div className="boris-f3-d5370c51632efc">Подключить ещё аккаунт</div>
         {prev && (
-          <div style={{ color: "#667085", fontSize: 13, marginBottom: 12 }}>
-            Доплата сейчас — <b style={{ color: "#101828" }}>{money(prev["доплата_за_ещё_один"])}</b> за
+          <div className="boris-f3-8b09689183ea25">
+            Доплата сейчас — <b className="boris-f3-872175c4f12c7c">{money(prev["доплата_за_ещё_один"])}</b> за
             оставшиеся {prev["дней_до_конца_периода"]} дней. Со следующего периода:
             {" "}{money(prev["со_следующего_периода"])} за {(prev["аккаунтов_сейчас"] || 0) + 1} аккаунтов
             ({money(prev["цена_за_аккаунт_станет"])} за каждый).
           </div>
         )}
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <div className="boris-f3-defeae6db5822b">
           <input placeholder="Название (например: Мебель Казань)" value={newName}
             onChange={e => setNewName(e.target.value)}
-            style={{ padding: "9px 12px", border: "1px solid #D0D5DD", borderRadius: 8, minWidth: 280 }} />
+  className="boris-f3-151dbb44cfda1b"/>
           <button onClick={addAccount} disabled={busy}
-            style={{ background: busy ? "#98A2B3" : "#2F6FED", color: "#fff", border: "none",
+            style={{ background: busy ? "var(--boris-text-3)" : "var(--boris-blue)", color: "#fff", border: "none",
                      borderRadius: 8, padding: "10px 18px", cursor: busy ? "default" : "pointer", fontWeight: 600 }}>
             {busy ? "Подключаем…" : "Подключить и оплатить"}</button>
-          {msg && <span style={{ color: "#067647", fontSize: 13 }}>{msg}</span>}
+          {msg && <span className="boris-f3-83fefc2d13e1fa">{msg}</span>}
         </div>
       </div>
 
       <div style={card}>
-        <div style={{ fontWeight: 600, marginBottom: 12 }}>Аккаунты</div>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-          <thead><tr style={{ textAlign: "left", color: "#667085", fontSize: 12 }}>
-            <th style={{ padding: "8px 6px" }}>Название</th><th>Тариф</th>
+        <div className="boris-f3-6c4905b5de58d0">Аккаунты</div>
+        <table className="boris-f3-246798c345c9bb">
+          <thead><tr className="boris-f3-d718f25d17f67a">
+            <th className="boris-f3-ed7579f15d16d2">Название</th><th>Тариф</th>
             <th>Баннеры</th><th>Объявления</th><th>Avito</th>
           </tr></thead>
           <tbody>
             {data["аккаунты"].map((a: any) => (
-              <tr key={a.account_id} style={{ borderTop: "1px solid #EAECF0" }}>
-                <td style={{ padding: "10px 6px" }}>
+              <tr key={a.account_id} className="boris-f3-7df93423a4b246">
+                <td className="boris-f3-08770b5ea674a8">
                   {a["название"]}
-                  <div style={{ color: "#98A2B3", fontSize: 12 }}>{a.account_id}</div>
+                  <div className="boris-f3-b5875a093e2b8b">{a.account_id}</div>
                 </td>
                 <td>{a["тариф"]}</td>
-                <td style={{ color: a["лимит_баннеров_исчерпан"] ? "#B42318" : "#101828",
+                <td style={{ color: a["лимит_баннеров_исчерпан"] ? "#B42318" : "var(--boris-text)",
                              fontWeight: a["лимит_баннеров_исчерпан"] ? 600 : 400 }}>
                   {a["баннеры"]}{a["лимит_баннеров_исчерпан"] ? " — исчерпан" : ""}
                 </td>

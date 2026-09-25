@@ -1,159 +1,154 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Mascot } from "../Mascot";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import css from "./shell.module.css";
-import { apiGet, getAccount, setAccount, navigateToOld, openRoute, OldMode } from "../../lib/api";
+import { Icon, type IconName } from "../../ui";
+import { NAVIGATION } from "../../ui/navigation";
+import { useAccounts } from "../../lib/AccountContext";
+import { apiGet } from "../../lib/api";
 
-/* Пункт меню: либо маршрут нового интерфейса, либо вкладка старого кабинета
-   (при необходимости с булевым режимом — их открывает мост навигации). */
-type Item = { key: string; icon: string; label: string; route?: string; tab?: string;
-              mode?: OldMode; testid?: string };
+type SessionUser = { role?: string; id?: number; email?: string; user?: { role?: string; id?: number; email?: string } };
 
-const GROUPS: { title: string; items: Item[] }[] = [
-  {
-    title: "Управление",
-    items: [
-      { key: "director",   icon: "📊", label: "Директор",          tab: "stats",     mode: "director" },
-      { key: "advisor",    icon: "🎯", label: "Советник",          tab: "marketing", mode: "advisor" },
-      { key: "billing",    icon: "💳", label: "Тарифы и финансы",  tab: "billing" },
-      { key: "wallet",     icon: "👛", label: "Кошелёк",           tab: "billing",   mode: "wallet" },
-      { key: "requisites", icon: "🧾", label: "Реквизиты",         tab: "billing",   mode: "requisites" },
-      { key: "accounts",   icon: "🏬", label: "Мои аккаунты",      route: "/agency" },
-    ],
-  },
-  {
-    title: "Работа",
-    items: [
-      { key: "home",     icon: "🏠", label: "Главная",       route: "/dashboard/home" },
-      { key: "scenarios", icon: "⭐", label: "Бизнес-сценарии", route: "/dashboard/scenarios" },
-      // nav-cabinet: любой пункт с tab уходит через navigateToOld на /dashboard,
-      // и «Объявления» — первый рабочий раздел кабинета. Этот идентификатор
-      // ждёт QA как доказательство, что переход в кабинет живой.
-      { key: "listings", icon: "📋", label: "Объявления",    tab: "listings",
-        testid: "nav-cabinet" },
-      { key: "plan",     icon: "✅", label: "Задачи и план", tab: "plan" },
-      { key: "settings", icon: "🛡", label: "Режим работы",  tab: "settings" },
-    ],
-  },
-  {
-    title: "Рост",
-    items: [
-      { key: "marketing", icon: "💼", label: "Маркетинг", tab: "marketing" },
-      { key: "content",   icon: "🎨", label: "Контент",   tab: "webdesign" },
-      { key: "sales",     icon: "💰", label: "Продажи",   tab: "sales" },
-      { key: "analytics", icon: "📈", label: "Аналитика", tab: "stats", mode: "analytics" },
-    ],
-  },
-];
+type Props = { active?: string; open?: boolean; onClose?: () => void; onSelect?: (key: string) => void; };
 
-type Props = { active?: string; open: boolean; onClose: () => void };
+const OWNER_ONLY_NAV_KEYS = new Set(["clients-control", "journal", "ux-tester", "reliability"]);
 
-export default function Sidebar({ active, open, onClose }: Props) {
-  const [min, setMin] = useState(false);
-  const [accounts, setAccounts] = useState<any[]>([]);
-  const [acc, setAcc] = useState("");
+function isActive(pathname: string, itemKey: string, href?: string, explicitActive?: string) {
+  if (explicitActive) return explicitActive === itemKey;
+
+  // Simplified business parents must stay highlighted while the user works
+  // inside nested tools that no longer have their own top-level menu item.
+  if (itemKey === "sales") {
+    if (pathname === "/dashboard/crm/integrations" || pathname.startsWith("/dashboard/crm/integrations/")) return false;
+    return pathname === "/rop" || pathname.startsWith("/rop/") || pathname === "/dashboard/crm" || pathname.startsWith("/dashboard/crm/");
+  }
+  if (itemKey === "messages" && (pathname === "/reactivation" || pathname.startsWith("/reactivation/") || pathname === "/messages" || pathname.startsWith("/messages/"))) return true;
+  if (itemKey === "listings" && (pathname === "/dashboard/crm/integrations" || pathname.startsWith("/dashboard/crm/integrations/"))) return true;
+
+  if (!href) return false;
+  const hrefPath = href.split("?")[0];
+  return pathname === hrefPath || pathname.startsWith(`${hrefPath}/`);
+}
+
+export default function Sidebar({ active, open = false, onClose, onSelect }: Props) {
+  const pathname = usePathname();
+  const [collapsed, setCollapsed] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [badges, setBadges] = useState<Record<string, number>>({});
+  const [platformOwner, setPlatformOwner] = useState(false);
+  const navRef = useRef<HTMLElement | null>(null);
+  const { accounts, selectedAccountId, selectedAccount, setSelectedAccount } = useAccounts();
 
   useEffect(() => {
-    setAcc(getAccount());
-    setMin(typeof window !== "undefined" && localStorage.getItem("boris_sideMin") === "1");
-    apiGet("/api/accounts/list").then((d: any) => {
-      const list = d && d.accounts ? d.accounts : Array.isArray(d) ? d : [];
-      setAccounts(list);
-      if (!getAccount() && list.length) {
-        const first = list[0].account_id || list[0].id;
-        setAccount(first); setAcc(first);
-      }
-    });
+    try { setCollapsed(sessionStorage.getItem("boris_sidebar_collapsed") === "1"); } catch {}
   }, []);
 
-  const toggle = () => {
-    const v = !min; setMin(v);
-    try { localStorage.setItem("boris_sideMin", v ? "1" : "0"); } catch {}
-  };
+  useEffect(() => {
+    let alive = true;
+    // FRONTEND_OWNER_MENU_FAST_PATH_V1:
+    // login already persists the authenticated email. Reuse it immediately so
+    // owner-only links do not disappear for a frame on every AppShell remount.
+    // Server /api/auth/me remains authoritative and corrects the value below.
+    try {
+      const savedEmail = String(localStorage.getItem("boris_user_email") || "").trim().toLowerCase();
+      if (savedEmail === "ostapenko-kirill-86@yandex.ru") setPlatformOwner(true);
+    } catch {}
+    apiGet("/api/auth/me").then((u: SessionUser) => {
+      const user = u?.user || u;
+      const uid = Number(user?.id || 0);
+      const email = String(user?.email || "").trim().toLowerCase();
+      if (alive) setPlatformOwner(uid === 2 && email === "ostapenko-kirill-86@yandex.ru");
+    }).catch(() => { if (alive) setPlatformOwner(false); });
+    return () => { alive = false; };
+  }, []);
 
-  const go = (it: Item) => {
-    onClose();
-    if (it.route) openRoute(it.route);
-    else if (it.tab) navigateToOld(it.tab, it.mode || null);
-  };
+  useEffect(() => {
+    let alive = true;
+    async function loadBadges() {
+      const next: Record<string, number> = {};
+      const requests: Promise<void>[] = [
+        apiGet("/api/factory/confirmations").then((d: any) => {
+          const n = Array.isArray(d?.items) ? d.items.filter((x: any) => x?.status === "pending").length : 0;
+          if (n > 0) next["factory-decisions"] = n;
+        }).catch(() => {}),
+        apiGet("/api/crm/today").then((d: any) => {
+          const n = Number(d?.["всего"] || 0);
+          if (n > 0) next.plan = n;
+        }).catch(() => {}),
+      ];
+      if (selectedAccountId) {
+        requests.push(apiGet(`/api/chat/notifications?account_id=${encodeURIComponent(selectedAccountId)}&unread_only=true`).then((d: any) => {
+          const n = Array.isArray(d?.notifications) ? d.notifications.length : 0;
+          if (n > 0) next.messages = n;
+        }).catch(() => {}));
+      }
+      await Promise.all(requests);
+      if (alive) setBadges(next);
+    }
+    loadBadges();
+    const timer = window.setInterval(loadBadges, 60000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [selectedAccountId]);
 
-  const cur = accounts.find((a: any) => (a.account_id || a.id) === acc);
-  // Роль в ТЕКУЩЕМ аккаунте: сотруднику незачем видеть кошелёк,
-  // тарифы, реквизиты и список аккаунтов владельца.
-  const myRole = (cur && (cur as any).role) || "owner";
-  const OWNER_ONLY = ["billing", "wallet", "requisites", "accounts"];
-  const groups = GROUPS
-    .map((g) => ({ ...g, items: g.items.filter(
-      (it) => myRole === "owner" || OWNER_ONLY.indexOf(it.key) === -1) }))
-    .filter((g) => g.items.length > 0);
+  useEffect(() => {
+    try {
+      const saved = Number(sessionStorage.getItem("boris_sidebar_scroll") || 0);
+      if (navRef.current && Number.isFinite(saved)) navRef.current.scrollTop = saved;
+    } catch {}
+  }, [pathname]);
 
-  return (
-    <aside className={css.side + " " + (min ? css.sideMin : "") + " " + (open ? css.sideOpen : "")}>
+  const toggleCollapsed = () => setCollapsed((value) => {
+    const next = !value;
+    try { sessionStorage.setItem("boris_sidebar_collapsed", next ? "1" : "0"); } catch {}
+    return next;
+  });
+  const accountName = selectedAccount?.name || "Текущий аккаунт";
+  const accountRole = selectedAccount?.role === "owner" ? "Руководитель"
+    : selectedAccount?.role === "employee" ? "Сотрудник"
+    : selectedAccount?.role === "manager" ? "Менеджер"
+    : "Аккаунт";
+  const initial = accountName.trim().charAt(0).toUpperCase() || "B";
+
+  return <>
+    <aside className={[css.side, collapsed ? css.sideMin : "", open ? css.sideOpen : ""].filter(Boolean).join(" ")} data-testid="boris-sidebar">
       <div className={css.brand}>
-        <Mascot size={min ? 30 : 34} interactive={false} />
-        {!min && (
-          <div className={css.brandText}>
-            <div className={css.brandName}>BORIS</div>
-            <div className={css.brandSub}>Цифровой коммерческий директор</div>
-          </div>
-        )}
-        <button className={css.collapse} onClick={toggle}
-          aria-label={min ? "Развернуть меню" : "Свернуть меню"}>{min ? "»" : "«"}</button>
+        <div className={css.brandMark} aria-hidden="true">B</div>
+        <div className={css.brandText}><div className={css.brandName}>БОРИС</div><div className={css.brandSub}>Ваш виртуальный отдел продаж и маркетинга</div></div>
+        <button type="button" className={css.collapse} onClick={toggleCollapsed} aria-label={collapsed ? "Развернуть меню" : "Свернуть меню"}>{collapsed ? "›" : "‹"}</button>
+        {onClose && <button type="button" className={css.mobileClose} onClick={onClose} aria-label="Закрыть меню">×</button>}
       </div>
-
-      {!min && accounts.length === 0 && (
-        <div data-testid="no-account-banner"
-             style={{ margin: "10px 12px", padding: "12px 14px", borderRadius: "12px",
-                      background: "#FEF6E7", border: "1px solid #F5D9A8" }}>
-          <div style={{ fontSize: "13px", fontWeight: 700, color: "#B54708", marginBottom: "4px" }}>
-            Аккаунт Авито не подключён
-          </div>
-          <div style={{ fontSize: "12px", color: "#7A5A20", lineHeight: 1.45, marginBottom: "10px" }}>
-            Пока он не подключён, большинство разделов будут пустыми — это не ошибка.
-          </div>
-          <button onClick={() => openRoute("/dashboard?connect=avito")}
-                  style={{ background: "#B54708", color: "#FFFFFF", border: "none",
-                           borderRadius: "8px", padding: "7px 12px", fontSize: "12px",
-                           fontWeight: 700, cursor: "pointer", width: "100%" }}>
-            Подключить аккаунт
-          </button>
-        </div>
-      )}
-      {!min && (
-        <div className={css.company}>
-          <div className={css.companyBox}>
-            <div className={css.companyName}>{(cur && (cur.name || cur.account_id)) || "Аккаунт не выбран"}</div>
-            <div className={css.online}><span className={css.dot} />Онлайн</div>
-            {accounts.length > 1 && (
-              <select className={css.select} value={acc} aria-label="Выбор аккаунта"
-                onChange={(e: any) => { setAccount(e.target.value); setAcc(e.target.value); window.location.reload(); }}>
-                {accounts.map((a: any) => {
-                  const id = a.account_id || a.id;
-                  return <option key={id} value={id}>{a.name || id}</option>;
-                })}
-              </select>
-            )}
-          </div>
-        </div>
-      )}
-
-      <nav className={css.nav}>
-        {groups.map((g) => (
-          <div className={css.group} key={g.title}>
-            {!min && <div className={css.groupTitle}>{g.title}</div>}
-            {g.items.map((it) => (
-              <button key={it.key} title={min ? it.label : undefined}
-                className={css.item + " " + (active === it.key ? css.itemActive : "")}
-                data-testid={it.testid || ("nav-" + it.key)}
-                onClick={() => go(it)}>
-                <span className={css.ico}>{it.icon}</span>
-                {!min && <span className={css.label}>{it.label}</span>}
-              </button>
-            ))}
-          </div>
-        ))}
+      <nav ref={navRef} className={css.nav} aria-label="Основная навигация" onScroll={(e) => { try { sessionStorage.setItem("boris_sidebar_scroll", String(e.currentTarget.scrollTop)); } catch {} }}>
+        {NAVIGATION.map(group => <div className={css.group} key={group.group}>
+          <div className={css.groupTitle}>{group.group}</div>
+          {group.items.filter(item => platformOwner || !OWNER_ONLY_NAV_KEYS.has(item.key)).map(item => {
+            const selected = isActive(pathname, item.key, item.href, active);
+            const tone = item.tone || "blue";
+            const badge = badges[item.key] || 0;
+            const badgeTone = item.key === "factory-decisions" ? "critical" : item.key === "plan" ? "attention" : "info";
+            const content = <><span className={css.ico} data-tone={tone}><Icon name={item.icon as IconName} size={18} /></span><span className={css.label}>{item.label}</span>{badge > 0 ? <span className={css.navBadge} data-badge-tone={badgeTone} aria-label={`${badge} новых`}>{badge > 99 ? "99+" : badge}</span> : null}</>;
+            const className=[css.item, selected ? css.itemActive : ""].filter(Boolean).join(" ");
+            if (onSelect) return <button type="button" key={item.key} className={className} title={collapsed ? item.label : undefined} onClick={() => { onSelect(item.key); onClose?.(); }}>{content}</button>;
+            return <Link key={item.key} href={item.href} className={className} title={collapsed ? item.label : undefined} aria-current={selected ? "page" : undefined} data-testid={item.key === "home" ? "nav-home" : undefined} aria-label={item.key === "home" ? "Главная — клиенты" : undefined} onClick={() => onClose?.()}>{item.key === "home" ? <><span className={css.ico} data-tone={tone}><Icon name={item.icon as IconName} size={18} /></span><span className={css.label}>Главная</span>{badge > 0 ? <span className={css.navBadge} data-badge-tone={badgeTone} aria-label={`${badge} новых`}>{badge > 99 ? "99+" : badge}</span> : null}</> : content}</Link>;
+          })}
+        </div>)}
       </nav>
+      <div className={css.accountArea}>
+        {accountOpen && accounts.length > 1 ? <div className={css.accountMenu} role="menu" aria-label="Выбор аккаунта">
+          {accounts.map((account) => <button type="button" role="menuitemradio" aria-checked={account.account_id === selectedAccountId} key={account.account_id} className={css.accountMenuItem} onClick={() => { setSelectedAccount(account.account_id); setAccountOpen(false); }}>
+            <span className={css.accountMiniAvatar}>{(account.name || account.account_id).trim().charAt(0).toUpperCase()}</span>
+            <span>{account.name || account.account_id}</span>
+            {account.account_id === selectedAccountId ? <span className={css.accountCheck}>✓</span> : null}
+          </button>)}
+        </div> : null}
+        <button type="button" className={css.accountFooter} title={collapsed ? accountName : undefined} aria-haspopup={accounts.length > 1 ? "menu" : undefined} aria-expanded={accounts.length > 1 ? accountOpen : undefined} onClick={() => accounts.length > 1 && setAccountOpen(v => !v)}>
+          <span className={css.accountAvatar}>{initial}</span>
+          <span className={css.accountMeta}><strong>{accountName}</strong><small>{accountRole}</small></span>
+          {accounts.length > 1 ? <span className={[css.accountChevron, accountOpen ? css.accountChevronOpen : ""].filter(Boolean).join(" ")} aria-hidden="true">⌄</span> : null}
+        </button>
+      </div>
     </aside>
-  );
+    {open && <button type="button" className={css.mobileBackdrop} aria-label="Закрыть меню" onClick={onClose} />}
+  </>;
 }

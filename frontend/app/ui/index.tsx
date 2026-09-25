@@ -65,17 +65,30 @@ import {
   LuChartBar,
   LuBuilding2,
   LuBuilding,
+  LuPhone,
+  LuPhoneIncoming,
+  LuPhoneOutgoing,
+  LuPhoneOff,
+  LuMic,
+  LuMicOff,
+  LuPause,
+  LuKeyboard,
+  LuDelete,
+  LuArrowLeftRight,
+  LuHistory,
+  LuMoon,
+  LuSmartphone,
 } from "react-icons/lu";
 import { color, radius, space, shadow, font, statusStyle, StatusKind, layout } from "./tokens";
 
 type Div = React.HTMLAttributes<HTMLDivElement>;
 
 /* ------------------------------------------------------------------ каркас */
-export function Page({ children, style, ...r }: Div) {
+export function Page({ children, style, className, ...r }: Div) {
   return (
-    <div style={{ background: color.bg, minHeight: "100vh",
+    <div className={["boris-product-page", className].filter(Boolean).join(" ")} style={{ background: color.bg, minHeight: "100vh",
                   padding: layout.page.padding, ...style }} {...r}>
-      <div style={{ maxWidth: layout.page.maxWidth, margin: "0 auto" }}>{children}</div>
+      <div className="boris-fluid-page-inner" style={{ width: "100%", maxWidth: "none", margin: 0, minWidth: 0, boxSizing: "border-box" }}>{children}</div>
     </div>
   );
 }
@@ -83,7 +96,7 @@ export function Page({ children, style, ...r }: Div) {
 export function PageHeader({ title, subtitle, actions }:
   { title: string; subtitle?: string; actions?: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", gap: space.lg,
+    <div className="boris-ui-page-header" style={{ display: "flex", alignItems: "flex-start", gap: space.lg,
                   marginBottom: space.xl, flexWrap: "wrap" }}>
       <div style={{ flex: 1, minWidth: 260 }}>
         <h1 style={{ ...font.h1, margin: 0 }}>{title}</h1>
@@ -94,10 +107,14 @@ export function PageHeader({ title, subtitle, actions }:
   );
 }
 
-export function Card({ children, padding = space.xxl, style, ...r }:
+export function Card({ children, padding = space.xxl, style, className, ...r }:
   Div & { padding?: number }) {
+  const interactive = typeof r.onClick === "function" || r.role === "button";
   return (
-    <div style={{ background: color.surface, border: "1px solid " + color.line,
+    <div
+      className={["boris-ui-card", className].filter(Boolean).join(" ")}
+      data-interactive={interactive ? "true" : undefined}
+      style={{ background: color.surface, border: "1px solid " + color.line,
                   borderRadius: radius.lg, boxShadow: shadow.card, padding, ...style }} {...r}>
       {children}
     </div>
@@ -106,7 +123,7 @@ export function Card({ children, padding = space.xxl, style, ...r }:
 
 export function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div style={{ marginTop: space.xl }}>
+    <div className="boris-ui-section" style={{ marginTop: space.xl }}>
       <div style={{ ...font.h3, marginBottom: space.md }}>{title}</div>
       {children}
     </div>
@@ -116,29 +133,21 @@ export function Section({ title, children }: { title: string; children: React.Re
 /* ------------------------------------------------------------------ кнопки */
 type BtnKind = "primary" | "secondary" | "ghost" | "danger";
 
-export function Button({ kind = "primary", disabled, children, style, ...r }:
+export function Button({ kind = "primary", disabled, children, style, className, ...r }:
   React.ButtonHTMLAttributes<HTMLButtonElement> & { kind?: BtnKind }) {
-  const [hover, setHover] = React.useState(false);
-  const [active, setActive] = React.useState(false);
-  const base: React.CSSProperties = {
-    borderRadius: radius.md, padding: "11px 18px", fontSize: 13.5, fontWeight: 600,
-    cursor: disabled ? "not-allowed" : "pointer", border: "1px solid transparent",
-    transition: "background .12s, border-color .12s", opacity: disabled ? 0.5 : 1,
-  };
   const map: Record<BtnKind, React.CSSProperties> = {
-    primary: { background: active ? color.blueActive : hover ? color.blueHover : color.blue,
-               color: color.onAccent },
-    secondary: { background: color.blueSoft, color: color.blue,
-                 borderColor: hover ? color.blue : color.blueSoft },
-    ghost: { background: color.surface, color: color.heading,
-             borderColor: hover ? color.lineStrong : color.line },
-    danger: { background: color.redSoft, color: color.red,
-              borderColor: hover ? color.red : color.redSoft },
+    primary: { background: color.blue, color: color.onAccent, borderColor: color.blue },
+    secondary: { background: color.blueSoft, color: color.blue, borderColor: color.blueSoft },
+    ghost: { background: color.surface, color: color.heading, borderColor: color.line },
+    danger: { background: color.redSoft, color: color.red, borderColor: color.redSoft },
   };
   return (
-    <button disabled={disabled} style={{ ...base, ...map[kind], ...style }}
-            onMouseEnter={() => setHover(true)} onMouseLeave={() => { setHover(false); setActive(false); }}
-            onMouseDown={() => setActive(true)} onMouseUp={() => setActive(false)} {...r}>
+    <button
+      disabled={disabled}
+      className={["boris-ui-button", `boris-ui-button-${kind}`, className].filter(Boolean).join(" ")}
+      style={{ ...map[kind], ...style }}
+      {...r}
+    >
       {children}
     </button>
   );
@@ -163,15 +172,15 @@ export function Field({ label, hint, children }:
 }
 
 export function Input(p: React.InputHTMLAttributes<HTMLInputElement>) {
-  return <input {...p} style={{ ...fieldBase, ...p.style }} />;
+  return <input {...p} className={["boris-ui-input", p.className].filter(Boolean).join(" ")} style={{ ...fieldBase, ...p.style }} />;
 }
 
 export function Textarea(p: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea {...p} style={{ ...fieldBase, minHeight: 96, resize: "vertical", ...p.style }} />;
+  return <textarea {...p} className={["boris-ui-input", p.className].filter(Boolean).join(" ")} style={{ ...fieldBase, minHeight: 96, resize: "vertical", ...p.style }} />;
 }
 
 export function Select(p: React.SelectHTMLAttributes<HTMLSelectElement>) {
-  return <select {...p} style={{ ...fieldBase, ...p.style }} />;
+  return <select {...p} className={["boris-ui-input", p.className].filter(Boolean).join(" ")} style={{ ...fieldBase, ...p.style }} />;
 }
 
 export function Choice({ type = "checkbox", checked, onToggle, title, hint, right }:
@@ -217,7 +226,14 @@ export function Kpi({ value, label, kind = "neutral" }:
 }
 
 export function KpiRow({ children }: { children: React.ReactNode }) {
-  return <div style={{ display: "flex", gap: space.md, flexWrap: "wrap" }}>{children}</div>;
+  return (
+    <div
+      className="boris-ui-kpi-row"
+      style={{ display: "flex", gap: space.md, flexWrap: "wrap" }}
+    >
+      {children}
+    </div>
+  );
 }
 
 /* ----------------------------------------------------------------- таблица */
@@ -234,7 +250,7 @@ export function Table({ head, rows, onRowClick }:
         ))}
       </div>
       {rows.map((r, i) => (
-        <div key={i} onClick={onRowClick ? () => onRowClick(i) : undefined}
+        <div key={i} className="boris-ui-table-row" onClick={onRowClick ? () => onRowClick(i) : undefined}
              style={{ display: "grid", gap: space.md,
                       gridTemplateColumns: `repeat(${head.length}, minmax(0,1fr))`,
                       padding: "13px 16px", cursor: onRowClick ? "pointer" : "default",
@@ -274,13 +290,12 @@ export function Skeleton({ lines = 3 }: { lines?: number }) {
   );
 }
 
-export function Alert({ kind = "info", children }:
-  { kind?: StatusKind; children: React.ReactNode }) {
+export function Alert({kind = "info", children, className, style}: {kind?: StatusKind; children: React.ReactNode; className?: string; style?: React.CSSProperties}) {
   const s = statusStyle[kind];
   return (
-    <div style={{ background: s.bg, color: color.heading, borderRadius: radius.md,
+    <div className={className} style={{ background: s.bg, color: color.heading, borderRadius: radius.md,
                   padding: "11px 15px", fontSize: 13.5, marginBottom: space.lg,
-                  borderLeft: "3px solid " + s.color }}>
+                  borderLeft: "3px solid " + s.color, ...style}}>
       {children}
     </div>
   );
@@ -295,7 +310,7 @@ export function Alert({ kind = "info", children }:
  */
 type LuComp = React.ComponentType<{ size?: number; color?: string; strokeWidth?: number }>;
 
-const LIB: Record<string, LuComp> = { LuHouse, LuMegaphone, LuMessageSquare, LuUsers, LuUser, LuListTodo, LuListChecks, LuChartLine, LuTrendingUp, LuWallet, LuCreditCard, LuSettings, LuBrain, LuBot, LuHandshake, LuCheck, LuX, LuPencil, LuPen, LuTrash2, LuTrash, LuPlus, LuRefreshCw, LuSearch, LuCircleAlert, LuInfo, LuClock, LuShield, LuPlug, LuFileText, LuStar, LuSend, LuArrowRight, LuEye, LuLock, LuZap, LuTarget, LuImage, LuCalendar, LuBell, LuAward, LuLink, LuHeadphones, LuMonitor, LuLayers, LuPenTool, LuList, LuBriefcase, LuCoins, LuBanknote, LuUpload, LuPalette, LuGlobe, LuChartColumn, LuChartBar, LuBuilding2, LuBuilding };
+const LIB: Record<string, LuComp> = { LuHouse, LuMegaphone, LuMessageSquare, LuUsers, LuUser, LuListTodo, LuListChecks, LuChartLine, LuTrendingUp, LuWallet, LuCreditCard, LuSettings, LuBrain, LuBot, LuHandshake, LuCheck, LuX, LuPencil, LuPen, LuTrash2, LuTrash, LuPlus, LuRefreshCw, LuSearch, LuCircleAlert, LuInfo, LuClock, LuShield, LuPlug, LuFileText, LuStar, LuSend, LuArrowRight, LuEye, LuLock, LuZap, LuTarget, LuImage, LuCalendar, LuBell, LuAward, LuLink, LuHeadphones, LuMonitor, LuLayers, LuPenTool, LuList, LuBriefcase, LuCoins, LuBanknote, LuUpload, LuPalette, LuGlobe, LuChartColumn, LuChartBar, LuBuilding2, LuBuilding, LuPhone, LuPhoneIncoming, LuPhoneOutgoing, LuPhoneOff, LuMic, LuMicOff, LuPause, LuKeyboard, LuDelete, LuArrowLeftRight, LuHistory, LuMoon, LuSmartphone };
 
 function pick(...names: string[]): LuComp {
   for (const n of names) if (LIB[n]) return LIB[n];
@@ -353,6 +368,19 @@ export const icons = {
   globe: pick("LuGlobe"),
   chart: pick("LuChartColumn", "LuBarChart3", "LuChartBar"),
   building: pick("LuBuilding2", "LuBuilding"),
+  phone: pick("LuPhone"),
+  phoneIncoming: pick("LuPhoneIncoming", "LuPhone"),
+  phoneOutgoing: pick("LuPhoneOutgoing", "LuPhone"),
+  phoneOff: pick("LuPhoneOff"),
+  mic: pick("LuMic"),
+  micOff: pick("LuMicOff"),
+  pause: pick("LuPause"),
+  keypad: pick("LuKeyboard"),
+  backspace: pick("LuDelete"),
+  transfer: pick("LuArrowLeftRight"),
+  history: pick("LuHistory"),
+  moon: pick("LuMoon"),
+  smartphone: pick("LuSmartphone"),
 };
 
 export type IconName = keyof typeof icons;

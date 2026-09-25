@@ -141,6 +141,10 @@ export function persistSession(data: any, justRegistered: boolean) {
     if (data.user.role) localStorage.setItem("boris_user_role", data.user.role);
     if (data.user.account_id) localStorage.setItem("boris_currentAccount", data.user.account_id);
   }
-  if (justRegistered) localStorage.setItem("boris_just_registered", "1");
+  if (justRegistered) {
+    localStorage.setItem("boris_just_registered", "1");
+    const firstUtm = localStorage.getItem("boris_first_utm");
+    if (firstUtm) localStorage.setItem("boris_registration_utm", firstUtm);
+  }
   return true;
 }

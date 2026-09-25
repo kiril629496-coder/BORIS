@@ -39,19 +39,19 @@ function CenterBox(props: { children: React.ReactNode }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "#F6F7FB",
+        background: "var(--boris-bg)",
         fontFamily: "var(--font-inter), Arial, Helvetica, sans-serif",
       }}
     >
       <div
         style={{
           background: "#FFFFFF",
-          border: "1px solid #E3E7F0",
+          border: "1px solid var(--boris-border)",
           borderRadius: 14,
           padding: "28px 32px",
           maxWidth: 420,
           textAlign: "center",
-          color: "#14161A",
+          color: "var(--boris-text)",
         }}
       >
         {props.children}
@@ -63,7 +63,7 @@ function CenterBox(props: { children: React.ReactNode }) {
 export function OnboardingLoading() {
   return (
     <CenterBox>
-      <div style={{ fontSize: 15, color: "#667085" }}>Проверяю ваш профиль…</div>
+      <div style={{ fontSize: 15, color: "var(--boris-text-2)" }}>Проверяю ваш профиль…</div>
     </CenterBox>
   );
 }
@@ -72,11 +72,11 @@ export function OnboardingError(props: { text: string; onRetry: () => void }) {
   return (
     <CenterBox>
       <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Не получилось проверить профиль</div>
-      <div style={{ fontSize: 14, color: "#667085", marginBottom: 18 }}>{props.text}</div>
+      <div style={{ fontSize: 14, color: "var(--boris-text-2)", marginBottom: 18 }}>{props.text}</div>
       <button
         onClick={props.onRetry}
         style={{
-          background: "#2F6FED",
+          background: "var(--boris-blue)",
           color: "#FFFFFF",
           border: "none",
           borderRadius: 10,
@@ -106,8 +106,17 @@ export function useOnboardingGuard(options?: { mode?: GuardMode }): GuardResult 
     setError("");
     setReady(false);
 
+    // Never let a slow profile check freeze the whole cabinet indefinitely.
+    // Onboarding is an entry-flow concern; an already authenticated user must
+    // keep access to dashboard even if this auxiliary check is temporarily slow.
+    const failOpenTimer = window.setTimeout(function () {
+      if (!alive) return;
+      setReady(true);
+    }, 2500);
+
     fetchOnboardingStatus()
       .then(function (value) {
+        window.clearTimeout(failOpenTimer);
         if (!alive) return;
         setStatus(value);
         if (needsOnboarding(value) && pathname !== ROUTE_ONBOARDING) {
@@ -117,16 +126,20 @@ export function useOnboardingGuard(options?: { mode?: GuardMode }): GuardResult 
         setReady(true);
       })
       .catch(function (err) {
+        window.clearTimeout(failOpenTimer);
         if (!alive) return;
         if (err instanceof OnboardingUnauthorized) {
           router.replace(ROUTE_LOGIN);
           return;
         }
+        // A transient onboarding-status failure must not lock the entire product.
         setError("Сервер не ответил на проверку статуса мастера.");
+        setReady(true);
       });
 
     return function () {
       alive = false;
+      window.clearTimeout(failOpenTimer);
     };
   }, [attempt, pathname, router]);
 

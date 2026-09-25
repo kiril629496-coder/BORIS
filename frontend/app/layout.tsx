@@ -1,8 +1,8 @@
 import { AccountProvider } from "./lib/AccountContext";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Manrope, Inter } from "next/font/google";
 import "./globals.css";
-import BorisWidget from "./components/BorisWidget";
+import NpsPrompt from "./components/NpsPrompt";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -25,11 +25,22 @@ const inter = Inter({
 });
 
 import Metrika from "./Metrika";
+import ScenarioNavBar from "./components/ScenarioNavigation";
+import "./components/boris-ui/boris-ui.css";
+import RouteStyleBridge from "./components/boris-ui/RouteStyleBridge";
+import CategoryActionBridge from "./components/CategoryActionBridge";
+import PwaRegister from "./components/PwaRegister";
+import PwaInstallHint from "./components/PwaInstallHint";
 
 export const metadata: Metadata = {
   title: "БОРИС — умный сервис интернет-рекламы",
   description: "БОРИС автоматизирует объявления, тексты, баннеры и аналитику. Ваша реклама работает, пока вы занимаетесь бизнесом.",
-  icons: { icon: "/icon.png" },
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [{ url: "/favicon.ico" }, { url: "/boris-icon-192.png", type: "image/png", sizes: "192x192" }],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
+  appleWebApp: { capable: true, title: "BORIS AI", statusBarStyle: "default" },
   openGraph: {
     title: "БОРИС — умный сервис интернет-рекламы",
     description: "Автоматизация объявлений, текстов, баннеров и аналитики. Реклама работает сама.",
@@ -37,6 +48,13 @@ export const metadata: Metadata = {
     siteName: "БОРИС",
     type: "website",
   },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#2563eb",
 };
 
 export default function RootLayout({
@@ -49,8 +67,16 @@ export default function RootLayout({
       lang="ru"
       className={`${geistSans.variable} ${geistMono.variable} ${manrope.variable} ${inter.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col"><AccountProvider>{children}</AccountProvider>        <BorisWidget />
+      <head>
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
+      </head>
+      <body className="min-h-full flex flex-col">
+        <PwaRegister /><PwaInstallHint /><RouteStyleBridge /><AccountProvider><CategoryActionBridge />
+        {children}
+        <NpsPrompt /></AccountProvider>
         <Metrika />
+        <ScenarioNavBar />
       </body>
     </html>
   );

@@ -1,0 +1,42 @@
+.root {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  container-type: inline-size;
+}
+
+.root *,
+.root *::before,
+.root *::after {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.root input,
+.root select,
+.root textarea,
+.root button {
+  max-width: 100%;
+}
+
+.root a,
+.root div,
+.root span,
+.root strong {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+@container (max-width: 300px) {
+  .root :global(.boris-manager-brief-grid) {
+    grid-template-columns: 1fr !important;
+  }
+
+  .root input,
+  .root select,
+  .root textarea {
+    width: 100%;
+  }
+}

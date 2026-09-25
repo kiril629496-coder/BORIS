@@ -14,6 +14,23 @@ export type OnboardingStatusValue =
   | "completed"
   | "skipped_existing_user";
 
+export interface ZeroTouchFactoryAccount {
+  account_id: string;
+  state: string;
+  launch_status: string | null;
+  readiness_pct: number;
+  human_questions: number;
+}
+
+export interface ZeroTouchFactoryReadiness {
+  status: string;
+  accounts: ZeroTouchFactoryAccount[];
+  total: number;
+  ready: number;
+  blocked: number;
+  all_ready: boolean;
+}
+
 export interface OnboardingStatus {
   status: OnboardingStatusValue;
   current_step: number;
@@ -95,6 +112,58 @@ export async function resolvePostAuthRoute(user?: { role?: string }): Promise<st
   }
 }
 
+export async function fetchFactoryReadiness(): Promise<ZeroTouchFactoryReadiness> {
+  const token = getToken();
+  if (!token) throw new OnboardingUnauthorized("Нет токена");
+
+  const res = await fetch("/api/onboarding/factory-readiness", {
+    headers: { Authorization: "Bearer " + token },
+    cache: "no-store",
+  });
+
+  if (res.status === 401 || res.status === 403) {
+    throw new OnboardingUnauthorized("Сессия недействительна");
+  }
+
+  const body = await res.json();
+
+  if (!res.ok) {
+    throw new Error("Не удалось получить готовность BORIS");
+  }
+
+  return body as ZeroTouchFactoryReadiness;
+}
+
+export async function syncOnboardingFactory(
+  full?: boolean
+): Promise<any> {
+  const token = getToken();
+  if (!token) throw new OnboardingUnauthorized("Нет токена");
+
+  const res = await fetch(
+    "/api/onboarding/factory-sync?full=" + (full ? "true" : "false"),
+    {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token },
+    }
+  );
+
+  if (res.status === 401 || res.status === 403) {
+    throw new OnboardingUnauthorized("Сессия недействительна");
+  }
+
+  const body = await res.json();
+
+  if (!res.ok) {
+    throw new Error(
+      (body && body.detail && body.detail.message)
+        || "Не удалось обновить готовность BORIS"
+    );
+  }
+
+  return body;
+}
+
 /** Сохранить один шаг мастера. Возвращает обновлённый статус. */
 export async function saveOnboardingStep(
   step: number,
@@ -114,6 +183,14 @@ export async function saveOnboardingStep(
   if (!res.ok) throw new OnboardingApiError(body && body.detail);
 
   clearOnboardingCache();
+
+  // Ответ шага уже сохранён. Factory-sync — фоновое пост-действие и не
+  // должен задерживать переход пользователя на следующий экран. Даже если
+  // Factory временно недоступна, мастер регистрации продолжает работать.
+  void syncOnboardingFactory(false).catch(function (e) {
+    console.error("onboarding factory bridge sync failed", e);
+  });
+
   return body as OnboardingStatus;
 }
 
@@ -132,6 +209,14 @@ export async function completeOnboarding(): Promise<OnboardingStatus> {
   if (!res.ok) throw new OnboardingApiError(body && body.detail);
 
   clearOnboardingCache();
+
+  // Онбординг уже успешно завершён на сервере. После этого достаточно
+  // дешёвой account-scoped синхронизации onboarding -> Factory D. Полный
+  // глобальный Factory-цикл живёт отдельно и не должен блокировать мастер.
+  void syncOnboardingFactory(false).catch(function (e) {
+    console.error("onboarding factory bridge sync after complete failed", e);
+  });
+
   return body as OnboardingStatus;
 }
 
@@ -187,4 +272,59 @@ export function describeOnboardingError(err: any): string {
     }
   }
   return "Не удалось связаться с сервером. Попробуйте ещё раз.";
+}
+
+
+export const ROUTE_ANALYSIS = "/onboarding/analysis";
+
+/** Персональный анализ. Все тексты приходят готовыми — фронт ничего не вычисляет. */
+export async function fetchAnalysis(): Promise<Record<string, any>> {
+  const token = getToken();
+  if (!token) throw new OnboardingUnauthorized("Нет токена");
+
+  const res = await fetch("/api/onboarding/analysis", {
+    headers: { Authorization: "Bearer " + token },
+    cache: "no-store",
+  });
+  if (res.status === 401 || res.status === 403) throw new OnboardingUnauthorized("Сессия недействительна");
+  const body = await res.json();
+  if (!res.ok) throw new OnboardingApiError(body && body.detail);
+  return body as Record<string, any>;
+}
+
+/** Выбор ниши, когда BORIS не смог определить её однозначно. */
+export async function selectNiche(slug: string): Promise<OnboardingStatus> {
+  const token = getToken();
+  if (!token) throw new OnboardingUnauthorized("Нет токена");
+
+  const res = await fetch("/api/onboarding/resolve_niche", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: JSON.stringify({ slug: slug }),
+  });
+  if (res.status === 401 || res.status === 403) throw new OnboardingUnauthorized("Сессия недействительна");
+  const body = await res.json();
+  if (!res.ok) throw new OnboardingApiError(body && body.detail);
+
+  clearOnboardingCache();
+  return body as OnboardingStatus;
+}
+
+/**
+ * Продуктовое событие BORIS. Уходит на наш бэкенд, не в Яндекс.Метрику:
+ * в кабинете она намеренно отключена. Ошибка отправки молча игнорируется —
+ * аналитика не должна мешать человеку пользоваться продуктом.
+ */
+export async function sendEvent(event: string, payload?: Record<string, any>): Promise<void> {
+  const token = getToken();
+  if (!token) return;
+  try {
+    await fetch("/api/onboarding/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({ event: event, payload: payload || {} }),
+    });
+  } catch (e) {
+    // тишина намеренно
+  }
 }

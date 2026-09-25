@@ -1,11 +1,20 @@
 "use client";
+import { humanizeBusinessText } from "@/app/lib/humanizeBusinessText";
+import { Card as BorisCard } from "@/app/ui";
+
+import { Button } from "@/app/ui";
+
 
 import { useCallback, useEffect, useState } from "react";
-import HomeShell from "../../components/HomeShell";
+import { useSearchParams } from "next/navigation";
 import styles from "./scenarios.module.css";
 import { apiGet, apiPost, getAccount, openRoute } from "../../lib/api";
+import { useAccounts } from "../../lib/AccountContext";
 
 export default function ScenariosPage() {
+  const { selectedAccountId } = useAccounts();
+  const searchParams = useSearchParams();
+  const explicitAccount = String(searchParams.get("account_id") || "").trim();
   const [account, setAccountState] = useState<string>("");
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -15,16 +24,27 @@ export default function ScenariosPage() {
   const [err, setErr] = useState("");
 
   useEffect(() => {
-    setAccountState(getAccount());
-  }, []);
+    setData(null); setWizard(null); setValues({}); setErr("");
+    setAccountState(explicitAccount || selectedAccountId || getAccount());
+  }, [explicitAccount, selectedAccountId]);
 
   const load = useCallback((acc: string) => {
     // Каталог грузим и без аккаунта: «Запустить Авито с нуля» доступен новичку,
     // остальные приходят с available:false и понятной причиной.
     setLoading(true);
+    setErr("");
     apiGet("/api/home/scenarios?account_id=" + encodeURIComponent(acc || ""))
       .then((d: any) => {
-        if (d && d.status === "ok") setData(d);
+        if (d && d.status === "ok") {
+          setData(d);
+          return;
+        }
+        setData(null);
+        setErr((d && (d.message || d.detail)) || "Не удалось загрузить бизнес-сценарии");
+      })
+      .catch(() => {
+        setData(null);
+        setErr("Не удалось загрузить бизнес-сценарии");
       })
       .finally(() => setLoading(false));
   }, []);
@@ -57,42 +77,109 @@ export default function ScenariosPage() {
     });
     setSaving(false);
     if (r && r.status === "ok" && r.scenario) {
-      openRoute("/dashboard/scenarios/" + r.scenario.id);
+      openRoute("/dashboard/scenarios/" + r.scenario.id + "?account_id=" + encodeURIComponent(account));
     } else {
       setErr((r && r.message) || "Не удалось запустить сценарий");
     }
   };
 
   return (
-    <HomeShell active="scenarios" account={account} onAccountChange={setAccountState}>
-      <div data-testid="scenarios-root">
+    <div data-testid="scenarios-root" className={styles.scenariosRoot}>
+      <div className={styles.referenceStage}>
+        <main className={styles.catalogColumn}>
         <div className={styles.head}>
           <h1 className={styles.h1}>Что вы хотите получить?</h1>
           <p className={styles.lead}>
             Выберите бизнес-задачу. БОРИС составит план и подключит нужные инструменты —
             вам не нужно выбирать, какой раздел открыть.
           </p>
+
+          <details className={styles.howDetails}>
+            <summary className={styles.howSummary}>
+              <span className={styles.howSummaryText}>
+                <strong>Как это работает</strong>
+                <small>4 шага от задачи до готового плана</small>
+              </span>
+              <span className={styles.howChevron} aria-hidden="true">⌄</span>
+            </summary>
+            <div className={styles.howSteps}>
+              <div className={styles.howStep}>
+                <span className={styles.howNumber}>1</span>
+                <div><strong>Выберите бизнес-задачу</strong><small>Не инструмент, а результат, который хотите получить.</small></div>
+              </div>
+              <div className={styles.howStep}>
+                <span className={styles.howNumber}>2</span>
+                <div><strong>BORIS уточнит данные</strong><small>Только те, которые нужны выбранному рабочему сценарию.</small></div>
+              </div>
+              <div className={styles.howStep}>
+                <span className={styles.howNumber}>3</span>
+                <div><strong>Покажет план</strong><small>Шаги, состояние и действия останутся в существующем механизме сценариев.</small></div>
+              </div>
+              <div className={styles.howStep}>
+                <span className={styles.howNumber}>4</span>
+                <div><strong>Выполняет доступные шаги</strong><small>Важные действия владельца остаются за владельцем.</small></div>
+              </div>
+            </div>
+          </details>
         </div>
 
         {loading && <div className={styles.text}>Загружаю…</div>}
 
-        {!loading && !account && (
-          <div className={styles.card}>
+        {!loading && err && !wizard && (
+          <BorisCard className={styles.card}>
+            <div className={styles.title}>Сценарии временно недоступны</div>
+            <div className={styles.text}>{err}</div>
+            <div className={styles.foot}>
+              <Button className={styles.btnGhost} onClick={() => load(account)}>Повторить</Button>
+            </div>
+          </BorisCard>
+        )}
+
+        {!loading && !err && !account && (
+          <BorisCard className={styles.card}>
             <div className={styles.title}>Подключите аккаунт Авито</div>
             <div className={styles.text}>Первый сценарий можно запустить уже сейчас — он и проведёт вас через подключение.</div>
             <div className={styles.foot}>
-              <button className={styles.btnFill} onClick={() => openRoute("/dashboard?connect=avito")}>
+              <Button className={styles.btnFill} onClick={() => openRoute("/dashboard?connect=avito")}>
                 Добавить аккаунт
-              </button>
+              </Button>
             </div>
-          </div>
+          </BorisCard>
         )}
 
-        {!loading && data && (
+        {!loading && !err && data && (
           <>
+            {data.recommended ? (() => {
+              const rec = data.recommended;
+              const recCard = (data.available || []).find((x: any) => x.scenario_type === rec.scenario_type);
+              return (
+                <BorisCard className={styles.card} data-testid="scenario-recommended">
+                  <div className={styles.scenarioIcon} aria-hidden="true">→</div>
+                  <div className={styles.title}>BORIS рекомендует начать отсюда</div>
+                  <div className={styles.text}><b>{rec.title || recCard?.title}</b></div>
+                  <div className={styles.text}>{humanizeBusinessText(rec.reason, "BORIS выбрал следующий шаг по текущему состоянию аккаунта.")}</div>
+                  <div className={styles.foot}>
+                    {rec.existing_id ? (
+                      <Button className={styles.btnFill} onClick={() => openRoute("/dashboard/scenarios/" + rec.existing_id + "?account_id=" + encodeURIComponent(account))}>
+                        Продолжить этот сценарий
+                      </Button>
+                    ) : rec.available && recCard ? (
+                      <Button className={styles.btnFill} onClick={() => openWizard(recCard)}>
+                        Начать рекомендуемый сценарий
+                      </Button>
+                    ) : (
+                      <span className={styles.btnDisabled}>
+                        {humanizeBusinessText(rec.blocked_reason, "Сначала нужно снять указанный блокер")}
+                      </span>
+                    )}
+                  </div>
+                </BorisCard>
+              );
+            })() : null}
             <div className={styles.grid} data-testid="scenarios-available">
-              {(data.available || []).map((s: any) => (
-                <div className={styles.card} key={s.scenario_type}>
+              {(data.available || []).map((s: any, index: number) => (
+                <BorisCard className={styles.card} key={s.scenario_type}>
+                  <div className={styles.scenarioIcon} aria-hidden="true">{String(index + 1).padStart(2, "0")}</div>
                   <div className={styles.title}>{s.title}</div>
                   <div className={styles.text}>{s.lead}</div>
                   <div className={styles.mods}>
@@ -103,52 +190,59 @@ export default function ScenariosPage() {
                   <div className={styles.foot}>
                     {s.existing_id ? (
                       <>
-                        <button
+                        <Button
                           className={styles.btnFill}
-                          onClick={() => openRoute("/dashboard/scenarios/" + s.existing_id)}
+                          onClick={() => openRoute("/dashboard/scenarios/" + s.existing_id + "?account_id=" + encodeURIComponent(account))}
                         >
                           Продолжить
-                        </button>
-                        <button className={styles.btnGhost} onClick={() => openWizard(s)}>
+                        </Button>
+                        <Button className={styles.btnGhost} onClick={() => openWizard(s)}>
                           Изменить данные
-                        </button>
+                        </Button>
                       </>
                     ) : s.available === false ? (
                       <span className={styles.btnDisabled}
                             data-testid={"blocked-" + s.scenario_type}>
-                        {s.blocked_reason || "Пока недоступно"}
+                        {humanizeBusinessText(s.blocked_reason, "Пока недоступно")}
                       </span>
                     ) : (
-                      <button
+                      <Button
                         className={styles.btnFill}
                         onClick={() => openWizard(s)}
                         data-testid={"start-" + s.scenario_type}
                       >
                         Запустить
-                      </button>
+                      </Button>
                     )}
                   </div>
-                </div>
+                </BorisCard>
               ))}
             </div>
 
-            <h2 className={styles.h2}>Скоро</h2>
-            <div className={styles.grid} data-testid="scenarios-soon">
-              {(data.soon || []).map((s: any) => (
-                <div className={styles.card + " " + styles.soon} key={s.scenario_type}>
-                  <span className={styles.soonTag}>Скоро</span>
-                  <div className={styles.title}>{s.title}</div>
-                  <div className={styles.text}>
-                    Появится после запуска первых трёх сценариев.
-                  </div>
-                  <div className={styles.foot}>
-                    <span className={styles.btnDisabled}>Пока недоступно</span>
-                  </div>
+            {(data.soon || []).length > 0 && (
+              <>
+                <h2 className={styles.h2}>Скоро</h2>
+                <div className={styles.grid} data-testid="scenarios-soon">
+                  {(data.soon || []).map((s: any) => (
+                    <div className={styles.card + " " + styles.soon} key={s.scenario_type}>
+                      <span className={styles.soonTag}>Скоро</span>
+                      <div className={styles.title}>{s.title}</div>
+                      <div className={styles.text}>
+                        {humanizeBusinessText(s.blocked_reason, "Для этого сценария пока не подключена необходимая возможность.")}
+                      </div>
+                      <div className={styles.foot}>
+                        <span className={styles.btnDisabled}>Технически заблокировано</span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              </>
+            )}
           </>
         )}
+
+        </main>
+      </div>
 
         {wizard && (
           <div className={styles.overlay} onClick={() => !saving && setWizard(null)}>
@@ -200,17 +294,16 @@ export default function ScenariosPage() {
               </div>
 
               <div className={styles.modalFoot}>
-                <button className={styles.btnFill} onClick={start} disabled={saving} data-testid="wizard-start">
+                <Button className={styles.btnFill} onClick={start} disabled={saving} data-testid="wizard-start">
                   {saving ? "Запускаю…" : "Запустить план"}
-                </button>
-                <button className={styles.btn} onClick={() => setWizard(null)} disabled={saving}>
+                </Button>
+                <Button className={styles.btn} onClick={() => setWizard(null)} disabled={saving}>
                   Отмена
-                </button>
+                </Button>
               </div>
             </div>
           </div>
         )}
-      </div>
-    </HomeShell>
+    </div>
   );
 }

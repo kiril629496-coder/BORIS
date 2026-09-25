@@ -1,11 +1,18 @@
 "use client";
+import { Card as BorisCard } from "@/app/ui";
+
+import { Button } from "@/app/ui";
+
 import { useBackTarget } from "../lib/useBackTarget";
 import { fetchOnboardingStatus } from "../lib/onboardingClient";
 import { useState, useEffect, useRef } from "react";
-import { Sidebar } from "../ui/Sidebar";
+import { DashboardSidebarAdapter as Sidebar } from "../components/shell/DashboardSidebarAdapter";
+import GlobalLogoutButton from "../components/shell/GlobalLogoutButton";
 import { Mascot } from '../components/Mascot';
 import { useRouter } from "next/navigation";
 import { ConfirmModal } from "../components/ConfirmModal";
+import { readCampaignDraft, writeCampaignDraft, clearCampaignDraft } from "@/app/lib/campaignDraft";
+import { humanizeBusinessText } from "@/app/lib/humanizeBusinessText";
 
 // Единая обёртка над fetch - подставляет Authorization: Bearer из localStorage (backend теперь
 // требует его почти везде) и при 401 (токен истёк/невалиден) чистит localStorage и уводит на /login,
@@ -102,26 +109,26 @@ function TermsGate({ product, pack, accountId, children }: any) {
     }
   };
   return (
-    <div style={{ width: "100%" }}>
-      <label style={{ display: "flex", alignItems: "flex-start", gap: "8px", fontSize: "12.5px", color: "#475467", marginBottom: "10px", textAlign: "left", cursor: "pointer" }}>
-        <input type="checkbox" checked={agreed} onChange={e => onCheck(e.target.checked)} style={{ marginTop: "2px", flexShrink: 0 }} />
-        <span>Я согласен с <span onClick={e => { e.preventDefault(); loadTerms(); }} style={{ color: "#2F6FED", fontWeight: 600, textDecoration: "underline", cursor: "pointer" }}>правилами использования</span> и офертой</span>
+    <div className="boris-f2-cad980f4b707">
+      <label className="boris-f2-e935c0b4b558">
+        <input type="checkbox" checked={agreed} onChange={e => onCheck(e.target.checked)}  className="boris-f2-d99a80608a47"/>
+        <span>Я согласен с <span onClick={e => { e.preventDefault(); loadTerms(); }} className="boris-f2-a64151a01fa8">правилами использования</span> и офертой</span>
       </label>
-      <div style={{ position: "relative" }}>
+      <div className="boris-f2-87db2275805b">
         {children}
         {!agreed && (
-          <div onClick={() => alert("Поставьте галочку согласия с правилами, чтобы продолжить")} style={{ position: "absolute", inset: 0, cursor: "not-allowed", background: "rgba(255,255,255,0.55)", borderRadius: "10px" }} />
+          <div onClick={() => alert("Поставьте галочку согласия с правилами, чтобы продолжить")}  className="boris-f2-b87242fa6763"/>
         )}
       </div>
       {showText && terms && (
-        <div onClick={() => setShowText(false)} style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.55)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
-          <div onClick={e => e.stopPropagation()} style={{ background: "#fff", borderRadius: "16px", maxWidth: "680px", width: "100%", maxHeight: "82vh", overflow: "auto", padding: "28px 30px", textAlign: "left" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-              <div style={{ fontSize: "18px", fontWeight: 800, color: "#1D2939" }}>{terms.title}</div>
-              <button onClick={() => setShowText(false)} style={{ background: "#F2F4F7", border: "none", borderRadius: "8px", width: "32px", height: "32px", cursor: "pointer", fontSize: "16px" }}>✕</button>
+        <div onClick={() => setShowText(false)} className="boris-f2-e5cf81d91efd">
+          <div onClick={e => e.stopPropagation()} className="boris-f2-bb0da04a8206">
+            <div className="boris-f2-a42388f688c8">
+              <div className="boris-f2-36c5f1945b9b">{terms.title}</div>
+              <Button onClick={() => setShowText(false)} className="boris-f2-5b99a9342ea6">✕</Button>
             </div>
-            <div style={{ fontSize: "12px", color: "#98A2B3", marginBottom: "16px" }}>Редакция от {terms.version}</div>
-            <div style={{ fontSize: "14px", color: "#344054", lineHeight: 1.65 }} dangerouslySetInnerHTML={{ __html: terms.html }} />
+            <div className="boris-f2-93fb4cf4cb86">Редакция от {terms.version}</div>
+            <div dangerouslySetInnerHTML={{ __html: terms.html }}  className="boris-f2-92ee211bca28"/>
           </div>
         </div>
       )}
@@ -152,15 +159,10 @@ function RobokassaButton({ invoiceId, pack, accountId }: { invoiceId: string; pa
       onClick={go}
       target="_blank"
       rel="noopener noreferrer"
-      className="boris-robokassa-btn"
-      style={{
-        display:"inline-flex", alignItems:"center", justifyContent:"center", gap:"6px",
-        width:"100%", background:"transparent", color:"#2F6FED", fontWeight:"bold",
-        fontSize:"15px", border:"2px solid #2F6FED", borderRadius:"10px", padding:"11px 20px",
-        textDecoration:"none", boxSizing:"border-box"
-      }}
+      className="boris-robokassa-btn boris-f2-6dd65d38c061"
+
     >
-      {busy ? "Открываю оплату..." : "Оплатить"} <span style={{fontSize:"17px"}}>→</span>
+      {busy ? "Открываю оплату..." : "Оплатить"} <span className="boris-f2-be8ffda67663">→</span>
     </a>
   );
 }
@@ -184,6 +186,12 @@ function CountUp({ to, delay = 0 }: { to: number; delay?: number }) {
 }
 
 export default function Home() {
+  const [currentAccount, setCurrentAccount] = useState("");
+  const [generatorAccount, setGeneratorAccount] = useState("");
+  const [generatorStorageError, setGeneratorStorageError] = useState("");
+  const activeGeneratorAccount = useRef("");
+  const generatorSaveQueue = useRef<Promise<void>>(Promise.resolve());
+  useEffect(() => { activeGeneratorAccount.current = currentAccount; }, [currentAccount]);
   const [view, setView] = useState("accounts");
   const [selectedAccount, setSelectedAccount] = useState<any>(null);
   const [items, setItems] = useState<any[]>([]);
@@ -552,6 +560,7 @@ export default function Home() {
   const [republishTotal, setRepublishTotal] = useState<number | null>(null);
   const [kpiTargetLeads, setKpiTargetLeads] = useState(0);
   const [kpiMaxCpl, setKpiMaxCpl] = useState(0);
+  const [kpiGoalAuto, setKpiGoalAuto] = useState<boolean | null>(null);
   const [kpiLeadTemp, setKpiLeadTemp] = useState("любые");
   const [kpiSaved, setKpiSaved] = useState(false);
   const [republishMinViews, setRepublishMinViews] = useState(10);
@@ -559,6 +568,8 @@ export default function Home() {
   const [republishEnabled, setRepublishEnabled] = useState(true);
   const [republishSettingsSaved, setRepublishSettingsSaved] = useState(false);
   const [kpiCheckResult, setKpiCheckResult] = useState<any>(null);
+  const [kpiActionMemory, setKpiActionMemory] = useState<any[]>([]);
+  const [kpiReadiness, setKpiReadiness] = useState<any>(null);
   const [kpiPlanIdPrefix, setKpiPlanIdPrefix] = useState("");
   const [kpiPlan, setKpiPlan] = useState<any>(null);
   const [kpiPlanExecuting, setKpiPlanExecuting] = useState(false);
@@ -580,6 +591,9 @@ export default function Home() {
   const [bannerVaryAll, setBannerVaryAll] = useState(false);
   const [bannerQuality, setBannerQuality] = useState("medium");
   const [bannerLoading, setBannerLoading] = useState(false);
+  const bannerGenerationKeyRef = useRef("");
+  const draftBatchBannerKeyRef = useRef("");
+  const pipelineBatchBannerKeyRef = useRef("");
   const [bannerResultUrls, setBannerResultUrls] = useState<string[]>([]);
   const [webdesignFolder, setWebdesignFolder] = useState<string | null>(null);
   const [showBannerPricing, setShowBannerPricing] = useState(false);
@@ -699,9 +713,12 @@ export default function Home() {
     if (bannerUseOwnPhoto && !bannerOwnPhotoUrl) { alert("Выберите фото из галереи или снимите галочку «своё фото»"); return; }
     setBannerLoading(true);
     setBannerResultUrls([]);
+    if (!bannerGenerationKeyRef.current) {
+      bannerGenerationKeyRef.current = globalThis.crypto?.randomUUID?.() || `banner-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    let res: Response | null = null;
     try {
       const useOwnPhotoFlow = bannerUseOwnPhoto && (bannerFormat === "infographic" || bannerFormat === "custom");
-      let res;
       if (useOwnPhotoFlow) {
         res = await apiFetch("/api/banners/infographic", {
           method: "POST",
@@ -720,24 +737,22 @@ export default function Home() {
           }),
         });
       } else {
+        // Avito visual safety contract: never let an image model render visible
+        // Russian copy. The safe endpoint generates the photographic layer and
+        // composes large mobile-readable text locally. One explicit click = one
+        // paid banner, preventing accidental multi-generation and legacy full_ai.
         const body: any = {
           account_id: currentAccount,
-          raw_description: bannerPrompt.trim(),
-          format: bannerFormat === "custom" ? "infographic" : bannerFormat,
+          description: bannerPrompt.trim(),
+          title: bannerExactText.trim(),
+          subtitle: "",
+          price_text: "",
+          photo_url: "",
           accent_color: bannerAccentColor,
-          quality: bannerQuality,
-          include_contacts: false,
-          reference_image_base64: bannerRefImageBase64,
-          reference_image_urls: selectedExampleUrls,
-          exact_text: bannerExactText.trim(),
-          count: bannerVaryCount,
-          vary_colors: bannerVaryColors,
-          vary_image: bannerVaryImage,
-          vary_icons: bannerVaryIcons,
-          vary_all: bannerVaryAll,
+          idempotency_key: bannerGenerationKeyRef.current,
         };
 
-        res = await apiFetch("/api/banners/full_ai", {
+        res = await apiFetch("/api/banners/v2/create-one", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -752,6 +767,9 @@ export default function Home() {
     } catch (e) {
       alert("Ошибка связи с сервером при генерации баннера");
     } finally {
+      // Keep the same key only for an ambiguous network failure. If BORIS
+      // answered, the explicit next click is a new generation request.
+      if (res) bannerGenerationKeyRef.current = "";
       setBannerLoading(false);
     }
   };
@@ -891,13 +909,13 @@ export default function Home() {
   const [prefsLoaded, setPrefsLoaded] = useState(false);
 
   useEffect(() => {
-    if (!prefsLoaded) return;
+    if (!prefsLoaded || !currentAccount || generatorAccount !== currentAccount) return;
     const t = setTimeout(() => {
       apiFetch("/api/storage/save", { method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({ account_id: currentAccount, key: "gen_sample", value: genSample }) }).catch(() => {});
     }, 800);
     return () => clearTimeout(t);
-  }, [genSample, prefsLoaded]);
+  }, [genSample, prefsLoaded, generatorAccount, currentAccount]);
   const setUseBannerPersist = (v: boolean) => {
     setUseBanner(v);
     apiFetch("/api/storage/save", { method: "POST", headers: {"Content-Type": "application/json"},
@@ -939,68 +957,74 @@ export default function Home() {
   const [expandedAds, setExpandedAds] = useState<Set<number>>(new Set());
   const toggleExpand = (i: number) => setExpandedAds(prev => { const s = new Set(prev); s.has(i) ? s.delete(i) : s.add(i); return s; });
   const [cloneTarget, setCloneTarget] = useState(10);
-  // === Автосохранение и автозагрузка в БД ===
+  // Account-scoped hydration: a late response must never enter another tenant's form.
   useEffect(() => {
-    const acc = (typeof window !== "undefined" && localStorage.getItem("boris_currentAccount")) || "";
-    apiFetch(`/api/storage/load?account_id=${acc}&key=templates`)
-      .then(r => r.json())
-      .then(d => { if (d.value && Array.isArray(d.value) && d.value.length > 0) setTemplates(d.value); })
-      .catch(() => {})
-      .finally(() => setTemplatesLoaded(true));
-    apiFetch(`/api/storage/load?account_id=${acc}&key=gen_ads`)
-      .then(r => r.json())
-      .then(d => { if (d.value && Array.isArray(d.value)) setGenAds(d.value); })
-      .catch(() => {});
-    apiFetch(`/api/storage/load?account_id=${acc}&key=gen_sample`)
-      .then(r => r.json())
-      .then(d => { if (typeof d.value === "string") setGenSample(d.value); })
-      .catch(() => {});
-    apiFetch(`/api/storage/load?account_id=${acc}&key=text_samples`)
-      .then(r => r.json())
-      .then(d => { if (d.value && Array.isArray(d.value)) setTextSamples(d.value); })
-      .catch(() => {});
-    apiFetch(`/api/storage/load?account_id=${acc}&key=text_samples`)
-      .then(r => r.json())
-      .then(d => { if (d.value && Array.isArray(d.value)) setTextSamples(d.value); })
-      .catch(() => {});
-    apiFetch(`/api/storage/load?account_id=${acc}&key=use_banner`)
-      .then(r => r.json())
-      .then(d => { if (typeof d.value === "boolean") setUseBanner(d.value); })
-      .catch(() => {});
-    apiFetch(`/api/storage/load?account_id=${acc}&key=feed_prefs`)
-      .then(r => r.json())
-      .then(d => {
-        const v = d.value || {};
-        if (v.feedImages && typeof v.feedImages === "object") setFeedImages(v.feedImages);
-        if (typeof v.photosPerAd === "number") setPhotosPerAd(v.photosPerAd);
-        if (typeof v.city === "string" && v.city) setGenAddress(v.city);
-      })
-      .catch(() => {})
-      .finally(() => setPrefsLoaded(true));
-    apiFetch(`/api/storage/load?account_id=${acc}&key=gen_ads_history`)
-      .then(r => r.json())
-      .then(d => { if (d.value && Array.isArray(d.value)) setGenAdsHistory(d.value); })
-      .catch(() => {});
-  }, []);
+    const acc = currentAccount;
+    let cancelled = false;
+    setGeneratorAccount(""); setTemplatesLoaded(false); setPrefsLoaded(false);
+    setGenAds([]); setGenSample(""); setTextSamples([]); setGenAdsHistory([]);
+    setTemplates([defaultTemplate]); setSelectedTemplate(null);
+    setFeedImages({}); setAdPhotos({}); setAdTextPhotos({}); setPhotosPerAd(1);
+    setGenAddress(""); setGenTopic(""); setGenExtra(""); setGenPriceFrom(0); setGenPriceTo(0);
+    setGeneratorStorageError("");
+    if (!acc) return () => { cancelled = true; };
+    const read = async (key: string) => {
+      const response = await apiFetch(`/api/storage/load?account_id=${encodeURIComponent(acc)}&key=${key}`);
+      const data = await response.json();
+      if (!response.ok || data.status === "error") throw new Error("Не удалось загрузить сохранённые данные. Обновите страницу, чтобы повторить.");
+      return data.value;
+    };
+    Promise.all(["templates","gen_ads","gen_sample","text_samples","use_banner","feed_prefs","gen_ads_history"].map(read))
+      .then(([tpl, ads, sample, samples, banner, prefs, history]) => {
+        if (cancelled) return;
+        const recovered = readCampaignDraft<any[]>("generated:" + acc);
+        setTemplates(Array.isArray(tpl) ? tpl : [defaultTemplate]);
+        setGenAds(Array.isArray(recovered) ? recovered : Array.isArray(ads) ? ads : []);
+        setGenSample(typeof sample === "string" ? sample : "");
+        setTextSamples(Array.isArray(samples) ? samples : []);
+        setUseBanner(typeof banner === "boolean" ? banner : true);
+        setFeedImages(prefs?.feedImages && typeof prefs.feedImages === "object" ? prefs.feedImages : {});
+        setPhotosPerAd(typeof prefs?.photosPerAd === "number" ? prefs.photosPerAd : 1);
+        setGenAddress(typeof prefs?.city === "string" ? prefs.city : "");
+        setGenAdsHistory(Array.isArray(history) ? history : []);
+        setTemplatesLoaded(true); setPrefsLoaded(true); setGeneratorAccount(acc);
+      }).catch((e: any) => { if (!cancelled) setGeneratorStorageError(e.message); });
+    return () => { cancelled = true; };
+  }, [currentAccount]);
 
   useEffect(() => {
-    if (!templatesLoaded) return;
+    if (!templatesLoaded || !currentAccount || generatorAccount !== currentAccount) return;
     if (templates.length === 0) return;
     apiFetch("/api/storage/save", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ account_id: currentAccount, key: "templates", value: templates })
     }).catch(() => {});
-  }, [templates, templatesLoaded]);
+  }, [templates, templatesLoaded, generatorAccount, currentAccount]);
 
   useEffect(() => {
-    if (genAds.length === 0) return;
-    apiFetch("/api/storage/save", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ account_id: currentAccount, key: "gen_ads", value: genAds })
-    }).catch(() => {});
-  }, [genAds]);
+    if (!currentAccount || generatorAccount !== currentAccount) return;
+    const acc = currentAccount;
+    const localSaved = writeCampaignDraft("generated:" + acc, genAds);
+    if (!localSaved) setGeneratorStorageError("Браузер не смог сохранить копию. Не закрывайте страницу до сохранения в BORIS.");
+    const timer = setTimeout(() => {
+      generatorSaveQueue.current = generatorSaveQueue.current.catch(() => {}).then(async () => {
+      try {
+        const response = await apiFetch("/api/storage/save", {
+          method: "POST", headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ account_id: acc, key: "gen_ads", value: genAds })
+        });
+        const data = await response.json();
+        if (!response.ok || data.status === "error") throw new Error("Сохранение в BORIS не выполнено. Локальная копия сохранена; повторите после восстановления связи.");
+        if (JSON.stringify(readCampaignDraft("generated:" + acc)) === JSON.stringify(genAds)) clearCampaignDraft("generated:" + acc);
+        if (activeGeneratorAccount.current === acc && localSaved) setGeneratorStorageError("");
+      } catch (e: any) {
+        if (activeGeneratorAccount.current === acc) setGeneratorStorageError(localSaved ? e.message : "Не удалось сохранить изменения. Не закрывайте страницу.");
+      }
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [genAds, generatorAccount, currentAccount]);
   const [adTextPhotos, setAdTextPhotos] = useState<{[key: number]: string[]}>({});
   const [restOrderMode, setRestOrderMode] = useState<"order" | "random">("order");
 
@@ -1333,12 +1357,17 @@ export default function Home() {
   const [dlUrl, setDlUrl] = useState("");
 
   const [imgQueueStatus, setImgQueueStatus] = useState("");
-  const [currentAccount, setCurrentAccount] = useState("");
+  useEffect(() => { setKpiActionMemory([]); setKpiReadiness(null); setKpiCheckResult(null); }, [currentAccount]);
   // Гидрация из localStorage только на клиенте (после mount) - иначе SSR mismatch #418
   useEffect(() => {
     if (typeof window === "undefined") return;
     const v = localStorage.getItem("boris_view"); if (v) setView(v);
-    const t = localStorage.getItem("boris_activeTab"); if (t) setActiveTab(t);
+    // boris_tab_from_url: адрес важнее сохранённой вкладки. Меню других разделов
+    // ведёт на /dashboard?tab=<ключ>, и без этого клик по «Статистике» открывал
+    // ту вкладку, что осталась в браузере с прошлого раза.
+    const _urlTab = new URLSearchParams(window.location.search).get("tab");
+    if (_urlTab) setActiveTab(_urlTab);
+    else { const t = localStorage.getItem("boris_activeTab"); if (t) setActiveTab(t); }
     const a = localStorage.getItem("boris_currentAccount"); if (a) setCurrentAccount(a);
   }, []);
 
@@ -1434,6 +1463,8 @@ export default function Home() {
   const [companyForm, setCompanyForm] = useState({website:"", niche:"", description:"", advantages:"", tone:""});
   const [companySaving, setCompanySaving] = useState(false);
   const [companySavedMsg, setCompanySavedMsg] = useState("");
+  const [kbFileBusy, setKbFileBusy] = useState(false);
+  const [kbFileMsg, setKbFileMsg] = useState("");
 
   const loadCompanyForm = async (accId: string) => {
     try {
@@ -1515,10 +1546,10 @@ export default function Home() {
       .then(r=>r.json()).then(d=>{ if (d.status==="ok" && !d.unlimited) setAllLimits(d); }).catch(()=>{});
   };
   const limitCard = (t:string, v:any, all:any, u:string, g:string) => (
-    <div style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"14px", padding:"14px 16px", position:"relative", overflow:"hidden", flex:1, minWidth:"180px"}}>
+    <div className="boris-f2-b53027ebb268">
       <div style={{position:"absolute", top:"-24px", right:"-24px", width:"70px", height:"70px", borderRadius:"50%", background:g, opacity:0.1}} />
-      <div style={{fontSize:"22px", fontWeight:800, color: v>0 ? "#1D2939" : "#B42318", letterSpacing:"-0.02em"}}>{v} <span style={{fontSize:"14px", fontWeight:600, color:"#667085"}}>из {all} {u}</span></div>
-      <div style={{fontSize:"14px", color:"#667085", marginTop:"2px"}}>{t}</div>
+      <div style={{fontSize:"22px", fontWeight:800, color: v>0 ? "var(--boris-text)" : "#B42318", letterSpacing:"-0.02em"}}>{v} <span className="boris-f2-f401e183907f">из {all} {u}</span></div>
+      <div className="boris-f2-b703107f9e84">{t}</div>
     </div>
   );
   const [ropSetup, setRopSetup] = useState<any>(null);
@@ -2104,7 +2135,7 @@ export default function Home() {
   const [feedImages, setFeedImages] = useState<{[key:string]: boolean}>({});
 
   useEffect(() => {
-    if (!prefsLoaded) return;
+    if (!prefsLoaded || !currentAccount || generatorAccount !== currentAccount) return;
     const t = setTimeout(() => {
       apiFetch("/api/storage/save", {
         method: "POST",
@@ -2114,7 +2145,7 @@ export default function Home() {
       }).catch(() => {});
     }, 800);
     return () => clearTimeout(t);
-  }, [feedImages, photosPerAd, genAddress, prefsLoaded]);
+  }, [feedImages, photosPerAd, genAddress, prefsLoaded, generatorAccount, currentAccount]);
   const [allImages, setAllImages] = useState<string[]>([]);
 
   const loadImagesForFeed = async () => {
@@ -2234,8 +2265,9 @@ export default function Home() {
 
   const generateAds = async () => {
     if (!genTopic.trim()) { alert("Укажите тему объявлений"); return; }
+    if (generatorAccount !== currentAccount) { alert("Дождитесь загрузки данных аккаунта."); return; }
+    const generationAccount = currentAccount;
     setGenLoading(true);
-    setGenAds([]);
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 180000);
@@ -2258,7 +2290,8 @@ export default function Home() {
       });
       clearTimeout(timeoutId);
       const data = await res.json();
-      if (data.status === "ok") {
+      if (activeGeneratorAccount.current !== generationAccount) { setGenLoading(false); return; }
+      if (res.ok && data.status === "ok") {
         setGenAds(data.ads);
         try {
           const histRes = await apiFetch(`/api/storage/load?account_id=${currentAccount}&key=gen_ads_history`);
@@ -2316,7 +2349,19 @@ export default function Home() {
   }, [currentAccount]);
 
   useEffect(() => { if (typeof window !== "undefined") localStorage.setItem("boris_view", view); }, [view]);
-  useEffect(() => { if (typeof window !== "undefined") localStorage.setItem("boris_activeTab", activeTab); }, [activeTab]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem("boris_activeTab", activeTab);
+    // Держим адрес в согласии с открытой вкладкой: ссылку можно отправить
+    // коллеге или сохранить, и она откроет то же самое.
+    try {
+      const _u = new URL(window.location.href);
+      if (_u.searchParams.get("tab") !== activeTab) {
+        _u.searchParams.set("tab", activeTab);
+        window.history.replaceState({}, "", _u.toString());
+      }
+    } catch {}
+  }, [activeTab]);
   useEffect(() => { if (typeof window !== "undefined") localStorage.setItem("boris_currentAccount", currentAccount); }, [currentAccount]);
 
   const kbOpenModal = (accId: string) => { setKbModalAccount(accId); setKbText(""); setKbFiles([]); setKbModalOpen(true); };
@@ -2326,19 +2371,32 @@ export default function Home() {
     setKbFiles((prev: any[]) => [...prev, {id, name: file.name, status: "processing"}]);
     try {
       const fd = new FormData(); fd.append("file", file);
-      const r = await apiFetch(`/api/chat/knowledge/upload?account_id=${encodeURIComponent(kbModalAccount)}`, {method:"POST", body: fd});
+      const r = await apiFetch(`/api/memory/upload_file?account_id=${encodeURIComponent(kbModalAccount)}&preview=true`, {method:"POST", body: fd});
       const d = await r.json();
-      setKbFiles((prev: any[]) => prev.map(f => f.id===id ? {...f, status: d.status==="ok"?"done":"error", chars: d.extracted_chars} : f));
+      if (d && d.status === "ok" && d.facts && d.facts.length) {
+        setKbFiles((prev: any[]) => prev.map(f => f.id===id ? {...f, status:"done", raw:file, facts:d.facts, keep:d.facts.map((x:any)=>x.i)} : f));
+      } else {
+        setKbFiles((prev: any[]) => prev.map(f => f.id===id ? {...f, status:"error", err:(d && d.message) || ""} : f));
+      }
     } catch { setKbFiles((prev: any[]) => prev.map(f => f.id===id ? {...f, status:"error"} : f)); }
   };
 
+  const kbToggleFact = (fileId: string, i: number) => {
+    setKbFiles((prev: any[]) => prev.map(f => f.id!==fileId ? f
+      : {...f, keep: (f.keep||[]).includes(i) ? (f.keep||[]).filter((x:number)=>x!==i) : [...(f.keep||[]), i]}));
+  };
+
   const kbSubmit = async () => {
-    const okFiles = kbFiles.filter((f: any) => f.status==="done").length;
-    if (!kbText.trim() && okFiles===0) { setKbModalOpen(false); return; }
+    const kbReady = kbFiles.filter((f: any) => f.status==="done" && f.raw && (f.keep||[]).length>0);
+    if (!kbText.trim() && kbReady.length===0) { setKbModalOpen(false); return; }
     setKbSaving(true);
     try {
       if (kbText.trim()) {
         await apiFetch("/api/chat/knowledge/add", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({text: kbText, account_id: kbModalAccount})});
+      }
+      for (const kf of kbReady) {
+        const kfd = new FormData(); kfd.append("file", kf.raw);
+        await apiFetch(`/api/memory/upload_file?account_id=${encodeURIComponent(kbModalAccount)}&keep=${(kf.keep||[]).join(",")}`, {method:"POST", body: kfd});
       }
       setKbModalOpen(false); setKbText(""); setKbFiles([]);
     } finally { setKbSaving(false); }
@@ -2445,7 +2503,6 @@ export default function Home() {
     });
   };
   const router = useRouter();
-
   const applyTemplate = (item: any, template: any) => {
     const city = template.cities[Math.floor(Math.random() * template.cities.length)];
     const titleRaw = template.titleTemplate.replace("{название}", item.title || "").replace("{город}", city);
@@ -2583,7 +2640,7 @@ export default function Home() {
   const [directorOverview, setDirectorOverview] = useState<any[]>([]);
   const [directorLoading, setDirectorLoading] = useState(false);
   const dsDelta = (v:any) => {
-    if (v === null || v === undefined) return <span style={{color:"#98A2B3", fontSize:"13px"}}>—</span>;
+    if (v === null || v === undefined) return <span className="boris-f2-6774eea0e0db">—</span>;
     const up = v >= 0;
     return <span style={{color: up ? "#12B76A" : "#F04438", fontSize:"14px", fontWeight:"bold"}}>{up ? "▲" : "▼"} {Math.abs(v)}%</span>;
   };
@@ -2700,33 +2757,57 @@ export default function Home() {
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [advMaxCpl, setAdvMaxCpl] = useState<string>("");
   const [advDailyLimit, setAdvDailyLimit] = useState<string>("");
+  const [advHardMaxBid, setAdvHardMaxBid] = useState<string>("");
+  // Защита от межаккаунтной гонки: старый HTTP-ответ не имеет права
+  // заполнить форму уже выбранного другого клиента его бюджетом/ставками.
+  const advisorLoadSeq = useRef(0);
 
   const loadAdvisor = () => {
+    const aid = currentAccount;
+    const seq = ++advisorLoadSeq.current;
     setAdvisorLoading(true);
-    // подтягиваем сохранённые настройки KPI в поля формы
-    apiFetch(`/api/avito/kpi_settings?account_id=${currentAccount}`)
+    setAdvisorData(null);
+    // Сбрасываем поля немедленно при смене клиента. Нулевой бюджет — это
+    // авторитетное значение, а не повод оставить цифры предыдущего аккаунта.
+    setAdvMaxCpl("");
+    setAdvDailyLimit("");
+    setAdvHardMaxBid("");
+    setAdvAutopilot(false);
+    apiFetch(`/api/avito/kpi_settings?account_id=${aid}`)
       .then(r => r.json())
       .then(d => {
+        if (seq !== advisorLoadSeq.current) return;
         const s = d.settings;
         if (s) {
-          if (s.max_cost_per_lead_rub) setAdvMaxCpl(String(s.max_cost_per_lead_rub));
-          if (s.daily_budget_limit_rub) setAdvDailyLimit(String(s.daily_budget_limit_rub));
+          setAdvMaxCpl(s.max_cost_per_lead_rub != null ? String(s.max_cost_per_lead_rub) : "");
+          setAdvDailyLimit(s.daily_budget_limit_rub != null ? String(s.daily_budget_limit_rub) : "");
+          setAdvHardMaxBid(s.hard_max_bid_rub != null ? String(s.hard_max_bid_rub) : "");
           setAdvAutopilot(!!s.bid_autopilot);
         }
       })
       .catch(() => {});
-    apiFetch(`/api/cpx_advisor/last?account_id=${currentAccount}`)
+    apiFetch(`/api/cpx_advisor/last?account_id=${aid}`)
       .then(r => r.json())
-      .then(d => { setAdvisorData(d.advice || null); setAdvisorLoading(false); })
-      .catch(() => setAdvisorLoading(false));
+      .then(d => {
+        if (seq !== advisorLoadSeq.current) return;
+        setAdvisorData(d.advice || null);
+        setAdvisorLoading(false);
+      })
+      .catch(() => { if (seq === advisorLoadSeq.current) setAdvisorLoading(false); });
   };
 
   const runAdvisor = () => {
+    const aid = currentAccount;
+    const seq = ++advisorLoadSeq.current;
     setAdvisorLoading(true);
-    apiFetch(`/api/cpx_advisor/run?account_id=${currentAccount}`)
+    apiFetch(`/api/cpx_advisor/run?account_id=${aid}`)
       .then(r => r.json())
-      .then(d => { setAdvisorData(d.advice || null); setAdvisorLoading(false); })
-      .catch(() => setAdvisorLoading(false));
+      .then(d => {
+        if (seq !== advisorLoadSeq.current) return;
+        setAdvisorData(d.advice || null);
+        setAdvisorLoading(false);
+      })
+      .catch(() => { if (seq === advisorLoadSeq.current) setAdvisorLoading(false); });
   };
 
   const activateAdvisor = async () => {
@@ -2735,8 +2816,9 @@ export default function Home() {
     setAdvisorLoading(true);
     await apiFetch("/api/avito/set_kpi_settings", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({account_id: currentAccount, target_leads_per_day: 1,
+      body: JSON.stringify({account_id: currentAccount, target_leads_per_day: advisorData?.target?.target_leads_per_day ?? undefined,
         max_cost_per_lead_rub: cpl, daily_budget_limit_rub: lim,
+        hard_max_bid_rub: parseFloat(advHardMaxBid) || undefined,
         bid_autopilot: advAutopilot, lead_temperature: "тёплый"})
     });
     runAdvisor();
@@ -2762,8 +2844,21 @@ export default function Home() {
   };
 
   const toggleAutopilot = () => {
-    // если включаем — сначала показываем красивую модалку-подтверждение
-    if (!advAutopilot) { setAutopilotModalOpen(true); return; }
+    // Повышение ставок является денежным действием: никогда не подставляем
+    // скрытый бюджет. Для включения нужен явно сохранённый суточный лимит.
+    if (!advAutopilot) {
+      const lim = parseFloat(advDailyLimit);
+      const cpl = parseFloat(advMaxCpl);
+      if (!cpl || cpl <= 0) {
+        notify("Чтобы включить автопилот, сначала задайте максимальную цену лида и нажмите «Сохранить».");
+        return;
+      }
+      if (!lim || lim <= 0) {
+        notify("Чтобы включить повышение ставок, сначала задайте суточный лимит бюджета и нажмите «Сохранить».");
+        return;
+      }
+      setAutopilotModalOpen(true); return;
+    }
     doToggleAutopilot(); // выключение — без подтверждения
   };
 
@@ -2773,10 +2868,11 @@ export default function Home() {
     await apiFetch("/api/avito/set_kpi_settings", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({account_id: currentAccount,
-        target_leads_per_day: advisorData?.target?.target_leads_per_day || 1,
-        max_cost_per_lead_rub: advisorData?.target?.max_cpl_rub || parseFloat(advMaxCpl) || 500,
-        daily_budget_limit_rub: parseFloat(advDailyLimit) || 1000,
-        bid_autopilot: next, lead_temperature: "тёплый"})
+        target_leads_per_day: advisorData?.target?.target_leads_per_day ?? undefined,
+        max_cost_per_lead_rub: advisorData?.target?.max_cpl_rub ?? (advMaxCpl.trim() ? parseFloat(advMaxCpl) : undefined),
+        daily_budget_limit_rub: advDailyLimit.trim() ? parseFloat(advDailyLimit) : undefined,
+        hard_max_bid_rub: advHardMaxBid.trim() ? parseFloat(advHardMaxBid) : undefined,
+        bid_autopilot: next})
     });
     setAdvAutopilot(next);
     notify(next ? "Автопилот ставок ВКЛЮЧЁН — Борис будет сам управлять ставками каждый час." : "Автопилот выключен — снова только рекомендации.");
@@ -3070,15 +3166,16 @@ export default function Home() {
     const newSched = {...itemSchedules};
     chosen.forEach((idx, order) => {
       const t = new Date(start.getTime() + order * bulkInterval * 60000);
-      const dd = String(t.getDate()).padStart(2, "0");
+      const yyyy = String(t.getFullYear());
       const mo = String(t.getMonth() + 1).padStart(2, "0");
-      const yy = String(t.getFullYear()).slice(2);
+      const dd = String(t.getDate()).padStart(2, "0");
       const hh = String(t.getHours()).padStart(2, "0");
       const mi = String(t.getMinutes()).padStart(2, "0");
-      newSched[idx] = `${dd}.${mo}.${yy} ${hh}:${mi}`;
+      // AVITO_REAL_DATEBEGIN_SCHEDULE_V1
+      newSched[idx] = `${yyyy}-${mo}-${dd}T${hh}:${mi}:00`;
     });
     setItemSchedules(newSched);
-    alert(`Расписание применено к ${chosen.length} объявлениям`);
+    alert(`Расписание применено к ${chosen.length} объявлениям. Даты попадут в фид при публикации.`);
   };
 
   const publishSingleItem = async (i: number) => {
@@ -3094,7 +3191,9 @@ export default function Home() {
       service_type: "Товары",
       address: genAddress || "Москва",
       images: (built.images || []).slice(0, 10),
-      params: {}
+      params: {},
+      date_begin: itemSchedules[i] || "",
+      timezone: itemSchedules[i] ? (Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow") : ""
     };
     try {
       const res = await apiFetch("/api/avito/generate_feed", {
@@ -3135,7 +3234,9 @@ export default function Home() {
         service_type: "Товары",
         address: genAddress || "Москва",
         images: (built.images || []).slice(0, 10),
-        params: {}
+        params: {},
+        date_begin: itemSchedules[i] || "",
+        timezone: itemSchedules[i] ? (Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow") : ""
       };
       setPublishStatus(`📤 Публикую ${i + 1} из ${parsedItems.length}: ${built.title}`);
       try {
@@ -3178,6 +3279,24 @@ export default function Home() {
     } catch {}
   };
 
+  const loadKpiActionMemory = async () => {
+    try {
+      const res = await apiFetch(`/api/avito/kpi_action_memory?account_id=${currentAccount}&limit=12`);
+      const data = await res.json();
+      setKpiActionMemory(Array.isArray(data.items) ? data.items : []);
+    } catch { setKpiActionMemory([]); }
+  };
+
+  const loadKpiReadiness = async () => {
+    try { const res = await apiFetch(`/api/avito/ai_marketing_readiness?account_id=${currentAccount}`); const data = await res.json(); setKpiReadiness(data?.status === "ok" ? data : null); setKpiCheckResult(data?.current_kpi?.status === "ok" ? data.current_kpi : null); } catch { setKpiReadiness(null); }
+  };
+  const confirmKpiTariff = async (state: "CONFIRMED_ACTIVE" | "CONFIRMED_NOT_ACTIVE") => {
+    if (!currentAccount || !kpiReadiness?.required_avito_tariff) return;
+    const r = await apiFetch(`/api/avito/ai_marketing_tariff_confirmation`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({account_id:currentAccount,state,actual_tariff:kpiReadiness.required_avito_tariff})});
+    if (!r.ok) throw new Error(`Ошибка сервера, код ${r.status}`);
+    await loadKpiReadiness();
+  };
+
   const saveKpiSettings = async () => {
     try {
       await apiFetch("/api/avito/set_kpi_settings", {
@@ -3187,7 +3306,8 @@ export default function Home() {
           account_id: currentAccount,
           target_leads_per_day: kpiTargetLeads,
           max_cost_per_lead_rub: kpiMaxCpl,
-          lead_temperature: kpiLeadTemp
+          lead_temperature: kpiLeadTemp,
+          ...(kpiGoalAuto !== null ? { goal_auto_enabled: kpiGoalAuto } : {})
         })
       });
       setKpiSaved(true);
@@ -3231,7 +3351,6 @@ export default function Home() {
   };
 
   const getKpiPlan = async () => {
-    if (!kpiPlanIdPrefix.trim()) { alert("Укажите префикс id направления (например boris-shkaf-...)"); return; }
     try {
       const res = await apiFetch("/api/avito/kpi_plan_execute", {
         method: "POST",
@@ -3250,6 +3369,7 @@ export default function Home() {
   };
 
   const executeKpiPlan = async () => {
+    if (!kpiPlanIdPrefix.trim() && !confirm("Тексты будут переписаны у ВСЕХ объявлений аккаунта (" + (kpiPlan && kpiPlan.affected_items ? kpiPlan.affected_items : "?") + " шт.). Продолжить?")) return;
     setKpiPlanExecuting(true);
     try {
       const res = await apiFetch("/api/avito/kpi_plan_execute", {
@@ -3370,6 +3490,7 @@ export default function Home() {
       const d = await apiFetch(`${API}/autopilot_settings?account_id=${currentAccount}`).then(r => r.json());
       const s = d.settings || {};
       setAutopilotMode(s.mode || "always_ask");
+      setKpiGoalAuto(s.mode === "goal_auto");
       setAutopilotFrom(s.date_from || "");
       setAutopilotTo(s.date_to || "");
     } catch (e) {}
@@ -3608,7 +3729,7 @@ export default function Home() {
     const percent = res.percent ?? (status === "done" || status === "ready" ? 100 : 0);
     const barColor = status === "needs_confirmation" ? "#F79009"
       : status === "error" || status === "cancelled" ? "#F04438"
-      : status === "done" || status === "ready" ? "#12805C" : "#2F6FED";
+      : status === "done" || status === "ready" ? "#12805C" : "var(--boris-blue)";
     const statusLabel = status === "needs_confirmation" ? "⏸ ждёт подтверждения"
       : status === "error" ? "❌ ошибка" : status === "cancelled" ? "🚫 отменено"
       : status === "queued" ? "🕓 в очереди" : status === "running" ? "🔵 идёт"
@@ -3617,50 +3738,50 @@ export default function Home() {
     const draftsCount = Array.isArray(res.draft_ids) ? res.draft_ids.length : null;
     const isFinished = status === "done" || status === "ready";
     return (
-      <div key={run.rootId} className={nested ? "" : "b-panel b-card-eq"} style={{padding: nested ? "12px" : "18px", background: nested ? "#FFFFFF" : undefined, borderRadius: nested ? "10px" : undefined, border: nested ? "1px solid #EEF2FA" : undefined}}>
-        <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"10px"}}>
-          <div style={{display:"flex", alignItems:"center", gap:"10px"}}>
-            {!nested && <span className="b-icon-sm" style={{background:"linear-gradient(135deg,#12805C,#3DBE93)"}}>🚀</span>}
+      <div key={run.rootId} className={nested ? "" : "b-panel b-card-eq"} style={{padding: nested ? "12px" : "18px", background: nested ? "var(--boris-surface)" : undefined, borderRadius: nested ? "10px" : undefined, border: nested ? "1px solid #EEF2FA" : undefined}}>
+        <div className="boris-f2-eee27c7b4dc7">
+          <div className="boris-f2-7e30d285d288">
+            {!nested && <span className="b-icon-sm boris-f2-886256c1d4fc boris-g1-icon">🚀</span>}
             <div>
-              <div style={{fontWeight:"bold", fontSize:"15px", color:"#1D2939"}}>{run.direction}</div>
-              <div style={{fontSize:"13px", color:"#667085"}}>{run.createdAt}</div>
+              <div className="boris-f2-5a316b8cb6a1">{run.direction}</div>
+              <div className="boris-f2-6c2427e9980a">{run.createdAt}</div>
             </div>
           </div>
           <span style={{fontSize:"13px", fontWeight:"bold", color: barColor}}>{statusLabel}</span>
         </div>
-        <div style={{fontSize:"14px", color:"#344054", marginBottom:"8px"}}>{res.step_label || run.active?.error_message || "…"}</div>
-        <div style={{background:"#EEF2FA", borderRadius:"6px", height:"8px", overflow:"hidden"}}>
+        <div className="boris-f2-a31d068d635d">{res.step_label || run.active?.error_message || "…"}</div>
+        <div className="boris-f2-60c739c22a08">
           <div style={{width:`${percent}%`, height:"100%", background: barColor, borderRadius:"6px", transition:"width 0.6s ease, background-color 0.3s ease"}} />
         </div>
         {status === "needs_confirmation" && (
-          <div style={{marginTop:"12px"}}>
-            {res.question && <div style={{fontSize:"13px", color:"#8A5A00", background:"#FFF6E9", border:"1px solid #FDEBC8", borderRadius:"8px", padding:"10px", marginBottom:"10px"}}>{res.question}</div>}
+          <div className="boris-f2-9374e8421025">
+            {res.question && <div className="boris-f2-53074ef0bedb">{res.question}</div>}
             <textarea placeholder="Ваш ответ Борису (например: собственное производство, цена за штуку, цвет — белый)"
               value={pipelineAnswerDrafts[run.active.id] || ""}
               onChange={e => setPipelineAnswerDrafts(prev => ({...prev, [run.active.id]: e.target.value}))}
-              rows={2} style={{width:"100%", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"8px 10px", fontSize:"14px", fontFamily:"inherit", marginBottom:"10px", resize:"vertical"}} />
-            <div style={{display:"flex", gap:"10px"}}>
-              <button className="boris-btn-hover" onClick={() => confirmPipelineTask(run.active.id, "proceed", pipelineAnswerDrafts[run.active.id])}
-                style={{flex:1, background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"8px", padding:"8px", fontWeight:"bold", cursor:"pointer", fontSize:"14px"}}>
+              rows={2}  className="boris-f2-2fbbefd1a50d"/>
+            <div className="boris-f2-6b00e75351fc">
+              <Button className="boris-btn-hover boris-f2-ce4a2a8735c1" onClick={() => confirmPipelineTask(run.active.id, "proceed", pipelineAnswerDrafts[run.active.id])}
+>
                 ✏️ Ответить и продолжить
-              </button>
-              <button className="boris-btn-hover" onClick={() => confirmPipelineTask(run.active.id, "proceed")}
-                style={{background:"#F79009", color:"#FFFFFF", border:"none", borderRadius:"8px", padding:"8px 12px", cursor:"pointer", fontSize:"14px", whiteSpace:"nowrap"}}>
+              </Button>
+              <Button className="boris-btn-hover boris-f2-677893180d9a" onClick={() => confirmPipelineTask(run.active.id, "proceed")}
+>
                 Всё равно
-              </button>
-              <button className="boris-btn-hover" onClick={() => confirmPipelineTask(run.active.id, "cancel")}
-                style={{background:"#FFFFFF", color:"#667085", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"8px 16px", cursor:"pointer", fontSize:"14px"}}>
+              </Button>
+              <Button className="boris-btn-hover boris-f2-5c30ecb73ebc" onClick={() => confirmPipelineTask(run.active.id, "cancel")}
+>
                 Отмена
-              </button>
+              </Button>
             </div>
           </div>
         )}
         {isFinished && (
-          <div style={{marginTop:"12px"}}>
-            <button className="boris-btn-hover" onClick={() => { setActiveTab("listings"); setListingFilter("drafts"); setDraftBatchFilter(batchLabel); loadDrafts(); }}
-              style={{background:"#FFFFFF", color:"#12805C", border:"1px solid #12805C", borderRadius:"8px", padding:"7px 14px", fontSize:"14px", fontWeight:"bold", cursor:"pointer"}}>
+          <div className="boris-f2-9374e8421025">
+            <Button className="boris-btn-hover boris-f2-e3cc8c33c3ba" onClick={() => { setActiveTab("listings"); setListingFilter("drafts"); setDraftBatchFilter(batchLabel); loadDrafts(); }}
+>
               ✅ Готово{draftsCount != null ? ` ${draftsCount}` : ""} → Смотреть результаты
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -3807,13 +3928,13 @@ export default function Home() {
     el.focus(); el.selectionStart = start; el.selectionEnd = start + replacement.length;
   };
   const FormatToolbar = ({textareaId}: {textareaId: string}) => (
-    <div style={{display:"flex", gap:"4px", flexWrap:"wrap", marginBottom:"6px"}}>
-      <button type="button" onClick={() => applyFormatToTextarea(textareaId, "bold")} title="Жирный" style={{fontWeight:800, background:"#F5F5F7", border:"1px solid #E3E7F0", borderRadius:"4px", padding:"3px 8px", fontSize:"12px", cursor:"pointer"}}>Ж</button>
-      <button type="button" onClick={() => applyFormatToTextarea(textareaId, "bullet")} title="Список" style={{background:"#F5F5F7", border:"1px solid #E3E7F0", borderRadius:"4px", padding:"3px 8px", fontSize:"12px", cursor:"pointer"}}>•</button>
-      <button type="button" onClick={() => applyFormatToTextarea(textareaId, "number")} title="Нумерованный список" style={{background:"#F5F5F7", border:"1px solid #E3E7F0", borderRadius:"4px", padding:"3px 8px", fontSize:"12px", cursor:"pointer"}}>1.</button>
-      <div style={{width:"1px", background:"#E3E7F0", margin:"2px 2px"}} />
+    <div className="boris-f2-95d055f2fb06">
+      <Button type="button" onClick={() => applyFormatToTextarea(textareaId, "bold")} title="Жирный" className="boris-f2-18c74fc4d520">Ж</Button>
+      <Button type="button" onClick={() => applyFormatToTextarea(textareaId, "bullet")} title="Список" className="boris-f2-ac71e5eb9b0d">•</Button>
+      <Button type="button" onClick={() => applyFormatToTextarea(textareaId, "number")} title="Нумерованный список" className="boris-f2-ac71e5eb9b0d">1.</Button>
+      <div  className="boris-f2-79d7f850cd3f"/>
       {["🔥","✅","❌","📞","💬","🎁","⭐","🚀"].map(emoji => (
-        <button key={emoji} type="button" onClick={() => applyFormatToTextarea(textareaId, emoji)} style={{background:"#F5F5F7", border:"1px solid #E3E7F0", borderRadius:"4px", padding:"3px 6px", fontSize:"12px", cursor:"pointer"}}>{emoji}</button>
+        <Button key={emoji} type="button" onClick={() => applyFormatToTextarea(textareaId, emoji)} className="boris-f2-34ddb35f15e7">{emoji}</Button>
       ))}
     </div>
   );
@@ -4000,11 +4121,16 @@ export default function Home() {
     if (!label) { alert("У черновиков нет партии — нечего привязать"); return; }
     if (!window.confirm(`Добавить баннеры и фото к партии «${label}»? Баннер станет первым фото, фото товара добавятся по кругу.`)) return;
     setDraftPhotoLoading(true);
+    if (!draftBatchBannerKeyRef.current) {
+      draftBatchBannerKeyRef.current = globalThis.crypto?.randomUUID?.() || `draft-banners-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    let serverAnswered = false;
     try {
       const r = await apiFetch("/api/avito/apply_banner_to_batch", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ account_id: currentAccount, batch_label: label, banner_count: bannerCount, photos_per_ad: photosPerAdInput, folder: bannerFolderInput.trim() })
+        body: JSON.stringify({ account_id: currentAccount, batch_label: label, banner_count: bannerCount, photos_per_ad: photosPerAdInput, folder: bannerFolderInput.trim(), idempotency_key: draftBatchBannerKeyRef.current })
       });
+      serverAnswered = true;
       const d = await r.json();
       if (d.status === "ok") {
         alert(`✅ Готово: баннеров ${d.banners_generated || 0}, обновлено черновиков ${d.updated || 0}`);
@@ -4013,18 +4139,27 @@ export default function Home() {
         alert(`⚠️ ${d.message || "Не удалось"}`);
       }
     } catch (e) { alert("Ошибка связи с сервером"); }
-    setDraftPhotoLoading(false);
+    finally {
+      // Preserve the key only when the network result is ambiguous.
+      if (serverAnswered) draftBatchBannerKeyRef.current = "";
+      setDraftPhotoLoading(false);
+    }
   };
 
   const runBatchBanners = async () => {
     if (!pipelineBatch || !currentAccount) return;
     setBatchBannerLoading(true);
     setBannerResult("Генерирую баннеры (обычно 30-90 секунд)...");
+    if (!pipelineBatchBannerKeyRef.current) {
+      pipelineBatchBannerKeyRef.current = globalThis.crypto?.randomUUID?.() || `pipeline-banners-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    let serverAnswered = false;
     try {
       const r = await apiFetch("/api/avito/apply_banner_to_batch", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ account_id: currentAccount, batch_label: pipelineBatch.label, banner_count: bannerCount, photos_per_ad: photosPerAdInput, folder: bannerFolderInput.trim() })
+        body: JSON.stringify({ account_id: currentAccount, batch_label: pipelineBatch.label, banner_count: bannerCount, photos_per_ad: photosPerAdInput, folder: bannerFolderInput.trim(), idempotency_key: pipelineBatchBannerKeyRef.current })
       });
+      serverAnswered = true;
       const d = await r.json();
       if (d.status === "ok") {
         setBannerResult(`✅ Баннеров создано: ${d.banners_generated}, обновлено черновиков: ${d.updated}` + (d.notice ? ` (${d.notice})` : ""));
@@ -4032,7 +4167,11 @@ export default function Home() {
         setBannerResult(`⚠️ ${d.message || "Не удалось"}`);
       }
     } catch (e) { setBannerResult("Ошибка связи с сервером"); }
-    setBatchBannerLoading(false);
+    finally {
+      // A retry after an ambiguous disconnect reuses the same economic intent.
+      if (serverAnswered) pipelineBatchBannerKeyRef.current = "";
+      setBatchBannerLoading(false);
+    }
   };
   const runBatchValidate = async () => {
     if (!pipelineBatch || !currentAccount) return;
@@ -4071,7 +4210,7 @@ export default function Home() {
         if (d.status === "ok") {
           onOk(d);
         } else if (d.status === "needs_confirmation") {
-          const list = (d.mismatches || []).map((m: any) => `• «${m.title}» — сейчас «${m.category}», похоже на «${m.suggested_category}» (${m.reason})`).join("\n");
+          const list = (d.mismatches || []).map((m: any) => `• «${m.title}» — сейчас «${m.category}», похоже на «${m.suggested_category}» (${humanizeBusinessText(m.reason,"причина уточняется")})`).join("\n");
           showBorisConfirm(
             "Борис заметил несоответствие категории",
             `${d.message}\n\n${list}\n\nОпубликовать как есть или сначала поправить категории вручную?`,
@@ -4236,13 +4375,15 @@ export default function Home() {
 
   const saveDraftEdit = async (draftId: string, fields: {title?: string, description?: string, price?: number}) => {
     try {
-      await apiFetch(`/api/avito/drafts/${draftId}`, {
+      const response = await apiFetch(`/api/avito/drafts/${draftId}`, {
         method: "PUT", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({ account_id: currentAccount, ...fields })
       });
+      const result = await response.json();
+      if (!response.ok || result.status !== "ok") throw new Error(result?.detail?.message || result?.detail || result?.message || "Не удалось сохранить черновик");
       setEditingDraftId(null);
       loadDrafts();
-    } catch (e) { alert("Ошибка связи с сервером"); }
+    } catch (e: any) { alert(e?.message || "Ошибка связи с сервером"); }
   };
 
   const loadPlanItems = async () => {
@@ -4283,13 +4424,13 @@ export default function Home() {
         if (data.decomposed) {
           alert(`🧩 ${data.message || `Задача разбита на ${data.subtasks_count} подзадач, Борис выполняет их в фоне.`}`);
         } else {
-          const actionsList = (data.results || []).map((r: any) => r.error ? `❌ ${r.action}: ${r.error}` : `✅ ${r.action}`).join("\n");
+          const actionsList = (data.results || []).map((r: any) => r.error ? `❌ ${humanizeBusinessText(r.action,"Действие BORIS")}: ${humanizeBusinessText(r.error,"не удалось завершить действие")}` : `✅ ${humanizeBusinessText(r.action,"Действие BORIS")}`).join("\n");
           const skippedList = (data.skipped || []).length > 0 ? "\n\n⚠️ Пропущено:\n" + data.skipped.join("\n") : "";
           const costText = (data.cost && userRole === "owner") ? `\n\n💰 Себестоимость: ${data.cost.total_rub}₽ (GPT-разбор: ${data.cost.gpt_routing_rub}₽ + действия: ${data.cost.steps_estimate_rub}₽)` : "";
           alert(`Борис выполнил ${data.steps_done ?? 0} из шагов задачи:\n${actionsList}${skippedList}${costText}`);
         }
       } else if (data.status === "needs_clarification") {
-        alert(`🤔 Борис пока не может это сделать сам: ${data.reason}`);
+        alert(`BORIS пока не может продолжить автоматически: ${humanizeBusinessText(data.reason,"нужны дополнительные данные или внешний шаг")}`);
       } else {
         alert(`❌ Ошибка: ${data.message || "неизвестная ошибка"}`);
       }
@@ -4310,6 +4451,7 @@ export default function Home() {
 
   useEffect(() => {
     if (activeTab === "settings") { loadAutopilot(); loadAuditLog(); loadRepublishCandidates(); loadKpiSettings(); loadRepublishSettings(); }
+    if (activeTab === "marketing") { loadKpiSettings(); loadKpiActionMemory(); loadKpiReadiness(); checkKpi(); }
     if (activeTab === "marketing") { loadWordstatHistory(); }
     if (activeTab === "plan") { loadPlanItems(); }
     if (activeTab === "billing") { loadBilling(); }
@@ -4322,27 +4464,31 @@ export default function Home() {
     setAnalysisResults([]);
     setAnalysisProgress(null);
     const cities = analysisCities.split(",").map(c => c.trim());
-    const startResp = await apiFetch("/api/parser/city_analysis_async", {
+    if (!currentAccount) { setAnalysisLoading(false); return alert("Сначала выберите аккаунт Avito"); }
+    const startResp = await apiFetch("/api/parser/city_analysis_gateway", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({query: analysisQuery, cities})
+      body: JSON.stringify({account_id: currentAccount, query: analysisQuery, cities, top_n: 20})
     }).then(r => r.json());
-    const taskId = startResp.task_id;
-    if (!taskId) { setAnalysisLoading(false); return alert("Не удалось запустить анализ"); }
+    const jobs = Array.isArray(startResp.jobs) ? startResp.jobs : [];
+    if (!jobs.length) { setAnalysisLoading(false); return alert(startResp.message || "Не удалось запустить анализ"); }
+    setAnalysisProgress({done: 0, total: jobs.length});
+    const completed = new Map<string, any>();
     const poll = setInterval(async () => {
       try {
-        const st = await apiFetch(`/api/tasks/status/${taskId}`).then(r => r.json());
-        if (st.result) {
-          const res = typeof st.result === "string" ? JSON.parse(st.result) : st.result;
-          if (res.results) setAnalysisResults(res.results);
-          if (res.total) setAnalysisProgress({done: res.done || 0, total: res.total});
-        }
-        if (st.status === "done" || st.status === "error") {
+        await Promise.all(jobs.map(async (job: any) => {
+          if (completed.has(job.job_id)) return;
+          const st = await apiFetch(`/api/parser/city_analysis_gateway/status?account_id=${encodeURIComponent(currentAccount)}&job_id=${encodeURIComponent(job.job_id)}`).then(r => r.json());
+          if (st.status === "ok" || st.status === "error") completed.set(job.job_id, st);
+        }));
+        setAnalysisResults(Array.from(completed.values()));
+        setAnalysisProgress({done: completed.size, total: jobs.length});
+        if (completed.size >= jobs.length) {
           clearInterval(poll);
           setAnalysisLoading(false);
           setAnalysisProgress(null);
         }
       } catch (e) {}
-    }, 3000);
+    }, 2500);
   };
 
   const [sortBy, setSortBy] = useState("");
@@ -4416,6 +4562,19 @@ export default function Home() {
       return {...prev, images: has ? images.filter((u: string) => u !== url) : [...images, url]};
     });
   };
+
+  const reorderDraftImage = (draggedUrl: string, targetUrl: string) => {
+    if (!draggedUrl || !targetUrl || draggedUrl === targetUrl) return;
+    setDuplicateEditingItem((prev: any) => {
+      const images = [...(prev?.images || [])];
+      const from = images.indexOf(draggedUrl);
+      const to = images.indexOf(targetUrl);
+      if (from < 0 || to < 0) return prev;
+      images.splice(from, 1);
+      images.splice(to, 0, draggedUrl);
+      return {...prev, images};
+    });
+  };
   const [duplicateDrafts, setDuplicateDrafts] = useState<any[]>([]);
   const [showDuplicateDrafts, setShowDuplicateDrafts] = useState(false);
   const [rewriteLoading, setRewriteLoading] = useState(false);
@@ -4476,7 +4635,8 @@ export default function Home() {
         body: JSON.stringify({
           account_id: currentAccount, draft_id: duplicateEditingItem.draft_id,
           title: duplicateEditingItem.title, description: duplicateEditingItem.description,
-          price: duplicateEditingItem.price, is_template: duplicateEditingItem.is_template
+          price: duplicateEditingItem.price, images: duplicateEditingItem.images || [],
+          is_template: duplicateEditingItem.is_template
         })
       }).then(r => r.json());
       if (res.status === "ok") {
@@ -4534,86 +4694,85 @@ export default function Home() {
     item.title.toLowerCase().includes(search.toLowerCase())
   );
 
-  const inputStyle: any = {width:"100%", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"15px", boxSizing:"border-box"};
+  const inputStyle: any = {width:"100%", background:"var(--boris-surface)", border:"1px solid var(--boris-border)", borderRadius:"8px", padding:"10px", color:"var(--boris-text)", fontSize:"15px", boxSizing:"border-box"};
   const days = ["пн","вт","ср","чт","пт","сб","вс"];
 
   if (view === "accounts") return (
-    <div style={{background:"#F6F7FB", minHeight:"100vh", fontFamily:"var(--font-inter), sans-serif", color:"#1D2939"}}>
-      <div style={{background:"#F6F7FB", borderBottom:"1px solid #EEF2FA", padding:"16px 32px", display:"flex", alignItems:"center", justifyContent:"space-between"}}>
-        <div style={{display:"flex", alignItems:"center", gap:"12px"}}>
+    <div className="boris-f2-7ba8c0d7e5d9">
+      <div className="boris-f2-de6da4e6c404">
+        <div className="boris-f2-16f2d512882a">
           <Mascot size={26} interactive={false} />
-          <span style={{fontSize:"23px", fontWeight:"bold"}}>БОРИС{userRole === "owner" ? " · Админ-панель" : ""}</span>
+          <span className="boris-f2-722924035001">БОРИС{userRole === "owner" ? " · Админ-панель" : ""}</span>
         </div>
         {accounts.length > 1 && userRole !== "owner" && (
-          <button onClick={() => router.push("/agency")} className="boris-btn-hover" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", marginRight:"10px", fontWeight:600}}>🏢 Мои аккаунты</button>
+          <Button onClick={() => router.push("/agency")} className="boris-btn-hover boris-f2-5e664ad55d8d">🏢 Мои аккаунты</Button>
         )}
-        <button onClick={back.go} className="boris-btn-hover" style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", marginRight:"10px", fontWeight:600}}>← В кабинет</button>
-        <button onClick={() => { localStorage.removeItem("boris_token"); localStorage.removeItem("boris_user_email"); localStorage.removeItem("boris_user_role"); localStorage.removeItem("boris_currentAccount"); router.push("/login"); }} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 16px", cursor:"pointer"}}>Выйти</button>
+        <Button onClick={back.go} className="boris-btn-hover boris-f2-b1618c3b47eb">← В кабинет</Button>
       </div>
 
-      <div style={{padding:"32px"}}>
+      <div className="boris-f2-7a3756a5cd36">
         {crmOpen && userRole === "owner" && (
-          <div style={{marginBottom:"24px"}}>
-            <div style={{display:"flex", alignItems:"center", gap:"14px", marginBottom:"18px", flexWrap:"wrap"}}>
-              <button className="boris-btn-hover" onClick={() => { setCrmOpen(false); setEconOpen(false); }} style={{background:"#FFFFFF", border:"1.5px solid #E3E7F0", color:"#667085", borderRadius:"10px", padding:"10px 16px", fontSize:"15px", cursor:"pointer"}}>← Назад</button>
-              <span style={{fontSize:"22px", fontWeight:800, color:"#1D2939"}}>CRM Владельца</span>
+          <div className="boris-f2-8b9688e6e090">
+            <div className="boris-f2-0baf9f8e11aa">
+              <Button className="boris-btn-hover boris-f2-094291ed5607" onClick={() => { setCrmOpen(false); setEconOpen(false); }}>← Назад</Button>
+              <span className="boris-f2-8bd094d7a630">Клиенты владельца</span>
             </div>
-            <div style={{display:"flex", gap:"12px", flexWrap:"wrap"}}>
-              <button className="boris-btn-hover" onClick={async () => { const v = !econOpen; setEconOpen(v); if (v && !econData) { try { const r = await apiFetch("/api/economics/overview?days=30"); const d = await r.json(); if (d.status === "ok") setEconData(d); } catch {} } }} style={{background: econOpen ? "#2F6FED" : "#FFFFFF", border:"1.5px solid #2F6FED", color: econOpen ? "#FFFFFF" : "#2F6FED", borderRadius:"10px", padding:"12px 22px", fontSize:"15px", fontWeight:700, cursor:"pointer"}}>💰 Экономика</button>
-              <button className="boris-btn-hover" onClick={() => alert("Раздел в разработке")} style={{background:"#FFFFFF", border:"1.5px solid #E3E7F0", color:"#667085", borderRadius:"10px", padding:"12px 22px", fontSize:"15px", fontWeight:700, cursor:"pointer"}}>📋 Лиды и сделки — скоро</button>
+            <div className="boris-f2-283d51b208bf">
+              <Button className="boris-btn-hover" onClick={async () => { const v = !econOpen; setEconOpen(v); if (v && !econData) { try { const r = await apiFetch("/api/economics/overview?days=30"); const d = await r.json(); if (d.status === "ok") setEconData(d); } catch {} } }} style={{background: econOpen ? "var(--boris-blue)" : "var(--boris-surface)", border:"1.5px solid var(--boris-blue)", color: econOpen ? "var(--boris-surface)" : "var(--boris-blue)", borderRadius:"10px", padding:"12px 22px", fontSize:"15px", fontWeight:700, cursor:"pointer"}}>💰 Экономика</Button>
+              <Button className="boris-btn-hover boris-f2-0ea4e5b82c11" onClick={() => router.push("/dashboard/crm")}>📋 Лиды и сделки</Button>
             </div>
           </div>
         )}
         {userRole === "owner" && (
           <div style={{display: crmOpen ? "block" : "grid", gridTemplateColumns:"1fr 1fr 1fr", gap:"16px", marginBottom:"32px"}}>
-            <div onClick={() => setCrmOpen(true)} className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"24px", cursor:"pointer", display: crmOpen ? "none" : "block", position:"relative", overflow:"hidden"}}>
-              <div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#9B87F5,#7C5CFC)", opacity:0.08}} /><div style={{display:"flex", alignItems:"center", gap:"12px", marginBottom:"10px"}}><span className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#9B87F5,#7C5CFC)", display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:"20px", flexShrink:0}}>📇</span><span style={{fontSize:"18px", fontWeight:700, color:"#1D2939"}}>CRM Владельца</span></div>
-              <div style={{color:"#667085", fontSize:"15px", marginBottom:"14px"}}>Лиды и сделки агентства — скоро</div>
-            </div>
-            <div onClick={() => alert("Раздел в разработке")} className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"24px", cursor:"pointer", display: crmOpen ? "none" : "block", position:"relative", overflow:"hidden"}}>
-              <div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#FDB022,#F79009)", opacity:0.08}} /><div style={{display:"flex", alignItems:"center", gap:"12px", marginBottom:"10px"}}><span className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#FDB022,#F79009)", display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:"20px", flexShrink:0}}>🛠</span><span style={{fontSize:"18px", fontWeight:700, color:"#1D2939"}}>Технический онбординг</span></div>
-              <div style={{color:"#667085", fontSize:"15px"}}>Чек-лист подключения нового клиента — скоро</div>
-            </div>
-            <div onClick={() => setShowAccountsList(v => !v)} className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"24px", cursor:"pointer", display: crmOpen ? "none" : "block", position:"relative", overflow:"hidden"}}>
-              <div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#4C8DFF,#2F6FED)", opacity:0.08}} /><div style={{display:"flex", alignItems:"center", gap:"12px", marginBottom:"10px"}}><span className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#4C8DFF,#2F6FED)", display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:"20px", flexShrink:0}}>📋</span><span style={{fontSize:"18px", fontWeight:700, color:"#1D2939"}}>Аккаунты Авито</span></div>
-              <div style={{color:"#667085", fontSize:"15px"}}>{showAccountsList ? "Скрыть список" : "Показать список клиентских аккаунтов"}</div>
-            </div>
+            <BorisCard onClick={() => setCrmOpen(true)} className="boris-card-hover boris-g1-card" style={{background:"var(--boris-surface)", border:"1px solid var(--boris-border)", borderRadius:"16px", padding:"24px", cursor:"pointer", display: crmOpen ? "none" : "block", position:"relative", overflow:"hidden"}}>
+              <div  className="boris-f2-f2082c9afe40"/><div className="boris-f2-3eb9ecfc6d8f"><span className="b-ref-ic boris-f2-fcc8aad8504e">📇</span><span className="boris-f2-0c9626a4337f">Клиенты владельца</span></div>
+              <div className="boris-f2-8d8140e5d2d5">CRM клиентов, воронка, задачи и сделки</div>
+            </BorisCard>
+            <BorisCard onClick={() => router.push("/dashboard/launch-client")} className="boris-card-hover boris-g1-card" style={{background:"var(--boris-surface)", border:"1px solid var(--boris-border)", borderRadius:"16px", padding:"24px", cursor:"pointer", display: crmOpen ? "none" : "block", position:"relative", overflow:"hidden"}}>
+              <div  className="boris-f2-212ed57b15c0"/><div className="boris-f2-3eb9ecfc6d8f"><span className="b-ref-ic boris-f2-c50e8401a6cc">🛠</span><span className="boris-f2-0c9626a4337f">Технический онбординг</span></div>
+              <div className="boris-f2-96046ead62a3">Проверить готовность и подключить нового клиента</div>
+            </BorisCard>
+            <BorisCard onClick={() => setShowAccountsList(v => !v)} className="boris-card-hover boris-g1-card" style={{background:"var(--boris-surface)", border:"1px solid var(--boris-border)", borderRadius:"16px", padding:"24px", cursor:"pointer", display: crmOpen ? "none" : "block", position:"relative", overflow:"hidden"}}>
+              <div  className="boris-f2-f4e03e24cfce"/><div className="boris-f2-3eb9ecfc6d8f"><span className="b-ref-ic boris-f2-b6403d10ce58">📋</span><span className="boris-f2-0c9626a4337f">Аккаунты Авито</span></div>
+              <div className="boris-f2-96046ead62a3">{showAccountsList ? "Скрыть список" : "Показать список клиентских аккаунтов"}</div>
+            </BorisCard>
           {econOpen && econData && (() => {
             const it = econData["итого"] || {};
             const box = (grad: string, val: string, cap: string) => (
-              <div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"20px", position:"relative", overflow:"hidden"}}>
+              <BorisCard className="boris-card-hover boris-f2-a1b59dff2608 boris-g1-card">
                 <div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:grad, opacity:0.08}} />
-                <div style={{fontSize:"26px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em"}}>{val}</div>
-                <div style={{fontSize:"14px", color:"#667085", marginTop:"2px"}}>{cap}</div>
-              </div>
+                <div className="boris-f2-4a3867b8b765">{val}</div>
+                <div className="boris-f2-b703107f9e84">{cap}</div>
+              </BorisCard>
             );
             const rub = (v: any) => (Number(v)||0).toLocaleString("ru") + " \u20bd";
             return (
-              <div style={{marginBottom:"32px"}}>
-                <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:"14px", marginBottom:"18px"}}>
+              <div className="boris-f2-2a28d13f8dfd">
+                <div className="boris-f2-9952a1398673">
                   {box("linear-gradient(135deg,#32D583,#12805C)", rub(it["получено"]), "получено от клиентов")}
                   {box("linear-gradient(135deg,#FF6B6B,#F04438)", rub(it["потрачено"]), "потрачено на генерацию")}
-                  {box("linear-gradient(135deg,#4C8DFF,#2F6FED)", rub(it["маржа"]), "маржа за 30 дней")}
-                  {box("linear-gradient(135deg,#98A2B3,#667085)", rub(it["расход_без_аккаунта"]), "расход вне клиентов")}
+                  {box("linear-gradient(135deg,var(--boris-blue),var(--boris-blue))", rub(it["маржа"]), "маржа за 30 дней")}
+                  {box("linear-gradient(135deg,var(--boris-text-3),var(--boris-text-2))", rub(it["расход_без_аккаунта"]), "расход вне клиентов")}
                 </div>
-                <div style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"20px", marginBottom:"14px"}}>
-                  <div style={{fontSize:"16px", fontWeight:700, marginBottom:"12px", color:"#1D2939"}}>На что уходят деньги</div>
+                <div className="boris-f2-ccdd3fa8b8b8">
+                  <div className="boris-f2-54ef736e30e1">На что уходят деньги</div>
                   {(econData["по_операциям"]||[]).map((o: any, i: number) => (
-                    <div key={i} style={{display:"flex", justifyContent:"space-between", padding:"7px 0", borderTop: i ? "1px solid #EAECF0" : "none", fontSize:"14px"}}>
-                      <span style={{color:"#667085"}}>{o["операция"]}</span>
-                      <span><b>{rub(o["руб"])}</b> <span style={{color:"#98A2B3"}}>· {o["раз"]} раз</span></span>
+                    <div key={i} style={{display:"flex", justifyContent:"space-between", padding:"7px 0", borderTop: i ? "1px solid var(--boris-border)" : "none", fontSize:"14px"}}>
+                      <span className="boris-f2-de52905d633b">{o["операция"]}</span>
+                      <span><b>{rub(o["руб"])}</b> <span className="boris-f2-6607ac287d11">· {o["раз"]} раз</span></span>
                     </div>
                   ))}
                 </div>
-                <div style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"20px"}}>
-                  <div style={{fontSize:"16px", fontWeight:700, marginBottom:"12px", color:"#1D2939"}}>По клиентам</div>
-                  <table style={{width:"100%", borderCollapse:"collapse", fontSize:"14px"}}>
-                    <thead><tr style={{textAlign:"left", color:"#667085", fontSize:"12px"}}><th style={{padding:"6px"}}>Клиент</th><th>Заплатил</th><th>Потратил</th><th>Маржа</th></tr></thead>
+                <div className="boris-f2-0d88e7648069">
+                  <div className="boris-f2-54ef736e30e1">По клиентам</div>
+                  <table className="boris-f2-1f5bf21361d2">
+                    <thead><tr className="boris-f2-4cdc3a34c4cd"><th className="boris-f2-885d720aa494">Клиент</th><th>Заплатил</th><th>Потратил</th><th>Маржа</th></tr></thead>
                     <tbody>{(econData["клиенты"]||[]).map((c: any) => (
-                      <tr key={c.account_id} style={{borderTop:"1px solid #EAECF0"}}>
-                        <td style={{padding:"9px 6px"}}>{c["название"] || c.account_id}<div style={{fontSize:"11px", color:"#98A2B3"}}>{c.account_id}</div></td>
-                        <td><b style={{color:"#12805C"}}>{rub(c["заплатил"])}</b></td>
-                        <td style={{color:"#667085"}}>{rub(c["потратил"])}</td>
+                      <tr key={c.account_id} className="boris-f2-54bb6239453e">
+                        <td className="boris-f2-0dfecaf781a4">{c["название"] || c.account_id}<div className="boris-f2-edeb33f149cd">{c.account_id}</div></td>
+                        <td><b className="boris-f2-de450bffd9aa">{rub(c["заплатил"])}</b></td>
+                        <td className="boris-f2-de52905d633b">{rub(c["потратил"])}</td>
                         <td><b style={{color: c["маржа"] >= 0 ? "#12805C" : "#B42318"}}>{rub(c["маржа"])}</b></td>
                       </tr>
                     ))}</tbody>
@@ -4626,125 +4785,125 @@ export default function Home() {
         )}
         {(userRole !== "owner" || showAccountsList) && (
         <>
-        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"24px"}}>
-          <h2 style={{margin:0, fontSize:"23px"}}>Аккаунты Авито</h2>
-          <button onClick={() => { setShowAddForm(true); setStep(1); }} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 20px", fontWeight:"bold", cursor:"pointer"}}>+ Добавить аккаунт</button>
+        <div className="boris-f2-d90da07dd31d">
+          <h2 className="boris-f2-6b1845f3027b">Аккаунты Авито</h2>
+          <Button onClick={() => { setShowAddForm(true); setStep(1); }} className="boris-f2-1cec6a943c82">+ Добавить аккаунт</Button>
         </div>
 
         {showAddForm && (
-          <div style={{background:"#F6F7FB", borderRadius:"12px", padding:"24px", border:"1px solid #E3E7F0", marginBottom:"24px"}}>
-            <div style={{display:"flex", gap:"8px", marginBottom:"24px"}}>
-              <div style={{flex:1, height:"4px", borderRadius:"2px", background: step >= 0 ? "#2F6FED" : "#E3E7F0"}}></div>
-              <div style={{flex:1, height:"4px", borderRadius:"2px", background: step >= 1 ? "#2F6FED" : "#E3E7F0"}}></div>
-              <div style={{flex:1, height:"4px", borderRadius:"2px", background: step >= 2 ? "#2F6FED" : "#E3E7F0"}}></div>
+          <div className="boris-f2-497dbb52498e">
+            <div className="boris-f2-cffa47be58d9">
+              <div style={{flex:1, height:"4px", borderRadius:"2px", background: step >= 0 ? "var(--boris-blue)" : "var(--boris-border)"}}></div>
+              <div style={{flex:1, height:"4px", borderRadius:"2px", background: step >= 1 ? "var(--boris-blue)" : "var(--boris-border)"}}></div>
+              <div style={{flex:1, height:"4px", borderRadius:"2px", background: step >= 2 ? "var(--boris-blue)" : "var(--boris-border)"}}></div>
             </div>
 
             {step === 0 && (
               <>
-                <h3 style={{margin:"0 0 4px", fontSize:"15px"}}>С чего начнём?</h3>
-                <p style={{color:"#667085", fontSize:"15px", marginBottom:"20px"}}>Выберите задачу — Борис покажет только нужные шаги</p>
-                <div style={{display:"grid", gap:"12px"}}>
-                  <button className="boris-btn-hover" onClick={() => { setWizardGoal("site"); setStep(1); }} style={{textAlign:"left", background: wizardGoal==="site" ? "#E7EFFE" : "#FFFFFF", border: wizardGoal==="site" ? "2px solid #2F6FED" : "1px solid #E3E7F0", borderRadius:"10px", padding:"16px 18px", cursor:"pointer", width:"100%"}}>
-                    <div style={{fontWeight:"bold", fontSize:"15px", color:"#14161A", marginBottom:"4px"}}>Перенести товары с моего сайта</div>
-                    <div style={{fontSize:"13px", color:"#667085"}}>Борис выгрузит каталог с вашего сайта</div>
-                  </button>
-                  <button className="boris-btn-hover" onClick={() => { setWizardGoal("avito"); setStep(1); }} style={{textAlign:"left", background: wizardGoal==="avito" ? "#E7EFFE" : "#FFFFFF", border: wizardGoal==="avito" ? "2px solid #2F6FED" : "1px solid #E3E7F0", borderRadius:"10px", padding:"16px 18px", cursor:"pointer", width:"100%"}}>
-                    <div style={{fontWeight:"bold", fontSize:"15px", color:"#14161A", marginBottom:"4px"}}>Подтянуть объявления с Avito</div>
-                    <div style={{fontSize:"13px", color:"#667085"}}>Импортировать то, что уже размещено</div>
-                  </button>
-                  <button className="boris-btn-hover" onClick={() => { setWizardGoal("scratch"); setStep(1); }} style={{textAlign:"left", background: wizardGoal==="scratch" ? "#E7EFFE" : "#FFFFFF", border: wizardGoal==="scratch" ? "2px solid #2F6FED" : "1px solid #E3E7F0", borderRadius:"10px", padding:"16px 18px", cursor:"pointer", width:"100%"}}>
-                    <div style={{fontWeight:"bold", fontSize:"15px", color:"#14161A", marginBottom:"4px"}}>Создать объявления с нуля</div>
-                    <div style={{fontSize:"13px", color:"#667085"}}>Составим и оформим новые объявления</div>
-                  </button>
-                  <div style={{background:"#FFFFFF", border: wizardGoal==="other" ? "2px solid #2F6FED" : "1px solid #E3E7F0", borderRadius:"10px", padding:"16px 18px"}}>
-                    <button className="boris-btn-hover" onClick={() => setWizardGoal("other")} style={{textAlign:"left", background:"transparent", border:"none", cursor:"pointer", width:"100%", padding:0}}>
-                      <div style={{fontWeight:"bold", fontSize:"15px", color:"#14161A", marginBottom:"4px"}}>Другое</div>
-                      <div style={{fontSize:"13px", color:"#667085"}}>Опишите свою задачу своими словами</div>
-                    </button>
+                <h3 className="boris-f2-2f71836d68bb">С чего начнём?</h3>
+                <p className="boris-f2-5209fe92f5d0">Выберите задачу — Борис покажет только нужные шаги</p>
+                <div className="boris-f2-fe3fb0d0fc7d">
+                  <Button className="boris-btn-hover" onClick={() => { setWizardGoal("site"); setStep(1); }} style={{textAlign:"left", background: wizardGoal==="site" ? "var(--boris-blue-soft)" : "var(--boris-surface)", border: wizardGoal==="site" ? "2px solid var(--boris-blue)" : "1px solid var(--boris-border)", borderRadius:"10px", padding:"16px 18px", cursor:"pointer", width:"100%"}}>
+                    <div className="boris-f2-66f0d659b84c">Перенести товары с моего сайта</div>
+                    <div className="boris-f2-6c2427e9980a">Борис выгрузит каталог с вашего сайта</div>
+                  </Button>
+                  <Button className="boris-btn-hover" onClick={() => { setWizardGoal("avito"); setStep(1); }} style={{textAlign:"left", background: wizardGoal==="avito" ? "var(--boris-blue-soft)" : "var(--boris-surface)", border: wizardGoal==="avito" ? "2px solid var(--boris-blue)" : "1px solid var(--boris-border)", borderRadius:"10px", padding:"16px 18px", cursor:"pointer", width:"100%"}}>
+                    <div className="boris-f2-66f0d659b84c">Подтянуть объявления с Avito</div>
+                    <div className="boris-f2-6c2427e9980a">Импортировать то, что уже размещено</div>
+                  </Button>
+                  <Button className="boris-btn-hover" onClick={() => { setWizardGoal("scratch"); setStep(1); }} style={{textAlign:"left", background: wizardGoal==="scratch" ? "var(--boris-blue-soft)" : "var(--boris-surface)", border: wizardGoal==="scratch" ? "2px solid var(--boris-blue)" : "1px solid var(--boris-border)", borderRadius:"10px", padding:"16px 18px", cursor:"pointer", width:"100%"}}>
+                    <div className="boris-f2-66f0d659b84c">Создать объявления с нуля</div>
+                    <div className="boris-f2-6c2427e9980a">Составим и оформим новые объявления</div>
+                  </Button>
+                  <div style={{background:"var(--boris-surface)", border: wizardGoal==="other" ? "2px solid var(--boris-blue)" : "1px solid var(--boris-border)", borderRadius:"10px", padding:"16px 18px"}}>
+                    <Button className="boris-btn-hover boris-f2-5d455e2295eb" onClick={() => setWizardGoal("other")}>
+                      <div className="boris-f2-66f0d659b84c">Другое</div>
+                      <div className="boris-f2-6c2427e9980a">Опишите свою задачу своими словами</div>
+                    </Button>
                     {wizardGoal==="other" && (
                       <input value={wizardGoalText} onChange={e => setWizardGoalText(e.target.value)} placeholder="Например: веду 3 магазина, хочу объединить" style={{...inputStyle, marginTop:"12px"}} />
                     )}
                   </div>
                 </div>
-                <div style={{display:"flex", gap:"12px", marginTop:"20px"}}>
-                  <button className="boris-btn-hover" onClick={() => { setShowAddForm(false); setWizardGoal(""); }} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"10px 24px", cursor:"pointer"}}>Отмена</button>
-                  <button className="boris-btn-hover" disabled={!wizardGoal} onClick={() => setStep(1)} style={{background: wizardGoal ? "#2F6FED" : "#E3E7F0", color: wizardGoal ? "#F6F7FB" : "#9AA3B2", border:"none", borderRadius:"10px", padding:"10px 24px", fontWeight:"bold", cursor: wizardGoal ? "pointer" : "not-allowed"}}>Далее →</button>
+                <div className="boris-f2-d4268e91708c">
+                  <Button className="boris-btn-hover boris-f2-cb85b182d2e2" onClick={() => { setShowAddForm(false); setWizardGoal(""); }}>Отмена</Button>
+                  <Button className="boris-btn-hover" disabled={!wizardGoal} onClick={() => setStep(1)} style={{background: wizardGoal ? "var(--boris-blue)" : "var(--boris-border)", color: wizardGoal ? "var(--boris-bg)" : "#9AA3B2", border:"none", borderRadius:"10px", padding:"10px 24px", fontWeight:"bold", cursor: wizardGoal ? "pointer" : "not-allowed"}}>Далее →</Button>
                 </div>
               </>
             )}
 
             {step === 1 && (
               <>
-                <h3 style={{margin:"0 0 4px", fontSize:"15px"}}>Шаг 1: Данные аккаунта Авито</h3>
-                <p style={{color:"#667085", fontSize:"15px", marginBottom:"20px"}}>Логин, пароль и API ключи аккаунта</p>
-                <div style={{background:"#EAF3FF", border:"1px solid #C7DDFF", borderRadius:"12px", padding:"16px 18px", marginBottom:"20px"}}>
-                  <div style={{fontWeight:700, color:"#14161A", fontSize:"14px", marginBottom:"6px"}}>{"\u041a\u0430\u043a \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c Client ID \u0438 Client Secret"}</div>
-                  <div style={{color:"#667085", fontSize:"12.5px", marginBottom:"12px"}}>{"\u041d\u0443\u0436\u0435\u043d \u0442\u0430\u0440\u0438\u0444 Avito \u00ab\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u044b\u0439\u00bb \u0438\u043b\u0438 \u00ab\u041c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u044b\u0439\u00bb \u2014 \u0431\u0435\u0437 \u043d\u0435\u0433\u043e API \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d."}</div>
-                  <ol style={{margin:"0 0 12px", paddingLeft:"20px", color:"#3A414D", fontSize:"13.5px", lineHeight:1.7}}>
+                <h3 className="boris-f2-2f71836d68bb">Шаг 1: Данные аккаунта Авито</h3>
+                <p className="boris-f2-5209fe92f5d0">Логин, пароль и API ключи аккаунта</p>
+                <div className="boris-f2-5876f482cb27">
+                  <div className="boris-f2-d41556864646">{"Как получить идентификатор приложения (Client ID) и секрет приложения (Client Secret)"}</div>
+                  <div className="boris-f2-6a7e47b0325d">{"\u041d\u0443\u0436\u0435\u043d \u0442\u0430\u0440\u0438\u0444 Avito \u00ab\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u044b\u0439\u00bb \u0438\u043b\u0438 \u00ab\u041c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u044b\u0439\u00bb \u2014 \u0431\u0435\u0437 \u043d\u0435\u0433\u043e API \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d."}</div>
+                  <ol className="boris-f2-e1d10995655d">
                     <li>{"\u0412 \u043b\u0438\u0447\u043d\u043e\u043c \u043a\u0430\u0431\u0438\u043d\u0435\u0442\u0435 Avito \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u00ab\u041f\u0440\u043e\u0444\u0438\u043b\u044c \u0438 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438\u00bb \u2192 \u00ab\u0418\u043d\u0442\u0435\u0433\u0440\u0430\u0446\u0438\u0438 \u0438 API\u00bb (\u043f\u0443\u043d\u043a\u0442 \u043c\u043e\u0436\u0435\u0442 \u0431\u044b\u0442\u044c \u043d\u0430 \u0430\u043d\u0433\u043b\u0438\u0439\u0441\u043a\u043e\u043c \u2014 Integrations / API)"}</li>
                     <li>{"\u0421\u043e\u0437\u0434\u0430\u0439\u0442\u0435 \u0438\u043d\u0442\u0435\u0433\u0440\u0430\u0446\u0438\u044e \u0434\u043b\u044f \u0430\u0432\u0442\u043e\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438 \u043e\u0431\u044a\u044f\u0432\u043b\u0435\u043d\u0438\u0439"}</li>
                     <li>{"\u0412\u043d\u0438\u0437\u0443 \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u044b \u0441\u043a\u043e\u043f\u0438\u0440\u0443\u0439\u0442\u0435 Client ID \u0438 Client Secret (\u043d\u0430 \u0430\u043d\u0433\u043b\u0438\u0439\u0441\u043a\u043e\u043c) \u0438 \u0432\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0432 \u043f\u043e\u043b\u044f \u043d\u0438\u0436\u0435"}</li>
                   </ol>
-                  <div style={{background:"#F6F7FB", border:"1px dashed #B9C6DD", borderRadius:"8px", padding:"20px", textAlign:"center", color:"#9AA3B2", fontSize:"12.5px"}}>{"\u0421\u043a\u0440\u0438\u043d\u0448\u043e\u0442\u044b \u0448\u0430\u0433\u043e\u0432 \u0431\u0443\u0434\u0443\u0442 \u0437\u0434\u0435\u0441\u044c"}</div>
-                  <a href="https://www.avito.ru/professionals/api" target="_blank" rel="noopener" style={{display:"inline-block", marginTop:"12px", color:"#2F6FED", fontSize:"13.5px", fontWeight:600, textDecoration:"none"}}>{"\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 API \u0432 Avito \u2192"}</a>
+                  <div className="boris-f2-1af820fe18b2">{"\u0421\u043a\u0440\u0438\u043d\u0448\u043e\u0442\u044b \u0448\u0430\u0433\u043e\u0432 \u0431\u0443\u0434\u0443\u0442 \u0437\u0434\u0435\u0441\u044c"}</div>
+                  <a href="https://www.avito.ru/professionals/api" target="_blank" rel="noopener" className="boris-f2-bdc11cff861c">{"\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 API \u0432 Avito \u2192"}</a>
                 </div>
-                <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"16px"}}>
+                <div className="boris-f2-001013efee98">
                   {[
                     {label:"Название", key:"name", placeholder:"Название компании"},
                     {label:"Логин (email)", key:"login", placeholder:"email@yandex.ru"},
                     {label:"Пароль", key:"password", placeholder:"••••••••"},
                     {label:"Комментарий", key:"comment", placeholder:"Заметки об аккаунте"},
-                    {label:"Client ID (Авито API)", key:"client_id", placeholder:"API Client ID"},
-                    {label:"Client Secret (Авито API)", key:"client_secret", placeholder:"API Client Secret"},
+                    {label:"Идентификатор приложения (Client ID, Авито API)", key:"client_id", placeholder:"Вставьте Client ID"},
+                    {label:"Секрет приложения (Client Secret, Авито API)", key:"client_secret", placeholder:"Вставьте Client Secret"},
                   ].map(field => (
                     <div key={field.key}>
-                      <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>{field.label}</label>
+                      <label className="boris-f2-5a0de0cf2264">{field.label}</label>
                       <input value={(newAccount as any)[field.key]} onChange={e => setNewAccount({...newAccount, [field.key]: e.target.value})}
                         placeholder={field.placeholder} type={field.key === "password" ? "password" : "text"} style={inputStyle} />
                     </div>
                   ))}
                 </div>
-                <div style={{display:"flex", gap:"12px", marginTop:"20px"}}>
-                  <button className="boris-btn-hover" onClick={() => { if (!newAccount.name || !newAccount.login) return alert("Заполните название и логин"); setStep(2); }}
-                    style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"8px", padding:"10px 24px", fontWeight:"bold", cursor:"pointer"}}>Далее →</button>
-                  <button className="boris-btn-hover" onClick={() => { setShowAddForm(false); setStep(1); }} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"10px 24px", cursor:"pointer"}}>Отмена</button>
+                <div className="boris-f2-d4268e91708c">
+                  <Button className="boris-btn-hover boris-f2-2fe5fa0e8409" onClick={() => { if (!newAccount.name || !newAccount.login) return alert("Заполните название и логин"); setStep(2); }}
+>Далее →</Button>
+                  <Button className="boris-btn-hover boris-f2-cb85b182d2e2" onClick={() => { setShowAddForm(false); setStep(1); }}>Отмена</Button>
                 </div>
               </>
             )}
 
             {step === 2 && (
               <>
-                <h3 style={{margin:"0 0 4px", fontSize:"15px"}}>🏢 Шаг 2: Расскажи о компании</h3>
-                <p style={{color:"#667085", fontSize:"15px", marginBottom:"20px"}}>БОРИС изучит бизнес и будет использовать эту информацию для создания объявлений</p>
-                <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"16px"}}>
-                  <div style={{gridColumn:"1/-1"}}>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Сайт компании</label>
+                <h3 className="boris-f2-2f71836d68bb">🏢 Шаг 2: Расскажи о компании</h3>
+                <p className="boris-f2-5209fe92f5d0">БОРИС изучит бизнес и будет использовать эту информацию для создания объявлений</p>
+                <div className="boris-f2-001013efee98">
+                  <div className="boris-f2-97294b207c62">
+                    <label className="boris-f2-5a0de0cf2264">Сайт компании</label>
                     <input value={newAccount.companyWebsite} onChange={e => setNewAccount({...newAccount, companyWebsite: e.target.value})} placeholder="https://example.com" style={inputStyle} />
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Сфера деятельности</label>
+                    <label className="boris-f2-5a0de0cf2264">Сфера деятельности</label>
                     <input value={newAccount.companyNiche} onChange={e => setNewAccount({...newAccount, companyNiche: e.target.value})} placeholder="Строительные материалы" style={inputStyle} />
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Тон общения</label>
+                    <label className="boris-f2-5a0de0cf2264">Тон общения</label>
                     <select className="b-select" value={newAccount.companyTone} onChange={e => setNewAccount({...newAccount, companyTone: e.target.value})} style={inputStyle}>
                       <option>Дружелюбный</option><option>Деловой</option><option>Экспертный</option><option>Простой</option>
                     </select>
                   </div>
-                  <div style={{gridColumn:"1/-1"}}>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Описание компании</label>
+                  <div className="boris-f2-97294b207c62">
+                    <label className="boris-f2-5a0de0cf2264">Описание компании</label>
                     <textarea value={newAccount.companyDescription} onChange={e => setNewAccount({...newAccount, companyDescription: e.target.value})}
                       placeholder="Чем занимается компания" rows={3} style={{...inputStyle, resize:"vertical"}} />
                   </div>
-                  <div style={{gridColumn:"1/-1"}}>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Преимущества компании</label>
+                  <div className="boris-f2-97294b207c62">
+                    <label className="boris-f2-5a0de0cf2264">Преимущества компании</label>
                     <textarea value={newAccount.companyAdvantages} onChange={e => setNewAccount({...newAccount, companyAdvantages: e.target.value})}
                       placeholder="Доставка за час, гарантия 5 лет" rows={3} style={{...inputStyle, resize:"vertical"}} />
                   </div>
                 </div>
-                <div style={{display:"flex", gap:"12px", marginTop:"20px"}}>
-                  <button className="boris-btn-hover" onClick={() => setStep(1)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"10px 24px", cursor:"pointer"}}>← Назад</button>
-                  <button className="boris-btn-hover" onClick={addAccount} disabled={addingAccount} style={{background: addingAccount ? "#E3E7F0" : "#2F6FED", color: addingAccount ? "#667085" : "#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 24px", fontWeight:"bold", cursor: addingAccount ? "wait" : "pointer"}}>{addingAccount ? "⏳ Создаю..." : "✅ Создать аккаунт"}</button>
+                <div className="boris-f2-d4268e91708c">
+                  <Button className="boris-btn-hover boris-f2-cb85b182d2e2" onClick={() => setStep(1)}>← Назад</Button>
+                  <Button className="boris-btn-hover" onClick={addAccount} disabled={addingAccount} style={{background: addingAccount ? "var(--boris-border)" : "var(--boris-blue)", color: addingAccount ? "var(--boris-text-2)" : "var(--boris-bg)", border:"none", borderRadius:"10px", padding:"10px 24px", fontWeight:"bold", cursor: addingAccount ? "wait" : "pointer"}}>{addingAccount ? "⏳ Создаю..." : "✅ Создать аккаунт"}</Button>
                 </div>
               </>
             )}
@@ -4752,40 +4911,40 @@ export default function Home() {
         )}
 
         {accounts.length > 0 && (
-          <div style={{color:"#667085", fontSize:"15px", marginBottom:"16px"}}>Выберите аккаунт, чтобы продолжить работу</div>
+          <div className="boris-f2-8d66ef11ddb7">Выберите аккаунт, чтобы продолжить работу</div>
         )}
 
         {accountsError && !showAddForm && (
-          <div style={{background:"#FFFFFF", borderRadius:"12px", padding:"32px 24px", border:"1px solid #FEE4E2", textAlign:"center", marginBottom:"16px"}}>
-            <div style={{fontSize:"18px", fontWeight:700, color:"#B42318", marginBottom:"8px"}}>Не удалось загрузить список аккаунтов</div>
-            <div style={{color:"#667085", fontSize:"15px", marginBottom:"20px"}}>{accountsError}</div>
-            <button className="boris-btn-hover" onClick={() => window.location.reload()} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"12px 28px", fontWeight:"bold", fontSize:"15px", cursor:"pointer"}}>Повторить</button>
+          <div className="boris-f2-1dd3b1dc6020">
+            <div className="boris-f2-863ecc270f82">Не удалось загрузить список аккаунтов</div>
+            <div className="boris-f2-5209fe92f5d0">{accountsError}</div>
+            <Button className="boris-btn-hover boris-f2-2cc305605595" onClick={() => window.location.reload()}>Повторить</Button>
           </div>
         )}
         {accounts.length === 0 && !showAddForm && !accountsError && (
-          <div style={{background:"#FFFFFF", borderRadius:"12px", padding:"40px 24px", border:"1px solid #EEF2FA", textAlign:"center"}}>
-            <div style={{fontSize:"40px", marginBottom:"12px"}}>🔌</div>
-            <div style={{fontSize:"18px", fontWeight:700, color:"#1D2939", marginBottom:"8px"}}>Пока нет ни одного аккаунта Авито</div>
-            <div style={{color:"#667085", fontSize:"15px", marginBottom:"20px"}}>Подключите аккаунт — Борис начнёт работать с вашими объявлениями</div>
-            <button className="boris-btn-hover" onClick={() => { setShowAddForm(true); setStep(1); }} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"12px 28px", fontWeight:"bold", fontSize:"15px", cursor:"pointer"}}>Подключить аккаунт</button>
-            <div style={{marginTop:"16px"}}>
-              <button onClick={() => router.push("/dashboard/home")} style={{background:"none", border:"none", color:"#667085", fontSize:"15px", cursor:"pointer", textDecoration:"underline"}}>Вернуться в кабинет</button>
+          <div className="boris-f2-ebe9e7fbab13">
+            <div className="boris-f2-9f0adb8bdffc">🔌</div>
+            <div className="boris-f2-f62da0285e94">Пока нет ни одного аккаунта Авито</div>
+            <div className="boris-f2-5209fe92f5d0">Подключите аккаунт — Борис начнёт работать с вашими объявлениями</div>
+            <Button className="boris-btn-hover boris-f2-2cc305605595" onClick={() => { setShowAddForm(true); setStep(1); }}>Подключить аккаунт</Button>
+            <div className="boris-f2-8a359a76ebec">
+              <Button onClick={() => router.push("/dashboard/home")} className="boris-f2-fb1db79dceca">Вернуться в кабинет</Button>
             </div>
           </div>
         )}
 
-        <div style={{display:"grid", gap:"16px"}}>
+        <div className="boris-f2-6aa137d58b1b">
           {accounts.map(acc => (
-            <div key={acc.id} style={{background:"#F6F7FB", borderRadius:"12px", padding:"24px", border:"1px solid #EEF2FA", display:"flex", alignItems:"center", justifyContent:"space-between"}}>
+            <div key={acc.id} className="boris-f2-abc6aa954ffe">
               <div>
-                <div style={{fontSize:"23px", fontWeight:"bold", marginBottom:"4px"}}>{acc.name}</div>
-                <div style={{color:"#667085", fontSize:"15px", marginBottom:"4px"}}>{acc.login}</div>
-                <div style={{color:"#8A93A6", fontSize:"15px"}}>{acc.comment}</div>
-                {(acc as any).company?.niche && <div style={{color:"#2F6FED", fontSize:"15px", marginTop:"6px"}}>🏢 {(acc as any).company.niche}</div>}
+                <div className="boris-f2-2e00323aee86">{acc.name}</div>
+                <div className="boris-f2-8e893b7db6d7">{acc.login}</div>
+                <div className="boris-f2-316437256d37">{acc.comment}</div>
+                {(acc as any).company?.niche && <div className="boris-f2-8e97d7c9817d">🏢 {(acc as any).company.niche}</div>}
               </div>
-              <div style={{display:"flex", alignItems:"center", gap:"12px"}}>
-                <span style={{background:"#1E4FBF", color:"#2F6FED", padding:"4px 12px", borderRadius:"20px", fontSize:"15px"}}>● Активен</span>
-                <button className="boris-btn-hover" onClick={() => openAccount(acc)} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 20px", fontWeight:"bold", cursor:"pointer"}}>Открыть →</button>
+              <div className="boris-f2-16f2d512882a">
+                <span className="boris-f2-9b85b88d6c35">● Активен</span>
+                <Button className="boris-btn-hover boris-f2-1cec6a943c82" onClick={() => openAccount(acc)}>Открыть →</Button>
               </div>
             </div>
           ))}
@@ -4797,7 +4956,7 @@ export default function Home() {
   );
 
   return (
-    <div style={{background:"#F6F7FB", minHeight:"100vh", fontFamily:"var(--font-inter), sans-serif", color:"#1D2939", display:"flex"}}>
+    <div className="boris-f2-5846b899f23a">
             <style jsx global>{`
         @keyframes guidePulse {
           0%, 100% { box-shadow: 0 0 0 0 rgba(74,222,128,0.5); }
@@ -4810,25 +4969,25 @@ export default function Home() {
         .boris-robokassa-btn:hover { background: rgba(47,111,237,0.08) !important; box-shadow: 0 6px 16px rgba(47,111,237,0.25) !important; transform: translateY(-2px); }
         .boris-nav-hover:hover { background: #F5F8FF !important; transform: translateX(2px); box-shadow: 0 2px 6px rgba(16,24,40,0.06); }
         .boris-side-btn { transition: all 0.2s ease; }
-        .boris-side-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(16,24,40,0.12) !important; border-color: #2F6FED !important; }
+        .boris-side-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(16,24,40,0.12) !important; border-color: var(--boris-blue) !important; }
 
-        .b-card { background:#FFFFFF; border:1px solid #E3E7F0; border-radius:16px; padding:24px; position:relative; overflow:hidden; transition: all 0.2s ease; }
+        .b-card { background:var(--boris-surface); border:1px solid var(--boris-border); border-radius:16px; padding:24px; position:relative; overflow:hidden; transition: all 0.2s ease; }
         .b-card:hover { transform: translateY(-3px); box-shadow: 0 12px 24px rgba(16,24,40,0.10); }
-        .b-panel { background:#FFFFFF; border:1px solid #E3E7F0; border-radius:16px; padding:24px; }
-        .b-title { font-size:20px; font-weight:800; color:#1D2939; margin:0 0 6px; letter-spacing:-0.01em; }
-        .b-sub { font-size:14px; color:#667085; margin:0 0 20px; }
-        .b-label { font-size:13px; font-weight:600; color:#344054; display:block; margin-bottom:6px; }
-        .b-input { width:100%; box-sizing:border-box; background:#FFFFFF; border:1px solid #E3E7F0; border-radius:10px; padding:11px 14px; font-size:14px; color:#1D2939; outline:none; transition: all 0.15s ease; font-family:inherit; }
-        .b-input:focus { border-color:#2F6FED; box-shadow:0 0 0 3px rgba(47,111,237,0.10); }
+        .b-panel { background:var(--boris-surface); border:1px solid var(--boris-border); border-radius:16px; padding:24px; }
+        .b-title { font-size:20px; font-weight:800; color:var(--boris-text); margin:0 0 6px; letter-spacing:-0.01em; }
+        .b-sub { font-size:14px; color:var(--boris-text-2); margin:0 0 20px; }
+        .b-label { font-size:13px; font-weight:600; color:var(--boris-text-2); display:block; margin-bottom:6px; }
+        .b-input { width:100%; box-sizing:border-box; background:var(--boris-surface); border:1px solid var(--boris-border); border-radius:10px; padding:11px 14px; font-size:14px; color:var(--boris-text); outline:none; transition: all 0.15s ease; font-family:inherit; }
+        .b-input:focus { border-color:var(--boris-blue); box-shadow:0 0 0 3px rgba(47,111,237,0.10); }
         .b-btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; border-radius:10px; padding:11px 20px; font-size:14px; font-weight:700; cursor:pointer; text-decoration:none; box-sizing:border-box; transition: all 0.2s ease; }
-        .b-btn-primary { background:#2F6FED; color:#FFFFFF; border:1px solid #2F6FED; }
+        .b-btn-primary { background:var(--boris-blue); color:var(--boris-surface); border:1px solid var(--boris-blue); }
         .b-btn-primary:hover { transform:translateY(-2px); box-shadow:0 6px 16px rgba(47,111,237,0.30); }
         /* --- нормализация вкладки Объявления --- */
         .b-btn { height:40px; padding:0 16px !important; font-size:13px !important; white-space:nowrap; line-height:1; }
         .b-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(16,24,40,0.10); }
         .b-btn:active { transform: translateY(0); box-shadow:none; }
         .b-nav { display:flex; align-items:center; gap:10px; width:100%; text-align:left; border-radius:10px; padding:8px 10px; cursor:pointer; font-size:14px; margin-bottom:3px; transition: all .15s ease; }
-        .b-nav:hover { background:#F6F7FB !important; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(16,24,40,0.08); }
+        .b-nav:hover { background:var(--boris-bg) !important; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(16,24,40,0.08); }
         .b-nav:active { transform: translateY(0); box-shadow:none; }
         .b-nav .b-icon-sm { transition: transform .15s ease, box-shadow .15s ease; }
         .b-nav:hover .b-icon-sm { transform: scale(1.06); box-shadow: 0 3px 10px rgba(16,24,40,0.18); }
@@ -4838,14 +4997,14 @@ export default function Home() {
         .b-stat { display:flex; align-items:center; gap:18px; padding:20px 22px; opacity:0; animation: statIn .55s cubic-bezier(.22,1,.36,1) forwards; flex:1; min-height:118px; }
         .b-stat:hover .b-stat-ico { animation: iconPulse 1.2s ease-in-out infinite; }
         .b-stat-ico { width:56px; height:56px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:26px; flex-shrink:0; box-shadow: 0 4px 14px rgba(16,24,40,0.14); }
-        .b-stat-num { font-size:34px; font-weight:800; line-height:1; letter-spacing:-0.02em; background:linear-gradient(90deg,#1D2939,#475467,#1D2939); background-size:200% auto; -webkit-background-clip:text; background-clip:text; color:transparent; animation: shine 4s linear infinite; }
+        .b-stat-num { font-size:34px; font-weight:800; line-height:1; letter-spacing:-0.02em; background:linear-gradient(90deg,var(--boris-text),var(--boris-text-2),var(--boris-text)); background-size:200% auto; -webkit-background-clip:text; background-clip:text; color:transparent; animation: shine 4s linear infinite; }
         /* --- фильтры объявлений --- */
         @keyframes chipIn { from { opacity:0; transform: translateY(-6px) scale(.96); } to { opacity:1; transform:none; } }
         .b-filters { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:20px; }
         .b-filters { gap:12px !important; }
         .b-filters .b-btn {
           height:auto !important; padding:14px 18px !important; font-size:14px !important; font-weight:600 !important;
-          background:#FFFFFF; border:1px solid #E3E7F0; color:#475467; border-radius:14px;
+          background:var(--boris-surface); border:1px solid var(--boris-border); color:var(--boris-text-2); border-radius:14px;
           position:relative; overflow:hidden; box-shadow:0 1px 3px rgba(16,24,40,0.04);
         }
         .b-filters .b-btn::after {
@@ -4872,21 +5031,21 @@ export default function Home() {
         .b-empty .b-stat-ico { animation: iconPulse 2.4s ease-in-out infinite; }
         .b-input { height:40px; }
         textarea.b-input { height:auto; }
-        .b-meta { font-size:13px; color:#667085; white-space:nowrap; }
+        .b-meta { font-size:13px; color:var(--boris-text-2); white-space:nowrap; }
         .b-card-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; padding-top:14px; border-top:1px solid #EEF2FA; }
         .b-card-actions .b-btn { flex:0 0 auto; margin:0 !important; }
         .b-price-row { display:flex; align-items:center; gap:8px; margin:10px 0; }
-        .b-more { width:100%; background:#F6F7FB; border:1px solid #E3E7F0; border-radius:10px; padding:10px 12px; font-size:13px; color:#667085; cursor:pointer; transition:all .2s ease; }
+        .b-more { width:100%; background:var(--boris-bg); border:1px solid var(--boris-border); border-radius:10px; padding:10px 12px; font-size:13px; color:var(--boris-text-2); cursor:pointer; transition:all .2s ease; }
         .b-more:hover { background:#EEF2FA; }
         .b-sep { height:1px; background:#EEF2FA; border:0; margin:16px 0; }
         .b-inline { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
         .b-photo-bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; row-gap:14px; }
         .b-photo-bar > .b-meta { margin:0; }
         .b-photo-bar .b-brk { flex-basis:100%; height:0; }
-        .b-btn-ghost { background:transparent; color:#2F6FED; border:2px solid #2F6FED; }
+        .b-btn-ghost { background:transparent; color:var(--boris-blue); border:2px solid var(--boris-blue); }
         .b-btn-ghost:hover { background:rgba(47,111,237,0.08); transform:translateY(-2px); box-shadow:0 6px 16px rgba(47,111,237,0.25); }
-        .b-btn-soft { background:#FFFFFF; color:#667085; border:1px solid #E3E7F0; }
-        .b-btn-soft:hover { transform:translateY(-2px); box-shadow:0 6px 14px rgba(16,24,40,0.10); border-color:#2F6FED; color:#2F6FED; }
+        .b-btn-soft { background:var(--boris-surface); color:var(--boris-text-2); border:1px solid var(--boris-border); }
+        .b-btn-soft:hover { transform:translateY(-2px); box-shadow:0 6px 14px rgba(16,24,40,0.10); border-color:var(--boris-blue); color:var(--boris-blue); }
         .b-icon { width:64px; height:64px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:28px; flex-shrink:0; }
         .b-icon-sm { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:18px; flex-shrink:0; }
         .b-chip { display:inline-block; font-size:13px; font-weight:700; border-radius:20px; padding:5px 14px; }
@@ -4897,82 +5056,114 @@ export default function Home() {
           guideKey={guideActive && guideSteps[guideIndex]
             ? guideSteps[guideIndex].tab : ""} />
 
-      <div className="b-content-col" style={{flex:1, minWidth:0, overflowY:"auto"}}>
+      <div className="b-content-col boris-dashboard-scroll">
+        <div style={{ position:"sticky", top:0, zIndex:35, display:"flex", justifyContent:"flex-end", padding:"10px 16px", background:"rgba(255,255,255,.94)", borderBottom:"1px solid var(--boris-border)", backdropFilter:"blur(12px)" }}>
+          <GlobalLogoutButton />
+        </div>
 
       {userRole === "owner" && unreadEscalationsCount > 0 && showEscalationPopup && !directorMode && (
-        <div style={{position:"fixed", bottom:"24px", left:"24px", background:"#FDEDEC", border:"2px solid #F04438", borderRadius:"12px", padding:"16px 20px", maxWidth:"340px", zIndex:1000, boxShadow:"0 8px 24px rgba(0,0,0,0.5)"}}>
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:"12px"}}>
+        <div className="boris-f2-db6fa137094b">
+          <div className="boris-f2-f69162a77f4a">
             <div>
-              <div style={{color:"#F04438", fontWeight:"bold", fontSize:"23px", marginBottom:"6px"}}>⚠️ Требует внимания</div>
-              <div style={{color:"#344054", fontSize:"15px"}}>{unreadEscalationsCount} {unreadEscalationsCount === 1 ? "ошибка" : "ошибки/ошибок"} в аккаунтах — Борис не смог довести задачу до результата.</div>
-              <button className="boris-btn-hover" onClick={() => { setDirectorMode(true); setShowEscalationPopup(false); }} style={{marginTop:"10px", background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"6px 14px", fontWeight:"bold", cursor:"pointer", fontSize:"15px"}}>👑 Открыть у директора</button>
+              <div className="boris-f2-7831ee398e7f">⚠️ Требует внимания</div>
+              <div className="boris-f2-96046ead62a3">{unreadEscalationsCount} {unreadEscalationsCount === 1 ? "ошибка" : "ошибки/ошибок"} в аккаунтах — Борис не смог довести задачу до результата.</div>
+              <Button className="boris-btn-hover boris-f2-e02afc9a225b" onClick={() => { setDirectorMode(true); setShowEscalationPopup(false); }}>👑 Открыть у директора</Button>
             </div>
-            <button className="boris-btn-hover" onClick={() => setShowEscalationPopup(false)} style={{background:"#FFFFFF", border:"none", color:"#2F6FED", cursor:"pointer", fontSize:"15px"}}>✕</button>
+            <Button className="boris-btn-hover boris-f2-ed9c6fefa922" onClick={() => setShowEscalationPopup(false)}>✕</Button>
           </div>
         </div>
       )}
 
       {advisorMode ? (
-        <div style={{padding:"32px"}}>
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"20px"}}>
-            <h2 style={{margin:0, color:"#14161A", fontSize:"26px", fontWeight:800, display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #9B87F5, #7C5CFC)"}}>📈</span>Маркетолог-советник по ставкам</h2>
-            <button className="boris-btn-hover" onClick={runAdvisor} disabled={advisorLoading} style={{background:"#FFFFFF", color:"#F79009", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"15px"}}>
+        <div className="boris-f2-7a3756a5cd36">
+          <div className="boris-f2-faeec7a3a7ea">
+            <h2 className="boris-f2-c482369e57a1"><span className="b-icon-sm boris-f2-fc42933d2a24 boris-g1-icon">📈</span>Маркетолог-советник по ставкам</h2>
+            <Button className="boris-btn-hover boris-f2-515ee9c8c7e4" onClick={runAdvisor} disabled={advisorLoading}>
               {advisorLoading ? "⏳ Считаю..." : "🔄 Пересчитать"}
-            </button>
+            </Button>
           </div>
 
           {/* Форма активации: два обязательных поля */}
-          <div className="b-panel b-card-eq" style={{marginBottom:"20px"}}>
-            <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #12B76A, #039855)"}}>🎯</span>Активация Советника</h3>
+          <BorisCard className="b-panel b-card-eq boris-f2-7dde5e56b3f3 boris-g1-card">
+            <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-e179ca50e9d4 boris-g1-icon">🎯</span>Активация Советника</h3>
             <p className="b-sub">Оба поля обязательны. Пока не заданы — Советник не работает.</p>
-            <div style={{display:"flex", gap:"16px", flexWrap:"wrap", alignItems:"flex-end"}}>
+            <div className="boris-f2-02bf13b70f3c">
               <div>
-                <div className="b-label">Макс. цена лида, ₽</div><div style={{fontSize:"12px", color:"#98A2B3", marginBottom:"6px"}}>Сколько готовы платить за один контакт</div>
-                <input type="number" value={advMaxCpl} onChange={e => setAdvMaxCpl(e.target.value)} placeholder="500"
-                  style={{width:"140px", padding:"9px 12px", border:"1px solid #E3E7F0", borderRadius:"8px", fontSize:"15px"}} />
+                <div className="b-label">Макс. цена лида, ₽</div><div className="boris-f2-be522d824950">Сколько готовы платить за один контакт</div>
+                <input type="number" value={Number(advMaxCpl) === 0 ? "" : advMaxCpl} onChange={e => setAdvMaxCpl(e.target.value)} placeholder="500"
+  className="boris-f2-e1f3097a630d"/>
               </div>
               <div>
-                <div className="b-label">Суточный лимит бюджета, ₽</div><div style={{fontSize:"12px", color:"#98A2B3", marginBottom:"6px"}}>Максимум трат за сутки</div>
-                <input type="number" value={advDailyLimit} onChange={e => setAdvDailyLimit(e.target.value)} placeholder="1000"
-                  style={{width:"170px", padding:"9px 12px", border:"1px solid #E3E7F0", borderRadius:"8px", fontSize:"15px"}} />
+                <div className="b-label">Суточный лимит бюджета, ₽</div><div className="boris-f2-be522d824950">Максимум трат за сутки</div>
+                <input type="number" value={Number(advDailyLimit) === 0 ? "" : advDailyLimit} onChange={e => setAdvDailyLimit(e.target.value)} placeholder="1000"
+  className="boris-f2-6d9f904b53ce"/>
               </div>
-              <button className="boris-btn-hover" onClick={activateAdvisor} disabled={advisorLoading || !advMaxCpl || !advDailyLimit}
-                style={{background: (!advMaxCpl || !advDailyLimit) ? "#C9D2E3" : "#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"8px", padding:"10px 20px", fontSize:"15px", fontWeight:"bold", cursor: (!advMaxCpl || !advDailyLimit) ? "not-allowed" : "pointer"}}>
+              <div>
+                <div className="b-label">Максимальная ставка, ₽</div><div className="boris-f2-be522d824950">Жёсткий потолок: BORIS никогда не поднимет ставку выше него</div>
+                <input type="number" min="1" step="1" value={Number(advHardMaxBid) === 0 ? "" : advHardMaxBid} onChange={e => setAdvHardMaxBid(e.target.value)} placeholder="40" className="boris-f2-6d9f904b53ce"/>
+              </div>
+              <Button className="boris-btn-hover" onClick={activateAdvisor} disabled={advisorLoading || !advMaxCpl || !advDailyLimit}
+                style={{background: (!advMaxCpl || !advDailyLimit) ? "#C9D2E3" : "var(--boris-blue)", color:"var(--boris-surface)", border:"none", borderRadius:"8px", padding:"10px 20px", fontSize:"15px", fontWeight:"bold", cursor: (!advMaxCpl || !advDailyLimit) ? "not-allowed" : "pointer"}}>
                 {(advisorData || advAutopilot) ? "💾 Сохранить" : "Активировать"}
-              </button>
+              </Button>
             </div>
-          </div>
+          </BorisCard>
 
           {advisorData && (
             <>
               {/* Сводка */}
-              <div style={{display:"flex", gap:"14px", flexWrap:"wrap", marginBottom:"20px"}}>
-                <div style={{flex:1, minWidth:"180px", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"14px"}}>
-                  <div style={{fontSize:"13px", color:"#667085"}}>Цель: цена лида</div>
-                  <div style={{fontSize:"22px", fontWeight:"bold", color:"#344054"}}>≤ {advisorData?.target?.max_cpl_rub ?? "—"} ₽</div>
+              <div className="boris-f2-3f0e936bda76">
+                <div className="boris-f2-c068c0b0ee12">
+                  <div className="boris-f2-6c2427e9980a">Цель: цена лида</div>
+                  <div className="boris-f2-603b3071dec1">≤ {advisorData?.target?.max_cpl_rub ?? "—"} ₽</div>
                 </div>
-                <div style={{flex:1, minWidth:"180px", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"14px"}}>
-                  <div style={{fontSize:"13px", color:"#667085"}}>Факт: цена лида сегодня</div>
+                <div className="boris-f2-c068c0b0ee12">
+                  <div className="boris-f2-6c2427e9980a">Факт: цена лида сегодня</div>
                   <div style={{fontSize:"22px", fontWeight:"bold", color: (advisorData?.fact?.account_cpl_rub && advisorData?.target?.max_cpl_rub && advisorData.fact.account_cpl_rub > advisorData.target.max_cpl_rub) ? "#F04438" : "#12B76A"}}>
                     {advisorData?.fact?.account_cpl_rub ?? "нет данных"} {advisorData?.fact?.account_cpl_rub ? "₽" : ""}
                   </div>
                 </div>
-                <div style={{flex:1, minWidth:"180px", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"14px"}}>
-                  <div style={{fontSize:"13px", color:"#667085"}}>Контактов сегодня</div>
-                  <div style={{fontSize:"22px", fontWeight:"bold", color:"#344054"}}>{advisorData?.fact?.contacts_today ?? 0}</div>
+                <div className="boris-f2-c068c0b0ee12">
+                  <div className="boris-f2-6c2427e9980a">Контактов сегодня</div>
+                  <div className="boris-f2-603b3071dec1">{advisorData?.fact?.contacts_today ?? 0}</div>
                 </div>
               </div>
 
-              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:"12px", background: advAutopilot ? "#ECFDF3" : "#EFF4FF", border: advAutopilot ? "1px solid #A6F4C5" : "1px solid #D1E0FF", borderRadius:"8px", padding:"12px 14px", marginBottom:"18px", fontSize:"14px", color: advAutopilot ? "#027A48" : "#2F6FED"}}>
-                <div style={{display:"flex", alignItems:"center", gap:"10px", flex:1}}>
-                  {advAutopilot && <span style={{whiteSpace:"nowrap", background:"#12B76A", color:"#FFFFFF", borderRadius:"20px", padding:"4px 12px", fontSize:"13px", fontWeight:"bold"}}>🟢 Автопилот активен</span>}
-                  <span>{advAutopilot ? "Борис сам меняет ставки каждый час в рамках предохранителей." : "ℹ️ Режим: только рекомендации (Борис ничего не меняет)."} {advisorData?.fact?.data_note || ""}</span>
+              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:"12px", background: advAutopilot ? "#ECFDF3" : "#EFF4FF", border: advAutopilot ? "1px solid #A6F4C5" : "1px solid #D1E0FF", borderRadius:"8px", padding:"12px 14px", marginBottom:"18px", fontSize:"14px", color: advAutopilot ? "#027A48" : "var(--boris-blue)"}}>
+                <div className="boris-f2-c47ffdad4342">
+                  {advAutopilot && Number(advDailyLimit) > 0 && <span className="boris-f2-5c89e00ca1ea">🟢 Автопилот активен</span>}
+                  {advAutopilot && Number(advDailyLimit) <= 0 && <span className="boris-f2-5c89e00ca1ea">🟠 Повышение ставок остановлено: суточный бюджет не задан</span>}
+                  <span>{advAutopilot ? `BORIS проверяет ставки каждый час. Денежное повышение разрешено только при явно заданном суточном лимите; ставка не превысит ${advHardMaxBid || "заданный"} ₽. Для новых доступных продвижений BORIS ориентируется на минимальную ставку Avito и применяет защитный шаг.` : "ℹ️ Режим: только рекомендации (Борис ничего не меняет)."} {advisorData?.fact?.data_note || ""}</span>
                 </div>
-                <button className="boris-btn-hover" onClick={toggleAutopilot} style={{whiteSpace:"nowrap", background: advAutopilot ? "#FFFFFF" : "#2F6FED", color: advAutopilot ? "#F04438" : "#FFFFFF", border: advAutopilot ? "1px solid #F04438" : "none", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontWeight:"bold", fontSize:"14px"}}>
+                <Button className="boris-btn-hover" onClick={toggleAutopilot} style={{whiteSpace:"nowrap", background: advAutopilot ? "var(--boris-surface)" : "var(--boris-blue)", color: advAutopilot ? "#F04438" : "var(--boris-surface)", border: advAutopilot ? "1px solid #F04438" : "none", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontWeight:"bold", fontSize:"14px"}}>
                   {advAutopilot ? "⏹ Отключить автопилот" : "Включить автопилот ставок"}
-                </button>
+                </Button>
               </div>
-              <div style={{marginBottom:"16px", color:"#344054", fontSize:"15px"}}>{advisorData?.summary}</div>
+              <div className="boris-f2-fec5a3117a9c">{advisorData?.summary}</div>
+              {advisorData?.owner_action && (
+                <div style={{margin:"10px 0 16px", padding:"12px 14px", border:"1px solid var(--boris-border)", borderRadius:"10px", background:"var(--boris-surface-2)", fontSize:"14px"}}>
+                  <div><b>Нужно ли ваше действие:</b> {humanizeBusinessText(advisorData.owner_action,"действие не требуется")}</div>
+                  <div style={{marginTop:"4px", color:"var(--boris-text-2)"}}>{humanizeBusinessText(advisorData?.next_check_text,"BORIS продолжит проверку автоматически.")}</div>
+                </div>
+              )}
+              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))", gap:"10px", margin:"12px 0 18px"}}>
+                <div style={{padding:"12px 14px", border:"1px solid var(--boris-border)", borderRadius:"10px", background:"var(--boris-surface)"}}>
+                  <div style={{fontWeight:800, marginBottom:"4px"}}>Расходы Avito</div>
+                  <div style={{fontSize:"13px", color:"var(--boris-text-2)"}}>
+                    {advisorData?.fact?.spend_signal?.status === "ok"
+                      ? `Подтверждено: ${Number(advisorData?.fact?.spend_signal?.spent_today_rub || 0).toFixed(0)} ₽ сегодня`
+                      : `Повышение ставок закрыто: ${humanizeBusinessText(advisorData?.fact?.spend_signal?.reason,"расход за сегодня не подтверждён")}`}
+                  </div>
+                </div>
+                <div style={{padding:"12px 14px", border:"1px solid var(--boris-border)", borderRadius:"10px", background:"var(--boris-surface)"}}>
+                  <div style={{fontWeight:800, marginBottom:"4px"}}>Позиции в Avito</div>
+                  <div style={{fontSize:"13px", color:"var(--boris-text-2)"}}>
+                    {advisorData?.position_monitor?.state === "fresh"
+                      ? `Измерено${advisorData?.position_monitor?.coverage_pct != null ? ` · покрытие ${advisorData.position_monitor.coverage_pct}%` : ""}`
+                      : `Только чтение · ${humanizeBusinessText(advisorData?.position_monitor?.reason,"ожидаем подтверждённое измерение")}`}
+                  </div>
+                </div>
+              </div>
 
               {/* Три блока рекомендаций */}
               {[
@@ -4983,23 +5174,35 @@ export default function Home() {
                 const list = advisorData?.recommendations?.[sec.k] || [];
                 if (!list.length) return null;
                 return (
-                  <div key={sec.k} style={{marginBottom:"18px"}}>
+                  <div key={sec.k} className="boris-f2-5b6aad9a3fd6">
                     <div style={{fontWeight:"bold", color:sec.col, marginBottom:"8px", fontSize:"16px"}}>{sec.t} ({list.length})</div>
-                    <div style={{maxHeight:"320px", overflowY:"auto", display:"flex", flexDirection:"column", gap:"6px"}}>
+                    <div className="boris-f2-55b86e49a4ce">
                       {list.map((it: any, i: number) => (
-                        <div key={i} style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px 12px", display:"flex", justifyContent:"space-between", gap:"12px", fontSize:"14px"}}>
-                          <div style={{flex:1}}>
-                            <div style={{color:"#344054", fontWeight:"500"}}>{it.title}</div>
-                            <div style={{color:"#667085", fontSize:"13px", marginTop:"2px"}}>{it.why}{it.suggest ? ` → ${it.suggest}` : ""}</div>
+                        <div key={i} className="boris-f2-3b4a094a8e5e">
+                          <div className="boris-f2-7623f0554520">
+                            <div className="boris-f2-f362877bb2d3">{it.title}</div>
+                            <div style={{display:"flex", flexWrap:"wrap", gap:"8px", marginTop:"5px", fontSize:"12px", color:"var(--boris-text-2)"}}>
+                              <span>Текущая ставка: <b>{it.bid_rub ?? "—"} ₽</b></span>
+                              <span>Минимум Avito: <b>{it.min_bid_rub ?? "—"} ₽</b></span>
+                              {it.recommended_bid_rub != null && <span>Рекомендация Avito: <b>{it.recommended_bid_rub} ₽</b></span>}
+                              <span>{it.promotion_active ? "Продвижение включено" : "Продвижение выключено"}</span>
+                            </div>
+                            <div className="boris-f2-a16cc290ede7"><b>Почему:</b> {it.why}{it.suggest ? ` → ${it.suggest}` : ""}</div>
+                            <div style={{display:"grid", gap:"3px", marginTop:"7px", fontSize:"12px", color:"var(--boris-text-2)"}}>
+                              <div><b>BORIS сделал:</b> {it.boris_action_text || "Ставку пока не менял"}</div>
+                              <div><b>Следующая проверка:</b> {it.boris_next_check_at ? new Date(it.boris_next_check_at).toLocaleString("ru-RU") : "по часовому циклу BORIS"}</div>
+                              {it.boris_measure_status === "waiting_measurement" && <div><b>Статус:</b> измеряю эффект изменения</div>}
+                              {it.boris_measure_effect && <div><b>Результат замера:</b> {String(it.boris_measure_effect)}</div>}
+                            </div>
                           </div>
-                          <div style={{textAlign:"right", whiteSpace:"nowrap", color:"#667085", fontSize:"13px", display:"flex", flexDirection:"column", alignItems:"flex-end", gap:"4px"}}>
+                          <div className="boris-f2-e3e9bd53cada">
                             <div>👁 {it.views} · 📞 {it.contacts}</div>
                             <div>{it.bid_rub != null ? `${it.bid_rub} ₽` : "без ставки"}</div>
                             {(sec.k === "raise" || sec.k === "lower_or_archive") && (
-                              <button className="boris-btn-hover" onClick={() => applyAdvisorOne(it.id, sec.k === "raise" ? "raise" : "archive")}
-                                style={{background: sec.k === "raise" ? "#12B76A" : "#F04438", color:"#FFFFFF", border:"none", borderRadius:"6px", padding:"4px 10px", cursor:"pointer", fontSize:"12px", fontWeight:"bold"}}>
+                              <Button className="boris-btn-hover" onClick={() => applyAdvisorOne(it.id, sec.k === "raise" ? "raise" : "archive")}
+                                style={{background: sec.k === "raise" ? "#12B76A" : "#F04438", color:"var(--boris-surface)", border:"none", borderRadius:"6px", padding:"4px 10px", cursor:"pointer", fontSize:"12px", fontWeight:"bold"}}>
                                 {sec.k === "raise" ? "▲ Поднять" : "✕ Снять"}
-                              </button>
+                              </Button>
                             )}
                           </div>
                         </div>
@@ -5011,89 +5214,88 @@ export default function Home() {
             </>
           )}
           {!advisorData && !advisorLoading && (
-            <div style={{color:"#667085", fontSize:"15px", padding:"20px 0"}}>Задайте цену лида и суточный лимит, нажмите «Активировать» — Борис проанализирует объявления.</div>
+            <div className="boris-f2-150ee12d824b">Задайте цену лида и суточный лимит, нажмите «Активировать» — Борис проанализирует объявления.</div>
           )}
         </div>
       ) : directorMode ? (
 
-        <div style={{padding:"32px"}}>
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"20px"}}>
-            <h2 style={{margin:0, color:"#14161A", fontSize:"26px", fontWeight:800, display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #F79009, #E8890B)"}}>👑</span>Панель директора — все клиенты</h2>
+        <div className="boris-f2-7a3756a5cd36">
+          <div className="boris-f2-faeec7a3a7ea">
+            <h2 className="boris-f2-c482369e57a1"><span className="b-icon-sm boris-f2-3402db1f72e2 boris-g1-icon">👑</span>Панель директора — все клиенты</h2>
             {null}
           </div>
-          <div style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"18px", marginBottom:"20px"}}>
-            <div style={{display:"flex", gap:"8px", flexWrap:"wrap", marginBottom:"16px"}}>
-              <span style={{color:"#667085", fontSize:"14px", alignSelf:"center"}}>с</span>
+          <div className="boris-f2-292c10b4285b">
+            <div className="boris-f2-2ab7c34db4b0">
+              <span className="boris-f2-3c176516799f">с</span>
               <input type="date" value={dsFrom} max={dsTo} onChange={e=>setDsFrom(e.target.value)}
-                style={{padding:"7px 10px", border:"1px solid #E3E7F0", borderRadius:"8px", fontSize:"14px"}} />
-              <span style={{color:"#667085", fontSize:"14px", alignSelf:"center"}}>по</span>
+  className="boris-f2-159a1738d4f8"/>
+              <span className="boris-f2-3c176516799f">по</span>
               <input type="date" value={dsTo} min={dsFrom} onChange={e=>setDsTo(e.target.value)}
-                style={{padding:"7px 10px", border:"1px solid #E3E7F0", borderRadius:"8px", fontSize:"14px"}} />
-              <button onClick={()=>loadDirectorStatsRange(dsFrom, dsTo)} disabled={dsLoading}
-                style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"8px", padding:"7px 16px", fontSize:"14px", cursor:"pointer", fontWeight:"bold"}}>Показать</button>
+  className="boris-f2-159a1738d4f8"/>
+              <Button onClick={()=>loadDirectorStatsRange(dsFrom, dsTo)} disabled={dsLoading}
+ className="boris-f2-1f368c236d46">Показать</Button>
               {[["7д",7],["30д",30],["90д",90],["180д",180],["365д",365]].map(([label,d]:any)=>(
-                <button key={d} disabled={dsLoading} onClick={()=>{
+                <Button key={d} disabled={dsLoading} onClick={()=>{
                     const t=new Date(); const f=new Date(); f.setDate(t.getDate()-(d-1));
                     const iso=(x:Date)=>x.toISOString().slice(0,10);
                     setDsFrom(iso(f)); setDsTo(iso(t)); loadDirectorStatsRange(iso(f), iso(t));
                   }}
-                  style={{background:"#FFFFFF", color:"#344054", border:"1px solid #E3E7F0", borderRadius:"8px",
-                    padding:"7px 14px", fontSize:"14px", cursor:"pointer"}}>{label}</button>
+ className="boris-f2-9e801f70d186">{label}</Button>
               ))}
             </div>
             {dsLoading ? (
-              <div style={{color:"#667085", fontSize:"15px"}}>Загрузка…</div>
+              <div className="boris-f2-96046ead62a3">Загрузка…</div>
             ) : dsData && dsData.totals ? (
               <>
-                <div style={{display:"flex", gap:"32px", flexWrap:"wrap"}}>
-                  <div><div style={{color:"#667085", fontSize:"13px", marginBottom:"4px"}}>Показы</div>
-                    <div style={{fontSize:"28px", fontWeight:800, color:"#14161A"}}>{dsData.totals.views}</div>
+                <div className="boris-f2-7b6f30baea06">
+                  <div><div className="boris-f2-e8f44a95aa96">Показы</div>
+                    <div className="boris-f2-0b60ea9ea94f">{dsData.totals.views}</div>
                     <div>{dsDelta(dsData.deltas?.views)}</div></div>
-                  <div><div style={{color:"#667085", fontSize:"13px", marginBottom:"4px"}}>Контакты</div>
-                    <div style={{fontSize:"28px", fontWeight:800, color:"#14161A"}}>{dsData.totals.contacts}</div>
+                  <div><div className="boris-f2-e8f44a95aa96">Контакты</div>
+                    <div className="boris-f2-0b60ea9ea94f">{dsData.totals.contacts}</div>
                     <div>{dsDelta(dsData.deltas?.contacts)}</div></div>
-                  <div><div style={{color:"#667085", fontSize:"13px", marginBottom:"4px"}}>Конверсия</div>
-                    <div style={{fontSize:"28px", fontWeight:800, color:"#2F6FED"}}>{dsData.totals.conversion}%</div>
+                  <div><div className="boris-f2-e8f44a95aa96">Конверсия</div>
+                    <div className="boris-f2-599e804904c7">{dsData.totals.conversion}%</div>
                     <div>{dsDelta(dsData.deltas?.conversion)}</div></div>
                 </div>
-                <div style={{color:"#98A2B3", fontSize:"13px", marginTop:"12px"}}>
+                <div className="boris-f2-b0dbcd946e76">
                   Данные с {dsData.data_since || "—"} · наполнено {dsData.days_with_data} дн. из {dsData.days_requested} · сравнение с предыдущими {dsData.days_requested} дн. ({dsData.prev_days_with_data} дн. данных)
                 </div>
               </>
             ) : (
-              <div style={{color:"#667085", fontSize:"15px"}}>Нет данных за период</div>
+              <div className="boris-f2-96046ead62a3">Нет данных за период</div>
             )}
-            <div style={{display:"flex", alignItems:"center", gap:"10px"}}>
-              <button className="boris-btn-hover" title="Открывает витрину как гость, ПК+моб, разбор глазами клиента (тратит vision)" onClick={async()=>{try{await apiFetch("/api/qa/landing",{method:"POST"});alert("🌐 Аудит лендинга запущен. Отчёт придёт в Telegram через 1-2 минуты.");}catch(e){alert("Не удалось запустить: "+e);}}} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"11px 20px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>🌐 Аудит лендинга</button>
-              <button className="boris-btn-hover" title="Бесплатная проверка всех вкладок кабинета" onClick={async()=>{try{await apiFetch("/api/qa/run",{method:"POST"});alert("⚡ Быстрый тест запущен. Отчёт придёт в Telegram через 2-3 минуты.");}catch(e){alert("Не удалось запустить: "+e);}}} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>⚡ Быстрый тест</button>
-              <button className="boris-btn-hover" title="Автоматический ежедневный быстрый тест" onClick={async()=>{const nv=!qaAuto;try{await apiFetch("/api/qa/auto",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:nv})});setQaAuto(nv);}catch(e){alert("Не удалось переключить: "+e);}}} style={{background: qaAuto ? "#12B76A" : "#FFFFFF", color: qaAuto ? "#FFFFFF" : "#667085", border: qaAuto ? "1px solid #12B76A" : "1px solid #E3E7F0", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>{qaAuto ? "🟢 Авто вкл" : "⚪ Авто выкл"}</button>
-              <button className="boris-btn-hover" onClick={loadDirectorOverview} disabled={directorLoading} style={{background:"#FFFFFF", color:"#F79009", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"15px"}}>
+            <div className="boris-f2-7e30d285d288">
+              <Button className="boris-btn-hover boris-f2-dd00a862416c" title="Открывает витрину как гость, ПК+моб, разбор глазами клиента (тратит vision)" onClick={async()=>{try{await apiFetch("/api/qa/landing",{method:"POST"});alert("🌐 Аудит лендинга запущен. Отчёт придёт в Telegram через 1-2 минуты.");}catch(e){alert("Не удалось запустить: "+e);}}}>🌐 Аудит лендинга</Button>
+              <Button className="boris-btn-hover boris-f2-0040eb377774" title="Бесплатная проверка всех вкладок кабинета" onClick={async()=>{try{await apiFetch("/api/qa/run",{method:"POST"});alert("⚡ Быстрый тест запущен. Отчёт придёт в Telegram через 2-3 минуты.");}catch(e){alert("Не удалось запустить: "+e);}}}>⚡ Быстрый тест</Button>
+              <Button className="boris-btn-hover" title="Автоматический ежедневный быстрый тест" onClick={async()=>{const nv=!qaAuto;try{await apiFetch("/api/qa/auto",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:nv})});setQaAuto(nv);}catch(e){alert("Не удалось переключить: "+e);}}} style={{background: qaAuto ? "#12B76A" : "var(--boris-surface)", color: qaAuto ? "var(--boris-surface)" : "var(--boris-text-2)", border: qaAuto ? "1px solid #12B76A" : "1px solid var(--boris-border)", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>{qaAuto ? "🟢 Авто вкл" : "⚪ Авто выкл"}</Button>
+              <Button className="boris-btn-hover boris-f2-515ee9c8c7e4" onClick={loadDirectorOverview} disabled={directorLoading}>
                 {directorLoading ? "⏳ Загружаю..." : "🔄 Обновить"}
-              </button>
+              </Button>
             </div>
           </div>
 
-          <div style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"20px", marginBottom:"20px"}}>
-            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"14px"}}>
-              <div style={{color:"#14161A", fontWeight:800, fontSize:"19px", display:"flex", alignItems:"center", gap:"8px"}}>🆕 Новые клиенты {newClients.length > 0 && <span style={{background:"#EAF3FF", color:"#2F6FED", borderRadius:"20px", padding:"2px 10px", fontSize:"14px"}}>{newClients.length}</span>}</div>
-              <button className="boris-btn-hover" onClick={() => kbOpenModal("global")} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"11px 20px", cursor:"pointer", fontSize:"14px", fontWeight:"bold", marginRight:"8px"}}>Обучить Бориса</button>
-                <button className="boris-btn-hover" onClick={loadNewClients} disabled={newClientsLoading} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 14px", cursor:"pointer", fontSize:"14px"}}>{newClientsLoading ? "⏳" : "🔄"}</button>
+          <div className="boris-f2-cc35bba3875d">
+            <div className="boris-f2-a794b88522b7">
+              <div className="boris-f2-4081af7f7494">🆕 Новые клиенты {newClients.length > 0 && <span className="boris-f2-cab53acd9f90">{newClients.length}</span>}</div>
+              <Button className="boris-btn-hover boris-f2-45463ef53533" onClick={() => kbOpenModal("global")}>Обучить Бориса</Button>
+                <Button className="boris-btn-hover boris-f2-e755c2c41599" onClick={loadNewClients} disabled={newClientsLoading}>{newClientsLoading ? "⏳" : "🔄"}</Button>
             </div>
             {newClients.length === 0 ? (
-              <div style={{color:"#667085", fontSize:"15px", padding:"8px 0"}}>Пока никто не зарегистрировался.</div>
+              <div className="boris-f2-274e86856bbf">Пока никто не зарегистрировался.</div>
             ) : (
-              <div style={{display:"flex", flexDirection:"column", gap:"10px"}}>
+              <div className="boris-f2-b32a606a6817">
                 {newClients.map((c: any) => {
-                  const badge = c.status === "активна" ? {bg:"#E7F7EE", fg:"#12805C", label:"🟢 активна"} : c.status === "триал" ? {bg:"#FEF6E7", fg:"#B25E09", label:"🟡 триал"} : c.status === "истёк" ? {bg:"#FDEDEC", fg:"#C4320A", label:"🔴 истёк"} : {bg:"#F0F1F5", fg:"#667085", label:"— нет подписки"};
+                  const badge = c.status === "активна" ? {bg:"#E7F7EE", fg:"#12805C", label:"🟢 активна"} : c.status === "триал" ? {bg:"#FEF6E7", fg:"#B25E09", label:"🟡 триал"} : c.status === "истёк" ? {bg:"#FDEDEC", fg:"#C4320A", label:"🔴 истёк"} : {bg:"#F0F1F5", fg:"var(--boris-text-2)", label:"— нет подписки"};
                   const reg = c.registered_at ? new Date(c.registered_at).toLocaleDateString("ru-RU") : "—";
                   return (
-                    <div key={c.id} style={{display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:"10px", background:"#F9FAFC", border:"1px solid #EEF1F6", borderRadius:"10px", padding:"12px 14px"}}>
-                      <div style={{display:"flex", flexDirection:"column", gap:"3px"}}>
-                        <div style={{color:"#14161A", fontWeight:700, fontSize:"15px"}}>{c.email}</div>
-                        <div style={{color:"#667085", fontSize:"13px"}}>Регистрация: {reg} · Аккаунтов: {c.accounts_count}</div>
+                    <div key={c.id} className="boris-f2-0a84b392ec70">
+                      <div className="boris-f2-526713208b4c">
+                        <div className="boris-f2-ce826865b101">{c.email}</div>
+                        <div className="boris-f2-274b6124e0e0">Регистрация: {reg} · Аккаунтов: {c.accounts_count}</div>
                       </div>
-                      <div style={{display:"flex", alignItems:"center", gap:"10px"}}>
-                        {c.days_left !== null && c.days_left >= 0 && <span style={{color:"#667085", fontSize:"13px"}}>ещё {c.days_left} дн.</span>}
+                      <div className="boris-f2-7e30d285d288">
+                        {c.days_left !== null && c.days_left >= 0 && <span className="boris-f2-274b6124e0e0">ещё {c.days_left} дн.</span>}
                         <span style={{background:badge.bg, color:badge.fg, borderRadius:"20px", padding:"4px 12px", fontSize:"13px", fontWeight:700, whiteSpace:"nowrap"}}>{badge.label}</span>
                       </div>
                     </div>
@@ -5104,41 +5306,41 @@ export default function Home() {
           </div>
 
           {escalations.length > 0 && (
-            <div style={{background:"#FDEDEC", border:"1px solid #FDEDEC", borderRadius:"10px", padding:"16px", marginBottom:"20px"}}>
-              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"10px"}}>
-                <div style={{color:"#F04438", fontWeight:"bold", fontSize:"23px"}}>⚠️ Эскалации ошибок ({escalations.length})</div>
-                <button className="boris-btn-hover" onClick={async () => {
+            <div className="boris-f2-5d3727e62bbc">
+              <div className="boris-f2-40eee6f1a1fd">
+                <div className="boris-f2-b9c03fff328a">⚠️ Эскалации ошибок ({escalations.length})</div>
+                <Button className="boris-btn-hover boris-f2-0045bf90441b" onClick={async () => {
                   await apiFetch("/api/avito/director/clear_escalations", {method:"POST"});
                   loadDirectorOverview();
-                }} style={{background:"#FDEDEC", color:"#F04438", border:"1px solid #FDEDEC", borderRadius:"6px", padding:"4px 10px", cursor:"pointer", fontSize:"15px"}}>
+                }}>
                   🗑 Очистить всё
-                </button>
+                </Button>
               </div>
-              <div style={{maxHeight:"240px", overflowY:"auto", display:"flex", flexDirection:"column", gap:"6px"}}>
+              <div className="boris-f2-529361f4274b">
                 {escalations.map((e: any, i: number) => (
-                  <div key={i} style={{fontSize:"15px", color:"#344054", padding:"8px 10px", background:"#F6F7FB", borderRadius:"6px", display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:"10px"}}>
-                    <div style={{flex:1}}>
-                      <div><b style={{color:"#F79009"}}>{e.account_id}</b> — {e.task_type}</div>
-                      <div style={{color:"#F04438", marginTop:"2px"}}>{e.error_message}</div>
-                      <div style={{color:"#8A93A6", fontSize:"15px", marginTop:"2px"}}>{new Date(e.ts).toLocaleString("ru-RU")}</div>
+                  <div key={i} className="boris-f2-ec55c0f7447a">
+                    <div className="boris-f2-7623f0554520">
+                      <div><b className="boris-f2-b26be2f96183">{e.account_id}</b> — {humanizeBusinessText(e.task_type,"Задача BORIS")}</div>
+                      <div className="boris-f2-f8c7e5877c2e">{humanizeBusinessText(e.error_message,"Техническая ошибка зафиксирована")}</div>
+                      <div className="boris-f2-e1bdcf8ddaf7">{new Date(e.ts).toLocaleString("ru-RU")}</div>
                     </div>
-                    <button className="boris-btn-hover" onClick={async () => {
+                    <Button className="boris-btn-hover boris-f2-62dd9cb0b9b3" onClick={async () => {
                       await apiFetch("/api/avito/director/resolve_escalation", {
                         method:"POST",
                         headers:{"Content-Type":"application/json"},
                         body: JSON.stringify({ts: e.ts})
                       });
                       loadDirectorOverview();
-                    }} style={{background:"#E7EFFE", color:"#2F6FED", border:"1px solid #E7EFFE", borderRadius:"6px", padding:"4px 8px", cursor:"pointer", fontSize:"15px", whiteSpace:"nowrap"}}>
+                    }}>
                       ✓ Исправить
-                    </button>
+                    </Button>
                   </div>
                 ))}
               </div>
             </div>
           )}
 
-          {directorLoading && <p style={{color:"#667085"}}>Собираю сводку по всем аккаунтам...</p>}
+          {directorLoading && <p className="boris-f2-de52905d633b">Собираю сводку по всем аккаунтам...</p>}
           {!directorLoading && (() => {
             const paid = directorOverview.filter((a: any) => a.money?.total_rub > 0);
             const total = paid.reduce((s: number, a: any) => s + (a.money?.total_rub || 0), 0);
@@ -5148,16 +5350,16 @@ export default function Home() {
             });
             if (!total && !soon.length) return null;
             const box = (grad: string, val: string, cap: string) => (
-              <div style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px 20px", position:"relative", overflow:"hidden"}}>
+              <div className="boris-f2-447425b64129">
                 <div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:grad, opacity:0.08}} />
-                <div style={{fontSize:"26px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em"}}>{val}</div>
-                <div style={{fontSize:"14px", color:"#667085", marginTop:"2px"}}>{cap}</div>
+                <div className="boris-f2-4a3867b8b765">{val}</div>
+                <div className="boris-f2-b703107f9e84">{cap}</div>
               </div>
             );
             return (
-              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))", gap:"14px", marginBottom:"20px"}}>
+              <div className="boris-f2-4b22f818aac7">
                 {box("linear-gradient(135deg,#32D583,#12805C)", total.toLocaleString("ru") + " \u20bd", "получено от клиентов")}
-                {box("linear-gradient(135deg,#4C8DFF,#2F6FED)", String(paid.length), "клиентов платят")}
+                {box("linear-gradient(135deg,var(--boris-blue),var(--boris-blue))", String(paid.length), "клиентов платят")}
                 {box("linear-gradient(135deg,#FDB022,#F79009)", String(soon.length), "оплата кончается за 7 дней")}
               </div>
             );
@@ -5171,16 +5373,16 @@ export default function Home() {
             });
             if (!total && !soon.length) return null;
             const box = (grad: string, val: string, cap: string) => (
-              <div style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px 20px", position:"relative", overflow:"hidden"}}>
+              <div className="boris-f2-447425b64129">
                 <div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:grad, opacity:0.08}} />
-                <div style={{fontSize:"26px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em"}}>{val}</div>
-                <div style={{fontSize:"14px", color:"#667085", marginTop:"2px"}}>{cap}</div>
+                <div className="boris-f2-4a3867b8b765">{val}</div>
+                <div className="boris-f2-b703107f9e84">{cap}</div>
               </div>
             );
             return (
-              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))", gap:"14px", marginBottom:"20px"}}>
+              <div className="boris-f2-4b22f818aac7">
                 {box("linear-gradient(135deg,#32D583,#12805C)", total.toLocaleString("ru") + " \u20bd", "получено от клиентов")}
-                {box("linear-gradient(135deg,#4C8DFF,#2F6FED)", String(paid.length), "клиентов платят")}
+                {box("linear-gradient(135deg,var(--boris-blue),var(--boris-blue))", String(paid.length), "клиентов платят")}
                 {box("linear-gradient(135deg,#FDB022,#F79009)", String(soon.length), "оплата кончается за 7 дней")}
               </div>
             );
@@ -5194,32 +5396,32 @@ export default function Home() {
             });
             if (!total && !soon.length) return null;
             const box = (grad: string, val: string, cap: string) => (
-              <div style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px 20px", position:"relative", overflow:"hidden"}}>
+              <div className="boris-f2-447425b64129">
                 <div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:grad, opacity:0.08}} />
-                <div style={{fontSize:"26px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em"}}>{val}</div>
-                <div style={{fontSize:"14px", color:"#667085", marginTop:"2px"}}>{cap}</div>
+                <div className="boris-f2-4a3867b8b765">{val}</div>
+                <div className="boris-f2-b703107f9e84">{cap}</div>
               </div>
             );
             return (
-              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))", gap:"14px", marginBottom:"20px"}}>
+              <div className="boris-f2-4b22f818aac7">
                 {box("linear-gradient(135deg,#32D583,#12805C)", total.toLocaleString("ru") + " \u20bd", "получено от клиентов")}
-                {box("linear-gradient(135deg,#4C8DFF,#2F6FED)", String(paid.length), "клиентов платят")}
+                {box("linear-gradient(135deg,var(--boris-blue),var(--boris-blue))", String(paid.length), "клиентов платят")}
                 {box("linear-gradient(135deg,#FDB022,#F79009)", String(soon.length), "оплата кончается за 7 дней")}
               </div>
             );
           })()}
           {!directorLoading && (
-            <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(300px, 1fr))", gap:"16px"}}>
+            <div className="boris-f2-b6a38b2ae32e">
               {directorOverview.map((acc: any) => (
                 <div key={acc.account_id} onClick={() => { setCurrentAccount(acc.account_id); setDirectorMode(false); }}
                   className={"b-client-card" + (acc.latest_stats_date && Number(acc.balance?.real) < 500 ? " b-bal-crit" : acc.latest_stats_date && Number(acc.balance?.real) < 2000 ? " b-bal-warn" : "")}>
-                  <div style={{fontSize:"20px", fontWeight:800, marginBottom:"6px", color:"#14161A", lineHeight:1.25}}>{acc.name}</div>
-                  <div style={{fontSize:"12px", color:"#98A2B3", marginBottom:"14px", fontFamily:"ui-monospace, monospace"}}>{acc.account_id}</div>
-                  <div style={{display:"flex", flexDirection:"column", gap:"6px", fontSize:"15px"}}>
+                  <div className="boris-f2-cd19185ab3a9">{acc.name}</div>
+                  <div className="boris-f2-feedb2cbf60b">{acc.account_id}</div>
+                  <div className="boris-f2-2b6ab878f831">
                     {acc.money && acc.money.total_rub > 0 && (
-                      <div style={{background:"#F0FDF6", border:"1px solid #D1FADF", borderRadius:"10px", padding:"8px 12px", marginBottom:"4px"}}>
-                        <div><span style={{color:"#667085"}}>Заплатил всего: </span><b style={{color:"#12805C", fontSize:"17px"}}>{acc.money.total_rub.toLocaleString("ru")} ₽</b></div>
-                        <div style={{fontSize:"13px", color:"#667085", marginTop:"2px"}}>
+                      <div className="boris-f2-ae2e2dae4ffa">
+                        <div><span className="boris-f2-de52905d633b">Заплатил всего: </span><b className="boris-f2-9b2d2d643310">{acc.money.total_rub.toLocaleString("ru")} ₽</b></div>
+                        <div className="boris-f2-e41894b51ae0">
                           {acc.money.payments_count} {acc.money.payments_count === 1 ? "платёж" : "платежей"}
                           {acc.money.last_at ? ` · последний ${new Date(acc.money.last_at).toLocaleDateString("ru")}` : ""}
                           {acc.money.last_title ? ` · ${acc.money.last_title}` : ""}
@@ -5227,9 +5429,9 @@ export default function Home() {
                       </div>
                     )}
                     {acc.money && acc.money.total_rub > 0 && (
-                      <div style={{background:"#F0FDF6", border:"1px solid #D1FADF", borderRadius:"10px", padding:"8px 12px", marginBottom:"4px"}}>
-                        <div><span style={{color:"#667085"}}>Заплатил всего: </span><b style={{color:"#12805C", fontSize:"17px"}}>{acc.money.total_rub.toLocaleString("ru")} ₽</b></div>
-                        <div style={{fontSize:"13px", color:"#667085", marginTop:"2px"}}>
+                      <div className="boris-f2-ae2e2dae4ffa">
+                        <div><span className="boris-f2-de52905d633b">Заплатил всего: </span><b className="boris-f2-9b2d2d643310">{acc.money.total_rub.toLocaleString("ru")} ₽</b></div>
+                        <div className="boris-f2-e41894b51ae0">
                           {acc.money.payments_count} {acc.money.payments_count === 1 ? "платёж" : "платежей"}
                           {acc.money.last_at ? ` · последний ${new Date(acc.money.last_at).toLocaleDateString("ru")}` : ""}
                           {acc.money.last_title ? ` · ${acc.money.last_title}` : ""}
@@ -5237,109 +5439,109 @@ export default function Home() {
                       </div>
                     )}
                     <div>
-                      <span style={{color:"#667085"}}>Avito-ключи: </span>
-                      {acc.has_avito_keys ? <span style={{color:"#2F6FED"}}>✅ подключены</span> : <span style={{color:"#F04438"}}>⚠️ не настроены</span>}
+                      <span className="boris-f2-de52905d633b">Avito-ключи: </span>
+                      {acc.has_avito_keys ? <span className="boris-f2-b5d95bf86ec9">✅ подключены</span> : <span className="boris-f2-de4c8a9423c7">⚠️ не настроены</span>}
                     </div>
                     {acc.latest_stats_date ? (
                       <>
-                        <div><span style={{color:"#667085"}}>Баланс: </span><b style={{color: Number(acc.balance?.real) < 500 ? "#D92D20" : Number(acc.balance?.real) < 2000 ? "#B54708" : "#2F6FED", fontSize:"17px"}}>{acc.balance?.real} ₽</b>{Number(acc.balance?.real) < 500 && <span style={{marginLeft:"8px", background:"#FEE4E2", color:"#B42318", borderRadius:"20px", padding:"2px 9px", fontSize:"11px", fontWeight:800}}>ПОПОЛНИТЬ</span>}</div>
-                        <div><span style={{color:"#667085"}}>Объявлений: </span><b>{acc.items_count}</b></div>
-                        <div><span style={{color:"#667085"}}>Запросов контактов сегодня: </span><b style={{color:"#2F6FED"}}>{acc.contacts_today ?? 0}</b></div>
+                        <div><span className="boris-f2-de52905d633b">Баланс: </span><b style={{color: Number(acc.balance?.real) < 500 ? "#D92D20" : Number(acc.balance?.real) < 2000 ? "#B54708" : "var(--boris-blue)", fontSize:"17px"}}>{acc.balance?.real} ₽</b>{Number(acc.balance?.real) < 500 && <span className="boris-f2-c436fc998734">ПОПОЛНИТЬ</span>}</div>
+                        <div><span className="boris-f2-de52905d633b">Объявлений: </span><b>{acc.items_count}</b></div>
+                        <div><span className="boris-f2-de52905d633b">Запросов контактов сегодня: </span><b className="boris-f2-b5d95bf86ec9">{acc.contacts_today ?? 0}</b></div>
                         {acc.cost_per_contact != null && (
-                          <div><span style={{color:"#667085"}}>Стоимость 1 контакта: </span><b style={{color:"#F79009"}}>{acc.cost_per_contact} ₽</b></div>
+                          <div><span className="boris-f2-de52905d633b">Стоимость 1 контакта: </span><b className="boris-f2-b26be2f96183">{acc.cost_per_contact} ₽</b></div>
                         )}
-                        <div style={{color:"#8A93A6", fontSize:"15px"}}>Данные за {acc.latest_stats_date}</div>
+                        <div className="boris-f2-316437256d37">Данные за {acc.latest_stats_date}</div>
                         {(() => {
                           const st = (dsData?.by_account || []).find((x:any) => x.account_id === acc.account_id);
                           if (!st) return null;
                           return (
-                            <div style={{marginTop:"8px", paddingTop:"8px", borderTop:"1px dashed #EEF1F6"}}>
-                              <div style={{color:"#98A2B3", fontSize:"12px", marginBottom:"5px"}}>За период · {dsDays} дн.</div>
-                              <div style={{display:"flex", flexDirection:"column", gap:"3px", fontSize:"14px"}}>
-                                <div><span style={{color:"#667085"}}>Показы: </span><b>{st.views}</b> {dsDelta(st.d_views)}</div>
-                                <div><span style={{color:"#667085"}}>Контакты: </span><b>{st.contacts}</b> {dsDelta(st.d_contacts)}</div>
-                                <div><span style={{color:"#667085"}}>Конверсия: </span><b style={{color:"#2F6FED"}}>{st.conversion}%</b> {dsDelta(st.d_conversion)}</div>
+                            <div className="boris-f2-7764b280c044">
+                              <div className="boris-f2-4107528df4c6">За период · {dsDays} дн.</div>
+                              <div className="boris-f2-e956bc196d6c">
+                                <div><span className="boris-f2-de52905d633b">Показы: </span><b>{st.views}</b> {dsDelta(st.d_views)}</div>
+                                <div><span className="boris-f2-de52905d633b">Контакты: </span><b>{st.contacts}</b> {dsDelta(st.d_contacts)}</div>
+                                <div><span className="boris-f2-de52905d633b">Конверсия: </span><b className="boris-f2-b5d95bf86ec9">{st.conversion}%</b> {dsDelta(st.d_conversion)}</div>
                               </div>
                             </div>
                           );
                         })()}
-                        <div style={{marginTop:"10px", paddingTop:"10px", borderTop:"1px solid #EEF1F6"}}>
+                        <div className="boris-f2-3eb8cb462bef">
                           {acc.payment?.has_payment ? (
-                            <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", gap:"8px"}}>
+                            <div className="boris-f2-4fbdc40c7bc2">
                               <span style={{background: acc.payment.color === "red" ? "#FEE4E2" : acc.payment.color === "yellow" ? "#FEF0C7" : "#D1FADF", color: acc.payment.color === "red" ? "#B42318" : acc.payment.color === "yellow" ? "#B54708" : "#027A48", borderRadius:"20px", padding:"4px 12px", fontSize:"13px", fontWeight:"bold"}}>
                                 {acc.payment.color === "red" ? "🔴" : acc.payment.color === "yellow" ? "🟡" : "🟢"} {acc.payment.overdue ? `Просрочено ${-acc.payment.days_left} дн.` : `осталось ${acc.payment.days_left} дн.`}
                               </span>
-                              <button className="boris-btn-hover" onClick={(e) => { e.stopPropagation(); setPayModalAccount(acc.account_id); setPayAmount(String(acc.payment.amount_rub||"")); setPayPeriod(String(acc.payment.period_days||30)); }} style={{background:"#FFFFFF", color:"#2F6FED", border:"1px solid #D0D5DD", borderRadius:"10px", padding:"3px 10px", cursor:"pointer", fontSize:"12px"}}>✏️</button>
+                              <Button className="boris-btn-hover boris-f2-641a64e88906" onClick={(e) => { e.stopPropagation(); setPayModalAccount(acc.account_id); setPayAmount(String(acc.payment.amount_rub||"")); setPayPeriod(String(acc.payment.period_days||30)); }}>✏️</Button>
                             </div>
                           ) : (
-                            <button className="boris-btn-hover" onClick={(e) => { e.stopPropagation(); setPayModalAccount(acc.account_id); setPayAmount(""); setPayPeriod("30"); }} style={{background:"#FFFFFF", color:"#2F6FED", border:"1px dashed #D0D5DD", borderRadius:"10px", padding:"4px 12px", cursor:"pointer", fontSize:"13px"}}>💳 Отметить оплату</button>
+                            <Button className="boris-btn-hover boris-f2-36600955f4bb" onClick={(e) => { e.stopPropagation(); setPayModalAccount(acc.account_id); setPayAmount(""); setPayPeriod("30"); }}>💳 Отметить оплату</Button>
                           )}
-                          {acc.payment?.has_payment && <div style={{color:"#8A93A6", fontSize:"12px", marginTop:"4px"}}>до {acc.payment.paid_until} · {acc.payment.amount_rub}₽</div>}
+                          {acc.payment?.has_payment && <div className="boris-f2-1ab7002bca97">до {acc.payment.paid_until} · {acc.payment.amount_rub}₽</div>}
                         </div>
                       </>
                     ) : (
-                      <div style={{color:"#8A93A6", fontSize:"15px"}}>Нет собранной статистики</div>
+                      <div className="boris-f2-316437256d37">Нет собранной статистики</div>
                     )}
-                    <div style={{marginTop:"auto", paddingTop:"12px", borderTop:"1px solid #EEF1F6"}}>
-                      <button className="boris-btn-hover" onClick={(e) => { e.stopPropagation(); toggleUnlimited(acc.account_id, !!acc.billing?.unlimited); }}
+                    <div className="boris-f2-9f2a6842b0ca">
+                      <Button className="boris-btn-hover" onClick={(e) => { e.stopPropagation(); toggleUnlimited(acc.account_id, !!acc.billing?.unlimited); }}
                         style={{
-                          background: acc.billing?.unlimited ? "#D1FADF" : "#FFFFFF",
-                          color: acc.billing?.unlimited ? "#027A48" : "#667085",
+                          background: acc.billing?.unlimited ? "#D1FADF" : "var(--boris-surface)",
+                          color: acc.billing?.unlimited ? "#027A48" : "var(--boris-text-2)",
                           border: acc.billing?.unlimited ? "1px solid #6CE9A6" : "1px solid #D0D5DD",
                           borderRadius:"6px", padding:"4px 12px", cursor:"pointer", fontSize:"13px", width:"100%", fontWeight: acc.billing?.unlimited ? "bold" : "normal"
                         }}>
                         {acc.billing?.unlimited ? "🔓 Без ограничений (вкл)" : "🔒 По тарифу — включить безлимит"}
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 </div>
               ))}
-              {directorOverview.length === 0 && <p style={{color:"#667085"}}>Клиентов пока нет</p>}
+              {directorOverview.length === 0 && <p className="boris-f2-de52905d633b">Клиентов пока нет</p>}
             </div>
           )}
         </div>
       ) : walletMode ? (
-        <div style={{padding:"8px 4px", maxWidth:"820px"}}>
-          <h2 style={{margin:"0 0 6px", color:"#12805C", fontSize:"23px"}}>💰 Кошелёк</h2>
-          <div style={{fontSize:"14px", color:"#667085", marginBottom:"20px"}}>Пополняйте баланс по счёту (для юрлиц и ИП) и покупайте любые услуги Бориса с баланса.</div>
-          <div style={{display:"flex", gap:"16px", flexWrap:"wrap", marginBottom:"24px"}}>
-            <div style={{flex:"1", minWidth:"260px", background:"linear-gradient(135deg,#F4F3FF,#FFFFFF)", border:"1px solid #D9D6FE", borderRadius:"16px", padding:"22px 24px"}}>
-              <div style={{fontSize:"13px", color:"#667085", marginBottom:"6px"}}>Баланс кошелька</div>
-              <div style={{fontSize:"34px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em"}}>{Number(balanceData.balance||0).toLocaleString("ru-RU")} ₽</div>
+        <div className="boris-f2-0389015cb36d">
+          <h2 className="boris-f2-ad71f55a12c0">💰 Кошелёк</h2>
+          <div className="boris-f2-6caa3780d4c0">Пополняйте баланс по счёту (для юрлиц и ИП) и покупайте любые услуги Бориса с баланса.</div>
+          <div className="boris-f2-435027c2417d">
+            <div className="boris-f2-e18d82f40a2a">
+              <div className="boris-f2-02cdc8abfc90">Баланс кошелька</div>
+              <div className="boris-f2-0578f6e090a5">{Number(balanceData.balance||0).toLocaleString("ru-RU")} ₽</div>
             </div>
-            <div style={{flex:"1", minWidth:"260px", background:"#fff", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"22px 24px"}}>
-              <div style={{fontSize:"13px", color:"#667085", marginBottom:"10px"}}>Пополнить по счёту</div>
-              <div style={{display:"flex", gap:"8px"}}>
-                <input value={topupSum} onChange={e=>setTopupSum(e.target.value.replace(/[^0-9]/g,""))} placeholder="Сумма, ₽" style={{flex:1, padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} />
-                <button onClick={()=>{ if(!topupSum||Number(topupSum)<=0){alert("Укажите сумму");return;} setInvoicePack(""); (window as any)._topup=Number(topupSum); setInvoiceOpen(true); }} style={{background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"10px 18px", fontSize:"14px", fontWeight:700, cursor:"pointer", whiteSpace:"nowrap"}}>Выставить счёт</button>
+            <div className="boris-f2-077dd48402da">
+              <div className="boris-f2-0cfd15ff8345">Пополнить по счёту</div>
+              <div className="boris-f2-b9bbe540d342">
+                <input value={topupSum} onChange={e=>setTopupSum(e.target.value.replace(/[^0-9]/g,""))} placeholder="Сумма, ₽"  className="boris-f2-1836f42c12ad"/>
+                <Button onClick={()=>{ if(!topupSum||Number(topupSum)<=0){alert("Укажите сумму");return;} setInvoicePack(""); (window as any)._topup=Number(topupSum); setInvoiceOpen(true); }} className="boris-f2-9b9b21e4359c">Выставить счёт</Button>
               </div>
             </div>
           </div>
-          <div style={{background:"#F4F3FF", border:"1px solid #D9D6FE", borderRadius:"14px", padding:"18px 20px", marginBottom:"28px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"14px", flexWrap:"wrap"}}>
-            <div style={{fontSize:"14px", color:"#475467"}}>Все услуги Бориса — РОП, Менеджер, тарифы, баннеры — можно оплатить с баланса кошелька в разделе «Тарифы».</div>
-            <button onClick={()=>{ setWalletMode(false); setTariffsFinanceMode(true); }} style={{background:"#7F56D9", color:"#fff", border:"none", borderRadius:"10px", padding:"11px 22px", fontSize:"14px", fontWeight:700, cursor:"pointer", whiteSpace:"nowrap"}}>Купить услуги →</button>
+          <div className="boris-f2-d71015481c00">
+            <div className="boris-f2-518c8acb87cd">Все услуги Бориса — РОП, Менеджер, тарифы, баннеры — можно оплатить с баланса кошелька в разделе «Тарифы».</div>
+            <Button onClick={()=>{ setWalletMode(false); setTariffsFinanceMode(true); }} className="boris-f2-94ed03f4b697">Купить услуги →</Button>
           </div>
           {userRole === "owner" && (
-            <div style={{marginBottom:"28px"}}>
-              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"12px"}}>
-                <div style={{fontSize:"16px", fontWeight:800, color:"#1D2939"}}>Счета клиентов (админ)</div>
-                <button onClick={loadInvoices} style={{fontSize:"13px", color:"#2F6FED", background:"#EFF4FF", border:"none", borderRadius:"8px", padding:"7px 14px", cursor:"pointer", fontWeight:600}}>Обновить</button>
+            <div className="boris-f2-1e1a9b09bf77">
+              <div className="boris-f2-bebbec744221">
+                <div className="boris-f2-0c5a266e650a">Счета клиентов (админ)</div>
+                <Button onClick={loadInvoices} className="boris-f2-e93c8092f5e7">Обновить</Button>
               </div>
               {invoicesList.length===0 ? (
-                <div style={{fontSize:"14px", color:"#98A2B3"}}>Счетов пока нет.</div>
+                <div className="boris-f2-e88a7eb51065">Счетов пока нет.</div>
               ) : (
-                <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+                <div className="boris-f2-f67b86e0fb4c">
                   {invoicesList.map((inv:any, i:number)=>(
-                    <div key={i} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"12px 14px", background:"#fff", border:"1px solid #EEF1F6", borderRadius:"10px", gap:"12px", flexWrap:"wrap"}}>
-                      <div style={{flex:1, minWidth:"180px"}}>
-                        <div style={{fontSize:"14px", fontWeight:700, color:"#1D2939"}}>{inv.number} · {Number(inv.amount||0).toLocaleString("ru-RU")} ₽</div>
-                        <div style={{fontSize:"12px", color:"#98A2B3"}}>{inv.account_id} · {inv.payer_name||"—"} · {(inv.created_at||"").slice(0,10)}</div>
+                    <div key={i} className="boris-f2-35c941e65b45">
+                      <div className="boris-f2-c06ac9822ca4">
+                        <div className="boris-f2-654558d879a0">{inv.number} · {Number(inv.amount||0).toLocaleString("ru-RU")} ₽</div>
+                        <div className="boris-f2-b68dda3a3439">{inv.account_id} · {inv.payer_name||"—"} · {(inv.created_at||"").slice(0,10)}</div>
                       </div>
-                      <div style={{fontSize:"12px", fontWeight:700, padding:"4px 10px", borderRadius:"20px", background: inv.status==="paid"?"#D1FADF":inv.status==="partial"?"#FEF0C7":"#F2F4F7", color: inv.status==="paid"?"#027A48":inv.status==="partial"?"#B54708":"#667085"}}>
+                      <div style={{fontSize:"12px", fontWeight:700, padding:"4px 10px", borderRadius:"20px", background: inv.status==="paid"?"#D1FADF":inv.status==="partial"?"#FEF0C7":"var(--boris-border-soft)", color: inv.status==="paid"?"#027A48":inv.status==="partial"?"#B54708":"var(--boris-text-2)"}}>
                         {inv.status==="paid"?"Оплачен":inv.status==="partial"?"Частично":"Ждёт оплаты"}
                       </div>
                       {inv.status!=="paid" && (
-                        <button onClick={()=>markPaid(inv.number, inv.amount)} style={{fontSize:"13px", fontWeight:700, color:"#fff", background:"#12805C", border:"none", borderRadius:"8px", padding:"8px 14px", cursor:"pointer", whiteSpace:"nowrap"}}>Деньги пришли</button>
+                        <Button onClick={()=>markPaid(inv.number, inv.amount)} className="boris-f2-ce4c073d011e">Деньги пришли</Button>
                       )}
                     </div>
                   ))}
@@ -5347,14 +5549,14 @@ export default function Home() {
               )}
             </div>
           )}
-          <div style={{fontSize:"16px", fontWeight:800, color:"#1D2939", marginBottom:"12px"}}>История операций</div>
+          <div className="boris-f2-3a4859a19b0c">История операций</div>
           {(!balanceData.history || balanceData.history.length===0) ? (
-            <div style={{fontSize:"14px", color:"#98A2B3"}}>Пока операций нет.</div>
+            <div className="boris-f2-e88a7eb51065">Пока операций нет.</div>
           ) : (
-            <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+            <div className="boris-f2-f67b86e0fb4c">
               {balanceData.history.map((h:any, i:number)=>(
-                <div key={i} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 14px", background:"#fff", border:"1px solid #EEF1F6", borderRadius:"10px"}}>
-                  <div><div style={{fontSize:"14px", color:"#1D2939"}}>{h.note||h.type}</div><div style={{fontSize:"12px", color:"#98A2B3"}}>{(h.ts||"").slice(0,10)}</div></div>
+                <div key={i} className="boris-f2-e3672c6151e4">
+                  <div><div className="boris-f2-9a938ed79996">{h.note||h.type}</div><div className="boris-f2-b68dda3a3439">{(h.ts||"").slice(0,10)}</div></div>
                   <div style={{fontSize:"15px", fontWeight:700, color: (h.amount||0)>=0 ? "#027A48" : "#B42318"}}>{(h.amount||0)>=0?"+":""}{Number(h.amount||0).toLocaleString("ru-RU")} ₽</div>
                 </div>
               ))}
@@ -5362,29 +5564,29 @@ export default function Home() {
           )}
         </div>
       ) : requisitesMode ? (
-        <div style={{padding:"8px 4px", maxWidth:"640px"}}>
-          <h2 style={{margin:"0 0 6px", color:"#12805C", fontSize:"23px"}}>🏦 Реквизиты для счетов</h2>
-          <div style={{fontSize:"14px", color:"#667085", marginBottom:"20px"}}>Эти данные Борис подставит в счета для оплаты по безналу от юрлиц и ИП. Заполните один раз.</div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>Наименование (ИП Остапенко Кирилл Олегович)</label><input value={requisites.org_name||""} onChange={e=>setRequisites({...requisites, org_name:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>ИНН</label><input value={requisites.inn||""} onChange={e=>setRequisites({...requisites, inn:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>ОГРНИП</label><input value={requisites.ogrnip||""} onChange={e=>setRequisites({...requisites, ogrnip:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>Адрес</label><input value={requisites.address||""} onChange={e=>setRequisites({...requisites, address:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>Банк</label><input value={requisites.bank_name||""} onChange={e=>setRequisites({...requisites, bank_name:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>Расчётный счёт</label><input value={requisites.bank_account||""} onChange={e=>setRequisites({...requisites, bank_account:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>БИК</label><input value={requisites.bank_bik||""} onChange={e=>setRequisites({...requisites, bank_bik:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>Корр. счёт</label><input value={requisites.corr_account||""} onChange={e=>setRequisites({...requisites, corr_account:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>E-mail</label><input value={requisites.email||""} onChange={e=>setRequisites({...requisites, email:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-<div style={{marginBottom:"14px"}}><label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>Телефон</label><input value={requisites.phone||""} onChange={e=>setRequisites({...requisites, phone:e.target.value})} style={{width:"100%", maxWidth:"520px", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px"}} /></div>
-          <div style={{marginTop:"18px", display:"flex", alignItems:"center", gap:"14px"}}>
-            <button onClick={saveRequisites} style={{background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"12px 24px", fontSize:"15px", fontWeight:700, cursor:"pointer"}}>Сохранить реквизиты</button>
-            {reqSaved && <span style={{color:"#027A48", fontWeight:600}}>✓ Сохранено</span>}
+        <div className="boris-f2-b7b1d39f59db">
+          <h2 className="boris-f2-ad71f55a12c0">🏦 Реквизиты для счетов</h2>
+          <div className="boris-f2-6caa3780d4c0">Эти данные Борис подставит в счета для оплаты по безналу от юрлиц и ИП. Заполните один раз.</div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">Наименование (ИП Остапенко Кирилл Олегович)</label><input value={requisites.org_name||""} onChange={e=>setRequisites({...requisites, org_name:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">ИНН</label><input value={requisites.inn||""} onChange={e=>setRequisites({...requisites, inn:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">ОГРНИП</label><input value={requisites.ogrnip||""} onChange={e=>setRequisites({...requisites, ogrnip:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">Адрес</label><input value={requisites.address||""} onChange={e=>setRequisites({...requisites, address:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">Банк</label><input value={requisites.bank_name||""} onChange={e=>setRequisites({...requisites, bank_name:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">Расчётный счёт</label><input value={requisites.bank_account||""} onChange={e=>setRequisites({...requisites, bank_account:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">БИК</label><input value={requisites.bank_bik||""} onChange={e=>setRequisites({...requisites, bank_bik:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">Корр. счёт</label><input value={requisites.corr_account||""} onChange={e=>setRequisites({...requisites, corr_account:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">E-mail</label><input value={requisites.email||""} onChange={e=>setRequisites({...requisites, email:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+<div className="boris-f2-a82d7062cc5e"><label className="boris-f2-465ca3ab2ea4">Телефон</label><input value={requisites.phone||""} onChange={e=>setRequisites({...requisites, phone:e.target.value})}  className="boris-f2-a5d6f949dc17"/></div>
+          <div className="boris-f2-8540c054bace">
+            <Button onClick={saveRequisites} className="boris-f2-8e980078655a">Сохранить реквизиты</Button>
+            {reqSaved && <span className="boris-f2-7a2df4816de9">✓ Сохранено</span>}
           </div>
         </div>
       ) : tariffsFinanceMode ? (
 
-        <div style={{padding:"32px"}}>
-          <h2 style={{margin:"0 0 8px", color:"#12805C", fontSize:"23px"}}>💰 Тарифы и Финансы</h2>
-          <p style={{color:"#667085", fontSize:"15px", marginBottom:"28px"}}>Оплата тарифа подписки и докупка дополнительных опций сверх лимита.</p>
+        <div className="boris-f2-7a3756a5cd36">
+          <h2 className="boris-f2-24cd9c46c930">💰 Тарифы и Финансы</h2>
+          <p className="boris-f2-9362daca3207">Оплата тарифа подписки и докупка дополнительных опций сверх лимита.</p>
 
           {[
             {
@@ -5397,25 +5599,25 @@ export default function Home() {
             {
               title: "Докупка баннеров для объявлений",
               items: [
-                {name:"1 баннер", price:"250 ₽", badge:"Точечно", badgeColor:"#667085", icon:"🖼️", gradient:"linear-gradient(135deg, #98A2B3, #667085)", invoiceId:"hlcZfzwZDUWWMhJitJ_wnQ", pack:"ban1"},
-                {name:"10 баннеров", price:"1 800 ₽", badge:"Популярно", badgeColor:"#2F6FED", icon:"🖼️", gradient:"linear-gradient(135deg, #4C8DFF, #2F6FED)", invoiceId:"i_DhFWpOYEyAf120Y4Djzg", pack:"ban10"},
+                {name:"1 баннер", price:"250 ₽", badge:"Точечно", badgeColor:"var(--boris-text-2)", icon:"🖼️", gradient:"linear-gradient(135deg, var(--boris-text-3), var(--boris-text-2))", invoiceId:"hlcZfzwZDUWWMhJitJ_wnQ", pack:"ban1"},
+                {name:"10 баннеров", price:"1 800 ₽", badge:"Популярно", badgeColor:"var(--boris-blue)", icon:"🖼️", gradient:"linear-gradient(135deg, var(--boris-blue), var(--boris-blue))", invoiceId:"i_DhFWpOYEyAf120Y4Djzg", pack:"ban10"},
                 {name:"30 баннеров", price:"5 100 ₽", badge:"💰 Выгодно", badgeColor:"#12805C", icon:"🖼️", gradient:"linear-gradient(135deg, #32D583, #12805C)", invoiceId:"scSJQwIYv0Ke4vDJwMjC3w", pack:"ban30"},
-                {name:"50 баннеров", price:"8 000 ₽", badge:"Для каталога", badgeColor:"#667085", icon:"🖼️", gradient:"linear-gradient(135deg, #98A2B3, #667085)", invoiceId:"Lc7XU4driEuytzx6a9453w", pack:"ban50"},
+                {name:"50 баннеров", price:"8 000 ₽", badge:"Для каталога", badgeColor:"var(--boris-text-2)", icon:"🖼️", gradient:"linear-gradient(135deg, var(--boris-text-3), var(--boris-text-2))", invoiceId:"Lc7XU4driEuytzx6a9453w", pack:"ban50"},
                 {name:"100 баннеров", price:"15 000 ₽", badge:"🔥 Максимум", badgeColor:"#F04438", icon:"🖼️", gradient:"linear-gradient(135deg, #FF6B6B, #F04438)", invoiceId:"gA5P5092U0KhSaT3diCv1Q", pack:"ban100"},
               ]
             },
             {
               title: "Баннеры для профиля магазина Avito",
               items: [
-                {name:"Расширенный тариф (1 ПК + 1 моб)", price:"700 ₽", badge:"Базово", badgeColor:"#667085", icon:"🏪", gradient:"linear-gradient(135deg, #98A2B3, #667085)", invoiceId:"rpurvpER-UmZnPckeCCkiQ", pack:"prof_ext"},
+                {name:"Расширенный тариф (1 ПК + 1 моб)", price:"700 ₽", badge:"Базово", badgeColor:"var(--boris-text-2)", icon:"🏪", gradient:"linear-gradient(135deg, var(--boris-text-3), var(--boris-text-2))", invoiceId:"rpurvpER-UmZnPckeCCkiQ", pack:"prof_ext"},
                 {name:"Максимальный тариф (3 ПК + 3 моб)", price:"2 100 ₽", badge:"Полный набор", badgeColor:"#7C5CFC", icon:"🏪", gradient:"linear-gradient(135deg, #9B87F5, #7C5CFC)", invoiceId:"O1Xeq-_fAkeAija1zkFpvw", pack:"prof_max"},
               ]
             },
             {
               title: "ИИ менеджер по продажам",
               items: [
-                {name:"Базовый пакет — 1 700 сообщений", price:"9 000 ₽", badge:"Автопилот диалогов", badgeColor:"#2F6FED", icon:"💬", gradient:"linear-gradient(135deg, #4C8DFF, #2F6FED)", invoiceId:"lSJ7L0x6zkGbVb3KKO353w", pack:"msg1700"},
-                {name:"Докупка +2 000 сообщений", price:"7 000 ₽", badge:"Без пауз", badgeColor:"#667085", icon:"💬", gradient:"linear-gradient(135deg, #98A2B3, #667085)", invoiceId:"P9e953qIq0yZ0cd2NKG_0A", pack:"msg2000"},
+                {name:"Базовый пакет — 1 700 сообщений", price:"9 000 ₽", badge:"Автопилот диалогов", badgeColor:"var(--boris-blue)", icon:"💬", gradient:"linear-gradient(135deg, var(--boris-blue), var(--boris-blue))", invoiceId:"lSJ7L0x6zkGbVb3KKO353w", pack:"msg1700"},
+                {name:"Докупка +2 000 сообщений", price:"7 000 ₽", badge:"Без пауз", badgeColor:"var(--boris-text-2)", icon:"💬", gradient:"linear-gradient(135deg, var(--boris-text-3), var(--boris-text-2))", invoiceId:"P9e953qIq0yZ0cd2NKG_0A", pack:"msg2000"},
                 {name:"Докупка +3 000 сообщений", price:"10 000 ₽", badge:"💰 Выгоднее за штуку", badgeColor:"#12805C", icon:"💬", gradient:"linear-gradient(135deg, #32D583, #12805C)", invoiceId:"E6SI_X7tnUqBNDw_RKkOtQ", pack:"msg3000"},
                 {name:"ИИ Руководитель отдела продаж", price:"20 000 ₽/мес", badge:"🧠 1500 мин · 450 переписок · 30+30 отчётов", badgeColor:"#7C5CFC", icon:"🧠", gradient:"linear-gradient(135deg, #9B87F5, #7C5CFC)", invoiceId:"", pack:"rop1500"},
                 {name:"РОП: докупка +300 минут", price:"5 000 ₽", badge:"300 мин · 90 переписок · 5+5 отчётов", badgeColor:"#7C5CFC", icon:"🧠", gradient:"linear-gradient(135deg, #9B87F5, #7C5CFC)", invoiceId:"", pack:"rop_a300"},
@@ -5427,23 +5629,23 @@ export default function Home() {
               ]
             },
           ].map(section => (
-            <div key={section.title} style={{marginBottom:"32px"}}>
-              <h3 style={{margin:"0 0 14px", fontSize:"18px", color:"#1D2939"}}>{section.title}</h3>
-              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:"14px", alignItems:"stretch"}}>
+            <div key={section.title} className="boris-f2-2a28d13f8dfd">
+              <h3 className="boris-f2-ef7dff1e71a6">{section.title}</h3>
+              <div className="boris-f2-f3545665e745">
                 {section.items.map(it => (
-                  <div key={it.invoiceId} className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"24px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", height:"100%", boxSizing:"border-box", position:"relative", overflow:"hidden"}}>
+                  <BorisCard key={it.invoiceId} className="boris-card-hover boris-f2-0faba668ede8 boris-g1-card">
                     <div style={{position:"absolute", top:"-40px", right:"-40px", width:"120px", height:"120px", borderRadius:"50%", background:it.gradient, opacity:0.08}} />
                     <div style={{width:"64px", height:"64px", borderRadius:"50%", background:it.gradient, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"28px", marginBottom:"16px", boxShadow:`0 8px 20px ${it.badgeColor}40`}}>{it.icon}</div>
-                    <div style={{fontWeight:"bold", fontSize:"16px", color:"#1D2939", marginBottom:"8px", minHeight:"40px", display:"flex", alignItems:"center"}}>{it.name}</div>
-                    <div style={{color:"#1D2939", fontWeight:800, fontSize:"26px", marginBottom:"14px", letterSpacing:"-0.02em"}}>{(livePrices && (it as any).pack && livePrices[(it as any).pack]) ? livePrices[(it as any).pack].sum.toLocaleString("ru") + " ₽" + (String(it.price).includes("/мес") ? "/мес" : "") : it.price}</div>
+                    <div className="boris-f2-b51f90c20057">{it.name}</div>
+                    <div className="boris-f2-047eeaeb44f0">{(livePrices && (it as any).pack && livePrices[(it as any).pack]) ? livePrices[(it as any).pack].sum.toLocaleString("ru") + " ₽" + (String(it.price).includes("/мес") ? "/мес" : "") : it.price}</div>
                     {it.badge && (
                       <div style={{display:"inline-block", background:`${it.badgeColor}18`, color:it.badgeColor, fontSize:"13px", fontWeight:"bold", borderRadius:"20px", padding:"5px 14px", marginBottom:"22px"}}>{it.badge}</div>
                     )}
-                    <div style={{marginTop:"auto", width:"100%"}}>
+                    <div className="boris-f2-ff71126d36e1">
                       <RobokassaButton invoiceId={it.invoiceId} pack={(it as any).pack} accountId={currentAccount} />
-                      <button onClick={()=>buyWithBalance((it as any).pack, it.name)} style={{width:"100%", marginTop:"8px", background:"#fff", color:"#12805C", border:"1.5px solid #12805C", borderRadius:"10px", padding:"9px", fontSize:"13px", fontWeight:700, cursor:"pointer"}}>💰 Купить с баланса</button>
+                      <Button onClick={()=>buyWithBalance((it as any).pack, it.name)} className="boris-f2-ad5f71eb1a34">💰 Купить с баланса</Button>
                     </div>
-                  </div>
+                  </BorisCard>
                 ))}
               </div>
             </div>
@@ -5454,101 +5656,101 @@ export default function Home() {
       <>
 
       {guideActive && guideSteps[guideIndex] && (
-        <div style={{position:"fixed", bottom:"24px", right:"24px", background:"#F6F7FB", border:"2px solid #2F6FED", borderRadius:"12px", padding:"18px 20px", maxWidth:"340px", zIndex:1000, boxShadow:"0 8px 24px rgba(0,0,0,0.5)"}}>
-          <div style={{color:"#2F6FED", fontSize:"15px", fontWeight:"bold", marginBottom:"6px"}}>
+        <div className="boris-f2-7c4fb6e0c6db">
+          <div className="boris-f2-1e0a8ff8c454">
             Борис-гид · шаг {guideIndex + 1} из {guideSteps.length}
           </div>
-          <div style={{color:"#fff", fontSize:"23px", marginBottom:"14px", lineHeight:"1.4"}}>
+          <div className="boris-f2-4c377b747809">
             {guideSteps[guideIndex].instruction}
           </div>
-          <div style={{display:"flex", gap:"8px"}}>
-            <button className="boris-btn-hover" onClick={guideNext} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"11px 20px", fontWeight:"bold", cursor:"pointer", fontSize:"15px"}}>
+          <div className="boris-f2-b9bbe540d342">
+            <Button className="boris-btn-hover boris-f2-3da096912514" onClick={guideNext}>
               {guideIndex + 1 >= guideSteps.length ? "Готово ✓" : "Далее →"}
-            </button>
-            <button className="boris-btn-hover" onClick={guideSkip} style={{background:"#E3E7F0", color:"#344054", border:"none", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontSize:"15px"}}>
+            </Button>
+            <Button className="boris-btn-hover boris-f2-376583938b1d" onClick={guideSkip}>
               Пропустить всё
-            </button>
+            </Button>
           </div>
         </div>
       )}
 
-      <div style={{padding:"32px"}}>
+      <div className="boris-f2-7a3756a5cd36">
 
         {activeTab === "stats" && (
           <>
-          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))", gap:"16px", marginBottom:"20px"}}>
-            <div className="b-card b-stat" style={{animationDelay:"0s", minHeight:"110px"}}>
-              <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#4C8DFF,#2F6FED)"}}>📋</span>
+          <div className="boris-f2-bc6659ec37ea">
+            <BorisCard className="b-card b-stat boris-f2-1e0cce60bae6">
+              <span className="b-stat-ico boris-f2-79a4d50add5b boris-g1-card">📋</span>
               <div>
-                <div className="b-meta" style={{fontWeight:700, color:"#98A2B3", textTransform:"uppercase", letterSpacing:"0.06em", fontSize:"11px", marginBottom:"4px"}}>Всего объявлений</div>
-                <div className="b-stat-num"><CountUp to={items.length} /></div>
+                <div className="b-meta boris-f2-870773467861">Всего объявлений</div>
+                <BorisCard className="b-stat-num boris-g1-card"><CountUp to={items.length} /></BorisCard>
               </div>
-            </div>
-            <div className="b-card b-stat" style={{animationDelay:"0.12s", minHeight:"110px"}}>
-              <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#3DBE93,#12805C)"}}>✅</span>
+            </BorisCard>
+            <BorisCard className="b-card b-stat boris-f2-73edae6743ac">
+              <span className="b-stat-ico boris-f2-9b8b21123da7 boris-g1-card">✅</span>
               <div>
-                <div className="b-meta" style={{fontWeight:700, color:"#98A2B3", textTransform:"uppercase", letterSpacing:"0.06em", fontSize:"11px", marginBottom:"4px"}}>Активных</div>
-                <div className="b-stat-num"><CountUp to={items.filter((i: any) => i.status === "active").length} delay={120} /></div>
+                <div className="b-meta boris-f2-870773467861">Активных</div>
+                <BorisCard className="b-stat-num boris-g1-card"><CountUp to={items.filter((i: any) => i.status === "active").length} delay={120} /></BorisCard>
               </div>
-            </div>
-            <div className="b-card b-stat" style={{animationDelay:"0.24s", minHeight:"110px"}}>
+            </BorisCard>
+            <BorisCard className="b-card b-stat boris-f2-1b00b1669e81">
               <Mascot size={26} interactive={false} />
               <div>
-                <div className="b-meta" style={{fontWeight:700, color:"#98A2B3", textTransform:"uppercase", letterSpacing:"0.06em", fontSize:"11px", marginBottom:"4px"}}>Статус Бориса</div>
-                <div style={{display:"flex", alignItems:"center", gap:"8px", marginTop:"2px"}}>
-                  <span style={{width:"9px", height:"9px", borderRadius:"50%", background:"#12805C", boxShadow:"0 0 0 4px rgba(18,128,92,0.15)", animation:"iconPulse 2s ease-in-out infinite"}}></span>
-                  <span style={{fontSize:"20px", fontWeight:800, color:"#12805C"}}>Работает</span>
+                <div className="b-meta boris-f2-870773467861">Статус Бориса</div>
+                <div className="boris-f2-c8e24a0e7a57">
+                  <span className="boris-f2-925142a329af"></span>
+                  <span className="boris-f2-964049ce6339">Работает</span>
                 </div>
               </div>
-            </div>
+            </BorisCard>
           </div>
 
-          <div className="b-panel" style={{marginTop:"24px"}}>
-            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"16px"}}>
-              <h3 className="b-title" style={{margin:0, display:"flex", alignItems:"center", gap:"12px"}}><Mascot size={26} interactive={false} />Резюме и советы от Бориса</h3>
-              <button className="b-btn b-btn-ghost" onClick={loadWeeklySummary} disabled={summaryLoading} style={{padding:"7px 16px", fontSize:"14px"}}>
+          <BorisCard className="b-panel boris-f2-3343fd6464ac">
+            <div className="boris-f2-bcbb844d17df">
+              <h3 className="b-title boris-f2-ea8ce7c7e635"><Mascot size={26} interactive={false} />Резюме и советы от Бориса</h3>
+              <Button className="b-btn b-btn-ghost boris-f2-d39548ec2be4" onClick={loadWeeklySummary} disabled={summaryLoading}>
                 {summaryLoading ? "⏳ Собираю..." : "🔄 Обновить"}
-              </button>
+              </Button>
             </div>
-            {summaryLoading && <p style={{color:"#667085"}}>Борис анализирует данные...</p>}
+            {summaryLoading && <p className="boris-f2-de52905d633b">Борис анализирует данные...</p>}
             {!summaryLoading && weeklySummary?.status === "ok" && (
               <>
-                <p style={{color:"#344054", lineHeight:1.6, whiteSpace:"pre-wrap", marginBottom:"20px"}}>{weeklySummary.summary}</p>
+                <p className="boris-f2-13378323fb95">{weeklySummary.summary}</p>
                 {weeklySummary.data?.текущий_баланс && (
-                  <div style={{display:"flex", gap:"24px", marginBottom:"20px", fontSize:"23px"}}>
-                    <div><span style={{color:"#667085"}}>Баланс:</span> <b style={{color:"#2F6FED"}}>{weeklySummary.data.текущий_баланс.real} ₽</b></div>
-                    <div><span style={{color:"#667085"}}>Бонусы:</span> <b style={{color:"#7C5CFC"}}>{weeklySummary.data.текущий_баланс.bonus}</b></div>
-                    <div><span style={{color:"#667085"}}>Дней в анализе:</span> <b>{weeklySummary.data.дней_данных}</b></div>
+                  <div className="boris-f2-63e1329281d3">
+                    <div><span className="boris-f2-de52905d633b">Баланс:</span> <b className="boris-f2-b5d95bf86ec9">{weeklySummary.data.текущий_баланс.real} ₽</b></div>
+                    <div><span className="boris-f2-de52905d633b">Бонусы:</span> <b className="boris-f2-517924e0b69a">{weeklySummary.data.текущий_баланс.bonus}</b></div>
+                    <div><span className="boris-f2-de52905d633b">Дней в анализе:</span> <b>{weeklySummary.data.дней_данных}</b></div>
                   </div>
                 )}
-                <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"20px"}}>
+                <div className="boris-f2-0a1d28e275a3">
                   <div>
-                    <div style={{color:"#2F6FED", fontWeight:"bold", marginBottom:"10px", fontSize:"15px"}}>🏆 Самые эффективные</div>
+                    <div className="boris-f2-e5b0b65cb8e9">🏆 Самые эффективные</div>
                     {(weeklySummary.data?.примеры_эффективных || []).map((it: any, i: number) => (
-                      <div key={i} style={{fontSize:"15px", color:"#344054", padding:"6px 0", borderBottom:"1px solid #FFFFFF"}}>{it.title} <span style={{color:"#2F6FED"}}>({it.conversion}%)</span></div>
+                      <div key={i} className="boris-f2-1108fcc45289">{it.title} <span className="boris-f2-b5d95bf86ec9">({it.conversion}%)</span></div>
                     ))}
                   </div>
                   <div>
-                    <div style={{color:"#F04438", fontWeight:"bold", marginBottom:"10px", fontSize:"15px"}}>📉 Требуют внимания</div>
+                    <div className="boris-f2-b72baccd392f">📉 Требуют внимания</div>
                     {(weeklySummary.data?.примеры_неэффективных || []).map((it: any, i: number) => (
-                      <div key={i} style={{fontSize:"15px", color:"#344054", padding:"6px 0", borderBottom:"1px solid #FFFFFF"}}>{it.title} <span style={{color:"#F04438"}}>({it.views} просм.)</span></div>
+                      <div key={i} className="boris-f2-1108fcc45289">{it.title} <span className="boris-f2-de4c8a9423c7">({it.views} просм.)</span></div>
                     ))}
                   </div>
                 </div>
               </>
             )}
             {!summaryLoading && weeklySummary?.status === "error" && (
-              <p style={{color:"#667085"}}>{weeklySummary.message}</p>
+              <p className="boris-f2-de52905d633b">{weeklySummary.message}</p>
             )}
-          </div>
+          </BorisCard>
           </>
         )}
 
         {activeTab === "listings" && (
           <>
-            <details style={{marginBottom:"16px", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"12px 16px"}}>
-              <summary style={{cursor:"pointer", color:"#2F6FED", fontSize:"14px", fontWeight:600}}>❓ Как это работает</summary>
-              <div style={{fontSize:"14px", color:"#475467", marginTop:"10px", lineHeight:1.6}}>
+            <details className="boris-f2-2a94378c48e5">
+              <summary className="boris-f2-c0e3ed53fc0c">❓ Как это работает</summary>
+              <div className="boris-f2-107d6b8151e3">
                 Здесь ваши объявления на Avito. Кнопки сверху — это фильтры («Все / Активные / Неактивные / Черновики») и сортировки («По контактам / конверсии / избранному»).<br/><br/>
                 Чтобы <b>создать объявления</b> — нажмите «Создать объявление» или «Выгрузить товары с сайта». Чтобы <b>опубликовать</b> готовое — «Опубликовать на Avito» (Борис соберёт фид сам).<br/><br/>
                 Не знаете, с чего начать? Синяя кнопка «С чего начать рекламу» вверху подскажет следующий шаг под ваш аккаунт.
@@ -5576,38 +5778,38 @@ export default function Home() {
               }
               if (!_act) return null;
               return (
-                <div style={{background:"linear-gradient(135deg,#EAF3FF,#F6F7FB)", border:"1px solid #C7DDFF", borderRadius:"14px", padding:"18px 20px", marginBottom:"20px", display:"flex", alignItems:"center", gap:"16px", flexWrap:"wrap"}}>
-                  <div style={{flex:1, minWidth:"200px"}}>
-                    <div style={{fontWeight:800, fontSize:"17px", color:"#14161A"}}>С чего начать рекламу</div>
-                    <div style={{color:"#667085", fontSize:"14px", marginTop:"3px"}}>{_hint}</div>
+                <div className="boris-f2-e0ebb78c5274">
+                  <div className="boris-f2-fa67ab694c2a">
+                    <div className="boris-f2-e59f0f96c3e5">С чего начать рекламу</div>
+                    <div className="boris-f2-cb57d9bd0ff7">{_hint}</div>
                   </div>
-                  <button className="boris-btn-hover" onClick={_act} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"14px 26px", fontSize:"16px", fontWeight:"bold", cursor:"pointer", whiteSpace:"nowrap"}}>{_label}</button>
+                  <Button className="boris-btn-hover boris-f2-b0c191290bbd" onClick={_act}>{_label}</Button>
                 </div>
               );
             })()}
-            <div style={{fontSize:"13px", color:"#667085", marginBottom:"10px"}}>Отфильтруйте или отсортируйте объявления. «По контактам / конверсии / избранному» — это сортировки: нажмите, чтобы упорядочить список (повторное нажатие меняет направление ↓↑).</div>
-            <div style={{fontSize:"13px", color:"#667085", marginBottom:"10px"}}>Отфильтруйте или отсортируйте объявления. «По контактам / конверсии / избранному» — это сортировки: нажмите, чтобы упорядочить список (повторное нажатие меняет направление ↓↑).</div>
-            <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:"16px", marginBottom:"20px"}}>
+            <div className="boris-f2-0cfd15ff8345">Отфильтруйте или отсортируйте объявления. «По контактам / конверсии / избранному» — это сортировки: нажмите, чтобы упорядочить список (повторное нажатие меняет направление ↓↑).</div>
+            <div className="boris-f2-0cfd15ff8345">Отфильтруйте или отсортируйте объявления. «По контактам / конверсии / избранному» — это сортировки: нажмите, чтобы упорядочить список (повторное нажатие меняет направление ↓↑).</div>
+            <div className="boris-f2-1ddb79e95c91">
               {[
-                {key:"all", icon:"📋", label:"Все", grad:"linear-gradient(135deg,#98A2B3,#667085)"},
+                {key:"all", icon:"📋", label:"Все", grad:"linear-gradient(135deg,var(--boris-text-3),var(--boris-text-2))"},
                 {key:"active", icon:"✅", label:"Активные", grad:"linear-gradient(135deg,#3DBE93,#12805C)"},
                 {key:"inactive", icon:"❌", label:"Неактивные", grad:"linear-gradient(135deg,#F97066,#F04438)"},
                 {key:"drafts", icon:"📝", label:"Черновики" + (draftItems.length > 0 ? ` (${draftItems.length})` : ""), grad:"linear-gradient(135deg,#FDB022,#F79009)"},
-                {key:"search", icon:"🔍", label:"Поиск", grad:"linear-gradient(135deg,#4C8DFF,#2F6FED)"},
+                {key:"search", icon:"🔍", label:"Поиск", grad:"linear-gradient(135deg,var(--boris-blue),var(--boris-blue))"},
                 {key:"feeds", icon:"📡", label:"Фиды для Avito", grad:"linear-gradient(135deg,#7C5CFC,#5B3FD9)"},
                 {key:"templates_lib", icon:"📄", label:"Шаблоны", grad:"linear-gradient(135deg,#F06AA8,#D93D86)"},
-                {key:"contacts", icon:"📞", label:"По контактам", grad:"linear-gradient(135deg,#4C8DFF,#2F6FED)", sort:true},
+                {key:"contacts", icon:"📞", label:"По контактам", grad:"linear-gradient(135deg,var(--boris-blue),var(--boris-blue))", sort:true},
                 {key:"conversion", icon:"📈", label:"По конверсии", grad:"linear-gradient(135deg,#3DBE93,#0F9A6E)", sort:true},
                 {key:"favorites", icon:"⭐", label:"По избранному", grad:"linear-gradient(135deg,#FDB022,#F79009)", sort:true},
                 {key:"dupes", icon:"🆕", label:"Новые дубли" + (duplicateDrafts.length > 0 ? ` (${duplicateDrafts.length})` : ""), grad:"linear-gradient(135deg,#7C5CFC,#5B3FD9)", dupes:true},
-                {key:"create", icon:"➕", label:"Создать объявление", grad:"linear-gradient(135deg,#4C8DFF,#2F6FED)", create:true},
+                {key:"create", icon:"➕", label:"Создать объявление", grad:"linear-gradient(135deg,var(--boris-blue),var(--boris-blue))", create:true},
                 {key:"pipeline", icon:"🚀", label:"Конвейер направления", grad:"linear-gradient(135deg,#12805C,#3DBE93)", pipeline:true},
               ].map((f: any, i: number) => {
                 const isOn = f.create || f.pipeline ? false : f.dupes ? showDuplicateDrafts : f.sort ? sortBy === f.key : listingFilter === f.key;
                 return (
-                <button className="b-card b-stat b-fcard" key={f.key} style={{animationDelay:`${i * 0.05}s`, flexDirection:"column", justifyContent:"center", gap:"12px", minHeight:"124px", cursor:"pointer", background: f.create ? "linear-gradient(135deg,#4C8DFF,#2F6FED)" : f.pipeline ? "linear-gradient(135deg,#12805C,#3DBE93)" : isOn ? "#E7EFFE" : "#FFFFFF", borderColor: f.create ? "#2F6FED" : f.pipeline ? "#12805C" : isOn ? "#2F6FED" : "#E3E7F0"}}
+                <Button className="b-card b-stat b-fcard" key={f.key} style={{animationDelay:`${i * 0.05}s`, flexDirection:"column", justifyContent:"center", gap:"12px", minHeight:"124px", cursor:"pointer", background: f.create ? "linear-gradient(135deg,var(--boris-blue),var(--boris-blue))" : f.pipeline ? "linear-gradient(135deg,#12805C,#3DBE93)" : isOn ? "var(--boris-blue-soft)" : "var(--boris-surface)", borderColor: f.create ? "var(--boris-blue)" : f.pipeline ? "#12805C" : isOn ? "var(--boris-blue)" : "var(--boris-border)"}}
                   onClick={() => {
-                    if (f.create) { setActiveTab("templates"); loadTemplateEffectiveness(currentAccount); return; }
+                    if (f.create) { window.location.href = "/dashboard/campaign"; return; }
                     if (f.pipeline) { setShowPipelineForm(true); return; }
                     if (f.dupes) { setShowDuplicateDrafts(v => !v); if (!showDuplicateDrafts) loadDuplicateDrafts(); return; }
                     if (f.sort) { if (sortBy === f.key) setSortDir(d => d === "desc" ? "asc" : "desc"); else { setSortBy(f.key); setSortDir("desc"); } return; }
@@ -5616,21 +5818,21 @@ export default function Home() {
                     if (f.key === "feeds") loadAllFeeds();
                     if (f.key === "templates_lib") loadTemplateEffectiveness(currentAccount);
                   }}>
-                  <span className="b-stat-ico" style={{background: f.grad}}>{f.icon}</span>
-                  <span style={{fontSize:"15px", fontWeight: (isOn || f.create) ? 800 : 600, color: f.create ? "#FFFFFF" : isOn ? "#2F6FED" : "#475467"}}>
+                  <span className="b-stat-ico boris-g1-card boris-g1-icon" style={{background: f.grad}}>{f.icon}</span>
+                  <span style={{fontSize:"15px", fontWeight: (isOn || f.create) ? 800 : 600, color: f.create ? "var(--boris-surface)" : isOn ? "var(--boris-blue)" : "var(--boris-text-2)"}}>
                     {f.label}{f.sort && sortBy === f.key ? (sortDir === "desc" ? " ↓" : " ↑") : ""}
                   </span>
-                </button>
+                </Button>
                 );
               })}
             </div>
             {selectedItemIds.size > 0 && (
-              <div style={{background:"#F6F7FB", border:"1px solid #2F6FED", borderRadius:"8px", padding:"12px 16px", marginBottom:"16px", display:"flex", alignItems:"center", gap:"12px", flexWrap:"wrap"}}>
-                <span style={{color:"#2F6FED", fontSize:"15px", fontWeight:"bold"}}>Выбрано: {selectedItemIds.size}</span>
-                <button className="boris-btn-hover" onClick={() => bulkAction("template")} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"15px"}}>📝 Сделать шаблон</button>
-                <button className="boris-btn-hover" onClick={() => bulkAction("archive")} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"15px"}}>📦 Архивировать</button>
-                <button className="boris-btn-hover" onClick={() => bulkAction("delete")} style={{background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"15px"}}>🗑 Удалить</button>
-                <button className="boris-btn-hover" onClick={clearItemSelection} style={{background:"#FFFFFF", border:"none", color:"#8A93A6", fontSize:"15px", cursor:"pointer", marginLeft:"auto"}}>Снять выбор</button>
+              <div className="boris-f2-cd6ba7ccfb24">
+                <span className="boris-f2-87b915590875">Выбрано: {selectedItemIds.size}</span>
+                <Button className="boris-btn-hover boris-f2-bbb6b8ff2463" onClick={() => bulkAction("template")}>📝 Сделать шаблон</Button>
+                <Button className="boris-btn-hover boris-f2-bbb6b8ff2463" onClick={() => bulkAction("archive")}>📦 Архивировать</Button>
+                <Button className="boris-btn-hover boris-f2-43b1105761fa" onClick={() => bulkAction("delete")}>🗑 Удалить</Button>
+                <Button className="boris-btn-hover boris-f2-5e59edcae124" onClick={clearItemSelection}>Снять выбор</Button>
               </div>
             )}
 
@@ -5638,42 +5840,42 @@ export default function Home() {
             <>
             {listingFilter === "templates_lib" && (
               <div>
-                <h3 style={{margin:"0 0 6px", fontSize:"18px", color:"#1D2939"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#4C8DFF,#2F6FED)", width:"30px", height:"30px", fontSize:"15px", display:"inline-flex", alignItems:"center", justifyContent:"center", borderRadius:"50%", flexShrink:0}}>📋</span>Библиотека шаблонов</h3>
-                <details style={{margin:"0 0 16px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Про сохранённые тексты</summary><p style={{color:"#667085", fontSize:"15px", margin:"8px 0 0"}}>Сохранённые тексты объявлений. Борис отслеживает эффективность каждого по реальным лидам. Сохранить новый шаблон можно кнопкой «💾 Сохранить как шаблон» под сгенерированным объявлением.</p></details>
+                <h3 className="boris-f2-1faa1f968015"><span className="b-icon-sm boris-f2-ac305422ad3b boris-g1-icon">📋</span>Библиотека шаблонов</h3>
+                <details className="boris-f2-489e16440bc3"><summary className="boris-f2-c0e3ed53fc0c">Про сохранённые тексты</summary><p className="boris-f2-183644454912">Сохранённые тексты объявлений. Борис отслеживает эффективность каждого по реальным лидам. Сохранить новый шаблон можно кнопкой «💾 Сохранить как шаблон» под сгенерированным объявлением.</p></details>
                 {templateEff.length === 0 ? (
-                  <div style={{background:"#F6F7FB", border:"1px dashed #D0D5DD", borderRadius:"12px", padding:"32px", textAlign:"center", color:"#98A2B3"}}>
+                  <div className="boris-f2-3259b97eab5f">
                     Пока нет сохранённых шаблонов. Сгенерируйте объявление и нажмите «💾 Сохранить как шаблон».
                   </div>
                 ) : (
-                  <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(320px, 1fr))", gap:"16px"}}>
+                  <div className="boris-f2-e0abfdb050e2">
                     {templateEff.map((t: any) => {
-                      const st = t.status === "effective" ? {emoji:"🟢", label:"Эффективный", color:"#12805C", bg:"#E7F7F0"}
+                      const st = t.status === "effective" ? {emoji:"🟢", label:"Эффективный", color:"var(--b-cat-leads)", bg:"#E7F7F0"}
                         : t.status === "ineffective" ? {emoji:"🔴", label:"Неэффективный", color:"#D92D20", bg:"#FEF0EF"}
-                        : t.status === "in_progress" ? {emoji:"🟡", label:"В процессе", color:"#B54708", bg:"#FEF7EC"}
-                        : {emoji:"⚪", label:"Нет данных", color:"#667085", bg:"#F2F4F7"};
+                        : t.status === "in_progress" ? {emoji:"🟡", label:"В процессе", color:"var(--b-warn)", bg:"#FEF7EC"}
+                        : {emoji:"⚪", label:"Нет данных", color:"var(--boris-text-2)", bg:"var(--boris-border-soft)"};
                       return (
-                        <div key={t.id} style={{background:"#FFFFFF", border:"1px solid #EEF2FA", borderRadius:"12px", padding:"18px"}}>
-                          <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:"8px", marginBottom:"10px"}}>
-                            <div style={{fontWeight:"bold", fontSize:"16px", color:"#1D2939"}}>{t.name}</div>
-                            <button className="boris-btn-hover" onClick={() => deleteTextTemplate(t.id)} style={{background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"4px 8px", cursor:"pointer", fontSize:"13px"}}>🗑</button>
+                        <div key={t.id} className="boris-f2-dd820dd9c326">
+                          <div className="boris-f2-fbafdde42320">
+                            <div className="boris-f2-30b79cafdf6f">{t.name}</div>
+                            <Button className="boris-btn-hover boris-f2-ed4eecd783ab" onClick={() => deleteTextTemplate(t.id)}>🗑</Button>
                           </div>
                           <div style={{display:"inline-block", background:st.bg, color:st.color, borderRadius:"6px", padding:"3px 10px", fontSize:"13px", fontWeight:"bold", marginBottom:"12px"}}>{st.emoji} {st.label}</div>
-                          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:"6px", marginBottom:"12px"}}>
-                            <div style={{textAlign:"center", background:"#F9FAFB", borderRadius:"6px", padding:"6px"}}>
-                              <div style={{color:"#98A2B3", fontSize:"12px"}}>Просмотры</div>
-                              <div style={{fontWeight:"bold", color:"#1D2939"}}>{t.views}</div>
+                          <div className="boris-f2-782bce7d3616">
+                            <div className="boris-f2-c4ed1893af64">
+                              <div className="boris-f2-85a2b3a910c8">Просмотры</div>
+                              <div className="boris-f2-180c648529c8">{t.views}</div>
                             </div>
-                            <div style={{textAlign:"center", background:"#F9FAFB", borderRadius:"6px", padding:"6px"}}>
-                              <div style={{color:"#98A2B3", fontSize:"12px"}}>Контакты</div>
-                              <div style={{fontWeight:"bold", color:"#1D2939"}}>{t.contacts}</div>
+                            <div className="boris-f2-c4ed1893af64">
+                              <div className="boris-f2-85a2b3a910c8">Контакты</div>
+                              <div className="boris-f2-180c648529c8">{t.contacts}</div>
                             </div>
-                            <div style={{textAlign:"center", background:"#F9FAFB", borderRadius:"6px", padding:"6px"}}>
-                              <div style={{color:"#98A2B3", fontSize:"12px"}}>Конверсия</div>
-                              <div style={{fontWeight:"bold", color:"#2F6FED"}}>{t.conversion}%</div>
+                            <div className="boris-f2-c4ed1893af64">
+                              <div className="boris-f2-85a2b3a910c8">Конверсия</div>
+                              <div className="boris-f2-8baa2a1e8844">{t.conversion}%</div>
                             </div>
                           </div>
-                          <div style={{color:"#98A2B3", fontSize:"12px"}}>Объявлений с этим шаблоном: {t.items_count}</div>
-                          <div style={{color:"#667085", fontSize:"13px", marginTop:"8px", maxHeight:"60px", overflow:"hidden", lineHeight:1.4}}>{t.title_template}</div>
+                          <div className="boris-f2-85a2b3a910c8">Объявлений с этим шаблоном: {t.items_count}</div>
+                          <div className="boris-f2-9ef106a8f548">{t.title_template}</div>
                         </div>
                       );
                     })}
@@ -5682,104 +5884,104 @@ export default function Home() {
               </div>
             )}
             {listingFilter === "feeds" && (
-              <div style={{marginTop:"16px"}}>
-                <div style={{color:"#1D2939", fontWeight:"bold", fontSize:"18px", marginBottom:"6px"}}>📡 Фиды для Avito — этот аккаунт</div>
-                <div style={{fontSize:"13px", color:"#667085", marginBottom:"12px"}}>Фид — это файл со всеми вашими объявлениями, который Avito автоматически забирает и публикует. Настраивать вручную не нужно: Борис собирает и обновляет его сам.</div>
-                {feedsLoading ? <div style={{color:"#667085"}}>Загрузка...</div> : (
-                  <div style={{display:"flex", flexDirection:"column", gap:"12px"}}>
+              <div className="boris-f2-8a359a76ebec">
+                <div className="boris-f2-3a27d53d2160">📡 Фиды для Avito — этот аккаунт</div>
+                <div className="boris-f2-e376c4c86d14">Фид — это файл со всеми вашими объявлениями, который Avito автоматически забирает и публикует. Настраивать вручную не нужно: Борис собирает и обновляет его сам.</div>
+                {feedsLoading ? <div className="boris-f2-de52905d633b">Загрузка...</div> : (
+                  <div className="boris-f2-2e1ca338d758">
                     {allFeeds.map((feed, i) => (
-                      <div key={i} style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"16px", boxShadow:"0 1px 3px rgba(16,24,40,0.06)"}}>
-                        <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:"10px"}}>
-                          <div style={{flex:"1 1 300px"}}>
-                            <div style={{fontWeight:"bold", fontSize:"16px", color:"#1D2939", marginBottom:"4px"}}>{feed.name}</div>
-                            <div style={{fontSize:"14px", color:"#667085", marginBottom:"2px"}}>📦 Объявлений: <b style={{color:"#2F6FED"}}>{feed.count}</b> · Городов: {feed.cities_count}</div>
-                            <div style={{fontSize:"14px", color:"#667085", marginBottom:"2px"}}>📁 Категория: {(feed.categories || []).join(", ")}</div>
-                            <div style={{fontSize:"12px", color:"#8A93A6", wordBreak:"break-all", marginTop:"6px"}}>{feed.feed_url}</div>
+                      <div key={i} className="boris-f2-5b6c5da6a641">
+                        <div className="boris-f2-71e2cc7f2338">
+                          <div className="boris-f2-8fe4d75b3829">
+                            <div className="boris-f2-382adea18445">{feed.name}</div>
+                            <div className="boris-f2-bdd5e7e2d132">📦 Объявлений: <b className="boris-f2-b5d95bf86ec9">{feed.count}</b> · Городов: {feed.cities_count}</div>
+                            <div className="boris-f2-bdd5e7e2d132">📁 Категория: {(feed.categories || []).join(", ")}</div>
+                            <div className="boris-f2-5f8aa513cec6">{feed.feed_url}</div>
                           </div>
-                          <div style={{display:"flex", flexDirection:"column", gap:"6px", minWidth:"160px"}}>
-                            <button className="boris-btn-hover" onClick={() => copyFeedUrl(feed.feed_url)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>📋 Копировать ссылку</button>
-                            <button className="boris-btn-hover" onClick={checkFeedValidation} disabled={feedCheckLoading} style={{background: feedCheckLoading ? "#C9D2E3" : "#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"8px 14px", cursor: feedCheckLoading ? "default" : "pointer", fontSize:"14px", fontWeight:"bold"}}>{feedCheckLoading ? "⏳ Проверяю..." : "✅ Проверить фид"}</button>
-                            <button className="boris-btn-hover" onClick={() => checkFeed(feed.feed_url)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontSize:"14px"}} title="Скопировать ссылку и открыть валидатор Avito вручную">🔗 Проверить на Avito</button>
-                            <button className="boris-btn-hover" onClick={() => sendFeedToAvito(feed.account_id)} style={{background:"#12805C", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>🚀 Отправить в Avito</button>
-                            <button className="boris-btn-hover" onClick={() => { if (openedFeedAccount === feed.account_id) { setOpenedFeedAccount(null); } else { setFeedTab("feed"); loadFeedItemsFull(feed.account_id); loadActiveItems(feed.account_id); } }} style={{background:"#FFFFFF", color:"#7C5CFC", border:"1px solid #F0ECFF", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>✏️ Редактировать объявления</button>
-                            <button className="boris-btn-hover" onClick={() => exportFeedXlsx(feed.account_id)} style={{background:"#FFFFFF", color:"#12805C", border:"1px solid #C7EBDC", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>📥 Выгрузить в Excel</button>
-                            <label className="boris-btn-hover" style={{background:"#FFFFFF", color:"#12805C", border:"1px solid #C7EBDC", borderRadius:"8px", padding:"8px 14px", cursor:"pointer", fontSize:"15px", fontWeight:"bold", textAlign:"center", display:"block"}}>📤 Загрузить из Excel<input type="file" accept=".xlsx" style={{display:"none"}} onChange={e => { if (e.target.files && e.target.files[0]) importFeedXlsx(feed.account_id, e.target.files[0]); }} /></label>
-                            <button className="boris-btn-hover" onClick={() => importActiveFromAvito(feed.account_id)} style={{background:"#FFFFFF", color:"#B54708", border:"1px solid #FEDF89", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>📥 Выгрузить активные с Avito</button>
+                          <div className="boris-f2-312dfe557de1">
+                            <Button className="boris-btn-hover boris-f2-d5cc3fa75958" onClick={() => copyFeedUrl(feed.feed_url)}>📋 Копировать ссылку</Button>
+                            <Button className="boris-btn-hover" onClick={checkFeedValidation} disabled={feedCheckLoading} style={{background: feedCheckLoading ? "#C9D2E3" : "var(--boris-blue)", color:"var(--boris-surface)", border:"none", borderRadius:"10px", padding:"8px 14px", cursor: feedCheckLoading ? "default" : "pointer", fontSize:"14px", fontWeight:"bold"}}>{feedCheckLoading ? "⏳ Проверяю..." : "✅ Проверить фид"}</Button>
+                            <Button className="boris-btn-hover boris-f2-71e7f8a2c363" onClick={() => checkFeed(feed.feed_url)} title="Скопировать ссылку и открыть валидатор Avito вручную">🔗 Проверить на Avito</Button>
+                            <Button className="boris-btn-hover boris-f2-1679a09dd622" onClick={() => sendFeedToAvito(feed.account_id)}>🚀 Отправить в Avito</Button>
+                            <Button className="boris-btn-hover boris-f2-a3c00bb6a8be" onClick={() => { if (openedFeedAccount === feed.account_id) { setOpenedFeedAccount(null); } else { setFeedTab("feed"); loadFeedItemsFull(feed.account_id); loadActiveItems(feed.account_id); } }}>✏️ Редактировать объявления</Button>
+                            <Button className="boris-btn-hover boris-f2-c92397afccee" onClick={() => exportFeedXlsx(feed.account_id)}>📥 Выгрузить в Excel</Button>
+                            <label className="boris-btn-hover boris-f2-93e9d9650a1f">📤 Загрузить из Excel<input type="file" accept=".xlsx" onChange={e => { if (e.target.files && e.target.files[0]) importFeedXlsx(feed.account_id, e.target.files[0]); }}  className="boris-f2-c8be1ccba60b"/></label>
+                            <Button className="boris-btn-hover boris-f2-8fb43e47aa0e" onClick={() => importActiveFromAvito(feed.account_id)}>📥 Выгрузить активные с Avito</Button>
                           </div>
                         </div>
                         {openedFeedAccount === feed.account_id && (
-                          <div style={{marginTop:"16px", borderTop:"1px solid #E3E7F0", paddingTop:"16px"}}>
-                            <div style={{display:"flex", gap:"8px", marginBottom:"14px"}}>
-                              <button className="boris-btn-hover" onClick={() => setFeedTab("feed")} style={{background: feedTab === "feed" ? "#2F6FED" : "#FFFFFF", color: feedTab === "feed" ? "#FFFFFF" : "#667085", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>📤 Мой фид ({feedItemsFull.length})</button>
-                              <button className="boris-btn-hover" onClick={() => { setFeedTab("active"); loadActiveItems(feed.account_id); }} style={{background: feedTab === "active" ? "#2F6FED" : "#FFFFFF", color: feedTab === "active" ? "#FFFFFF" : "#667085", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>📥 Активные на Avito ({activeItems.length})</button>
-                              <button className="boris-btn-hover" onClick={() => setFeedTab("schedule")} style={{background: feedTab === "schedule" ? "#2F6FED" : "#FFFFFF", color: feedTab === "schedule" ? "#FFFFFF" : "#667085", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>🕐 Расписание</button>
+                          <div className="boris-f2-be866ac5fc0e">
+                            <div className="boris-f2-f94566b02aa1">
+                              <Button className="boris-btn-hover" onClick={() => setFeedTab("feed")} style={{background: feedTab === "feed" ? "var(--boris-blue)" : "var(--boris-surface)", color: feedTab === "feed" ? "var(--boris-surface)" : "var(--boris-text-2)", border:"1px solid var(--boris-border)", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>📤 Мой фид ({feedItemsFull.length})</Button>
+                              <Button className="boris-btn-hover" onClick={() => { setFeedTab("active"); loadActiveItems(feed.account_id); }} style={{background: feedTab === "active" ? "var(--boris-blue)" : "var(--boris-surface)", color: feedTab === "active" ? "var(--boris-surface)" : "var(--boris-text-2)", border:"1px solid var(--boris-border)", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>📥 Активные на Avito ({activeItems.length})</Button>
+                              <Button className="boris-btn-hover" onClick={() => setFeedTab("schedule")} style={{background: feedTab === "schedule" ? "var(--boris-blue)" : "var(--boris-surface)", color: feedTab === "schedule" ? "var(--boris-surface)" : "var(--boris-text-2)", border:"1px solid var(--boris-border)", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"14px", fontWeight:"bold"}}>🕐 Расписание</Button>
                             </div>
                             {feedTab === "schedule" && (
-                              <div className="b-panel b-card-eq" style={{marginBottom:"16px"}}>
-                                <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #98A2B3, #667085)"}}>🕐</span>Расписание публикаций</h3>
+                              <BorisCard className="b-panel b-card-eq boris-f2-79a1c5a5db96 boris-g1-card">
+                                <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-0f591da89e9c boris-g1-icon">🕐</span>Расписание публикаций</h3>
 
-                                <div style={{background:"#FFFAEB", border:"1px solid #FEC84B", borderRadius:"10px", padding:"14px", marginBottom:"18px", fontSize:"14px", color:"#B54708"}}>
-                                  <b>Автозапуск по расписанию пока не подключён.</b><br/>
-                                  Ежедневная публикация «сама по себе» в разработке. Сейчас доступно разовое планирование пачки — объявления уйдут на Avito с указанной даты и интервалом.
+                                <div className="boris-f2-ccc494ba7417">
+                                  <b>Отложенный старт подключён к реальному фиду Avito.</b><br/>
+                                  Выберите объявления, дату и интервал. BORIS запишет для каждого объявления DateBegin и часовой пояс; Avito начнёт публикацию не раньше назначенного времени. Повторяющееся ежедневное правило не включается без отдельного решения владельца.
                                 </div>
 
-                                <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(160px, 1fr))", gap:"14px", marginBottom:"16px"}}>
+                                <div className="boris-f2-a4205867d71a">
                                   <div>
                                     <div className="b-label">Дата старта</div>
-                                    <input type="date" value={bulkStartDate} onChange={e => setBulkStartDate(e.target.value)} style={{width:"100%", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"8px", fontSize:"15px"}} />
+                                    <input type="date" value={bulkStartDate} onChange={e => setBulkStartDate(e.target.value)}  className="boris-f2-7b9b1c880bd1"/>
                                   </div>
                                   <div>
                                     <div className="b-label">Время старта</div>
-                                    <input type="time" value={bulkStartTime} onChange={e => setBulkStartTime(e.target.value)} style={{width:"100%", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"8px", fontSize:"15px"}} />
+                                    <input type="time" value={bulkStartTime} onChange={e => setBulkStartTime(e.target.value)}  className="boris-f2-7b9b1c880bd1"/>
                                   </div>
                                   <div>
                                     <div className="b-label">Интервал, мин</div>
-                                    <input type="number" value={bulkInterval} onChange={e => setBulkInterval(Number(e.target.value))} style={{width:"100%", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"8px", fontSize:"15px"}} />
+                                    <input type="number" value={Number(bulkInterval) === 0 ? "" : bulkInterval} onChange={e => setBulkInterval(Number(e.target.value))}  className="boris-f2-7b9b1c880bd1"/>
                                   </div>
                                 </div>
 
-                                <p style={{color:"#667085", fontSize:"14px", marginBottom:"14px"}}>Интервал между объявлениями нужен, чтобы Avito не увидел массовую загрузку — публикация растягивается во времени.</p>
+                                <p className="boris-f2-68a14f8ea8e2">Интервал между объявлениями нужен, чтобы Avito не увидел массовую загрузку — публикация растягивается во времени.</p>
 
-                                <button className="boris-btn-hover" onClick={applyBulkSchedule} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"10px 18px", cursor:"pointer", fontWeight:"bold", fontSize:"15px"}}>🕐 Применить к выбранным</button>
-                              </div>
+                                <Button className="boris-btn-hover boris-f2-bc6d4c47a0a0" onClick={applyBulkSchedule}>🕐 Применить к выбранным</Button>
+                              </BorisCard>
                             )}
 
                             {feedTab !== "schedule" && (feedTab === "feed" ? (
-                              feedItemsLoading ? <div style={{color:"#667085"}}>Загрузка объявлений...</div> : (
-                              <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
-                                <div style={{fontSize:"13px", color:"#8A93A6", marginBottom:"4px"}}>Объявления, которые Борис создал и отдаёт на автозагрузку Avito.</div>
+                              feedItemsLoading ? <div className="boris-f2-de52905d633b">Загрузка объявлений...</div> : (
+                              <div className="boris-f2-f67b86e0fb4c">
+                                <div className="boris-f2-ce3c551df9d5">Объявления, которые Борис создал и отдаёт на автозагрузку Avito.</div>
                                 {feedItemsFull.map((it, k) => (
-                                  <div key={k} style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:"10px", background:"#F6F7FB", borderRadius:"8px", padding:"10px 14px", flexWrap:"wrap"}}>
-                                    <div style={{flex:"1 1 300px", minWidth:0}}>
-                                      <div style={{fontSize:"14px", color:"#1D2939", fontWeight:"600", overflow:"hidden", textOverflow:"ellipsis"}}>{it.title}</div>
-                                      <div style={{fontSize:"13px", color:"#667085"}}>{it.price} ₽ · {it.address}</div>
+                                  <div key={k} className="boris-f2-2c5ebcda333d">
+                                    <div className="boris-f2-e2f828e3f89e">
+                                      <div className="boris-f2-56da0241e9ee">{it.title}</div>
+                                      <div className="boris-f2-6c2427e9980a">{it.price} ₽ · {it.address}</div>
                                     </div>
-                                    <div style={{display:"flex", gap:"6px"}}>
-                                      <button className="boris-btn-hover" onClick={() => { setEditingFeedItem({...it}); loadFeedPhotoGallery(feed.account_id); loadTextTemplates(feed.account_id); }} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"13px"}}>✏️ Править</button>
-                                      <button className="boris-btn-hover" onClick={() => deleteFeedItem(feed.account_id, it.id)} style={{background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"13px"}}>🗑</button>
+                                    <div className="boris-f2-1d8943fa86ea">
+                                      <Button className="boris-btn-hover boris-f2-e554ba5154c3" onClick={() => { setEditingFeedItem({...it}); loadFeedPhotoGallery(feed.account_id); loadTextTemplates(feed.account_id); }}>✏️ Править</Button>
+                                      <Button className="boris-btn-hover boris-f2-9557399d8149" onClick={() => deleteFeedItem(feed.account_id, it.id)}>🗑</Button>
                                     </div>
                                   </div>
                                 ))}
-                                {feedItemsFull.length === 0 && <div style={{color:"#667085"}}>Нет объявлений в фиде</div>}
+                                {feedItemsFull.length === 0 && <div className="boris-f2-de52905d633b">Нет объявлений в фиде</div>}
                               </div>
                               )
                             ) : (
-                              activeLoading ? <div style={{color:"#667085"}}>Загрузка активных...</div> : (
-                              <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
-                                <details style={{marginBottom:"14px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Подробнее</summary><div style={{fontSize:"13px", color:"#8A93A6", marginBottom:"4px"}}>Объявления, которые уже опубликованы и живут на Avito (включая старые). Нажми «📥 Выгрузить активные с Avito» на карточке, чтобы обновить список.</div></details>
+                              activeLoading ? <div className="boris-f2-de52905d633b">Загрузка активных...</div> : (
+                              <div className="boris-f2-f67b86e0fb4c">
+                                <details className="boris-f2-a82d7062cc5e"><summary className="boris-f2-c0e3ed53fc0c">Подробнее</summary><div className="boris-f2-ce3c551df9d5">Объявления, которые уже опубликованы и живут на Avito (включая старые). Нажми «📥 Выгрузить активные с Avito» на карточке, чтобы обновить список.</div></details>
                                 {activeItems.map((it, k) => (
-                                  <div key={k} style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:"10px", background:"#FFF7ED", borderRadius:"8px", padding:"10px 14px", flexWrap:"wrap", border:"1px solid #FEDF89"}}>
-                                    <div style={{flex:"1 1 300px", minWidth:0}}>
-                                      <div style={{fontSize:"14px", color:"#1D2939", fontWeight:"600", overflow:"hidden", textOverflow:"ellipsis"}}>{it.title}</div>
-                                      <div style={{fontSize:"13px", color:"#667085"}}>{it.price} ₽ · {it.address}</div>
+                                  <div key={k} className="boris-f2-b47ca5a64610">
+                                    <div className="boris-f2-e2f828e3f89e">
+                                      <div className="boris-f2-56da0241e9ee">{it.title}</div>
+                                      <div className="boris-f2-6c2427e9980a">{it.price} ₽ · {it.address}</div>
                                     </div>
-                                    <div style={{display:"flex", gap:"6px"}}>
-                                      {it.avito_url && <a href={it.avito_url} target="_blank" rel="noreferrer" style={{textDecoration:"none", background:"#FFFFFF", color:"#B54708", border:"1px solid #FEDF89", borderRadius:"6px", padding:"6px 12px", fontSize:"13px"}}>🔗 На Avito</a>}
-                                      <button className="boris-btn-hover" onClick={() => { setEditingFeedItem({...it}); loadFeedPhotoGallery(feed.account_id); }} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"13px"}}>✏️ Править</button>
+                                    <div className="boris-f2-1d8943fa86ea">
+                                      {it.avito_url && <a href={it.avito_url} target="_blank" rel="noreferrer" className="boris-f2-c59e275a49dc">🔗 На Avito</a>}
+                                      <Button className="boris-btn-hover boris-f2-e554ba5154c3" onClick={() => { setEditingFeedItem({...it}); loadFeedPhotoGallery(feed.account_id); }}>✏️ Править</Button>
                                     </div>
                                   </div>
                                 ))}
-                                {activeItems.length === 0 && <div style={{color:"#667085"}}>Активных объявлений пока нет. Нажми «📥 Выгрузить активные с Avito».</div>}
+                                {activeItems.length === 0 && <div className="boris-f2-de52905d633b">Активных объявлений пока нет. Нажми «📥 Выгрузить активные с Avito».</div>}
                               </div>
                               )
                             ))}
@@ -5787,146 +5989,146 @@ export default function Home() {
                         )}
                       </div>
                     ))}
-                    {allFeeds.length === 0 && <div style={{color:"#667085"}}>Фиды не найдены</div>}
+                    {allFeeds.length === 0 && <div className="boris-f2-de52905d633b">Фиды не найдены</div>}
                   </div>
                 )}
               </div>
             )}
             {feedCheckResult && (
-              <div onClick={() => setFeedCheckResult(null)} style={{position:"fixed", inset:0, background:"rgba(16,24,40,0.5)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:3500, padding:"20px"}}>
-                <div onClick={e => e.stopPropagation()} style={{background:"#FFFFFF", borderRadius:"16px", padding:"24px", maxWidth:"700px", width:"100%", maxHeight:"80vh", overflowY:"auto", boxShadow:"0 12px 40px rgba(16,24,40,0.2)"}}>
-                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"12px"}}>
-                    <div style={{fontSize:"18px", fontWeight:"bold", color:"#1D2939"}}>
+              <div onClick={() => setFeedCheckResult(null)} className="boris-f2-fb012a6f23e1">
+                <div onClick={e => e.stopPropagation()} className="boris-f2-0ad877afc111">
+                  <div className="boris-f2-bebbec744221">
+                    <div className="boris-f2-6d20d2d2002c">
                       {feedCheckResult.status === "ok" ? "✅ Фид корректен" : feedCheckResult.status === "errors" ? "⚠️ Найдены ошибки" : "❌ Ошибка проверки"}
                     </div>
-                    <button onClick={() => setFeedCheckResult(null)} style={{background:"#FFFFFF", border:"none", fontSize:"24px", cursor:"pointer", color:"#2F6FED"}}>×</button>
+                    <Button onClick={() => setFeedCheckResult(null)} className="boris-f2-ff3ab6a95f75">×</Button>
                   </div>
-                  <div style={{fontSize:"13px", color:"#475467", whiteSpace:"pre-line", lineHeight:"1.6", fontFamily:"monospace", background:"#F9FAFB", borderRadius:"8px", padding:"14px"}}>
+                  <div className="boris-f2-d34e32a1d8f7">
                     {feedCheckResult.raw_text || "Нет данных"}
                   </div>
                 </div>
               </div>
             )}
 {addPhotoDraftId && (
-              <div onClick={() => setAddPhotoDraftId(null)} style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.6)", zIndex:9999, display:"flex", alignItems:"center", justifyContent:"center"}}>
-                <div onClick={e => e.stopPropagation()} style={{background:"#fff", borderRadius:"12px", padding:"20px", maxWidth:"760px", maxHeight:"80vh", overflowY:"auto", width:"90%"}}>
-                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"14px"}}>
-                    <span style={{fontSize:"17px", fontWeight:"bold", color:"#1D2939"}}>Выберите фото для добавления</span>
-                    <button onClick={() => setAddPhotoDraftId(null)} style={{background:"none", border:"none", fontSize:"22px", cursor:"pointer", color:"#667085"}}>×</button>
+              <div onClick={() => setAddPhotoDraftId(null)} className="boris-f2-3d1c6967b48f">
+                <div onClick={e => e.stopPropagation()} className="boris-f2-f51ba28ba993">
+                  <div className="boris-f2-a794b88522b7">
+                    <span className="boris-f2-df3d5e383a28">Выберите фото для добавления</span>
+                    <Button onClick={() => setAddPhotoDraftId(null)} className="boris-f2-a3baf4f66eda">×</Button>
                   </div>
-                  {Object.keys(accountPhotos).length === 0 && <p style={{color:"#667085"}}>Нет загруженных фото у аккаунта.</p>}
+                  {Object.keys(accountPhotos).length === 0 && <p className="boris-f2-de52905d633b">Нет загруженных фото у аккаунта.</p>}
                   {Object.entries(accountPhotos).map(([folder, imgs]: [string, any]) => (
-                    <div key={folder} style={{marginBottom:"16px"}}>
-                      <div style={{fontSize:"14px", fontWeight:"bold", color:"#7C5CFC", marginBottom:"8px"}}>{folder} ({imgs.length})</div>
-                      <div style={{display:"flex", flexWrap:"wrap", gap:"8px"}}>
+                    <div key={folder} className="boris-f2-79a1c5a5db96">
+                      <div className="boris-f2-60d0bb245376">{folder} ({imgs.length})</div>
+                      <div className="boris-f2-eee7876950a8">
                         {imgs.map((img: string, i: number) => (
-                          <img key={i} src={img.startsWith("http") ? img : ("https://boris-ai.pro" + img)} alt="" onClick={() => addPhotoToDraft(img)} style={{width:"72px", height:"72px", objectFit:"cover", borderRadius:"8px", border:"1px solid #E3E7F0", cursor:"pointer"}} title="Нажмите чтобы добавить" />
+                          <img key={i} src={img.startsWith("http") ? img : ("https://boris-ai.pro" + img)} alt="" onClick={() => addPhotoToDraft(img)} title="Нажмите чтобы добавить"  className="boris-f2-fb0da273abb6"/>
                         ))}
                       </div>
                     </div>
                   ))}
-                  <p style={{fontSize:"13px", color:"#8A93A6", marginTop:"8px"}}>Нажмите на фото — оно добавится в объявление. Окно можно закрыть крестиком.</p>
+                  <p className="boris-f2-e02d3ab73921">Нажмите на фото — оно добавится в объявление. Окно можно закрыть крестиком.</p>
                 </div>
               </div>
             )}
             {lightboxImage && (
-              <div onClick={() => setLightboxImage(null)} style={{position:"fixed", inset:0, background:"rgba(10,14,20,0.92)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:3000, padding:"30px", cursor:"zoom-out"}}>
-                <button onClick={() => setLightboxImage(null)} style={{position:"absolute", top:"20px", right:"30px", background:"#FFFFFF", border:"none", color:"#fff", fontSize:"32px", cursor:"pointer"}}>×</button>
+              <div onClick={() => setLightboxImage(null)} className="boris-f2-d27f9b35595c">
+                <Button onClick={() => setLightboxImage(null)} className="boris-f2-9a58eb4feb71">×</Button>
                 {lightboxGallery.length > 1 && (
-                  <button onClick={e => { e.stopPropagation(); const ni = (lightboxIdx - 1 + lightboxGallery.length) % lightboxGallery.length; setLightboxIdx(ni); setLightboxImage(lightboxGallery[ni]); }}
-                    style={{position:"absolute", left:"20px", background:"rgba(255,255,255,0.15)", border:"none", color:"#fff", fontSize:"28px", cursor:"pointer", borderRadius:"50%", width:"44px", height:"44px"}}>‹</button>
+                  <Button onClick={e => { e.stopPropagation(); const ni = (lightboxIdx - 1 + lightboxGallery.length) % lightboxGallery.length; setLightboxIdx(ni); setLightboxImage(lightboxGallery[ni]); }}
+ className="boris-f2-2cab23b778df">‹</Button>
                 )}
-                <img src={lightboxImage} alt="Просмотр" style={{maxWidth:"90vw", maxHeight:"90vh", objectFit:"contain", borderRadius:"8px"}} onClick={e => e.stopPropagation()} />
+                <img src={lightboxImage} alt="Просмотр" onClick={e => e.stopPropagation()}  className="boris-f2-dbdf60aedc4f"/>
                 {lightboxGallery.length > 1 && (
-                  <button onClick={e => { e.stopPropagation(); const ni = (lightboxIdx + 1) % lightboxGallery.length; setLightboxIdx(ni); setLightboxImage(lightboxGallery[ni]); }}
-                    style={{position:"absolute", right:"20px", background:"rgba(255,255,255,0.15)", border:"none", color:"#fff", fontSize:"28px", cursor:"pointer", borderRadius:"50%", width:"44px", height:"44px"}}>›</button>
+                  <Button onClick={e => { e.stopPropagation(); const ni = (lightboxIdx + 1) % lightboxGallery.length; setLightboxIdx(ni); setLightboxImage(lightboxGallery[ni]); }}
+ className="boris-f2-45f336d638b3">›</Button>
                 )}
-                {lightboxGallery.length > 1 && <div style={{position:"absolute", bottom:"20px", color:"#fff", fontSize:"13px"}}>{lightboxIdx + 1} / {lightboxGallery.length}</div>}
+                {lightboxGallery.length > 1 && <div className="boris-f2-b56e479aa0ed">{lightboxIdx + 1} / {lightboxGallery.length}</div>}
               </div>
             )}
             {editingFeedItem && (
-              <div style={{position:"fixed", inset:0, background:"rgba(16,24,40,0.5)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000, padding:"20px"}} onClick={() => setEditingFeedItem(null)}>
-                <div style={{background:"#FFFFFF", borderRadius:"16px", padding:"24px", maxWidth:"600px", width:"100%", maxHeight:"85vh", overflowY:"auto"}} onClick={e => e.stopPropagation()}>
-                  <div style={{fontSize:"18px", fontWeight:"bold", color:"#2F6FED", marginBottom:"16px"}}>✏️ Редактирование объявления в фиде</div>
-                  <label style={{fontSize:"15px", color:"#667085", display:"block", marginBottom:"4px"}}>📋 Использовать шаблон (необязательно)</label>
-                  <select className="b-select" value={editingFeedItem.template_id || ""} onChange={e => applyTextTemplate(e.target.value)} style={{width:"100%", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px 14px", fontSize:"14px", marginBottom:"14px", boxSizing:"border-box", background:"#FFFFFF"}}>
+              <div onClick={() => setEditingFeedItem(null)} className="boris-f2-84a756efbb89">
+                <div onClick={e => e.stopPropagation()} className="boris-f2-014be6f5e8d0">
+                  <div className="boris-f2-f25d861bbc56">✏️ Редактирование объявления в фиде</div>
+                  <label className="boris-f2-fa9a6591c1c7">📋 Использовать шаблон (необязательно)</label>
+                  <select className="b-select boris-f2-8ccf51308a88" value={editingFeedItem.template_id || ""} onChange={e => applyTextTemplate(e.target.value)}>
                     <option value="">— Написать своё описание —</option>
                     {textTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
-                  <label style={{fontSize:"15px", color:"#667085", display:"block", marginBottom:"4px"}}>Заголовок</label>
-                  <input value={editingFeedItem.title} onChange={e => setEditingFeedItem({...editingFeedItem, title: e.target.value})} style={{width:"100%", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px 14px", fontSize:"15px", marginBottom:"14px", boxSizing:"border-box"}} />
-                  <label style={{fontSize:"15px", color:"#667085", display:"block", marginBottom:"4px"}}>Цена</label>
-                  <input type="number" value={editingFeedItem.price} onChange={e => setEditingFeedItem({...editingFeedItem, price: e.target.value})} style={{width:"180px", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px 14px", fontSize:"15px", marginBottom:"14px", boxSizing:"border-box"}} />
-                  <label style={{fontSize:"15px", color:"#667085", display:"block", marginBottom:"4px"}}>Описание</label>
-                  <div style={{display:"flex", gap:"4px", marginBottom:"6px", flexWrap:"wrap", position:"relative"}}>
-                    <button className="boris-btn-hover" onClick={() => feedWrap("<strong>", "</strong>", "жирный")} title="Жирный" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"5px 11px", cursor:"pointer", fontWeight:"bold", fontSize:"14px"}}>Ж</button>
-                    <button className="boris-btn-hover" onClick={() => feedWrap("<i>", "</i>", "курсив")} title="Курсив" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"5px 11px", cursor:"pointer", fontStyle:"italic", fontSize:"14px"}}>К</button>
-                    <button className="boris-btn-hover" onClick={() => feedInsert("\n1. \n2. \n3. ")} title="Нумерованный список" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"5px 11px", cursor:"pointer", fontSize:"14px"}}>1.</button>
-                    <button className="boris-btn-hover" onClick={() => feedInsert("\n• \n• \n• ")} title="Список точками" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"5px 11px", cursor:"pointer", fontSize:"14px"}}>•</button>
-                    <button className="boris-btn-hover" onClick={() => feedInsert("\n— \n— \n— ")} title="Список чёрточками" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"5px 11px", cursor:"pointer", fontSize:"14px"}}>—</button>
-                    <button className="boris-btn-hover" onClick={() => feedInsert("{вариант1|вариант2}")} title="Спинтакс уникализации" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"5px 11px", cursor:"pointer", fontSize:"14px", fontFamily:"monospace"}}>{"{|}"}</button>
-                    <button className="boris-btn-hover" onClick={() => setFeedEmojiOpen(v => !v)} title="Эмодзи" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"5px 11px", cursor:"pointer", fontSize:"14px"}}>😀</button>
+                  <label className="boris-f2-fa9a6591c1c7">Заголовок</label>
+                  <input value={editingFeedItem.title} onChange={e => setEditingFeedItem({...editingFeedItem, title: e.target.value})}  className="boris-f2-44b528d933b6"/>
+                  <label className="boris-f2-fa9a6591c1c7">Цена</label>
+                  <input type="number" value={Number(editingFeedItem.price) === 0 ? "" : editingFeedItem.price} onChange={e => setEditingFeedItem({...editingFeedItem, price: e.target.value})}  className="boris-f2-6ec949674c50"/>
+                  <label className="boris-f2-fa9a6591c1c7">Описание</label>
+                  <div className="boris-f2-e26d4e894c87">
+                    <Button className="boris-btn-hover boris-f2-0b7236213eae" onClick={() => feedWrap("<strong>", "</strong>", "жирный")} title="Жирный">Ж</Button>
+                    <Button className="boris-btn-hover boris-f2-9a79d12b10c1" onClick={() => feedWrap("<i>", "</i>", "курсив")} title="Курсив">К</Button>
+                    <Button className="boris-btn-hover boris-f2-ac4beb4fee69" onClick={() => feedInsert("\n1. \n2. \n3. ")} title="Нумерованный список">1.</Button>
+                    <Button className="boris-btn-hover boris-f2-ac4beb4fee69" onClick={() => feedInsert("\n• \n• \n• ")} title="Список точками">•</Button>
+                    <Button className="boris-btn-hover boris-f2-ac4beb4fee69" onClick={() => feedInsert("\n— \n— \n— ")} title="Список чёрточками">—</Button>
+                    <Button className="boris-btn-hover boris-f2-b01ad9e85d28" onClick={() => feedInsert("{вариант1|вариант2}")} title="Спинтакс уникализации">{"{|}"}</Button>
+                    <Button className="boris-btn-hover boris-f2-ac4beb4fee69" onClick={() => setFeedEmojiOpen(v => !v)} title="Эмодзи">😀</Button>
                     {feedEmojiOpen && (
-                      <div style={{position:"absolute", top:"38px", left:0, zIndex:10, background:"#FFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"8px", display:"flex", flexWrap:"wrap", gap:"4px", maxWidth:"320px", boxShadow:"0 4px 12px rgba(16,24,40,0.12)"}}>
+                      <div className="boris-f2-81464d48ce23">
                         {["📞","💬","✅","⭐","🔥","💰","🎁","📍","🚀","👍","❤️","🏆","⏰","📦","🛠","🔧","💡","🌟","✨","👉"].map((em, i) => (
-                          <button key={i} onClick={() => { feedInsert(em); setFeedEmojiOpen(false); }} style={{background:"#FFFFFF", border:"none", cursor:"pointer", fontSize:"20px", padding:"2px"}}>{em}</button>
+                          <Button key={i} onClick={() => { feedInsert(em); setFeedEmojiOpen(false); }} className="boris-f2-f6bc36703206">{em}</Button>
                         ))}
                       </div>
                     )}
                   </div>
-                  <textarea ref={feedDescRef} value={editingFeedItem.description} onChange={e => setEditingFeedItem({...editingFeedItem, description: e.target.value})} rows={10} style={{width:"100%", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px 14px", fontSize:"14px", fontFamily:"inherit", marginBottom:"16px", boxSizing:"border-box"}} />
-                  <label style={{fontSize:"15px", color:"#667085", display:"block", marginBottom:"6px"}}>📷 Фото объявления</label>
-                  <div style={{display:"flex", flexWrap:"wrap", gap:"8px", marginBottom:"10px"}}>
+                  <textarea ref={feedDescRef} value={editingFeedItem.description} onChange={e => setEditingFeedItem({...editingFeedItem, description: e.target.value})} rows={10}  className="boris-f2-8c3c0d892745"/>
+                  <label className="boris-f2-bba85c920562">📷 Фото объявления</label>
+                  <div className="boris-f2-91229c80749d">
                     {(editingFeedItem.images || []).map((url: string, idx: number) => (
-                      <div key={idx} style={{position:"relative", width:"70px", height:"70px"}}>
-                        <img src={url} style={{width:"70px", height:"70px", objectFit:"cover", borderRadius:"8px", border:"1px solid #E3E7F0"}} />
-                        <button onClick={() => removeFeedPhoto(idx)} style={{position:"absolute", top:"-6px", right:"-6px", background:"#FFFFFF", color:"#FFF", border:"1.5px solid #F04438", borderRadius:"50%", width:"20px", height:"20px", cursor:"pointer", fontSize:"12px", lineHeight:"1"}}>×</button>
+                      <div key={idx} className="boris-f2-c1638a7d8f0f">
+                        <img src={url}  className="boris-f2-8c32cf250d55"/>
+                        <Button onClick={() => removeFeedPhoto(idx)} className="boris-f2-2ac17bbe1147">×</Button>
                       </div>
                     ))}
-                    {(!editingFeedItem.images || editingFeedItem.images.length === 0) && <span style={{color:"#8A93A6", fontSize:"13px"}}>Фото нет</span>}
+                    {(!editingFeedItem.images || editingFeedItem.images.length === 0) && <span className="boris-f2-6774eea0e0db">Фото нет</span>}
                   </div>
-                  <div style={{display:"flex", gap:"6px", marginBottom:"16px", flexWrap:"wrap"}}>
-                    <label className="boris-btn-hover" style={{background:"#FFFFFF", color:"#2F6FED", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 12px", cursor:"pointer", fontSize:"15px"}}>📁 С компьютера<input type="file" accept="image/*" multiple style={{display:"none"}} onChange={e => { if (e.target.files && openedFeedAccount) uploadFeedPhoto(openedFeedAccount, e.target.files); }} /></label>
-                    <button className="boris-btn-hover" onClick={() => setFeedPhotoPickerOpen(feedPhotoPickerOpen === "banners" ? null : "banners")} style={{background:"#FFFFFF", color:"#7C5CFC", border:"1px solid #F0ECFF", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"13px"}}>🎨 Из баннеров ({feedPhotoGallery.banners.length})</button>
-                    <button className="boris-btn-hover" onClick={() => setFeedPhotoPickerOpen(feedPhotoPickerOpen === "images" ? null : "images")} style={{background:"#FFFFFF", color:"#7C5CFC", border:"1px solid #F0ECFF", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"13px"}}>🖼 Из картинок ({feedPhotoGallery.images.length})</button>
+                  <div className="boris-f2-3d775e0b2f0d">
+                    <label className="boris-btn-hover boris-f2-5f9a2de107aa">📁 С компьютера<input type="file" accept="image/*" multiple onChange={e => { if (e.target.files && openedFeedAccount) uploadFeedPhoto(openedFeedAccount, e.target.files); }}  className="boris-f2-c8be1ccba60b"/></label>
+                    <Button className="boris-btn-hover boris-f2-73e829628e6e" onClick={() => setFeedPhotoPickerOpen(feedPhotoPickerOpen === "banners" ? null : "banners")}>🎨 Из баннеров ({feedPhotoGallery.banners.length})</Button>
+                    <Button className="boris-btn-hover boris-f2-73e829628e6e" onClick={() => setFeedPhotoPickerOpen(feedPhotoPickerOpen === "images" ? null : "images")}>🖼 Из картинок ({feedPhotoGallery.images.length})</Button>
                   </div>
                   {feedPhotoPickerOpen && (
-                    <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(70px, 1fr))", gap:"6px", maxHeight:"200px", overflowY:"auto", marginBottom:"16px", padding:"8px", background:"#F6F7FB", borderRadius:"8px"}}>
+                    <div className="boris-f2-321e6c9c05fe">
                       {(feedPhotoPickerOpen === "banners" ? feedPhotoGallery.banners : feedPhotoGallery.images).map((url, k) => (
-                        <img key={k} src={url} onClick={() => addFeedPhoto(url)} style={{width:"100%", height:"70px", objectFit:"cover", borderRadius:"6px", cursor:"pointer", border:"1px solid #E3E7F0"}} title="Нажми чтобы добавить" />
+                        <img key={k} src={url} onClick={() => addFeedPhoto(url)} title="Нажми чтобы добавить"  className="boris-f2-cd9ef6f8d942"/>
                       ))}
-                      {(feedPhotoPickerOpen === "banners" ? feedPhotoGallery.banners : feedPhotoGallery.images).length === 0 && <span style={{color:"#8A93A6", fontSize:"13px"}}>Пусто</span>}
+                      {(feedPhotoPickerOpen === "banners" ? feedPhotoGallery.banners : feedPhotoGallery.images).length === 0 && <span className="boris-f2-6774eea0e0db">Пусто</span>}
                     </div>
                   )}
-                  <div style={{display:"flex", gap:"10px"}}>
-                    <button className="boris-btn-hover" onClick={saveFeedItem} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"10px 20px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>✅ Сохранить в фид</button>
-                    <button className="boris-btn-hover" onClick={() => setEditingFeedItem(null)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"10px 20px", cursor:"pointer", fontSize:"15px"}}>Отмена</button>
+                  <div className="boris-f2-6b00e75351fc">
+                    <Button className="boris-btn-hover boris-f2-b808cb2238b2" onClick={saveFeedItem}>✅ Сохранить в фид</Button>
+                    <Button className="boris-btn-hover boris-f2-9e1b414cf8c3" onClick={() => setEditingFeedItem(null)}>Отмена</Button>
                   </div>
                 </div>
               </div>
             )}
             {listingFilter === "search" && (
               <input placeholder="🔍 Введите название объявления..." value={search} onChange={e => setSearch(e.target.value)}
-                style={{width:"100%", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"12px 16px", color:"#1D2939", fontSize:"23px", marginBottom:"16px", boxSizing:"border-box"}} />
+  className="boris-f2-32aa9058655f"/>
             )}
 
             {false && borisFeedItems.length > 0 && (
-              <div style={{background:"#E7EFFE", border:"1px solid #E7EFFE", borderRadius:"10px", padding:"16px", marginBottom:"20px"}}>
-                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"10px"}}>
-                  <div style={{color:"#1E4FBF", fontWeight:"bold", fontSize:"23px"}}>Объявления Бориса в фиде: {borisFeedItems.length}</div>
-                  <button className="boris-btn-hover" onClick={() => loadBorisFeedItems()} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"4px 10px", cursor:"pointer", fontSize:"15px"}}>🔄 Обновить</button>
+              <div className="boris-f2-be45403022f5">
+                <div className="boris-f2-40eee6f1a1fd">
+                  <div className="boris-f2-53b999dd27bc">Объявления Бориса в фиде: {borisFeedItems.length}</div>
+                  <Button className="boris-btn-hover boris-f2-529389c48629" onClick={() => loadBorisFeedItems()}>🔄 Обновить</Button>
                 </div>
-                <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"10px"}}>
+                <div className="boris-f2-9ade317dcdce">
                   Это объявления, уже готовые и сохранённые в фиде Бориса — они появятся выше как реальные объявления Avito, как только площадка обработает автозагрузку (обычно в течение часа).
                 </div>
-                <div style={{maxHeight:"200px", overflowY:"auto", display:"flex", flexDirection:"column", gap:"6px"}}>
+                <div className="boris-f2-b5121c37f248">
                   {borisFeedItems.slice(0, 20).map((it: any, i: number) => (
-                    <div key={i} style={{fontSize:"15px", color:"#667085", padding:"6px 10px", background:"#F6F7FB", borderRadius:"6px"}}>
-                      {it.title} — {it.price}₽ — {it.address} — <span style={{color:"#667085"}}>{it.category}</span>
+                    <div key={i} className="boris-f2-dc2b650a8739">
+                      {it.title} — {it.price}₽ — {it.address} — <span className="boris-f2-de52905d633b">{it.category}</span>
                     </div>
                   ))}
                   {borisFeedItems.length > 20 && (
-                    <div style={{fontSize:"15px", color:"#8A93A6", textAlign:"center", padding:"4px"}}>...и ещё {borisFeedItems.length - 20}</div>
+                    <div className="boris-f2-48ccb47b4e0a">...и ещё {borisFeedItems.length - 20}</div>
                   )}
                 </div>
               </div>
@@ -5934,103 +6136,103 @@ export default function Home() {
 
             {listingFilter === "feeds" || listingFilter === "templates_lib" ? null : listingFilter === "drafts" ? (
               <>
-                {draftsLoading ? <p style={{color:"#667085"}}>Загружаю черновики...</p> : draftItems.length === 0 ? (
-                  <p style={{color:"#667085", fontSize:"15px", background:"#F5FAFF", borderRadius:"8px", padding:"20px", textAlign:"center"}}>📭 Черновиков нет. Дайте Борису задачу в режиме черновика — они появятся здесь.</p>
+                {draftsLoading ? <p className="boris-f2-de52905d633b">Загружаю черновики...</p> : draftItems.length === 0 ? (
+                  <p className="boris-f2-943b91793f7d">📭 Черновиков нет. Дайте Борису задачу в режиме черновика — они появятся здесь.</p>
                 ) : (
                   <>
                     {draftBatchFilter && (
-                      <div style={{display:"flex", alignItems:"center", gap:"10px", background:"#F0ECFF", border:"1px solid #7C5CFC", borderRadius:"8px", padding:"10px 14px", marginBottom:"14px"}}>
-                        <span style={{fontSize:"14px", color:"#5B3FD9"}}>Показаны только результаты партии «{draftBatchFilter}»</span>
-                        <button className="boris-btn-hover" onClick={() => setDraftBatchFilter(null)} style={{marginLeft:"auto", background:"#FFFFFF", color:"#5B3FD9", border:"1px solid #7C5CFC", borderRadius:"10px", padding:"4px 10px", fontSize:"13px", cursor:"pointer"}}>Показать все</button>
+                      <div className="boris-f2-d0dfa8007342">
+                        <span className="boris-f2-b84f9c6fc10c">Показаны только результаты партии «{draftBatchFilter}»</span>
+                        <Button className="boris-btn-hover boris-f2-560e10b26cb6" onClick={() => setDraftBatchFilter(null)}>Показать все</Button>
                       </div>
                     )}
                     {(() => { const visibleDrafts = draftBatchFilter ? draftItems.filter((d: any) => d.batch_label === draftBatchFilter) : draftItems; return (
                     <>
-                    <div style={{display:"flex", flexWrap:"wrap", justifyContent:"space-between", alignItems:"center", marginBottom:"14px", gap:"10px"}}>
-                      <div style={{flexBasis:"100%", width:"100%", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"12px 14px", marginBottom:"4px", display:"flex", flexWrap:"wrap", gap:"10px", alignItems:"center"}}>
-                        <span style={{fontSize:"15px", fontWeight:"bold", color:"#1D2939"}}>📍 Публикация:</span>
-                        <input placeholder="Город (напр. Москва)" value={selectedCity} onChange={e=>{setSelectedCity(e.target.value); setBulkCities([]); setBulkMetro([]);}} style={{border:"1px solid #E3E7F0", borderRadius:"8px", padding:"6px 10px", fontSize:"15px", width:"170px"}} />
+                    <div className="boris-f2-a6136bab2a36">
+                      <div className="boris-f2-39ab2a622026">
+                        <span className="boris-f2-870a64560bdb">📍 Публикация:</span>
+                        <input placeholder="Город (напр. Москва)" value={selectedCity} onChange={e=>{setSelectedCity(e.target.value); setBulkCities([]); setBulkMetro([]);}}  className="boris-f2-bf71e9f7845e"/>
                         {metroData[selectedCity] && metroData[selectedCity].length>0 && (
-                          <button className="boris-btn-hover" onClick={selectAllMetroInCity} style={{background: bulkMetro.length>0 ? "#E7EFFE" : "#FFFFFF", color: bulkMetro.length>0 ? "#2F6FED" : "#667085", border:"1px solid #2F6FED", borderRadius:"8px", padding:"6px 12px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>🚇 Раскидать по районам {bulkMetro.length>0 ? `(${bulkMetro.length})` : `(${metroData[selectedCity].length} станций)`}</button>
+                          <Button className="boris-btn-hover" onClick={selectAllMetroInCity} style={{background: bulkMetro.length>0 ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: bulkMetro.length>0 ? "var(--boris-blue)" : "var(--boris-text-2)", border:"1px solid var(--boris-blue)", borderRadius:"8px", padding:"6px 12px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>🚇 Раскидать по районам {bulkMetro.length>0 ? `(${bulkMetro.length})` : `(${metroData[selectedCity].length} станций)`}</Button>
                         )}
-                        <span style={{fontSize:"14px", color:"#8A93A6"}}>|</span>
-                        <label style={{fontSize:"14px", color:"#667085"}}>📅 Дата:</label>
-                        <input type="date" value={publishDate} onChange={e=>setPublishDate(e.target.value)} style={{border:"1px solid #E3E7F0", borderRadius:"8px", padding:"6px 10px", fontSize:"15px"}} />
-                        <label style={{fontSize:"14px", color:"#667085"}}>🕐 Время:</label>
-                        <input type="time" value={publishTime} onChange={e=>setPublishTime(e.target.value)} style={{border:"1px solid #E3E7F0", borderRadius:"8px", padding:"6px 10px", fontSize:"15px"}} />
-                        <label style={{fontSize:"14px", color:"#667085"}}>🌍 Пояс:</label>
-                        <select value={publishTimezone} onChange={e=>setPublishTimezone(e.target.value)} style={{border:"1px solid #E3E7F0", borderRadius:"8px", padding:"6px 10px", fontSize:"15px"}}>
+                        <span className="boris-f2-e88a7eb51065">|</span>
+                        <label className="boris-f2-518c8acb87cd">📅 Дата:</label>
+                        <input type="date" value={publishDate} onChange={e=>setPublishDate(e.target.value)}  className="boris-f2-3f2dd663be85"/>
+                        <label className="boris-f2-518c8acb87cd">🕐 Время:</label>
+                        <input type="time" value={publishTime} onChange={e=>setPublishTime(e.target.value)}  className="boris-f2-3f2dd663be85"/>
+                        <label className="boris-f2-518c8acb87cd">🌍 Пояс:</label>
+                        <select value={publishTimezone} onChange={e=>setPublishTimezone(e.target.value)} className="boris-f2-3f2dd663be85">
                           {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
                         </select>
-                        {(bulkMetro.length>0 || bulkCities.length>0) && <span style={{fontSize:"13px", color:"#12B76A", fontWeight:"bold"}}>✓ адреса раскинутся по {bulkMetro.length>0 ? "районам" : "городам"}</span>}
+                        {(bulkMetro.length>0 || bulkCities.length>0) && <span className="boris-f2-6eb5926fb7af">✓ адреса раскинутся по {bulkMetro.length>0 ? "районам" : "городам"}</span>}
                       </div>
-                      <div style={{color:"#667085", fontSize:"15px"}}>Черновиков: {visibleDrafts.length}</div>
-                      <button className="boris-btn-hover" onClick={() => publishAllDrafts()} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"11px 20px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>✅ Опубликовать все ({draftItems.length})</button>
-                      <button className="boris-btn-hover" onClick={checkFeedValidation} disabled={feedCheckLoading}
-                        style={{background:"#7C5CFC", color:"#FFFFFF", border:"none", borderRadius:"8px", padding:"8px 14px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>
+                      <div className="boris-f2-96046ead62a3">Черновиков: {visibleDrafts.length}</div>
+                      <Button className="boris-btn-hover boris-f2-673cceaca701" onClick={() => publishAllDrafts()}>✅ Опубликовать все ({draftItems.length})</Button>
+                      <Button className="boris-btn-hover boris-f2-9f7abcd254bc" onClick={checkFeedValidation} disabled={feedCheckLoading}
+>
                         🔍 {feedCheckLoading ? "Проверяю (до минуты)..." : "Проверить фид"}
-                      </button>
-                      <button className="boris-btn-hover" onClick={applyPhotosToDrafts} disabled={draftPhotoLoading}
-                        style={{background:"#12B76A", color:"#FFFFFF", border:"none", borderRadius:"8px", padding:"8px 14px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>
+                      </Button>
+                      <Button className="boris-btn-hover boris-f2-89b3e059df62" onClick={applyPhotosToDrafts} disabled={draftPhotoLoading}
+>
                         🖼 {draftPhotoLoading ? "Добавляю фото..." : "Добавить фото/баннеры"}
-                      </button>
+                      </Button>
                     </div>
-                    <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:"12px"}}>
+                    <div className="boris-f2-4203436f0a4f">
                       {visibleDrafts.map((d: any) => (
-                        <div key={d.id} className="boris-card-hover" style={{background:"#FFFFFF", borderRadius:"10px", padding:"14px", border:"1px solid #EEF2FA", boxShadow:"0 1px 3px rgba(16,24,40,0.06)", display:"flex", flexDirection:"column"}}>
-                          <div style={{fontSize:"15px", color:"#7C5CFC", fontWeight:"bold", marginBottom:"6px"}}>{d.batch_label || "Без партии"}</div>
+                        <BorisCard key={d.id} className="boris-card-hover boris-f2-6e6bcbd330e1 boris-g1-card">
+                          <div className="boris-f2-31d4dc6ae00a">{d.batch_label || "Без партии"}</div>
                           {editingDraftId === d.id ? (
                             <>
-                              <input defaultValue={d.title} id={`draft-title-${d.id}`} style={{width:"100%", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 8px", fontSize:"15px", marginBottom:"6px", fontWeight:"bold"}} />
-                              <textarea defaultValue={d.description} id={`draft-desc-${d.id}`} rows={10} style={{width:"100%", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 8px", fontSize:"15px", marginBottom:"6px", fontFamily:"inherit", resize:"vertical", minHeight:"160px"}} />
-                              <input type="number" defaultValue={d.price} id={`draft-price-${d.id}`} style={{width:"100%", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 8px", fontSize:"15px", marginBottom:"8px"}} />
-                              <div style={{display:"flex", gap:"6px"}}>
-                                <button className="boris-btn-hover" onClick={() => {
+                              <input defaultValue={d.title} id={`draft-title-${d.id}`}  className="boris-f2-febd82c2c682"/>
+                              <textarea defaultValue={d.description} id={`draft-desc-${d.id}`} rows={10}  className="boris-f2-c04b76655525"/>
+                              <input type="number" defaultValue={Number(d.price) === 0 ? "" : d.price} id={`draft-price-${d.id}`}  className="boris-f2-76cbb7b6b669"/>
+                              <div className="boris-f2-1d8943fa86ea">
+                                <Button className="boris-btn-hover boris-f2-1f56e6c46d1d" onClick={() => {
                                     const title = (document.getElementById(`draft-title-${d.id}`) as HTMLInputElement)?.value;
                                     const description = (document.getElementById(`draft-desc-${d.id}`) as HTMLTextAreaElement)?.value;
                                     const price = Number((document.getElementById(`draft-price-${d.id}`) as HTMLInputElement)?.value);
                                     saveDraftEdit(d.id, { title, description, price });
-                                  }} style={{flex:1, background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"6px", padding:"6px", fontSize:"15px", cursor:"pointer", fontWeight:"bold"}}>Сохранить</button>
-                                <button className="boris-btn-hover" onClick={() => setEditingDraftId(null)} style={{flex:1, background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px", fontSize:"15px", cursor:"pointer"}}>Отмена</button>
+                                  }}>Сохранить</Button>
+                                <Button className="boris-btn-hover boris-f2-0661a736aa96" onClick={() => setEditingDraftId(null)}>Отмена</Button>
                               </div>
                             </>
                           ) : (
                             <>
-                              <div style={{fontSize:"15px", fontWeight:"bold", marginBottom:"6px", color:"#1D2939"}}>{d.title}</div>
+                              <div className="boris-f2-51f1c576d8c7">{d.title}</div>
                               {d.images && d.images.length > 0 && (
-                                <div style={{marginBottom:"8px"}}>
-                                  <div style={{display:"flex", gap:"4px", flexWrap:"wrap", alignItems:"center"}}>
+                                <div className="boris-f2-e4ad4a163b5e">
+                                  <div className="boris-f2-ead5ec20330b">
                                     {d.images.map((img: string, imgIdx: number) => (
-                                      <div key={imgIdx} draggable onDragStart={() => setDragPhoto({draftId: d.id, idx: imgIdx})} onDragOver={e => e.preventDefault()} onDrop={() => { if (dragPhoto && dragPhoto.draftId === d.id) { reorderDraftImages(d.id, dragPhoto.idx, imgIdx); setDragPhoto(null); } }} style={{position:"relative", width:"54px", height:"54px", cursor:"grab"}}>
-                                        <img src={img} alt="" onClick={() => { setLightboxGallery(d.images); setLightboxIdx(imgIdx); setLightboxImage(img); }} style={{width:"54px", height:"54px", objectFit:"cover", borderRadius:"6px", border: imgIdx===0 ? "2px solid #12B76A" : "1px solid #E3E7F0", cursor:"pointer"}} title={imgIdx===0 ? "Главное фото (баннер) — перетащите фото чтобы изменить порядок" : "Клик = увеличить · перетащите чтобы изменить порядок"} />
-                                        <button onClick={() => removeDraftImage(d.id, imgIdx)} style={{position:"absolute", top:"-6px", right:"-6px", width:"18px", height:"18px", borderRadius:"50%", background:"#F04438", color:"#fff", border:"none", fontSize:"11px", cursor:"pointer", lineHeight:"1", display:"flex", alignItems:"center", justifyContent:"center"}} title="Удалить фото">×</button>
+                                      <div key={imgIdx} draggable onDragStart={() => setDragPhoto({draftId: d.id, idx: imgIdx})} onDragOver={e => e.preventDefault()} onDrop={() => { if (dragPhoto && dragPhoto.draftId === d.id) { reorderDraftImages(d.id, dragPhoto.idx, imgIdx); setDragPhoto(null); } }} className="boris-f2-21206b6e251d">
+                                        <img src={img} alt="" onClick={() => { setLightboxGallery(d.images); setLightboxIdx(imgIdx); setLightboxImage(img); }} style={{width:"54px", height:"54px", objectFit:"cover", borderRadius:"6px", border: imgIdx===0 ? "2px solid #12B76A" : "1px solid var(--boris-border)", cursor:"pointer"}} title={imgIdx===0 ? "Главное фото (баннер) — перетащите фото чтобы изменить порядок" : "Клик = увеличить · перетащите чтобы изменить порядок"} />
+                                        <Button onClick={() => removeDraftImage(d.id, imgIdx)} title="Удалить фото" className="boris-f2-de83079c8b08">×</Button>
                                       </div>
                                     ))}
                                   </div>
-                                  <div style={{display:"flex", gap:"8px", alignItems:"center", marginTop:"4px"}}>
-                                    <span style={{fontSize:"12px", color:"#8A93A6"}}>🖼 {d.images.length} фото · зелёная рамка = главное · клик = увеличить</span>
-                                    <button onClick={() => openAddPhoto(d.id)} style={{background:"#EAF5EE", color:"#12B76A", border:"1px solid #12B76A", borderRadius:"6px", padding:"2px 8px", fontSize:"12px", cursor:"pointer", fontWeight:"bold"}}>+ фото</button>
+                                  <div className="boris-f2-1a5bd9156c8e">
+                                    <span className="boris-f2-b68dda3a3439">🖼 {d.images.length} фото · зелёная рамка = главное · клик = увеличить</span>
+                                    <Button onClick={() => openAddPhoto(d.id)} className="boris-f2-a228e6b86cc8">+ фото</Button>
                                   </div>
                                 </div>
                               )}
-                              <div style={{fontSize:"15px", color:"#667085", marginBottom:"8px", flex:1, display:"-webkit-box", WebkitLineClamp:3, WebkitBoxOrient:"vertical" as any, overflow:"hidden", maxHeight:"66px", lineHeight:"22px"}} dangerouslySetInnerHTML={{__html: (d.description || "")
+                              <div style={{fontSize:"15px", color:"var(--boris-text-2)", marginBottom:"8px", flex:1, display:"-webkit-box", WebkitLineClamp:3, WebkitBoxOrient:"vertical" as any, overflow:"hidden", maxHeight:"66px", lineHeight:"22px"}} dangerouslySetInnerHTML={{__html: (d.description || "")
                                 .replace(/</g, "&lt;").replace(/>/g, "&gt;")
-                                .replace(/&lt;strong&gt;/g, "<strong style='color:#1D2939'>").replace(/&lt;\/strong&gt;/g, "</strong>")
+                                .replace(/&lt;strong&gt;/g, "<strong style='color:var(--boris-text)'>").replace(/&lt;\/strong&gt;/g, "</strong>")
                                 .replace(/&lt;em&gt;/g, "<em>").replace(/&lt;\/em&gt;/g, "</em>")
                                 .replace(/&lt;ul&gt;/g, "<ul style='margin:6px 0;padding-left:18px'>").replace(/&lt;\/ul&gt;/g, "</ul>")
                                 .replace(/&lt;ol&gt;/g, "<ol style='margin:6px 0;padding-left:18px'>").replace(/&lt;\/ol&gt;/g, "</ol>")
                                 .replace(/&lt;li&gt;/g, "<li>").replace(/&lt;\/li&gt;/g, "</li>")
                                 .replace(/&lt;br\s*\/?&gt;/g, "<br>").replace(/&lt;p&gt;/g, "<p style='margin:6px 0'>").replace(/&lt;\/p&gt;/g, "</p>")
                               }} />
-                              <div style={{fontSize:"15px", fontWeight:"bold", color:"#2F6FED", marginBottom:"8px"}}>{d.price} ₽ <span style={{fontSize:"15px", color:"#8A93A6", fontWeight:"normal"}}>· {d.address}</span></div>
-                              <div style={{display:"flex", gap:"6px"}}>
-                                <button className="boris-btn-hover" onClick={() => publishDraft(d.id)} style={{flex:1, background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"7px", fontSize:"15px", cursor:"pointer", fontWeight:"bold"}}>✅ Опубликовать</button>
-                                <button className="boris-btn-hover" onClick={() => setEditingDraftId(d.id)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"7px 10px", fontSize:"15px", cursor:"pointer"}}>✏️</button>
-                                <button className="boris-btn-hover" onClick={() => deleteDraft(d.id)} style={{background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"7px 10px", fontSize:"15px", cursor:"pointer"}}>🗑</button>
+                              <div className="boris-f2-6e7a55f05fca">{d.price} ₽ <span className="boris-f2-13ea4796e6c5">· {d.address}</span></div>
+                              <div className="boris-f2-1d8943fa86ea">
+                                <Button className="boris-btn-hover boris-f2-35c57ca487ae" onClick={() => publishDraft(d.id)}>✅ Опубликовать</Button>
+                                <Button className="boris-btn-hover boris-f2-cd2e364b8a1f" onClick={() => setEditingDraftId(d.id)}>✏️</Button>
+                                <Button className="boris-btn-hover boris-f2-24a22e67b472" onClick={() => deleteDraft(d.id)}>🗑</Button>
                               </div>
                             </>
                           )}
-                        </div>
+                        </BorisCard>
                       ))}
                     </div>
                     </>
@@ -6039,53 +6241,53 @@ export default function Home() {
                 )}
               </>
             ) : listingFilter === null ? (
-              <div style={{textAlign:"center", padding:"60px 20px", color:"#8A93A6", fontSize:"16px", background:"#F9FAFC", borderRadius:"12px", border:"1px dashed #E3E7F0"}}>
+              <div className="boris-f2-287ac94afd35">
                 👆 Выберите фильтр выше («Все», «Активные», «Черновики» и т.д.), чтобы увидеть объявления
               </div>
             ) : (
               <>
             {listingFilter !== "feeds" && listingFilter !== "templates_lib" && (
-            <div style={{color:"#667085", fontSize:"15px", marginBottom:"16px", display:"flex", alignItems:"center", gap:"12px"}}>
+            <div className="boris-f2-4a7df0e4aae1">
               <span>Показано: {getFilteredItems().length} объявлений</span>
-              <button className="boris-btn-hover" onClick={() => setSelectedItemIds(new Set(getFilteredItems().map((it: any) => String(it.id))))} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"4px 10px", cursor:"pointer", fontSize:"15px"}}>☑ Выбрать все</button>
+              <Button className="boris-btn-hover boris-f2-529389c48629" onClick={() => setSelectedItemIds(new Set(getFilteredItems().map((it: any) => String(it.id))))}>☑ Выбрать все</Button>
               {selectedItemIds.size > 0 && (
-                <button className="boris-btn-hover" onClick={() => setSelectedItemIds(new Set())} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"4px 10px", cursor:"pointer", fontSize:"15px"}}>✕ Снять выбор</button>
+                <Button className="boris-btn-hover boris-f2-529389c48629" onClick={() => setSelectedItemIds(new Set())}>✕ Снять выбор</Button>
               )}
             </div>
             )}
 
-            {loading ? <p style={{color:"#667085"}}>Загружаю объявления...</p> : (
-              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(230px, 1fr))", gap:"12px"}}>
+            {loading ? <p className="boris-f2-de52905d633b">Загружаю объявления...</p> : (
+              <div className="boris-f2-60ff095509bd">
                 {getFilteredItems().map((item: any) => (
-                  <div key={item.id} className="boris-card-hover" style={{background:"#FFFFFF", borderRadius:"10px", padding:"14px", border: selectedItemIds.has(String(item.id)) ? "1px solid #2F6FED" : "1px solid #EEF2FA", boxShadow:"0 1px 3px rgba(16,24,40,0.06), 0 1px 2px rgba(16,24,40,0.04)", display:"flex", flexDirection:"column", height:"100%"}}>
-                    <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:"8px"}}>
-                      <div style={{fontSize:"15px", color:"#667085", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" as any, overflow:"hidden", minHeight:"24px", flex:1, marginRight:"6px"}}>📍 {item.address}</div>
-                      <input type="checkbox" checked={selectedItemIds.has(String(item.id))} onChange={() => toggleItemSelected(String(item.id))} style={{width:"18px", height:"18px", cursor:"pointer"}} />
+                  <BorisCard key={item.id} className="boris-card-hover boris-g1-card" style={{background:"var(--boris-surface)", borderRadius:"10px", padding:"14px", border: selectedItemIds.has(String(item.id)) ? "1px solid var(--boris-blue)" : "1px solid #EEF2FA", boxShadow:"0 1px 3px rgba(16,24,40,0.06), 0 1px 2px rgba(16,24,40,0.04)", display:"flex", flexDirection:"column", height:"100%"}}>
+                    <div className="boris-f2-8ca25de36f2d">
+                      <div style={{fontSize:"15px", color:"var(--boris-text-2)", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" as any, overflow:"hidden", minHeight:"24px", flex:1, marginRight:"6px"}}>📍 {item.address}</div>
+                      <input type="checkbox" checked={selectedItemIds.has(String(item.id))} onChange={() => toggleItemSelected(String(item.id))}  className="boris-f2-ccd87a40655a"/>
                     </div>
-                    <div style={{fontSize:"15px", fontWeight:"bold", marginBottom:"8px", color:"#1D2939"}}>{item.title}</div>
-                    <div style={{fontSize:"23px", color:"#2F6FED", fontWeight:"bold", marginBottom:"8px"}}>{item.price} ₽</div>
-                    <div style={{display:"flex", gap:"8px", marginBottom:"10px", fontSize:"15px", color:"#667085"}}>
+                    <div className="boris-f2-066e21f56938">{item.title}</div>
+                    <div className="boris-f2-6d4a0677cda9">{item.price} ₽</div>
+                    <div className="boris-f2-665cfdfa11bc">
                       <span>👁 {item.views || 0}</span>
                       <span>📞 {item.contacts || 0}</span>
                       <span>⭐ {item.favorites || 0}</span>
                       <span>📈 {item.conversion || 0}%</span>
                     </div>
-                    <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"8px"}}>
-                      <span style={{background: item.status === "active" ? "#E7EFFE" : "#FDEDEC", color: item.status === "active" ? "#1E4FBF" : "#F04438", padding:"3px 9px", borderRadius:"20px", fontSize:"15px"}}>
+                    <div className="boris-f2-5a9738ff9ea1">
+                      <span style={{background: item.status === "active" ? "var(--boris-blue-soft)" : "#FDEDEC", color: item.status === "active" ? "#1E4FBF" : "#F04438", padding:"3px 9px", borderRadius:"20px", fontSize:"15px"}}>
                         {item.status === "active" ? "✅ Активно" : "❌ Неактивно"}
                       </span>
-                      <a href={item.url} target="_blank" style={{color:"#2F6FED", fontSize:"15px", textDecoration:"none"}}>Открыть →</a>
+                      <a href={item.url} target="_blank" className="boris-f2-e9dd60ae5c61">Открыть →</a>
                     </div>
-                    <button className="boris-btn-hover" onClick={() => startDuplicate(item)}
-                      style={{width:"100%", background:"#FFFFFF", color:"#667085", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"6px", cursor:"pointer", fontSize:"15px", marginTop:"auto"}}>
+                    <Button className="boris-btn-hover boris-f2-595c9828687d" onClick={() => startDuplicate(item)}
+>
                       🔁 Дублировать
-                    </button>
+                    </Button>
                     {myBorisItems.some((mi: any) => mi.id === String(item.id)) && (
-                      <button className="boris-btn-hover" onClick={() => startEditItem(myBorisItems.find((mi: any) => mi.id === String(item.id)))} style={{marginTop:"8px", width:"100%", background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>
+                      <Button className="boris-btn-hover boris-f2-6f36e57a8101" onClick={() => startEditItem(myBorisItems.find((mi: any) => mi.id === String(item.id)))}>
                         ✏️ Править (опубликовано Борисом)
-                      </button>
+                      </Button>
                     )}
-                  </div>
+                  </BorisCard>
                 ))}
               </div>
             )}
@@ -6093,93 +6295,111 @@ export default function Home() {
             )}
 
             {duplicateEditingItem && (
-              <div style={{background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"24px", maxWidth:"600px"}}>
-                <button className="boris-btn-hover" onClick={() => setDuplicateEditingItem(null)} style={{background:"#FFFFFF", border:"none", color:"#2F6FED", cursor:"pointer", fontSize:"15px", marginBottom:"16px"}}>← Назад к списку</button>
-                <h3 style={{margin:"0 0 16px", fontSize:"15px"}}>🔁 Редактирование дубля</h3>
+              <div className="boris-f2-bdd984a5751f">
+                <Button className="boris-btn-hover boris-f2-28b7615c7757" onClick={() => setDuplicateEditingItem(null)}>← Назад к списку</Button>
+                <h3 className="boris-f2-f7fa2916028b">🔁 Редактирование дубля</h3>
 
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Заголовок</label>
+                <label className="boris-f2-5a0de0cf2264">Заголовок</label>
                 <input value={duplicateEditingItem.title} onChange={e => setDuplicateEditingItem((prev: any) => ({...prev, title: e.target.value}))}
-                  style={{width:"100%", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"23px", marginBottom:"16px", boxSizing:"border-box"}} />
+  className="boris-f2-939359cccc31"/>
 
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Описание</label>
-                <div style={{display:"flex", gap:"6px", marginBottom:"8px", flexWrap:"wrap", position:"relative"}}>
-                  <button className="boris-btn-hover" onClick={() => wrapDescriptionSelection("<strong>", "</strong>", "жирный текст")} title="Жирный" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>Ж</button>
-                  <button className="boris-btn-hover" onClick={() => wrapDescriptionSelection("<i>", "</i>", "курсив")} title="Курсив" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"15px", fontStyle:"italic"}}>К</button>
-                  <button className="boris-btn-hover" onClick={() => insertAtCursor("{вариант1|вариант2|вариант3}")} title="Спинтакс — оператор уникализации" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"15px", fontFamily:"monospace"}}>{"{ | }"}</button>
-                  <button className="boris-btn-hover" onClick={() => setShowEmojiPicker(v => !v)} title="Эмодзи" style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"15px"}}>😀</button>
+                <label className="boris-f2-5a0de0cf2264">Описание</label>
+                <div className="boris-f2-c6e850aae20c">
+                  <Button className="boris-btn-hover boris-f2-11562b2a9997" onClick={() => wrapDescriptionSelection("<strong>", "</strong>", "жирный текст")} title="Жирный">Ж</Button>
+                  <Button className="boris-btn-hover boris-f2-bfd4c449ecab" onClick={() => wrapDescriptionSelection("<i>", "</i>", "курсив")} title="Курсив">К</Button>
+                  <Button className="boris-btn-hover boris-f2-53aec12f80a4" onClick={() => insertAtCursor("{вариант1|вариант2|вариант3}")} title="Спинтакс — оператор уникализации">{"{ | }"}</Button>
+                  <Button className="boris-btn-hover boris-f2-bbb6b8ff2463" onClick={() => setShowEmojiPicker(v => !v)} title="Эмодзи">😀</Button>
                   {showEmojiPicker && (
-                    <div style={{position:"absolute", top:"36px", left:0, zIndex:10, background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"8px", display:"flex", gap:"4px", flexWrap:"wrap", maxWidth:"280px"}}>
+                    <div className="boris-f2-565d6626d267">
                       {AD_EMOJIS.map(e => (
-                        <button className="boris-btn-hover" key={e} onClick={() => { insertAtCursor(e); setShowEmojiPicker(false); }} style={{background:"#FFFFFF", border:"none", cursor:"pointer", fontSize:"23px", padding:"4px"}}>{e}</button>
+                        <Button className="boris-btn-hover boris-f2-b201388b836a" key={e} onClick={() => { insertAtCursor(e); setShowEmojiPicker(false); }}>{e}</Button>
                       ))}
                     </div>
                   )}
                 </div>
                 <textarea ref={descTextareaRef} value={duplicateEditingItem.description} onChange={e => setDuplicateEditingItem((prev: any) => ({...prev, description: e.target.value}))}
-                  rows={5} style={{width:"100%", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"23px", marginBottom:"16px", boxSizing:"border-box", resize:"vertical"}} />
+                  rows={5}  className="boris-f2-f9fe8a11aca2"/>
 
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Цена (₽)</label>
-                <input type="number" value={duplicateEditingItem.price} onChange={e => setDuplicateEditingItem((prev: any) => ({...prev, price: Number(e.target.value)}))}
-                  style={{width:"100%", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"23px", marginBottom:"20px", boxSizing:"border-box"}} />
+                <label className="boris-f2-5a0de0cf2264">Цена (₽)</label>
+                <input type="number" value={Number(duplicateEditingItem.price) === 0 ? "" : duplicateEditingItem.price} onChange={e => setDuplicateEditingItem((prev: any) => ({...prev, price: Number(e.target.value)}))}
+  className="boris-f2-ab147b296c0e"/>
 
-                <div style={{display:"flex", gap:"8px", marginBottom:"10px"}}>
-                  <button className="boris-btn-hover" onClick={() => setRewriteEngine("gigachat")} style={{flex:1, background: rewriteEngine === "gigachat" ? "#2F6FED" : "#FFFFFF", color: rewriteEngine === "gigachat" ? "#F6F7FB" : "#667085", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"8px", cursor:"pointer", fontSize:"15px", fontWeight: rewriteEngine === "gigachat" ? "bold" : "normal"}}>Копирайтер Стандарт</button>
-                  <button className="boris-btn-hover" onClick={() => setRewriteEngine("chatgpt")} style={{flex:1, background: rewriteEngine === "chatgpt" ? "#2F6FED" : "#FFFFFF", color: rewriteEngine === "chatgpt" ? "#F6F7FB" : "#667085", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"8px", cursor:"pointer", fontSize:"15px", fontWeight: rewriteEngine === "chatgpt" ? "bold" : "normal"}}>Копирайтер Премиум</button>
+                <div className="boris-f2-bd7a6315938c">
+                  <Button className="boris-btn-hover" onClick={() => setRewriteEngine("gigachat")} style={{flex:1, background: rewriteEngine === "gigachat" ? "var(--boris-blue)" : "var(--boris-surface)", color: rewriteEngine === "gigachat" ? "var(--boris-bg)" : "var(--boris-text-2)", border:"1px solid var(--boris-border)", borderRadius:"10px", padding:"8px", cursor:"pointer", fontSize:"15px", fontWeight: rewriteEngine === "gigachat" ? "bold" : "normal"}}>Копирайтер Стандарт</Button>
+                  <Button className="boris-btn-hover" onClick={() => setRewriteEngine("chatgpt")} style={{flex:1, background: rewriteEngine === "chatgpt" ? "var(--boris-blue)" : "var(--boris-surface)", color: rewriteEngine === "chatgpt" ? "var(--boris-bg)" : "var(--boris-text-2)", border:"1px solid var(--boris-border)", borderRadius:"10px", padding:"8px", cursor:"pointer", fontSize:"15px", fontWeight: rewriteEngine === "chatgpt" ? "bold" : "normal"}}>Копирайтер Премиум</Button>
                 </div>
-                <label style={{display:"flex", alignItems:"center", gap:"10px", marginBottom:"10px", cursor:"pointer", color:"#475467", fontSize:"15px"}}>
-                  <input type="checkbox" checked={forceIncludeVariants} onChange={e => setForceIncludeVariants(e.target.checked)} style={{width:"16px", height:"16px", cursor:"pointer"}} />
+                <label className="boris-f2-81ab6a503433">
+                  <input type="checkbox" checked={forceIncludeVariants} onChange={e => setForceIncludeVariants(e.target.checked)}  className="boris-f2-16a162db1be5"/>
                   🎨 Принудительно добавить блоки характеристик/цвета (RAL) в конец описания
                 </label>
-                <button className="boris-btn-hover" onClick={rewriteDraftText} disabled={rewriteLoading}
-                  style={{width:"100%", background: rewriteLoading ? "#E3E7F0" : "#2F6FED", color:"#1D2939", border:"none", borderRadius:"8px", padding:"12px", fontWeight:"bold", cursor: rewriteLoading ? "wait" : "pointer", fontSize:"23px", marginBottom:"16px"}}>
+                <Button className="boris-btn-hover" onClick={rewriteDraftText} disabled={rewriteLoading}
+                  style={{width:"100%", background: rewriteLoading ? "var(--boris-border)" : "var(--boris-blue)", color:"var(--boris-text)", border:"none", borderRadius:"8px", padding:"12px", fontWeight:"bold", cursor: rewriteLoading ? "wait" : "pointer", fontSize:"23px", marginBottom:"16px"}}>
                   {rewriteLoading ? "⏳ Борис переписывает текст..." : "🔄 Борис перепишет текст эффективнее"}
-                </button>
+                </Button>
 
-                <label style={{display:"flex", alignItems:"center", gap:"10px", marginBottom:"20px", cursor:"pointer", color:"#475467", fontSize:"23px"}}>
-                  <input type="checkbox" checked={!!duplicateEditingItem.is_template} onChange={e => setDuplicateEditingItem((prev: any) => ({...prev, is_template: e.target.checked}))} style={{width:"18px", height:"18px", cursor:"pointer"}} />
+                <label className="boris-f2-2d4f4606389a">
+                  <input type="checkbox" checked={!!duplicateEditingItem.is_template} onChange={e => setDuplicateEditingItem((prev: any) => ({...prev, is_template: e.target.checked}))}  className="boris-f2-ccd87a40655a"/>
                   📝 Также сохранить как шаблон
                 </label>
 
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Фотографии (выбери из галереи)</label>
-                <div style={{display:"flex", flexWrap:"wrap", gap:"8px", marginBottom:"20px", maxHeight:"220px", overflowY:"auto", padding:"8px", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px"}}>
+                <label className="boris-f2-5a0de0cf2264">Фотографии (выбери из галереи)</label>
+                <div className="boris-f2-4dd2dd07b7fe">
                   {Object.entries(allFolders).flatMap(([folder, urls]: [string, any]) =>
                     (urls as string[]).map((url: string) => (
-                      <div key={url} onClick={() => toggleDraftImage(url)} style={{position:"relative", width:"70px", height:"70px", borderRadius:"6px", overflow:"hidden", cursor:"pointer", border: (duplicateEditingItem.images || []).includes(url) ? "3px solid #2F6FED" : "1px solid #E3E7F0"}}>
-                        <img src={url} style={{width:"100%", height:"100%", objectFit:"cover"}} />
+                      <div key={url} onClick={() => toggleDraftImage(url)} style={{position:"relative", width:"70px", height:"70px", borderRadius:"6px", overflow:"hidden", cursor:"pointer", border: (duplicateEditingItem.images || []).includes(url) ? "3px solid var(--boris-blue)" : "1px solid var(--boris-border)"}}>
+                        <img src={url}  className="boris-f2-b1279a8389d1"/>
                         {(duplicateEditingItem.images || []).includes(url) && (
-                          <div style={{position:"absolute", top:0, right:0, background:"#2F6FED", color:"#F6F7FB", fontSize:"15px", fontWeight:"bold", padding:"1px 4px", borderRadius:"0 0 0 6px"}}>✓</div>
+                          <div className="boris-f2-124d97d1aaec">✓</div>
                         )}
                       </div>
                     ))
                   )}
-                  {Object.keys(allFolders).length === 0 && <div style={{color:"#8A93A6", fontSize:"15px"}}>Галерея пуста — загрузите фото во вкладке «Выгрузка с сайта».</div>}
+                  {Object.keys(allFolders).length === 0 && <div className="boris-f2-316437256d37">Галерея пуста — загрузите фото во вкладке «Выгрузка с сайта».</div>}
                 </div>
-                <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"16px"}}>
-                  Выбрано фото: {(duplicateEditingItem.images || []).length}. Порядок перетаскиванием — в разработке.
+                <div className="boris-f2-c78ddedb8b24">
+                  Выбрано фото: {(duplicateEditingItem.images || []).length}. Перетащите выбранные фото ниже, чтобы задать порядок на Avito.
                 </div>
+                {(duplicateEditingItem.images || []).length > 0 && (
+                  <div style={{display:"flex", flexWrap:"wrap", gap:"10px", margin:"10px 0 16px"}}>
+                    {(duplicateEditingItem.images || []).map((url: string, index: number) => (
+                      <div
+                        key={url}
+                        draggable
+                        onDragStart={e => e.dataTransfer.setData("text/plain", url)}
+                        onDragOver={e => e.preventDefault()}
+                        onDrop={e => { e.preventDefault(); reorderDraftImage(e.dataTransfer.getData("text/plain"), url); }}
+                        title="Перетащите, чтобы изменить порядок"
+                        style={{position:"relative", width:"82px", height:"82px", borderRadius:"8px", overflow:"hidden", cursor:"grab", border:"2px solid var(--boris-blue)", background:"var(--boris-surface)"}}
+                      >
+                        <img src={url} alt={`Фото ${index + 1}`} style={{width:"100%", height:"100%", objectFit:"cover"}}/>
+                        <div style={{position:"absolute", left:"5px", top:"5px", minWidth:"24px", height:"24px", padding:"0 6px", borderRadius:"12px", background:"rgba(0,0,0,.72)", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"12px", fontWeight:800}}>{index + 1}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
-                <button className="boris-btn-hover" onClick={saveDuplicateDraft} disabled={savingDraft}
-                  style={{width:"100%", background: savingDraft ? "#E3E7F0" : "#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"8px", padding:"12px", fontWeight:"bold", cursor: savingDraft ? "wait" : "pointer", fontSize:"23px"}}>
+                <Button className="boris-btn-hover" onClick={saveDuplicateDraft} disabled={savingDraft}
+                  style={{width:"100%", background: savingDraft ? "var(--boris-border)" : "var(--boris-blue)", color:"var(--boris-bg)", border:"none", borderRadius:"8px", padding:"12px", fontWeight:"bold", cursor: savingDraft ? "wait" : "pointer", fontSize:"23px"}}>
                   {savingDraft ? "⏳ Сохраняю..." : "✅ Сохранить черновик"}
-                </button>
+                </Button>
               </div>
             )}
 
             {showDuplicateDrafts && !duplicateEditingItem && (
               <div>
-                <h3 style={{margin:"0 0 16px", fontSize:"15px"}}>🆕 Новые дубли — черновики в работе</h3>
+                <h3 className="boris-f2-f7fa2916028b">🆕 Новые дубли — черновики в работе</h3>
                 {duplicateDrafts.length === 0 ? (
-                  <p style={{color:"#667085"}}>Пока нет черновиков-дублей. Нажми «🔁 Дублировать» на любом объявлении.</p>
+                  <p className="boris-f2-de52905d633b">Пока нет черновиков-дублей. Нажми «🔁 Дублировать» на любом объявлении.</p>
                 ) : (
-                  <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(320px, 1fr))", gap:"16px"}}>
+                  <div className="boris-f2-e0abfdb050e2">
                     {duplicateDrafts.map((d: any) => (
-                      <div key={d.draft_id} style={{background:"#F6F7FB", borderRadius:"12px", padding:"20px", border:"1px solid #EEF2FA"}}>
-                        <div style={{fontSize:"23px", fontWeight:"bold", marginBottom:"8px"}}>{d.title}</div>
-                        <div style={{color:"#667085", fontSize:"15px", marginBottom:"12px"}}>{d.created_at}{d.is_template ? " · 📝 шаблон" : ""}</div>
-                        <div style={{fontSize:"23px", color:"#2F6FED", fontWeight:"bold", marginBottom:"16px"}}>{d.price} ₽</div>
-                        <div style={{display:"flex", gap:"8px"}}>
-                          <button className="boris-btn-hover" onClick={() => setDuplicateEditingItem(d)} style={{flex:1, background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px", cursor:"pointer", fontSize:"15px"}}>✏️ Продолжить</button>
-                          <button className="boris-btn-hover" onClick={() => deleteDuplicateDraft(d.draft_id)} style={{background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"8px 12px", cursor:"pointer", fontSize:"15px"}}>🗑</button>
+                      <div key={d.draft_id} className="boris-f2-8ca8ff789792">
+                        <div className="boris-f2-bca662eb31d9">{d.title}</div>
+                        <div className="boris-f2-a6dd61d4390b">{d.created_at}{d.is_template ? " · 📝 шаблон" : ""}</div>
+                        <div className="boris-f2-ea8b084d2968">{d.price} ₽</div>
+                        <div className="boris-f2-b9bbe540d342">
+                          <Button className="boris-btn-hover boris-f2-19a58890b3e3" onClick={() => setDuplicateEditingItem(d)}>✏️ Продолжить</Button>
+                          <Button className="boris-btn-hover boris-f2-e1068172a030" onClick={() => deleteDuplicateDraft(d.draft_id)}>🗑</Button>
                         </div>
                       </div>
                     ))}
@@ -6189,10 +6409,10 @@ export default function Home() {
             )}
 
             {pipelineHistory.length > 0 && (
-              <div className="b-panel" style={{marginTop:"24px"}}>
+              <BorisCard className="b-panel boris-f2-3343fd6464ac">
                 <div className="b-title">🚀 История конвейера направления</div>
                 <div className="b-sub">Аккаунт: {currentAccount} — только его запуски, независимо от того, что крутится в других аккаунтах.</div>
-                <div style={{display:"grid", gap:"14px"}}>
+                <div className="boris-f2-167ac309cd9b">
                   {pipelineHistory.map((item: any) => {
                     if (item.type === "single") return renderPipelineRunCard(item.run);
                     const runs = item.runs;
@@ -6203,25 +6423,25 @@ export default function Home() {
                     const errorCount = runs.filter((r: any) => ["error", "cancelled"].includes(r.active?.status)).length;
                     const allDone = doneCount + errorCount === runs.length;
                     return (
-                      <div key={item.batchId} className="b-panel b-card-eq" style={{padding:"18px", background:"#F6FBF9"}}>
-                        <div style={{display:"flex", alignItems:"center", gap:"10px", marginBottom:"6px"}}>
-                          <span className="b-icon-sm" style={{background:"linear-gradient(135deg,#7C5CFC,#5B3FD9)"}}>📦</span>
-                          <div style={{fontWeight:"bold", fontSize:"15px", color:"#1D2939"}}>Пакет из {runs.length} направлений</div>
+                      <BorisCard key={item.batchId} className="b-panel b-card-eq boris-f2-0a595cb511d5 boris-g1-card">
+                        <div className="boris-f2-0db0719fbfe0">
+                          <span className="b-icon-sm boris-f2-042ef8607ebd boris-g1-icon">📦</span>
+                          <div className="boris-f2-5a316b8cb6a1">Пакет из {runs.length} направлений</div>
                         </div>
-                        <div style={{fontSize:"13px", color:"#667085", marginBottom:"14px"}}>
+                        <div className="boris-f2-bcf8299c1d0e">
                           ✅ {doneCount} готово{waitingCount ? ` · ⏸ ${waitingCount} ждут подтверждения` : ""}{runningCount ? ` · 🔵 ${runningCount} в работе` : ""}{queuedCount ? ` · 🕓 ${queuedCount} в очереди` : ""}{errorCount ? ` · ❌ ${errorCount} с ошибкой` : ""}
                         </div>
-                        <div style={{background:"#E3E7F0", borderRadius:"6px", height:"6px", overflow:"hidden", marginBottom:"16px"}}>
-                          <div style={{width:`${allDone ? 100 : Math.round((doneCount / runs.length) * 100)}%`, height:"100%", background:"#7C5CFC", borderRadius:"6px", transition:"width 0.6s ease"}} />
+                        <div className="boris-f2-dc5ddb322cef">
+                          <div style={{width:`${allDone ? 100 : Math.round((doneCount / runs.length) * 100)}%`, height:"100%", background:"var(--b-cat-diag)", borderRadius:"6px", transition:"width 0.6s ease"}} />
                         </div>
-                        <div style={{display:"grid", gap:"10px"}}>
+                        <div className="boris-f2-c317fec12a8e">
                           {runs.map((run: any) => renderPipelineRunCard(run, true))}
                         </div>
-                      </div>
+                      </BorisCard>
                     );
                   })}
                 </div>
-              </div>
+              </BorisCard>
             )}
           </>
         )}
@@ -6230,108 +6450,109 @@ export default function Home() {
 
         {activeTab === "templates" && (
           <div>
-            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"24px"}}>
-              <h3 style={{margin:0, fontSize:"15px"}}>📝 Шаблоны объявлений</h3>
-              <button className="boris-btn-hover" onClick={() => setShowTemplateForm(true)} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 20px", fontWeight:"bold", cursor:"pointer"}}>+ Новый шаблон</button>
+            {generatorStorageError && <p role="alert" style={{color:"#B42318"}}>{generatorStorageError}</p>}
+            <div className="boris-f2-d90da07dd31d">
+              <h3 className="boris-f2-5a9a6dee1167">📝 Шаблоны объявлений</h3>
+              <Button className="boris-btn-hover boris-f2-1cec6a943c82" onClick={() => setShowTemplateForm(true)}>+ Новый шаблон</Button>
             </div>
-            <div style={{background:"#F6F7FB", border:"1px solid #E7EFFE", borderRadius:"12px", padding:"24px", marginBottom:"24px"}}>
-              <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"10px"}}><Mascot size={26} interactive={false} />Генератор объявлений через ИИ</h3>
-              <p className="b-sub">Борис сам придумает уникальные продающие объявления со спинтаксом для защиты от дублей</p>
-              <div style={{display:"grid", gridTemplateColumns:"2fr 1fr", gap:"16px", marginBottom:"16px"}}>
+            <div className="boris-f2-f4f0cb080183">
+              <h3 className="b-title boris-f2-7e30d285d288"><Mascot size={26} interactive={false} />Генератор объявлений через ИИ</h3>
+              <p className="b-sub">Подготовьте текст на основе фактов о вашем товаре или услуге. Проверьте результат перед публикацией.</p>
+              <div className="boris-f2-f6b9c08f5c7e">
                 <div>
-                  <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Тема / услуга</label>
+                  <label className="boris-f2-5a0de0cf2264">Тема / услуга</label>
                   <input value={genTopic} onChange={e => setGenTopic(e.target.value)} placeholder="Например: Поздравления в стихах на юбилей" style={inputStyle} />
                 </div>
                 <div>
-                  <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Сколько штук</label>
-                  <input type="number" value={genCount} onChange={e => setGenCount(Number(e.target.value))} min={1} max={30} style={inputStyle} />
+                  <label className="boris-f2-5a0de0cf2264">Сколько штук</label>
+                  <input type="number" value={Number(genCount) === 0 ? "" : genCount} onChange={e => setGenCount(Number(e.target.value))} min={1} max={30} style={inputStyle} />
                 </div>
               </div>
-              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"16px", marginBottom:"16px"}}>
+              <div className="boris-f2-df9c7b56906a">
                 <div>
-                  <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Цена от (руб)</label>
+                  <label className="boris-f2-5a0de0cf2264">Цена от (руб)</label>
                   <input type="number" value={genPriceFrom || ""} onChange={e => setGenPriceFrom(Number(e.target.value) || 0)} min={0} style={inputStyle} />
                 </div>
                 <div>
-                  <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Цена до (руб)</label>
+                  <label className="boris-f2-5a0de0cf2264">Цена до (руб)</label>
                   <input type="number" value={genPriceTo || ""} onChange={e => setGenPriceTo(Number(e.target.value) || 0)} min={0} style={inputStyle} />
-                    <div style={{color:"#8A93A6", fontSize:"15px", marginTop:"6px"}}>💡 Для товаров обычно нужна одна конкретная цена, а не диапазон — впишите одинаковое число в оба поля.</div>
+                    <div className="boris-f2-314f95d6c1dc">💡 Для товаров обычно нужна одна конкретная цена, а не диапазон — впишите одинаковое число в оба поля.</div>
                 </div>
               </div>
-              <div style={{marginBottom:"16px"}}>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>О компании / акции / особенности (Борис учтёт это)</label>
+              <div className="boris-f2-79a1c5a5db96">
+                <label className="boris-f2-5a0de0cf2264">О компании / акции / особенности (Борис учтёт это)</label>
                 <textarea value={genExtra} onChange={e => setGenExtra(e.target.value)} placeholder="Например: работаем 10 лет, скидка пенсионерам 10%, бесплатная доставка по МО" rows={3} style={{...inputStyle, resize:"vertical", fontFamily:"inherit"}} />
-                <label className="b-label" style={{marginTop:"18px"}}>📋 Образец / пожелания к шаблону <span style={{fontWeight:400, color:"#8A93A6"}}>— вставь пример объявления или бриф: Борис возьмёт оттуда общую информацию и стиль, а конкретику по товару придумает свою</span></label>
-                <textarea className="b-input" value={genSample} onChange={e => setGenSample(e.target.value)} placeholder="Например: вставь текст удачного объявления конкурента или описание компании — Борис учтёт структуру, тон и общие факты, но переработает под каждый товар" rows={5} style={{resize:"vertical", fontFamily:"inherit"}} />
+                <label className="b-label boris-f2-e7673d9ced19">📋 Образец / пожелания к шаблону <span className="boris-f2-de10b07e3112">— вставь пример объявления или бриф: Борис возьмёт оттуда общую информацию и стиль, а факты о товаре возьмёт из ваших данных</span></label>
+                <textarea className="b-input boris-f2-90afa77b7cd3" value={genSample} onChange={e => setGenSample(e.target.value)} placeholder="Например: вставь текст удачного объявления конкурента или описание компании — Борис учтёт структуру, тон и общие факты, но переработает под каждый товар" rows={5} />
               </div>
-              <div style={{marginBottom:"16px"}}>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Длина описаний</label>
-                <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
+              <div className="boris-f2-79a1c5a5db96">
+                <label className="boris-f2-5a0de0cf2264">Длина описаний</label>
+                <div className="boris-f2-0889360d6347">
                   {[{k:"short",l:"📄 Короткие"},{k:"medium",l:"📃 Средние"},{k:"long",l:"📜 Длинные"}].map(g => (
-                    <button className="boris-btn-hover" key={g.k} onClick={() => setGenLength(g.k)} style={{padding:"8px 16px", borderRadius:"10px", border: genLength===g.k ? "1px solid #2F6FED" : "1px solid #E3E7F0", background: genLength===g.k ? "#E7EFFE" : "#FFFFFF", color: genLength===g.k ? "#2F6FED" : "#667085", cursor:"pointer", fontSize:"15px", fontWeight: genLength===g.k ? "bold" : "normal"}}>{g.l}</button>
+                    <Button className="boris-btn-hover" key={g.k} onClick={() => setGenLength(g.k)} style={{padding:"8px 16px", borderRadius:"10px", border: genLength===g.k ? "1px solid var(--boris-blue)" : "1px solid var(--boris-border)", background: genLength===g.k ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: genLength===g.k ? "var(--boris-blue)" : "var(--boris-text-2)", cursor:"pointer", fontSize:"15px", fontWeight: genLength===g.k ? "bold" : "normal"}}>{g.l}</Button>
                   ))}
                 </div>
               </div>
-              <label style={{display:"flex", alignItems:"center", gap:"10px", marginBottom:"16px", cursor:"pointer", color:"#475467", fontSize:"23px"}}>
-                <input type="checkbox" checked={useMyAds} onChange={e => setUseMyAds(e.target.checked)} style={{width:"18px", height:"18px", cursor:"pointer"}} />
+              <label className="boris-f2-66a666fd88d9">
+                <input type="checkbox" checked={useMyAds} onChange={e => setUseMyAds(e.target.checked)}  className="boris-f2-ccd87a40655a"/>
                 📊 Учитывать стиль моих активных объявлений (Борис возьмёт образцы из Авито)
               </label>
-              <div style={{marginBottom:"16px"}}>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Цель объявления — что должен сделать клиент?</label>
-                <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
+              <div className="boris-f2-79a1c5a5db96">
+                <label className="boris-f2-5a0de0cf2264">Цель объявления — что должен сделать клиент?</label>
+                <div className="boris-f2-0889360d6347">
                   {[{k:"call",l:"📞 Позвонить"},{k:"message",l:"💬 Написать в чат"},{k:"order",l:"🛒 Сразу заказать"},{k:"visit",l:"📍 Прийти / замер"}].map(g => (
-                    <button className="b-btn" key={g.k} onClick={() => setGenGoal(g.k)} style={{border: genGoal===g.k ? "1px solid #2F6FED" : "1px solid #E3E7F0", background: genGoal===g.k ? "#E7EFFE" : "#FFFFFF", color: genGoal===g.k ? "#2F6FED" : "#667085", fontWeight: genGoal===g.k ? 700 : 500}}>{g.l}</button>
+                    <Button className="b-btn" key={g.k} onClick={() => setGenGoal(g.k)} style={{border: genGoal===g.k ? "1px solid var(--boris-blue)" : "1px solid var(--boris-border)", background: genGoal===g.k ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: genGoal===g.k ? "var(--boris-blue)" : "var(--boris-text-2)", fontWeight: genGoal===g.k ? 700 : 500}}>{g.l}</Button>
                   ))}
                 </div>
               </div>
-              <button className="b-btn b-btn-primary" onClick={() => setShowConfirm(true)} disabled={genLoading} style={{background: genLoading ? "#E3E7F0" : "#2F6FED", borderColor: genLoading ? "#E3E7F0" : "#2F6FED", cursor: genLoading ? "wait" : "pointer", padding:"12px 24px"}}>
+              <Button className="b-btn b-btn-primary" onClick={() => setShowConfirm(true)} disabled={genLoading} style={{background: genLoading ? "var(--boris-border)" : "var(--boris-blue)", borderColor: genLoading ? "var(--boris-border)" : "var(--boris-blue)", cursor: genLoading ? "wait" : "pointer", padding:"12px 24px"}}>
                 {genLoading ? "Борис генерирует…" : "✨ Сгенерировать объявления"}
-              </button>
+              </Button>
 {showConfirm && (
-  <div style={{position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.7)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center"}} onClick={() => setShowConfirm(false)}>
-    <div onClick={(e:any) => e.stopPropagation()} style={{background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"28px", maxWidth:"480px", width:"90%"}}>
-      <h3 style={{margin:"0 0 16px", color:"#1D2939", fontSize:"18px"}}>Проверьте перед генерацией</h3>
-      <div style={{fontSize:"23px", color:"#344054", lineHeight:"2"}}>
-        <div><b style={{color:"#667085"}}>Тема:</b> {genTopic || "—"}</div>
-        <div><b style={{color:"#667085"}}>Цена:</b> {genPriceFrom || genPriceTo ? `${genPriceFrom||0} – ${genPriceTo||0} ₽` : "не задана"}</div>
-        <div><b style={{color:"#667085"}}>О компании:</b> {genExtra ? genExtra.slice(0,60)+(genExtra.length>60?"…":"") : "—"}</div>
-        <div><b style={{color:"#667085"}}>Количество:</b> {genCount}</div>
-        <div><b style={{color:"#667085"}}>Длина:</b> {genLength === "short" ? "Короткие" : genLength === "long" ? "Длинные" : "Средние"}</div>
-        <div><b style={{color:"#667085"}}>Цель:</b> {genGoal === "call" ? "📞 Позвонить" : genGoal === "message" ? "💬 Написать" : genGoal === "order" ? "🛒 Заказать" : "📍 Прийти"}</div>
-        <div><b style={{color:"#667085"}}>Стиль моих объявлений:</b> {useMyAds ? "учитывать" : "не учитывать"}</div>
+  <div onClick={() => setShowConfirm(false)} className="boris-f2-40ee1e11790e">
+    <div onClick={(e:any) => e.stopPropagation()} className="boris-f2-33631c931988">
+      <h3 className="boris-f2-ab7a0549a1dc">Проверьте перед генерацией</h3>
+      <div className="boris-f2-aa5939599233">
+        <div><b className="boris-f2-de52905d633b">Тема:</b> {genTopic || "—"}</div>
+        <div><b className="boris-f2-de52905d633b">Цена:</b> {genPriceFrom || genPriceTo ? `${genPriceFrom||0} – ${genPriceTo||0} ₽` : "не задана"}</div>
+        <div><b className="boris-f2-de52905d633b">О компании:</b> {genExtra ? genExtra.slice(0,60)+(genExtra.length>60?"…":"") : "—"}</div>
+        <div><b className="boris-f2-de52905d633b">Количество:</b> {genCount}</div>
+        <div><b className="boris-f2-de52905d633b">Длина:</b> {genLength === "short" ? "Короткие" : genLength === "long" ? "Длинные" : "Средние"}</div>
+        <div><b className="boris-f2-de52905d633b">Цель:</b> {genGoal === "call" ? "📞 Позвонить" : genGoal === "message" ? "💬 Написать" : genGoal === "order" ? "🛒 Заказать" : "📍 Прийти"}</div>
+        <div><b className="boris-f2-de52905d633b">Стиль моих объявлений:</b> {useMyAds ? "учитывать" : "не учитывать"}</div>
       </div>
-      <div style={{display:"flex", gap:"12px", marginTop:"24px"}}>
-        <button className="boris-btn-hover" onClick={() => { setShowConfirm(false); generateAds(); }} style={{flex:1, background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"12px", fontWeight:"bold", cursor:"pointer"}}>✅ Всё верно, генерировать</button>
-        <button className="boris-btn-hover" onClick={() => setShowConfirm(false)} style={{flex:1, background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"12px", cursor:"pointer"}}>Изменить</button>
+      <div className="boris-f2-2c5b241b3608">
+        <Button className="boris-btn-hover boris-f2-b68f130f1f82" onClick={() => { setShowConfirm(false); generateAds(); }}>✅ Всё верно, генерировать</Button>
+        <Button className="boris-btn-hover boris-f2-cc812ecc9f36" onClick={() => setShowConfirm(false)}>Изменить</Button>
       </div>
     </div>
   </div>
 )}
 
               {genAdsHistory.length > 0 && (
-                <div style={{marginBottom:"24px", background:"#F6F7FB", border:"1px solid #EEF2FA", borderRadius:"10px", padding:"16px"}}>
-                  <div style={{color:"#667085", fontWeight:"bold", fontSize:"15px", marginBottom:"12px"}}>📚 История партий шаблонов ({genAdsHistory.length})</div>
-                  <div style={{display:"flex", flexDirection:"column", gap:"8px", maxHeight:"280px", overflowY:"auto"}}>
+                <div className="boris-f2-e0c7755d9873">
+                  <div className="boris-f2-35411fbf6eb4">📚 История партий шаблонов ({genAdsHistory.length})</div>
+                  <div className="boris-f2-e03a69f985d6">
                     {genAdsHistory.map((batch: any) => {
                       const eff = batchEffectiveness[batch.id];
                       return (
-                        <div key={batch.id} style={{display:"flex", justifyContent:"space-between", alignItems:"center", background:"#F6F7FB", borderRadius:"8px", padding:"10px 14px", fontSize:"15px"}}>
-                          <div style={{flex:1}}>
-                            <div><b>{batch.topic}</b> <span style={{color:"#8A93A6"}}>— {batch.ads?.length || 0} шт.</span></div>
-                            <div style={{color:"#8A93A6", fontSize:"15px"}}>{new Date(batch.created_at).toLocaleString("ru-RU")}</div>
+                        <div key={batch.id} className="boris-f2-104b57bf4d1a">
+                          <div className="boris-f2-7623f0554520">
+                            <div><b>{batch.topic}</b> <span className="boris-f2-6607ac287d11">— {batch.ads?.length || 0} шт.</span></div>
+                            <div className="boris-f2-316437256d37">{new Date(batch.created_at).toLocaleString("ru-RU")}</div>
                             {eff && eff.status === "ok" && (
-                              <div style={{marginTop:"4px", fontSize:"15px"}}>
-                                Эффективность: <b style={{color: eff.level === "Высокая" ? "#2F6FED" : eff.level === "Средняя" ? "#F79009" : "#F04438"}}>{eff.level}</b>
+                              <div className="boris-f2-0f13f0ec1909">
+                                Эффективность: <b style={{color: eff.level === "Высокая" ? "var(--boris-blue)" : eff.level === "Средняя" ? "#F79009" : "#F04438"}}>{eff.level}</b>
                                 {" "}(конверсия {eff.conversion}%, {eff.contacts} обращений за {eff.days} дн.)
                               </div>
                             )}
                             {eff && eff.status === "no_data" && (
-                              <div style={{marginTop:"4px", fontSize:"15px", color:"#8A93A6"}}>Нет данных — объявления из этой партии ещё не публиковались или статистика не собрана</div>
+                              <div className="boris-f2-4baad7265b0c">Нет данных — объявления из этой партии ещё не публиковались или статистика не собрана</div>
                             )}
                           </div>
-                          <div style={{display:"flex", gap:"6px"}}>
-                            <button className="boris-btn-hover" onClick={() => checkBatchEffectiveness(batch.id)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 10px", cursor:"pointer", fontSize:"15px"}}>📊 Эффективность</button>
-                            <button className="boris-btn-hover" onClick={() => setGenAds(batch.ads)} style={{background:"#E7EFFE", color:"#2F6FED", border:"1px solid #E7EFFE", borderRadius:"10px", padding:"6px 10px", cursor:"pointer", fontSize:"15px"}}>↩ Загрузить</button>
+                          <div className="boris-f2-1d8943fa86ea">
+                            <Button className="boris-btn-hover boris-f2-35f87f7a34b3" onClick={() => checkBatchEffectiveness(batch.id)}>📊 Эффективность</Button>
+                            <Button className="boris-btn-hover boris-f2-59834f70617c" onClick={() => setGenAds(batch.ads)}>↩ Загрузить</Button>
                           </div>
                         </div>
                       );
@@ -6340,16 +6561,16 @@ export default function Home() {
                 </div>
               )}
               {genAds.length > 0 && (
-                <div style={{marginTop:"24px"}}>
-                  <div className="b-title" style={{display:"flex", alignItems:"center", gap:"10px", marginBottom:"16px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#12805C,#3DBE93)"}}>✅</span>Готово! Сгенерировано: {genAds.length}</div>
-                  <div className="b-panel" style={{display:"flex", gap:"10px", alignItems:"center", marginBottom:"16px", padding:"16px", flexWrap:"wrap"}}>
-                    <span className="b-label" style={{margin:0}}>🔁 Размножить до:</span>
-                    <input type="number" value={cloneTarget} onChange={e => setCloneTarget(Math.max(1, Number(e.target.value)||1))} style={{...inputStyle, width:"90px"}} />
-                    <button className="b-btn" onClick={cloneAds} style={{background:"#7C5CFC", color:"#FFFFFF", border:"1px solid #7C5CFC"}}>🔁 Размножить</button>
-                    <button className="b-btn" onClick={saveGenBatch} style={{background:"#12805C", color:"#FFFFFF", border:"1px solid #12805C"}}>💾 Сохранить партию</button>
-                    <button className="b-btn b-btn-ghost" onClick={() => { if (!feedUrl) { alert("Сначала отправьте партию в фид."); return; } checkFeed(feedUrl); }}>🔍 Проверить фид</button>
-                    <span style={{color:"#8A93A6", fontSize:"15px"}}>Уникальность текста и фото сохранится за счёт спинтакса</span>
-                  </div>
+                <div className="boris-f2-3343fd6464ac">
+                  <div className="b-title boris-f2-2aa22d63b379"><span className="b-icon-sm boris-f2-886256c1d4fc boris-g1-icon">✅</span>Готово! Сгенерировано: {genAds.length}</div>
+                  <BorisCard className="b-panel boris-f2-cd1644160ace">
+                    <span className="b-label boris-f2-1da9facb4d70">🔁 Размножить до:</span>
+                    <input type="number" value={Number(cloneTarget) === 0 ? "" : cloneTarget} onChange={e => setCloneTarget(Math.max(1, Number(e.target.value)||1))} style={{...inputStyle, width:"90px"}} />
+                    <Button className="b-btn boris-f2-cba9d2a49a1f" onClick={cloneAds}>🔁 Размножить</Button>
+                    <Button className="b-btn boris-f2-af8bb1646461" onClick={saveGenBatch}>💾 Сохранить партию</Button>
+                    <Button className="b-btn b-btn-ghost" onClick={() => { if (!feedUrl) { alert("Сначала отправьте партию в фид."); return; } checkFeed(feedUrl); }}>🔍 Проверить фид</Button>
+                    <span className="boris-f2-316437256d37">Уникальность текста и фото сохранится за счёт спинтакса</span>
+                  </BorisCard>
                   {(() => {
                     const spinMax = (t: string) => { const m = String(t||"").match(/\{([^{}]*)\}/); const vars = m ? m[1].split("|") : [String(t||"")]; return vars.reduce((a, v) => Math.max(a, v.trim().length), 0); };
                     const probs: string[] = [];
@@ -6360,102 +6581,102 @@ export default function Home() {
                       if (!a.description || String(a.description).length < 50) probs.push("№" + (i+1) + ": описание пустое или слишком короткое");
                     });
                     if (probs.length === 0) return (
-                      <div style={{marginBottom:"16px", padding:"10px 14px", background:"#E9F7F1", border:"1px solid #C7EBDC", borderRadius:"8px", color:"#12805C", fontSize:"14px", fontWeight:"bold"}}>✅ Проверка пройдена: все {genAds.length} объявлений корректны</div>
+                      <div className="boris-f2-cee76ae2920b">✅ Проверка пройдена: все {genAds.length} объявлений корректны</div>
                     );
                     return (
-                      <div style={{marginBottom:"16px", padding:"10px 14px", background:"#FDECEC", border:"1px solid #F5C6C6", borderRadius:"8px", color:"#B42318", fontSize:"14px"}}>
-                        <div style={{fontWeight:"bold", marginBottom:"6px"}}>⚠️ Найдено проблем: {probs.length}</div>
-                        {probs.slice(0, 12).map((t, k) => <div key={k} style={{marginBottom:"2px"}}>• {t}</div>)}
+                      <div className="boris-f2-29f5993fa222">
+                        <div className="boris-f2-fa3d46ec5c59">⚠️ Найдено проблем: {probs.length}</div>
+                        {probs.slice(0, 12).map((t, k) => <div key={k} className="boris-f2-c188ad004af7">• {t}</div>)}
                         {probs.length > 12 && <div>…и ещё {probs.length - 12}</div>}
                       </div>
                     );
                   })()}
-                  <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(320px, 1fr))", gap:"16px"}}>
+                  <div className="boris-f2-e0abfdb050e2">
                     {genAds.map((ad, i) => (
-                      <div key={i} className="b-card" style={{padding:"20px"}}>
+                      <BorisCard key={i} className="b-card boris-f2-8cddc29a6936">
                         {editingIndex === i ? (
                           <div>
                             <input value={ad.title} onChange={e => updateAd(i, "title", e.target.value)} style={{...inputStyle, marginBottom:"8px", fontWeight:"bold"}} />
-                            <input type="number" value={ad.price} onChange={e => updateAd(i, "price", Number(e.target.value))} style={{...inputStyle, marginBottom:"8px", width:"120px"}} />
-                            <div style={{display:"flex", gap:"8px", marginBottom:"6px", alignItems:"center"}}>
-                              <button className="boris-btn-hover" onClick={() => applyBold(i)} style={{background:"#FFFFFF", color:"#fff", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"4px 12px", cursor:"pointer", fontWeight:"bold"}}>Ж</button>
-                              <span style={{color:"#8A93A6", fontSize:"15px"}}>выделите текст и нажмите Ж</span>
+                            <input type="number" value={Number(ad.price) === 0 ? "" : ad.price} onChange={e => updateAd(i, "price", Number(e.target.value))} style={{...inputStyle, marginBottom:"8px", width:"120px"}} />
+                            <div className="boris-f2-fa288833341a">
+                              <Button className="boris-btn-hover boris-f2-a1317344cb1f" onClick={() => applyBold(i)}>Ж</Button>
+                              <span className="boris-f2-316437256d37">выделите текст и нажмите Ж</span>
                             </div>
                             <textarea id={"desc-edit-" + i} value={ad.description} onChange={e => updateAd(i, "description", e.target.value)} rows={10} style={{...inputStyle, width:"100%", boxSizing:"border-box" as any, fontFamily:"inherit", fontSize:"15px"}} />
-                            <button className="boris-btn-hover" onClick={() => setEditingIndex(null)} style={{marginTop:"8px", background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"11px 20px", fontWeight:"bold", cursor:"pointer"}}>✅ Готово</button>
+                            <Button className="boris-btn-hover boris-f2-efa1f4de92d4" onClick={() => setEditingIndex(null)}>✅ Готово</Button>
                           </div>
                         ) : (
                           <>
-                        <div style={{fontWeight:"bold", fontSize:"18px", marginBottom:"8px", color:"#1D2939", wordBreak:"break-word", overflowWrap:"break-word"}}>{ad.title}</div>
-                        <div style={{fontSize:"23px", color:"#2F6FED", marginBottom:"10px"}}>{ad.price} ₽</div>
-                        <div style={{fontSize:"15px", color:"#475467", whiteSpace:"pre-wrap", lineHeight:1.5, wordBreak:"break-word", overflowWrap:"break-word", maxHeight: expandedAds.has(i) ? "none" : "120px", overflow: expandedAds.has(i) ? "visible" : "hidden", position:"relative"}} dangerouslySetInnerHTML={{__html: ad.description
+                        <div className="boris-f2-dd7c1e6181f8">{ad.title}</div>
+                        <div className="boris-f2-55bc6c20f644">{ad.price} ₽</div>
+                        <div style={{fontSize:"15px", color:"var(--boris-text-2)", whiteSpace:"pre-wrap", lineHeight:1.5, wordBreak:"break-word", overflowWrap:"break-word", maxHeight: expandedAds.has(i) ? "none" : "120px", overflow: expandedAds.has(i) ? "visible" : "hidden", position:"relative"}} dangerouslySetInnerHTML={{__html: ad.description
                           .replace(/</g, "&lt;").replace(/>/g, "&gt;")
-                          .replace(/&lt;strong&gt;/g, "<strong style='color:#1D2939'>").replace(/&lt;\/strong&gt;/g, "</strong>")
+                          .replace(/&lt;strong&gt;/g, "<strong style='color:var(--boris-text)'>").replace(/&lt;\/strong&gt;/g, "</strong>")
                           .replace(/&lt;em&gt;/g, "<em>").replace(/&lt;\/em&gt;/g, "</em>")
                           .replace(/&lt;ul&gt;/g, "<ul style='margin:6px 0;padding-left:18px'>").replace(/&lt;\/ul&gt;/g, "</ul>")
                           .replace(/&lt;ol&gt;/g, "<ol style='margin:6px 0;padding-left:18px'>").replace(/&lt;\/ol&gt;/g, "</ol>")
                           .replace(/&lt;li&gt;/g, "<li>").replace(/&lt;\/li&gt;/g, "</li>")
                           .replace(/&lt;br\s*\/?&gt;/g, "<br>").replace(/&lt;p&gt;/g, "<p style='margin:6px 0'>").replace(/&lt;\/p&gt;/g, "</p>")
-                          .replace(/(\{[^}]*\})/g, "<span style='background:#E7EFFE;color:#2F6FED;padding:1px 4px;border-radius:4px;font-weight:bold'>$1</span>")
+                          .replace(/(\{[^}]*\})/g, "<span style='background:var(--boris-blue-soft);color:var(--boris-blue);padding:1px 4px;border-radius:4px;font-weight:bold'>$1</span>")
                         }} />
-                          <button className="b-more" onClick={() => toggleExpand(i)} style={{marginTop:"10px"}}>{expandedAds.has(i) ? "▲ Свернуть" : "▼ Показать полностью"}</button>
-                          <div style={{marginTop:"10px", display:"flex", alignItems:"center", gap:"8px"}}>
+                          <Button className="b-more boris-f2-d8a81eac84c9" onClick={() => toggleExpand(i)}>{expandedAds.has(i) ? "▲ Свернуть" : "▼ Показать полностью"}</Button>
+                          <div className="boris-f2-4aecb837fc3e">
                             <span className="b-meta">Цена:</span>
-                            <input className="b-input" type="number" value={ad.price || ""} onChange={e => updateAd(i, "price", e.target.value)} style={{width:"110px", padding:"8px 10px", fontWeight:700, color:"#2F6FED"}} />
+                            <input className="b-input boris-f2-6f2c3d4dc8da" type="number" value={ad.price || ""} onChange={e => updateAd(i, "price", e.target.value)} />
                             <span className="b-meta">₽</span>
                           </div>
-                          <div className="b-card-actions">
-                            <button className="b-btn" onClick={() => setEditingIndex(i)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", padding:"8px 14px", fontSize:"13px"}}>✏️ Править</button>
-                            <button className="b-btn" onClick={() => setPhotoPickerIndex(photoPickerIndex === i ? null : i)} style={{background:"#FFFFFF", color:"#7C5CFC", border:"1px solid #F0ECFF", padding:"8px 14px", fontSize:"13px"}}>🖼 Фото ({getAdPhotos(i).length})</button>
-                            <button className="b-btn" onClick={() => deleteAd(i)} style={{background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438", padding:"8px 14px", fontSize:"13px"}}>🗑 Удалить</button>
-                            <button className="b-btn" onClick={() => saveAsTextTemplate(ad)} style={{background:"#FFFFFF", color:"#12805C", border:"1px solid #C7EBDC", padding:"8px 14px", fontSize:"13px"}}>💾 Сохранить как шаблон</button>
-                          </div>
+                          <BorisCard className="b-card-actions boris-g1-card boris-g1-interactive">
+                            <Button className="b-btn boris-f2-0afbd4f80773" onClick={() => setEditingIndex(i)}>✏️ Править</Button>
+                            <Button className="b-btn boris-f2-2cbe3eccf188" onClick={() => setPhotoPickerIndex(photoPickerIndex === i ? null : i)}>🖼 Фото ({getAdPhotos(i).length})</Button>
+                            <Button className="b-btn boris-f2-d6bd88faab51" onClick={() => deleteAd(i)}>🗑 Удалить</Button>
+                            <Button className="b-btn boris-f2-5e05ee655d94" onClick={() => saveAsTextTemplate(ad)}>💾 Сохранить как шаблон</Button>
+                          </BorisCard>
                           {photoPickerIndex === i && (
-                            <div style={{marginTop:"10px", padding:"10px", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px"}}>
-                              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"8px"}}>
-                                <span style={{color:"#667085", fontSize:"15px"}}>Выделите фото для этого объявления</span>
-                                <div style={{display:"flex", gap:"6px"}}>
-                                  <input id={"ad-upload-" + i} type="file" accept="image/*" multiple style={{display:"none"}} onChange={e => uploadForAd(i, e.target.files)} />
-                                  <button className="boris-btn-hover" onClick={() => document.getElementById("ad-upload-" + i)?.click()} style={{background:"#FFFFFF", color:"#7C5CFC", border:"1px solid #F0ECFF", borderRadius:"10px", padding:"4px 10px", cursor:"pointer", fontSize:"15px"}}>📁 Со своего устройства</button>
-                                  <button className="boris-btn-hover" onClick={loadImagesForFeed} style={{background:"#FFFFFF", color:"#7C5CFC", border:"1px solid #F0ECFF", borderRadius:"10px", padding:"4px 10px", cursor:"pointer", fontSize:"15px"}}>🔄 Обновить список</button>
+                            <div className="boris-f2-815b2589145e">
+                              <div className="boris-f2-5a9738ff9ea1">
+                                <span className="boris-f2-96046ead62a3">Выделите фото для этого объявления</span>
+                                <div className="boris-f2-1d8943fa86ea">
+                                  <input id={"ad-upload-" + i} type="file" accept="image/*" multiple onChange={e => uploadForAd(i, e.target.files)}  className="boris-f2-c8be1ccba60b"/>
+                                  <Button className="boris-btn-hover boris-f2-2476d65ce100" onClick={() => document.getElementById("ad-upload-" + i)?.click()}>📁 Со своего устройства</Button>
+                                  <Button className="boris-btn-hover boris-f2-2476d65ce100" onClick={loadImagesForFeed}>🔄 Обновить список</Button>
                                 </div>
                               </div>
-                              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(70px, 1fr))", gap:"6px", maxHeight:"200px", overflowY:"auto"}}>
+                              <div className="boris-f2-aaea5800ee2a">
                                 {allImages.map((url, ii) => (
-                                  <div key={ii} style={{position:"relative"}}>
+                                  <div key={ii} className="boris-f2-87db2275805b">
                                     <div onClick={() => toggleAdPhoto(i, url)} style={{cursor:"pointer", border: (adPhotos[i]||[]).includes(url) ? "2px solid #7C5CFC" : "2px solid #EEF2FA", borderRadius:"6px", overflow:"hidden"}}>
                                       <img src={url} style={{width:"100%", height:"55px", objectFit:"cover", display:"block", opacity: (adPhotos[i]||[]).includes(url) ? 1 : 0.5}} />
-                                      {(adPhotos[i]||[]).includes(url) && <div style={{position:"absolute", top:"2px", right:"2px", background:"#7C5CFC", color:"#F6F7FB", borderRadius:"50%", width:"16px", height:"16px", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"15px", fontWeight:"bold"}}>✓</div>}
+                                      {(adPhotos[i]||[]).includes(url) && <div className="boris-f2-ba62c0a4386b">✓</div>}
                                     </div>
                                     {(adPhotos[i]||[]).includes(url) && (
-                                      <div style={{display:"flex", justifyContent:"space-between", marginTop:"2px"}}>
-                                        <button className="boris-btn-hover" onClick={() => toggleTextPhoto(i, url)} title="Пометить как фото с текстом (пойдёт первым)" style={{background: (adTextPhotos[i]||[]).includes(url) ? "#2F6FED" : "#FFFFFF", color: (adTextPhotos[i]||[]).includes(url) ? "#F6F7FB" : "#8A93A6", border:"1px solid #E3E7F0", borderRadius:"4px", width:"20px", height:"18px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>Т</button>
-                                        <div style={{display:"flex", gap:"2px"}}>
-                                          <button className="boris-btn-hover" onClick={() => movePhoto(i, url, -1)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"4px", width:"18px", height:"18px", fontSize:"15px", cursor:"pointer"}}>↑</button>
-                                          <button className="boris-btn-hover" onClick={() => movePhoto(i, url, 1)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"4px", width:"18px", height:"18px", fontSize:"15px", cursor:"pointer"}}>↓</button>
+                                      <div className="boris-f2-2b5fa1251907">
+                                        <Button className="boris-btn-hover" onClick={() => toggleTextPhoto(i, url)} title="Пометить как фото с текстом (пойдёт первым)" style={{background: (adTextPhotos[i]||[]).includes(url) ? "var(--boris-blue)" : "var(--boris-surface)", color: (adTextPhotos[i]||[]).includes(url) ? "var(--boris-bg)" : "var(--boris-text-3)", border:"1px solid var(--boris-border)", borderRadius:"4px", width:"20px", height:"18px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>Т</Button>
+                                        <div className="boris-f2-293ab8ff6efc">
+                                          <Button className="boris-btn-hover boris-f2-bdc46b98820d" onClick={() => movePhoto(i, url, -1)}>↑</Button>
+                                          <Button className="boris-btn-hover boris-f2-bdc46b98820d" onClick={() => movePhoto(i, url, 1)}>↓</Button>
                                         </div>
                                       </div>
                                     )}
                                   </div>
                                 ))}
                               </div>
-                              <button className="boris-btn-hover" onClick={() => setPhotoPickerIndex(null)} style={{marginTop:"8px", background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"11px 20px", fontWeight:"bold", cursor:"pointer", fontSize:"15px"}}>✅ Готово</button>
+                              <Button className="boris-btn-hover boris-f2-cfe2d8accbe5" onClick={() => setPhotoPickerIndex(null)}>✅ Готово</Button>
                             </div>
                           )}
                           </>
                         )}
-                      </div>
+                      </BorisCard>
                     ))}
                   </div>
-                  <div style={{marginTop:"20px", padding:"16px", background:"#F6F7FB", borderRadius:"10px", border:"1px solid #EEF2FA"}}>
-                    <div style={{display:"flex", gap:"12px", alignItems:"flex-end", flexWrap:"wrap"}}>
+                  <div className="boris-f2-fe706cba890a">
+                    <div className="boris-f2-66689fe172ec">
                       <div>
                         <label className="b-label">📍 Город / адрес для фида</label>
                         <input value={genAddress} onChange={e => setGenAddress(e.target.value)} placeholder="Москва" style={{...inputStyle, width:"260px"}} />
                       </div>
                       <div>
                         <label className="b-label">Или выберите из справочника</label>
-                        <div style={{display:"flex", gap:"8px"}}>
+                        <div className="boris-f2-b9bbe540d342">
                           <select className="b-select" value={selectedRegion} onChange={e => { setSelectedRegion(e.target.value); setSelectedCity(""); }} style={{...inputStyle, width:"160px"}}>
                             <option value="">Регион</option>
                             {Object.keys(citiesData).map(r => <option key={r} value={r}>{r}</option>)}
@@ -6465,40 +6686,40 @@ export default function Home() {
                             {(citiesData[selectedRegion] || []).map(c => <option key={c} value={c}>{c}</option>)}
                           </select>
                           {metroData[selectedCity] && (
-                            <button className="boris-btn-hover" onClick={() => setShowMetroPicker(!showMetroPicker)} style={{background: selectedMetro ? "#E7EFFE" : "#FFFFFF", color: selectedMetro ? "#2F6FED" : "#7C5CFC", border:"1px solid #F0ECFF", borderRadius:"10px", padding:"0 14px", cursor:"pointer", fontSize:"15px", whiteSpace:"nowrap"}}>🚇 {selectedMetro || "Метро"}</button>
+                            <Button className="boris-btn-hover" onClick={() => setShowMetroPicker(!showMetroPicker)} style={{background: selectedMetro ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: selectedMetro ? "var(--boris-blue)" : "#7C5CFC", border:"1px solid #F0ECFF", borderRadius:"10px", padding:"0 14px", cursor:"pointer", fontSize:"15px", whiteSpace:"nowrap"}}>🚇 {selectedMetro || "Метро"}</Button>
                           )}
                         </div>
-                        <div style={{display:"flex", gap:"8px", marginTop:"8px"}}>
+                        <div className="boris-f2-ecd721ef4d39">
                           {selectedRegion && (citiesData[selectedRegion] || []).length > 1 && (
-                            <button className="boris-btn-hover" onClick={selectAllCitiesInRegion} style={{background: bulkCities.length>0 ? "#E7EFFE" : "#FFFFFF", color: bulkCities.length>0 ? "#2F6FED" : "#667085", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"5px 10px", cursor:"pointer", fontSize:"15px"}}>✅ Все города региона {bulkCities.length>0 ? `(${bulkCities.length})` : ""}</button>
+                            <Button className="boris-btn-hover" onClick={selectAllCitiesInRegion} style={{background: bulkCities.length>0 ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: bulkCities.length>0 ? "var(--boris-blue)" : "var(--boris-text-2)", border:"1px solid var(--boris-border)", borderRadius:"10px", padding:"5px 10px", cursor:"pointer", fontSize:"15px"}}>✅ Все города региона {bulkCities.length>0 ? `(${bulkCities.length})` : ""}</Button>
                           )}
                           {metroData[selectedCity] && (
-                            <button className="boris-btn-hover" onClick={selectAllMetroInCity} style={{background: bulkMetro.length>0 ? "#E7EFFE" : "#FFFFFF", color: bulkMetro.length>0 ? "#2F6FED" : "#667085", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"5px 10px", cursor:"pointer", fontSize:"15px"}}>✅ Все станции метро {bulkMetro.length>0 ? `(${bulkMetro.length})` : ""}</button>
+                            <Button className="boris-btn-hover" onClick={selectAllMetroInCity} style={{background: bulkMetro.length>0 ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: bulkMetro.length>0 ? "var(--boris-blue)" : "var(--boris-text-2)", border:"1px solid var(--boris-border)", borderRadius:"10px", padding:"5px 10px", cursor:"pointer", fontSize:"15px"}}>✅ Все станции метро {bulkMetro.length>0 ? `(${bulkMetro.length})` : ""}</Button>
                           )}
-                          <div style={{display:"flex", gap:"6px", alignItems:"center", background:"#FFF", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"3px 8px"}}>
-                            <span style={{fontSize:"14px"}}>🇷🇺 Вся Россия: топ</span>
-                            <input value={topNCount} onChange={e=>setTopNCount(e.target.value.replace(/[^0-9]/g,""))} style={{width:"48px", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"3px 6px", fontSize:"14px", textAlign:"center"}} />
-                            <button className="boris-btn-hover" onClick={applyTopRussia} style={{background:"#7F56D9", color:"#fff", border:"none", borderRadius:"8px", padding:"4px 12px", cursor:"pointer", fontSize:"14px", fontWeight:600}}>Применить</button>
+                          <div className="boris-f2-4a17cefe8a2b">
+                            <span className="boris-f2-ba62946b0ebb">🇷🇺 Вся Россия: топ</span>
+                            <input value={topNCount} onChange={e=>setTopNCount(e.target.value.replace(/[^0-9]/g,""))}  className="boris-f2-90fe448eff62"/>
+                            <Button className="boris-btn-hover boris-f2-27b984c54fe2" onClick={applyTopRussia}>Применить</Button>
                           </div>
-                          <button className="boris-btn-hover" onClick={()=>setMultiRegionMode(!multiRegionMode)} style={{background: pickedRegions.length>0 ? "#E7EFFE" : "#FFFFFF", color: pickedRegions.length>0 ? "#2F6FED" : "#667085", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"5px 10px", cursor:"pointer", fontSize:"15px"}}>🗺️ Несколько регионов {pickedRegions.length>0 ? `(${pickedRegions.length})` : ""}</button>
+                          <Button className="boris-btn-hover" onClick={()=>setMultiRegionMode(!multiRegionMode)} style={{background: pickedRegions.length>0 ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: pickedRegions.length>0 ? "var(--boris-blue)" : "var(--boris-text-2)", border:"1px solid var(--boris-border)", borderRadius:"10px", padding:"5px 10px", cursor:"pointer", fontSize:"15px"}}>🗺️ Несколько регионов {pickedRegions.length>0 ? `(${pickedRegions.length})` : ""}</Button>
                           {(bulkCities.length>0 || bulkMetro.length>0) && (
-                            <button className="boris-btn-hover" onClick={() => { setBulkCities([]); setBulkMetro([]); }} style={{background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"5px 10px", cursor:"pointer", fontSize:"15px"}}>✕ Сбросить</button>
+                            <Button className="boris-btn-hover boris-f2-f0e9c0d60c26" onClick={() => { setBulkCities([]); setBulkMetro([]); }}>✕ Сбросить</Button>
                           )}
                         </div>
                         {multiRegionMode && (
-                          <div style={{marginTop:"10px", padding:"12px", background:"#FFF", border:"1px solid #E3E7F0", borderRadius:"10px", display:"flex", flexWrap:"wrap", gap:"8px", maxHeight:"200px", overflowY:"auto", alignItems:"flex-start"}}>
+                          <div className="boris-f2-45755f365f5e">
                             {Object.keys(citiesData).map(r => (
-                              <label key={r} style={{display:"flex", alignItems:"center", gap:"5px", fontSize:"14px", cursor:"pointer", background: pickedRegions.includes(r)?"#E7EFFE":"#F6F7FB", borderRadius:"8px", padding:"4px 10px"}}>
+                              <label key={r} style={{display:"flex", alignItems:"center", gap:"5px", fontSize:"14px", cursor:"pointer", background: pickedRegions.includes(r)?"var(--boris-blue-soft)":"var(--boris-bg)", borderRadius:"8px", padding:"4px 10px"}}>
                                 <input type="checkbox" checked={pickedRegions.includes(r)} onChange={()=>toggleRegion(r)} />{r}
                               </label>
                             ))}
-                            <button onClick={applyMultiRegions} style={{background:"#2F6FED", color:"#fff", border:"none", borderRadius:"8px", padding:"6px 16px", cursor:"pointer", fontSize:"14px", fontWeight:600, whiteSpace:"nowrap"}}>Собрать города ({pickedRegions.length} рег.)</button>
+                            <Button onClick={applyMultiRegions} className="boris-f2-06d9e9f324bb">Собрать города ({pickedRegions.length} рег.)</Button>
                           </div>
                         )}
                         {showMetroPicker && metroData[selectedCity] && (
-                          <div style={{marginTop:"8px", maxHeight:"180px", overflowY:"auto", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"8px"}}>
+                          <div className="boris-f2-f9169a9eaede">
                             {metroData[selectedCity].map(st => (
-                              <div key={st} onClick={() => applyMetroToAddress(st)} style={{padding:"6px 10px", cursor:"pointer", borderRadius:"6px", fontSize:"15px", color: selectedMetro===st ? "#2F6FED" : "#344054"}} onMouseEnter={e => (e.currentTarget.style.background = "#FFFFFF")} onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+                              <div key={st} onClick={() => applyMetroToAddress(st)} style={{padding:"6px 10px", cursor:"pointer", borderRadius:"6px", fontSize:"15px", color: selectedMetro===st ? "var(--boris-blue)" : "var(--boris-text-2)"}} onMouseEnter={e => (e.currentTarget.style.background = "var(--boris-surface)")} onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
                                 {st}
                               </div>
                             ))}
@@ -6506,24 +6727,24 @@ export default function Home() {
                         )}
                       </div>
 
-                    <div style={{marginTop:"16px"}}>
-                      <label className="b-label" style={{marginBottom:"14px"}}>🖼 Фото для объявлений <span style={{fontWeight:400, color:"#8A93A6"}}>— отмеченные галочками распределятся по объявлениям</span></label>
+                    <div className="boris-f2-8a359a76ebec">
+                      <label className="b-label boris-f2-a82d7062cc5e">🖼 Фото для объявлений <span className="boris-f2-de10b07e3112">— отмеченные галочками распределятся по объявлениям</span></label>
                       <div className="b-photo-bar">
-                        <span style={{color:"#667085", fontSize:"15px", marginLeft:"12px"}}>Фото на объявление:</span>
-                        <input className="b-input" type="number" min={1} max={10} value={photosPerAd} onChange={e => setPhotosPerAd(Math.max(1, Math.min(10, Number(e.target.value)||1)))} style={{width:"60px", padding:"9px 10px", marginLeft:"6px"}} />
-                        <div style={{display:"flex", gap:"6px", alignItems:"center", marginLeft:"10px"}}>
-                          <span style={{color:"#8A93A6", fontSize:"15px"}}>Остальные фото:</span>
-                          <button className="b-btn" onClick={() => setRestOrderMode("order")} style={{padding:"9px 12px", fontSize:"13px", border: restOrderMode==="order" ? "1px solid #2F6FED" : "1px solid #E3E7F0", background: restOrderMode==="order" ? "#E7EFFE" : "#FFFFFF", color: restOrderMode==="order" ? "#2F6FED" : "#667085"}}>по порядку</button>
-                          <button className="b-btn" onClick={() => setRestOrderMode("random")} style={{padding:"9px 12px", fontSize:"13px", border: restOrderMode==="random" ? "1px solid #2F6FED" : "1px solid #E3E7F0", background: restOrderMode==="random" ? "#E7EFFE" : "#FFFFFF", color: restOrderMode==="random" ? "#2F6FED" : "#667085"}}>случайно</button>
+                        <span className="boris-f2-076b4ea8da03">Фото на объявление:</span>
+                        <input className="b-input boris-f2-f03512d7abda" type="number" min={1} max={10} value={Number(photosPerAd) === 0 ? "" : photosPerAd} onChange={e => setPhotosPerAd(Math.max(1, Math.min(10, Number(e.target.value)||1)))} />
+                        <div className="boris-f2-f1013f288bab">
+                          <span className="boris-f2-316437256d37">Остальные фото:</span>
+                          <Button className="b-btn" onClick={() => setRestOrderMode("order")} style={{padding:"9px 12px", fontSize:"13px", border: restOrderMode==="order" ? "1px solid var(--boris-blue)" : "1px solid var(--boris-border)", background: restOrderMode==="order" ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: restOrderMode==="order" ? "var(--boris-blue)" : "var(--boris-text-2)"}}>по порядку</Button>
+                          <Button className="b-btn" onClick={() => setRestOrderMode("random")} style={{padding:"9px 12px", fontSize:"13px", border: restOrderMode==="random" ? "1px solid var(--boris-blue)" : "1px solid var(--boris-border)", background: restOrderMode==="random" ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: restOrderMode==="random" ? "var(--boris-blue)" : "var(--boris-text-2)"}}>случайно</Button>
                         </div>
                         <div className="b-brk"></div>
-                        <button className="b-btn" onClick={loadImagesForFeed} style={{background:"#FFFFFF", color:"#7C5CFC", border:"1px solid #F0ECFF"}}>🔄 Из хранилища</button>
-                        <input id="pool-upload-input" type="file" accept="image/*" multiple style={{display:"none"}} onChange={e => uploadForPool(e.target.files)} />
-                        <button className="b-btn" onClick={() => document.getElementById("pool-upload-input")?.click()} style={{background:"#FFFFFF", color:"#7C5CFC", border:"1px solid #F0ECFF", padding:"9px 14px", fontSize:"13px", whiteSpace:"nowrap"}}>📁 С устройства</button>
-                        <span className="b-meta" style={{marginLeft:"12px"}}>🏷 Баннер первым:</span>
-                        <button className="b-btn" onClick={() => setUseBannerPersist(true)} style={{padding:"9px 14px", fontSize:"13px", border: useBanner ? "1px solid #12805C" : "1px solid #E3E7F0", background: useBanner ? "#E9F7F1" : "#FFFFFF", color: useBanner ? "#12805C" : "#667085"}}>Да</button>
-                        <button className="b-btn" onClick={() => setUseBannerPersist(false)} style={{padding:"9px 14px", fontSize:"13px", border: !useBanner ? "1px solid #B42318" : "1px solid #E3E7F0", background: !useBanner ? "#FDECEC" : "#FFFFFF", color: !useBanner ? "#B42318" : "#667085"}}>Нет</button>
-                        <span style={{color:"#2F6FED", fontSize:"15px"}}>Выбрано: {Object.values(feedImages).filter(Boolean).length}</span>
+                        <Button className="b-btn boris-f2-06d3f5bf4f3d" onClick={loadImagesForFeed}>🔄 Из хранилища</Button>
+                        <input id="pool-upload-input" type="file" accept="image/*" multiple onChange={e => uploadForPool(e.target.files)}  className="boris-f2-c8be1ccba60b"/>
+                        <Button className="b-btn boris-f2-7f842d52869a" onClick={() => document.getElementById("pool-upload-input")?.click()}>📁 С устройства</Button>
+                        <span className="b-meta boris-f2-4018f4a8b552">🏷 Баннер первым:</span>
+                        <Button className="b-btn" onClick={() => setUseBannerPersist(true)} style={{padding:"9px 14px", fontSize:"13px", border: useBanner ? "1px solid #12805C" : "1px solid var(--boris-border)", background: useBanner ? "#E9F7F1" : "var(--boris-surface)", color: useBanner ? "#12805C" : "var(--boris-text-2)"}}>Да</Button>
+                        <Button className="b-btn" onClick={() => setUseBannerPersist(false)} style={{padding:"9px 14px", fontSize:"13px", border: !useBanner ? "1px solid #B42318" : "1px solid var(--boris-border)", background: !useBanner ? "#FDECEC" : "var(--boris-surface)", color: !useBanner ? "#B42318" : "var(--boris-text-2)"}}>Нет</Button>
+                        <span className="boris-f2-2bd0042afdbf">Выбрано: {Object.values(feedImages).filter(Boolean).length}</span>
                       </div>
                       {allImages.length > 0 && (() => {
                         const isBanner = (u: string) => /banner|баннер|infograph|инфограф/i.test(decodeURIComponent(u));
@@ -6532,11 +6753,11 @@ export default function Home() {
                         const cntB = bannerList.filter((u: string) => feedImages[u]).length;
                         const cntP = photoList.filter((u: string) => feedImages[u]).length;
                         const grid = (list: string[], accent: string) => (
-                          <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(110px, 1fr))", gap:"10px", maxHeight:"220px", overflowY:"auto", padding:"4px"}}>
+                          <div className="boris-f2-7cc92521063d">
                             {list.map((url: string, ii: number) => (
                               <div key={ii} onClick={() => toggleFeedImage(url)} style={{position:"relative", cursor:"pointer", border: feedImages[url] ? "2px solid " + accent : "2px solid #EEF2FA", borderRadius:"8px", overflow:"hidden"}}>
                                 <img src={url} style={{width:"100%", height:"90px", objectFit:"cover", display:"block", opacity: feedImages[url] ? 1 : 0.6}} />
-                                {feedImages[url] && <div style={{position:"absolute", top:"4px", right:"4px", background: accent, color:"#F6F7FB", borderRadius:"50%", width:"20px", height:"20px", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"15px", fontWeight:"bold"}}>✓</div>}
+                                {feedImages[url] && <div style={{position:"absolute", top:"4px", right:"4px", background: accent, color:"var(--boris-bg)", borderRadius:"50%", width:"20px", height:"20px", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"15px", fontWeight:"bold"}}>✓</div>}
                               </div>
                             ))}
                           </div>
@@ -6544,15 +6765,15 @@ export default function Home() {
                         return (
                           <div>
                             {bannerList.length > 0 && (
-                              <div style={{marginBottom:"14px"}}>
-                                <div style={{color:"#12805C", fontWeight:"bold", fontSize:"14px", marginBottom:"6px"}}>🏷 Баннеры {useBanner ? "(ставятся первым фото, по кругу)" : "(отключены — тумблер «Нет»)"} — выбрано: {cntB} из {bannerList.length}</div>
+                              <div className="boris-f2-a82d7062cc5e">
+                                <div className="boris-f2-697af69b32f5">🏷 Баннеры {useBanner ? "(ставятся первым фото, по кругу)" : "(отключены — тумблер «Нет»)"} — выбрано: {cntB} из {bannerList.length}</div>
                                 {grid(bannerList, "#12805C")}
                               </div>
                             )}
                             {photoList.length > 0 && (
                               <div>
-                                <div style={{color:"#2F6FED", fontWeight:"bold", fontSize:"14px", marginBottom:"6px"}}>🖼 Фото товара (добираются до {Math.max(0, photosPerAd - (useBanner && cntB > 0 ? 1 : 0))}) — выбрано: {cntP} из {photoList.length}</div>
-                                {grid(photoList, "#2F6FED")}
+                                <div className="boris-f2-00ad068b4341">🖼 Фото товара (добираются до {Math.max(0, photosPerAd - (useBanner && cntB > 0 ? 1 : 0))}) — выбрано: {cntP} из {photoList.length}</div>
+                                {grid(photoList, "var(--boris-blue)")}
                               </div>
                             )}
                           </div>
@@ -6562,48 +6783,48 @@ export default function Home() {
 
                     <div>
                         <label className="b-label">🕐 Когда публиковать</label>
-                        <div style={{display:"flex", gap:"8px"}}>
-                          <button className="boris-btn-hover" onClick={() => setPublishMode("now")} style={{padding:"8px 14px", borderRadius:"10px", border: publishMode==="now" ? "1px solid #2F6FED" : "1px solid #E3E7F0", background: publishMode==="now" ? "#E7EFFE" : "#FFFFFF", color: publishMode==="now" ? "#2F6FED" : "#667085", cursor:"pointer", fontSize:"15px", fontWeight: publishMode==="now" ? "bold" : "normal"}}>⚡ Сейчас</button>
-                          <button className="boris-btn-hover" onClick={() => setPublishMode("schedule")} style={{padding:"8px 14px", borderRadius:"10px", border: publishMode==="schedule" ? "1px solid #2F6FED" : "1px solid #E3E7F0", background: publishMode==="schedule" ? "#E7EFFE" : "#FFFFFF", color: publishMode==="schedule" ? "#2F6FED" : "#667085", cursor:"pointer", fontSize:"15px", fontWeight: publishMode==="schedule" ? "bold" : "normal"}}>🕐 Запланировать</button>
+                        <div className="boris-f2-b9bbe540d342">
+                          <Button className="boris-btn-hover" onClick={() => setPublishMode("now")} style={{padding:"8px 14px", borderRadius:"10px", border: publishMode==="now" ? "1px solid var(--boris-blue)" : "1px solid var(--boris-border)", background: publishMode==="now" ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: publishMode==="now" ? "var(--boris-blue)" : "var(--boris-text-2)", cursor:"pointer", fontSize:"15px", fontWeight: publishMode==="now" ? "bold" : "normal"}}>⚡ Сейчас</Button>
+                          <Button className="boris-btn-hover" onClick={() => setPublishMode("schedule")} style={{padding:"8px 14px", borderRadius:"10px", border: publishMode==="schedule" ? "1px solid var(--boris-blue)" : "1px solid var(--boris-border)", background: publishMode==="schedule" ? "var(--boris-blue-soft)" : "var(--boris-surface)", color: publishMode==="schedule" ? "var(--boris-blue)" : "var(--boris-text-2)", cursor:"pointer", fontSize:"15px", fontWeight: publishMode==="schedule" ? "bold" : "normal"}}>🕐 Запланировать</Button>
                         </div>
                       </div>
                       {publishMode === "schedule" && (
-                        <div style={{display:"flex", gap:"8px"}}>
+                        <div className="boris-f2-b9bbe540d342">
                           <div>
-                            <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Дата</label>
+                            <label className="boris-f2-5a0de0cf2264">Дата</label>
                             <input type="date" value={publishDate} onChange={e => setPublishDate(e.target.value)} style={{...inputStyle, width:"160px"}} />
                           </div>
                           <div>
-                            <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Время</label>
+                            <label className="boris-f2-5a0de0cf2264">Время</label>
                             <input type="time" value={publishTime} onChange={e => setPublishTime(e.target.value)} style={{...inputStyle, width:"120px"}} />
                           </div>
                         </div>
                       )}
-                      <button className="b-btn b-btn-primary" onClick={() => setShowPublishConfirm(true)} style={{padding:"12px 24px"}}>
+                      <Button className="b-btn b-btn-primary boris-f2-0b69cd21e01b" onClick={() => setShowPublishConfirm(true)}>
                         {publishMode === "now" ? `📤 Опубликовать сейчас (${genAds.length})` : `🕐 Запланировать (${genAds.length})`}
-                      </button>
+                      </Button>
                       {showPublishConfirm && (
-                        <div style={{position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.7)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center"}} onClick={() => setShowPublishConfirm(false)}>
-                          <div onClick={(e:any) => e.stopPropagation()} style={{background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"28px", maxWidth:"480px", width:"90%"}}>
-                            <h3 style={{margin:"0 0 16px", color:"#1D2939", fontSize:"18px"}}>Проверьте перед публикацией</h3>
-                            <div style={{fontSize:"23px", color:"#344054", lineHeight:"2"}}>
-                              <div><b style={{color:"#667085"}}>Объявлений:</b> {genAds.length}</div>
-                              <div><b style={{color:"#667085"}}>С индивидуальными фото:</b> {Object.values(adPhotos).filter(p => p && p.length > 0).length} из {genAds.length}</div>
-                              <div><b style={{color:"#667085"}}>Город:</b> {genAddress || "не указан"}</div>
-                              <div><b style={{color:"#667085"}}>Когда:</b> {publishMode === "now" ? "⚡ Сейчас" : `🕐 ${publishDate || "дата не указана"} в ${publishTime}`}</div>
+                        <div onClick={() => setShowPublishConfirm(false)} className="boris-f2-40ee1e11790e">
+                          <div onClick={(e:any) => e.stopPropagation()} className="boris-f2-33631c931988">
+                            <h3 className="boris-f2-ab7a0549a1dc">Проверьте перед публикацией</h3>
+                            <div className="boris-f2-aa5939599233">
+                              <div><b className="boris-f2-de52905d633b">Объявлений:</b> {genAds.length}</div>
+                              <div><b className="boris-f2-de52905d633b">С индивидуальными фото:</b> {Object.values(adPhotos).filter(p => p && p.length > 0).length} из {genAds.length}</div>
+                              <div><b className="boris-f2-de52905d633b">Город:</b> {genAddress || "не указан"}</div>
+                              <div><b className="boris-f2-de52905d633b">Когда:</b> {publishMode === "now" ? "⚡ Сейчас" : `🕐 ${publishDate || "дата не указана"} в ${publishTime}`}</div>
                             </div>
-                            <div style={{display:"flex", gap:"12px", marginTop:"24px"}}>
-                              <button className="boris-btn-hover" onClick={() => { setShowPublishConfirm(false); addAdsToFeed(); }} style={{flex:1, background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"12px", fontWeight:"bold", cursor:"pointer"}}>✅ Всё верно, публикуем</button>
-                              <button className="boris-btn-hover" onClick={() => setShowPublishConfirm(false)} style={{flex:1, background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"12px", cursor:"pointer"}}>Отмена</button>
+                            <div className="boris-f2-2c5b241b3608">
+                              <Button className="boris-btn-hover boris-f2-b68f130f1f82" onClick={() => { setShowPublishConfirm(false); addAdsToFeed(); }}>✅ Всё верно, публикуем</Button>
+                              <Button className="boris-btn-hover boris-f2-cc812ecc9f36" onClick={() => setShowPublishConfirm(false)}>Отмена</Button>
                             </div>
                           </div>
                         </div>
                       )}
                     </div>
                     {feedUrl && (
-                      <div style={{marginTop:"16px", padding:"12px", background:"#E7EFFE", border:"1px solid #2F6FED", borderRadius:"8px"}}>
-                        <div style={{color:"#2F6FED", fontWeight:"bold", marginBottom:"6px"}}>✅ Фид готов! Ссылка для ЛК Авито (Автозагрузка):</div>
-                        <a href={feedUrl} target="_blank" style={{color:"#2F6FED", fontSize:"15px", wordBreak:"break-all"}}>{feedUrl}</a>
+                      <div className="boris-f2-a8bec053f4c3">
+                        <div className="boris-f2-879a36bd023e">✅ Фид готов! Ссылка для ЛК Авито (Автозагрузка):</div>
+                        <a href={feedUrl} target="_blank" className="boris-f2-a46eb3d95c47">{feedUrl}</a>
                       </div>
                     )}
                   </div>
@@ -6614,17 +6835,17 @@ export default function Home() {
 
 
             {showTemplateForm && (
-              <div style={{background:"#F6F7FB", borderRadius:"12px", padding:"24px", border:"1px solid #E3E7F0", marginBottom:"24px"}}>
-                <h3 style={{margin:"0 0 8px", fontSize:"15px"}}>Новый шаблон</h3>
-                <p style={{color:"#667085", fontSize:"15px", marginBottom:"20px"}}>Переменные: {"{название}"}, {"{город}"}, {"{Вариант 1|Вариант 2|Вариант 3}"}</p>
-                <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"16px"}}>
+              <div className="boris-f2-497dbb52498e">
+                <h3 className="boris-f2-92a3f3c23f8e">Новый шаблон</h3>
+                <p className="boris-f2-5209fe92f5d0">Переменные: {"{название}"}, {"{город}"}, {"{Вариант 1|Вариант 2|Вариант 3}"}</p>
+                <div className="boris-f2-001013efee98">
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Название шаблона</label>
+                    <label className="boris-f2-5a0de0cf2264">Название шаблона</label>
                     <input value={newTemplate.name} onChange={e => setNewTemplate({...newTemplate, name: e.target.value})} placeholder="Услуги в Москве" style={inputStyle} />
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Категория Авито</label>
-                    <div style={{display:"flex", gap:"8px"}}>
+                    <label className="boris-f2-5a0de0cf2264">Категория Авито</label>
+                    <div className="boris-f2-b9bbe540d342">
                       <select className="b-select" value={mainCat} onChange={e => { const nc = e.target.value; setMainCat(nc); const firstSub = AVITO_CATEGORIES[nc].subs[0]; setSubCat(firstSub); setNewTemplate({...newTemplate, category: nc + " / " + firstSub}); }} style={{...inputStyle, flex:1}}>
                         {Object.keys(AVITO_CATEGORIES).map(c => (
                           <option key={c} value={c}>{AVITO_CATEGORIES[c].ready ? "✅ " : "🔜 "}{c}</option>
@@ -6637,21 +6858,21 @@ export default function Home() {
                       </select>
                     </div>
                     {!AVITO_CATEGORIES[mainCat].ready && (
-                      <details style={{marginBottom:"14px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Подробнее</summary><div style={{color:"#F79009", fontSize:"15px", marginTop:"6px"}}>🔜 Эта категория пока не проверена в валидаторе Авито — выгрузка в фид может не пройти. Готово: Услуги → Стихи, поздравления, тосты.</div></details>
+                      <details className="boris-f2-a82d7062cc5e"><summary className="boris-f2-c0e3ed53fc0c">Подробнее</summary><div className="boris-f2-f10a6a56fafd">🔜 Эта категория пока не проверена в валидаторе Авито — выгрузка в фид может не пройти. Готово: Услуги → Стихи, поздравления, тосты.</div></details>
                     )}
                   </div>
-                  <div style={{gridColumn:"1/-1"}}>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Шаблон заголовка</label>
+                  <div className="boris-f2-97294b207c62">
+                    <label className="boris-f2-5a0de0cf2264">Шаблон заголовка</label>
                     <input value={newTemplate.titleTemplate} onChange={e => setNewTemplate({...newTemplate, titleTemplate: e.target.value})}
                       placeholder="{Тротуарная плитка|Брусчатка} в {город}" style={inputStyle} />
                   </div>
-                  <div style={{gridColumn:"1/-1"}}>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Шаблон описания</label>
+                  <div className="boris-f2-97294b207c62">
+                    <label className="boris-f2-5a0de0cf2264">Шаблон описания</label>
                     <textarea value={newTemplate.description} onChange={e => setNewTemplate({...newTemplate, description: e.target.value})}
                       placeholder="{описание}" rows={4} style={{...inputStyle, resize:"vertical"}} />
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Цена</label>
+                    <label className="boris-f2-5a0de0cf2264">Цена</label>
                     <select className="b-select" value={newTemplate.priceType} onChange={e => setNewTemplate({...newTemplate, priceType: e.target.value})} style={inputStyle}>
                       <option value="original">Оригинальная с сайта</option>
                       <option value="markup">Наценка %</option>
@@ -6660,83 +6881,83 @@ export default function Home() {
                   </div>
                   {newTemplate.priceType !== "original" && (
                     <div>
-                      <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>{newTemplate.priceType === "markup" ? "Наценка %" : "Цена ₽"}</label>
-                      <input type="number" value={newTemplate.priceModifier} onChange={e => setNewTemplate({...newTemplate, priceModifier: Number(e.target.value)})} style={inputStyle} />
+                      <label className="boris-f2-5a0de0cf2264">{newTemplate.priceType === "markup" ? "Наценка %" : "Цена ₽"}</label>
+                      <input type="number" value={Number(newTemplate.priceModifier) === 0 ? "" : newTemplate.priceModifier} onChange={e => setNewTemplate({...newTemplate, priceModifier: Number(e.target.value)})} style={inputStyle} />
                     </div>
                   )}
-                  <div style={{gridColumn:"1/-1"}}>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Города</label>
-                    <div style={{display:"flex", gap:"8px", marginBottom:"8px", flexWrap:"wrap"}}>
+                  <div className="boris-f2-97294b207c62">
+                    <label className="boris-f2-5a0de0cf2264">Города</label>
+                    <div className="boris-f2-568b09bafe45">
                       {Object.keys(CITY_SETS).map(setName => (
-                        <button className="boris-btn-hover" key={setName} onClick={() => setNewTemplate({...newTemplate, cities: CITY_SETS[setName]})}
-                          style={{padding:"6px 12px", borderRadius:"8px", border:"1px solid #2F6FED", background:"#E7EFFE", color:"#2F6FED", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>
+                        <Button className="boris-btn-hover boris-f2-660d89275a49" key={setName} onClick={() => setNewTemplate({...newTemplate, cities: CITY_SETS[setName]})}
+>
                           + {setName}
-                        </button>
+                        </Button>
                       ))}
-                      <button className="boris-btn-hover" onClick={() => setNewTemplate({...newTemplate, cities: []})}
-                        style={{padding:"6px 12px", borderRadius:"8px", border:"1px solid #E3E7F0", background:"#FFFFFF", color:"#667085", cursor:"pointer", fontSize:"15px"}}>
+                      <Button className="boris-btn-hover boris-f2-c545564683bb" onClick={() => setNewTemplate({...newTemplate, cities: []})}
+>
                         Очистить
-                      </button>
+                      </Button>
                     </div>
                     <input value={newTemplate.cities.join(", ")} onChange={e => setNewTemplate({...newTemplate, cities: e.target.value.split(/[,\s]+/).map(c => c.trim()).filter(c => c)})}
                       placeholder="Или введите вручную: москва, спб питер" style={inputStyle} />
-                    <div style={{color:"#8A93A6", fontSize:"15px", marginTop:"6px"}}>Выбрано городов: {newTemplate.cities.length}</div>
+                    <div className="boris-f2-314f95d6c1dc">Выбрано городов: {newTemplate.cities.length}</div>
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Время публикации</label>
+                    <label className="boris-f2-5a0de0cf2264">Время публикации</label>
                     <input type="time" value={newTemplate.schedule} onChange={e => setNewTemplate({...newTemplate, schedule: e.target.value})} style={inputStyle} />
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Задержка мин (минут)</label>
-                    <input type="number" value={newTemplate.delayMin} onChange={e => setNewTemplate({...newTemplate, delayMin: Number(e.target.value)})} style={inputStyle} />
+                    <label className="boris-f2-5a0de0cf2264">Задержка мин (минут)</label>
+                    <input type="number" value={Number(newTemplate.delayMin) === 0 ? "" : newTemplate.delayMin} onChange={e => setNewTemplate({...newTemplate, delayMin: Number(e.target.value)})} style={inputStyle} />
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Задержка макс (минут)</label>
-                    <input type="number" value={newTemplate.delayMax} onChange={e => setNewTemplate({...newTemplate, delayMax: Number(e.target.value)})} style={inputStyle} />
+                    <label className="boris-f2-5a0de0cf2264">Задержка макс (минут)</label>
+                    <input type="number" value={Number(newTemplate.delayMax) === 0 ? "" : newTemplate.delayMax} onChange={e => setNewTemplate({...newTemplate, delayMax: Number(e.target.value)})} style={inputStyle} />
                   </div>
-                  <div style={{gridColumn:"1/-1"}}>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Дни публикации</label>
-                    <div style={{display:"flex", gap:"8px"}}>
+                  <div className="boris-f2-97294b207c62">
+                    <label className="boris-f2-5a0de0cf2264">Дни публикации</label>
+                    <div className="boris-f2-b9bbe540d342">
                       {days.map(day => (
-                        <button className="boris-btn-hover" key={day} onClick={() => {
+                        <Button className="boris-btn-hover" key={day} onClick={() => {
                           const current = newTemplate.scheduleDays;
                           setNewTemplate({...newTemplate, scheduleDays: current.includes(day) ? current.filter(d => d !== day) : [...current, day]});
                         }} style={{padding:"8px 12px", borderRadius:"8px", border:"none", cursor:"pointer",
-                          background: newTemplate.scheduleDays.includes(day) ? "#2F6FED" : "#FFFFFF",
-                          color: newTemplate.scheduleDays.includes(day) ? "#F6F7FB" : "#667085", fontWeight:"bold", fontSize:"15px"}}>
+                          background: newTemplate.scheduleDays.includes(day) ? "var(--boris-blue)" : "var(--boris-surface)",
+                          color: newTemplate.scheduleDays.includes(day) ? "var(--boris-bg)" : "var(--boris-text-2)", fontWeight:"bold", fontSize:"15px"}}>
                           {day}
-                        </button>
+                        </Button>
                       ))}
                     </div>
                   </div>
                 </div>
-                <div style={{display:"flex", gap:"12px", marginTop:"20px"}}>
-                  <button className="boris-btn-hover" onClick={() => {
+                <div className="boris-f2-d4268e91708c">
+                  <Button className="boris-btn-hover boris-f2-2fe5fa0e8409" onClick={() => {
                     if (!newTemplate.name) return alert("Введите название шаблона");
                     setTemplates([...templates, {...newTemplate, id: Date.now()}]);
                     setShowTemplateForm(false);
                     setNewTemplate({name:"", titleTemplate:"{название}", description:"{описание}", priceType:"original", priceModifier:0, cities:["Москва"], category:"Предложение услуг", schedule:"09:00", scheduleDays:["пн","вт","ср","чт","пт"], delayMin:2, delayMax:3});
-                  }} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"8px", padding:"10px 24px", fontWeight:"bold", cursor:"pointer"}}>Сохранить</button>
-                  <button className="boris-btn-hover" onClick={() => setShowTemplateForm(false)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"10px 24px", cursor:"pointer"}}>Отмена</button>
+                  }}>Сохранить</Button>
+                  <Button className="boris-btn-hover boris-f2-cb85b182d2e2" onClick={() => setShowTemplateForm(false)}>Отмена</Button>
                 </div>
               </div>
             )}
 
-            <div style={{display:"grid", gap:"16px"}}>
+            <div className="boris-f2-6aa137d58b1b">
               {templates.map(t => (
-                <div key={t.id} style={{background:"#F6F7FB", borderRadius:"12px", padding:"24px", border:"1px solid #EEF2FA"}}>
-                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"12px"}}>
-                    <div style={{fontSize:"23px", fontWeight:"bold"}}>{t.name}</div>
-                    <div style={{display:"flex", gap:"8px"}}>
-                      <button className="b-btn b-btn-primary" onClick={() => { setSelectedTemplate(t); setActiveTab("parser"); }} style={{padding:"8px 16px", fontSize:"13px"}}>Использовать</button>
-                      <button className="boris-btn-hover" onClick={() => setTemplates(templates.filter(x => x.id !== t.id))} style={{background:"#FDEDEC", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"6px 14px", cursor:"pointer", fontSize:"15px"}}>Удалить</button>
+                <div key={t.id} className="boris-f2-f13f2b87dcdf">
+                  <div className="boris-f2-bebbec744221">
+                    <div className="boris-f2-722924035001">{t.name}</div>
+                    <div className="boris-f2-b9bbe540d342">
+                      <Button className="b-btn b-btn-primary boris-f2-04069f041f3f" onClick={() => { setSelectedTemplate(t); setActiveTab("parser"); }}>Использовать</Button>
+                      <Button className="boris-btn-hover boris-f2-3d6efb02a142" onClick={() => setTemplates(templates.filter(x => x.id !== t.id))}>Удалить</Button>
                     </div>
                   </div>
-                  <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:"12px"}}>
-                    <div className="b-meta" style={{overflow:"hidden", textOverflow:"ellipsis"}} title={t.titleTemplate}>📝 {t.titleTemplate}</div>
+                  <div className="boris-f2-8d48d3cc01d2">
+                    <div className="b-meta boris-f2-fd2b934d6d0e" title={t.titleTemplate}>📝 {t.titleTemplate}</div>
                     <div className="b-meta">💰 {t.priceType === "original" ? "С сайта" : t.priceType === "markup" ? `+${t.priceModifier}%` : `${t.priceModifier} ₽`}</div>
-                    <div className="b-meta" style={{overflow:"hidden", textOverflow:"ellipsis"}}>📍 {(t.cities || []).join(", ")}</div>
-                    <div className="b-meta" style={{overflow:"hidden", textOverflow:"ellipsis"}}>🕐 {t.schedule} / {(t.scheduleDays || []).join(", ")}</div>
+                    <div className="b-meta boris-f2-fd2b934d6d0e">📍 {(t.cities || []).join(", ")}</div>
+                    <div className="b-meta boris-f2-fd2b934d6d0e">🕐 {t.schedule} / {(t.scheduleDays || []).join(", ")}</div>
                     <div className="b-meta">⏱ Задержка: {t.delayMin}–{t.delayMax} мин</div>
                   </div>
                 </div>
@@ -6748,265 +6969,265 @@ export default function Home() {
 
         {activeTab === "parser" && (
           <div>
-            <div className="b-panel" style={{maxWidth:"760px", marginBottom:"24px"}}>
-              <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #4C8DFF, #2F6FED)"}}>📤</span>Выгрузка товаров с сайта</h3>
+            <BorisCard className="b-panel boris-f2-d12871d88e2b">
+              <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-3ab1bb33aea8 boris-g1-icon">📤</span>Выгрузка товаров с сайта</h3>
               <p className="b-sub">БОРИС найдёт все товары и перенесёт в Авито</p>
 
-              <div style={{marginBottom:"16px"}}>
+              <div className="boris-f2-79a1c5a5db96">
                 <label className="b-label">Шаблон для выгрузки</label>
                 <select className="b-select" value={selectedTemplate?.id || ""} onChange={e => setSelectedTemplate(templates.find(t => t.id === Number(e.target.value)) || null)} style={inputStyle}>
                   <option value="">Выберите шаблон</option>
                   {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               </div>
-              <div style={{marginBottom:"20px", padding:"20px", background:"#F8FAFF", border:"1px solid #E7EFFE", borderRadius:"12px"}}>
-                <h4 style={{margin:"0 0 6px", color:"#1D2939", fontSize:"18px", fontWeight:800, display:"flex", alignItems:"center", gap:"10px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #9B87F5, #7C5CFC)", width:"30px", height:"30px", fontSize:"15px"}}>🔁</span>Или растяните шаблон без сайта</h4>
-                <details style={{marginBottom:"14px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Подробнее</summary><p style={{color:"#667085", fontSize:"14px", marginBottom:"14px", lineHeight:1.5}}>Выберите шаблон выше, впишите тему — Борис сгенерирует названия и разошлёт их через выбранный шаблон с уникализацией</p></details>
-                <div style={{display:"flex", gap:"12px", marginBottom:"10px", flexWrap:"wrap"}}>
+              <div className="boris-f2-5c00d98595d4">
+                <h4 className="boris-f2-a9b4fa714e7f"><span className="b-icon-sm boris-f2-9146fe9dae58 boris-g1-icon">🔁</span>Или растяните шаблон без сайта</h4>
+                <details className="boris-f2-a82d7062cc5e"><summary className="boris-f2-c0e3ed53fc0c">Подробнее</summary><p className="boris-f2-fffa89405079">Выберите шаблон выше, впишите тему — Борис сгенерирует названия и разошлёт их через выбранный шаблон с уникализацией</p></details>
+                <div className="boris-f2-4d809b7004bb">
                   <input value={stretchTopic} onChange={e => setStretchTopic(e.target.value)} placeholder="Тема партии, напр. стихи на заказ" style={{...inputStyle, flex:1, minWidth:"200px"}} />
-                  <input type="number" value={stretchCount} onChange={e => setStretchCount(Math.max(1, Math.min(50, Number(e.target.value)||1)))} style={{...inputStyle, width:"90px"}} />
-                  <button onClick={generateStretchNames} disabled={stretchLoading} className="b-btn b-btn-primary" style={{background: stretchLoading ? "#E3E7F0" : undefined, borderColor: stretchLoading ? "#E3E7F0" : undefined, cursor: stretchLoading ? "wait" : "pointer"}}>
+                  <input type="number" value={Number(stretchCount) === 0 ? "" : stretchCount} onChange={e => setStretchCount(Math.max(1, Math.min(50, Number(e.target.value)||1)))} style={{...inputStyle, width:"90px"}} />
+                  <Button onClick={generateStretchNames} disabled={stretchLoading} className="b-btn b-btn-primary" style={{background: stretchLoading ? "var(--boris-border)" : undefined, borderColor: stretchLoading ? "var(--boris-border)" : undefined, cursor: stretchLoading ? "wait" : "pointer"}}>
                     {stretchLoading ? "⏳ Думаю..." : "✨ Сгенерировать названия"}
-                  </button>
+                  </Button>
                 </div>
                 {stretchNames.length > 0 && (
                   <div>
-                    <div style={{color:"#667085", fontSize:"15px", marginBottom:"8px"}}>Названия (можно отредактировать каждое):</div>
-                    <div style={{display:"grid", gap:"6px", maxHeight:"240px", overflowY:"auto", marginBottom:"12px"}}>
+                    <div className="boris-f2-d6c905d382ac">Названия (можно отредактировать каждое):</div>
+                    <div className="boris-f2-34f46bec29b5">
                       {stretchNames.map((name, i) => (
                         <input key={i} value={name} onChange={e => setStretchNames(prev => prev.map((n, ni) => ni === i ? e.target.value : n))} style={{...inputStyle, fontSize:"15px", padding:"8px"}} />
                       ))}
                     </div>
-                    <button onClick={publishStretch} className="b-btn b-btn-primary">
+                    <Button onClick={publishStretch} className="b-btn b-btn-primary">
                       📤 Опубликовать {stretchNames.length} объявлений
-                    </button>
+                    </Button>
                   </div>
                 )}
               </div>
-            </div>
+            </BorisCard>
 
 
             {publishStatus && (
-              <div style={{background:"#F6F7FB", borderRadius:"8px", padding:"16px", border:"1px solid #E3E7F0", marginBottom:"16px", color:"#2F6FED"}}>
+              <div className="boris-f2-70f49cf1039e">
                 {publishStatus}
               </div>
             )}
 
               <div>
-                <div className="b-panel" style={{marginBottom:"18px"}}>
-                  <div className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #4C8DFF, #2F6FED)"}}>🌐</span>Выгрузка карточек с сайта</div>
-                  <details style={{marginBottom:"14px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Подробнее</summary><div className="b-sub" style={{marginBottom:"14px"}}>Вставьте ссылку на товар или на каталог/категорию (можно несколько, каждая с новой строки) — Борис выгрузит карточки с фото, ценами и характеристиками. Задача уйдёт в очередь, результат появится через 10-30 секунд на ссылку.</div></details>
-                  <div style={{display:"flex", gap:"8px", flexWrap:"wrap", alignItems:"flex-start"}}>
+                <BorisCard className="b-panel boris-f2-5b6aad9a3fd6">
+                  <div className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-3ab1bb33aea8 boris-g1-icon">🌐</span>Выгрузка карточек с сайта</div>
+                  <details className="boris-f2-a82d7062cc5e"><summary className="boris-f2-c0e3ed53fc0c">Подробнее</summary><div className="b-sub boris-f2-a82d7062cc5e">Вставьте ссылку на товар или на каталог/категорию (можно несколько, каждая с новой строки) — Борис выгрузит карточки с фото, ценами и характеристиками. Задача уйдёт в очередь, результат появится через 10-30 секунд на ссылку.</div></details>
+                  <div className="boris-f2-3487fbc4ce18">
                     <textarea value={parseUrl} onChange={e => setParseUrl(e.target.value)} placeholder={"https://сайт-клиента.ru/товар-или-каталог\nhttps://сайт-клиента.ru/другой-каталог"}
-                      rows={3} className="b-input" style={{flex:1, minWidth:"280px", fontFamily:"inherit", resize:"vertical"}} />
-                    <div style={{display:"flex", flexDirection:"column", gap:"4px", minWidth:"140px"}}>
-                      <label style={{fontSize:"12px", color:"#667085"}}>Сколько товаров</label>
-                      <input type="number" min={0} value={parseLimit || ""} onChange={e => setParseLimit(Math.max(0, parseInt(e.target.value) || 0))} placeholder="0 = все" className="b-input" style={{width:"100%"}} />
+                      rows={3} className="b-input boris-f2-4cb37163ab0e" />
+                    <div className="boris-f2-7f58be58a02e">
+                      <label className="boris-f2-98cb934029bf">Сколько товаров</label>
+                      <input type="number" min={0} value={parseLimit || ""} onChange={e => setParseLimit(Math.max(0, parseInt(e.target.value) || 0))} placeholder="0 = все" className="b-input boris-f2-cad980f4b707" />
                     </div>
-                    <button onClick={startParse} disabled={parseLoading || !parseUrl.trim()}
+                    <Button onClick={startParse} disabled={parseLoading || !parseUrl.trim()}
                       className="b-btn b-btn-primary" style={{opacity: parseLoading ? 0.6 : 1}}>
                       {parseLoading ? "⏳ Выгружаю..." : "🌐 Выгрузить"}
-                    </button>
-                    <button onClick={loadParsedProducts} className="b-btn b-btn-ghost">
+                    </Button>
+                    <Button onClick={loadParsedProducts} className="b-btn b-btn-ghost">
                       🔄 Обновить
-                    </button>
+                    </Button>
                   </div>
                   {parseProgress && (
-                    <div style={{fontSize:"13px", color:"#2F6FED", marginTop:"10px", display:"flex", alignItems:"center", gap:"8px"}}>
+                    <div className="boris-f2-101c7a75cddd">
                       ⏳ Борис выгружает карточки... (товар {parseProgress.done} из {parseProgress.total})
                     </div>
                   )}
                   {parseSourceUrls.length > 0 && (
-                    <div style={{fontSize:"12px", color:"#8A93A6", marginTop:"10px"}}>
+                    <div className="boris-f2-42d4a5024937">
                       Источник{parseSourceUrls.length > 1 ? "и" : ""}: {parseSourceUrls.map((u, i) => (
-                        <span key={u}>{i > 0 && ", "}<a href={u} target="_blank" rel="noopener noreferrer" style={{color:"#2F6FED"}}>{u}</a></span>
+                        <span key={u}>{i > 0 && ", "}<a href={u} target="_blank" rel="noopener noreferrer" className="boris-f2-b5d95bf86ec9">{u}</a></span>
                       ))} · выгружено карточек: {parsedProducts.length}
                     </div>
                   )}
-                </div>
+                </BorisCard>
 
                 {parsedProducts.length > 0 && (
-                  <div style={{marginBottom:"14px"}}>
-                    <div className="b-panel" style={{marginBottom:"16px", padding:"18px"}}>
-                      <label className="b-label">📋 Образец / пожелания к текстам <span style={{fontWeight:400, color:"#8A93A6"}}>— Борис возьмёт отсюда общую информацию о компании и стиль, а конкретику по каждому товару и ключевые слова придумает свои</span></label>
-                      <textarea className="b-input" value={genSample} onChange={e => setGenSample(e.target.value)} placeholder="Вставь пример удачного объявления, бриф клиента или описание компании: условия доставки, гарантии, преимущества, тон подачи…" rows={5} style={{resize:"vertical", fontFamily:"inherit"}} />
-                      <div style={{display:"flex", gap:"8px", marginTop:"12px", flexWrap:"wrap", alignItems:"center"}}>
-                        <button className="b-btn" onClick={saveTextSample} style={{background:"#FFFFFF", color:"#12805C", border:"1px solid #C7EBDC"}}>💾 Сохранить как…</button>
-                        {genSample && <button className="b-btn b-btn-ghost" onClick={() => setGenSample("")}>Очистить</button>}
+                  <div className="boris-f2-a82d7062cc5e">
+                    <BorisCard className="b-panel boris-f2-93597abd4e0d">
+                      <label className="b-label">📋 Образец / пожелания к текстам <span className="boris-f2-de10b07e3112">— Борис возьмёт отсюда общую информацию о компании и стиль, а конкретику по каждому товару и ключевые слова придумает свои</span></label>
+                      <textarea className="b-input boris-f2-90afa77b7cd3" value={genSample} onChange={e => setGenSample(e.target.value)} placeholder="Вставь пример удачного объявления, бриф клиента или описание компании: условия доставки, гарантии, преимущества, тон подачи…" rows={5} />
+                      <div className="boris-f2-8841b3e06f48">
+                        <Button className="b-btn boris-f2-38e413b98ec6" onClick={saveTextSample}>💾 Сохранить как…</Button>
+                        {genSample && <Button className="b-btn b-btn-ghost" onClick={() => setGenSample("")}>Очистить</Button>}
                       </div>
                       {textSamples.length > 0 && (
-                        <div style={{marginTop:"14px", paddingTop:"14px", borderTop:"1px solid #EEF2FA"}}>
-                          <div className="b-meta" style={{marginBottom:"8px", fontWeight:700}}>Сохранённые образцы ({textSamples.length})</div>
+                        <div className="boris-f2-77b7c168e926">
+                          <div className="b-meta boris-f2-ca4dc3e95d0e">Сохранённые образцы ({textSamples.length})</div>
                           {textSamples.map((t: any) => (
-                            <div key={t.id} style={{display:"flex", alignItems:"center", gap:"8px", padding:"8px 0", borderBottom:"1px solid #F6F7FB"}}>
-                              <span className="b-meta" style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", color:"#1D2939", fontWeight:600}}>{t.name}</span>
-                              <button className="b-btn b-btn-ghost" onClick={() => setGenSample(t.text)}>↩ Загрузить</button>
-                              <button className="b-btn" onClick={() => deleteTextSample(t.id)} style={{background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438"}}>🗑</button>
+                            <div key={t.id} className="boris-f2-437e0dfcc67c">
+                              <span className="b-meta boris-f2-c78ddc8b82f9">{t.name}</span>
+                              <Button className="b-btn b-btn-ghost" onClick={() => setGenSample(t.text)}>↩ Загрузить</Button>
+                              <Button className="b-btn boris-f2-4ed708bc749b" onClick={() => deleteTextSample(t.id)}>🗑</Button>
                             </div>
                           ))}
                         </div>
                       )}
-                    </div>
-                    <details style={{marginBottom:"14px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Подробнее</summary><div style={{fontSize:"12px", color:"#8A93A6", marginBottom:"8px"}}>Конвейер: 1) выгрузка (готово) → 2) обогатить тексты + отправить в черновики → 3) баннеры на партию → 4) проверить фид → 5) опубликовать.</div></details>
-                    <div style={{display:"flex", gap:"10px", alignItems:"center", flexWrap:"wrap"}}>
-                      <button onClick={fetchAllGalleries} disabled={allGalleriesLoading}
-                        className="b-btn b-btn-primary" style={{background:"#7C5CFC", borderColor:"#7C5CFC", padding:"9px 16px", fontSize:"13px"}}>
+                    </BorisCard>
+                    <details className="boris-f2-a82d7062cc5e"><summary className="boris-f2-c0e3ed53fc0c">Подробнее</summary><div className="boris-f2-13ca16e7de8e">Конвейер: 1) выгрузка (готово) → 2) обогатить тексты + отправить в черновики → 3) баннеры на партию → 4) проверить фид → 5) опубликовать.</div></details>
+                    <div className="boris-f2-15b47d7710a8">
+                      <Button onClick={fetchAllGalleries} disabled={allGalleriesLoading}
+                        className="b-btn b-btn-primary boris-f2-96b5a01a96d6">
                         🖼 {allGalleriesLoading ? "Запускаю..." : "Собрать все фото (в фоне)"}
-                      </button>
-                      <button onClick={enrichDescriptions} disabled={enrichLoading}
-                        className="b-btn b-btn-primary" style={{background:"#EE46BC", borderColor:"#EE46BC", padding:"9px 16px", fontSize:"13px"}}>
+                      </Button>
+                      <Button onClick={enrichDescriptions} disabled={enrichLoading}
+                        className="b-btn b-btn-primary boris-f2-5880fa0541d0">
                         ✨ {enrichLoading ? "Пишу описания..." : "Обогатить тексты ИИ (в фоне)"}
-                      </button>
-                      <button onClick={() => setSelectedParsedIdx(selectedParsedIdx.size === parsedProducts.length ? new Set() : new Set(parsedProducts.map((_,i)=>i)))}
-                        className="b-btn b-btn-soft" style={{padding:"9px 16px", fontSize:"13px"}}>
+                      </Button>
+                      <Button onClick={() => setSelectedParsedIdx(selectedParsedIdx.size === parsedProducts.length ? new Set() : new Set(parsedProducts.map((_,i)=>i)))}
+                        className="b-btn b-btn-soft boris-f2-5d4515f904fc">
                         {selectedParsedIdx.size === parsedProducts.length ? "☑ Снять выбор" : "☐ Выбрать все"}
-                      </button>
+                      </Button>
                       {selectedParsedIdx.size > 0 && (
                         <>
-                          <span style={{fontSize:"13px", color:"#5B6472"}}>Выбрано: {selectedParsedIdx.size}</span>
-                          <button onClick={deleteSelectedParsed}
-                            className="b-btn b-btn-primary" style={{background:"#F04438", borderColor:"#F04438", padding:"9px 16px", fontSize:"13px"}}>
+                          <span className="boris-f2-a5968d92dd2c">Выбрано: {selectedParsedIdx.size}</span>
+                          <Button onClick={deleteSelectedParsed}
+                            className="b-btn b-btn-primary boris-f2-c2b57489c305">
                             🗑 Удалить выбранные
-                          </button>
+                          </Button>
                         </>
                       )}
                     </div>
-                    {enrichProgress && <div style={{fontSize:"12px", color:"#8A93A6", marginTop:"6px"}}>{enrichProgress}</div>}
+                    {enrichProgress && <div className="boris-f2-1d201bc91c10">{enrichProgress}</div>}
                     {selectedParsedIdx.size > 0 && (
-                      <div style={{display:"flex", gap:"8px", alignItems:"center", flexWrap:"wrap", marginTop:"10px", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px"}}>
+                      <div className="boris-f2-446fac4f5a5f">
                         <input value={pipelineBatchLabelInput} onChange={e => setPipelineBatchLabelInput(e.target.value)} placeholder="Название партии, напр. Детские"
-                          className="b-input" style={{minWidth:"200px", fontSize:"13px", padding:"7px 10px"}} />
+                          className="b-input boris-f2-668d18fb0c60" />
                         <input value={pipelineTopicInput} onChange={e => setPipelineTopicInput(e.target.value)} placeholder="Ниша для категории (необязательно)"
-                          className="b-input" style={{minWidth:"220px", fontSize:"13px", padding:"7px 10px"}} />
-                        <button onClick={sendSelectedToDrafts} disabled={toDraftsLoading}
-                          className="b-btn b-btn-primary" style={{background:"#12805C", borderColor:"#12805C", padding:"9px 16px", fontSize:"13px"}}>
+                          className="b-input boris-f2-d9ccacd74cbf" />
+                        <Button onClick={sendSelectedToDrafts} disabled={toDraftsLoading}
+                          className="b-btn b-btn-primary boris-f2-48e95d1fef4e">
                           📤 {toDraftsLoading ? "Создаю..." : "В черновики"}
-                        </button>
+                        </Button>
                       </div>
                     )}
                   </div>
                 )}
 
                 {pipelineBatch && (
-                  <div className="b-panel" style={{marginBottom:"18px", border:"1px solid #E7EFFE"}}>
-                    <div className="b-title" style={{fontSize:"15px", display:"flex", alignItems:"center", gap:"10px"}}>
-                      <span className="b-icon-sm" style={{background:"linear-gradient(135deg, #12805C, #1E8E5A)"}}>📦</span>
+                  <BorisCard className="b-panel boris-f2-3e45ce21f4e9">
+                    <div className="b-title boris-f2-12ac1e81f1de">
+                      <span className="b-icon-sm boris-f2-9153f4ff5264 boris-g1-icon">📦</span>
                       Партия «{pipelineBatch.label}» — {pipelineBatch.count} черновиков, категория «{pipelineBatch.category}»
                     </div>
-                    <div style={{display:"flex", gap:"8px", alignItems:"center", flexWrap:"wrap", margin:"12px 0"}}>
-                      <input type="number" value={bannerCount} onChange={e => setBannerCount(Math.max(1, Number(e.target.value) || 1))} style={{width:"70px", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"7px", fontSize:"13px"}} title="Сколько разных баннеров" />
-                      <input type="number" value={photosPerAdInput} onChange={e => setPhotosPerAdInput(Math.max(1, Number(e.target.value) || 1))} style={{width:"70px", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"7px", fontSize:"13px"}} title="Фото на объявление (баннер + обычные)" />
+                    <div className="boris-f2-41231101c56e">
+                      <input type="number" value={Number(bannerCount) === 0 ? "" : bannerCount} onChange={e => setBannerCount(Math.max(1, Number(e.target.value) || 1))} title="Сколько разных баннеров"  className="boris-f2-cd334c10cb14"/>
+                      <input type="number" value={Number(photosPerAdInput) === 0 ? "" : photosPerAdInput} onChange={e => setPhotosPerAdInput(Math.max(1, Number(e.target.value) || 1))} title="Фото на объявление (баннер + обычные)"  className="boris-f2-cd334c10cb14"/>
                       <input value={bannerFolderInput} onChange={e => setBannerFolderInput(e.target.value)} placeholder="Папка с доп. фото (необязательно)"
-                        className="b-input" style={{minWidth:"200px", fontSize:"13px", padding:"7px 10px"}} />
-                      <button onClick={runBatchBanners} disabled={batchBannerLoading}
-                        className="b-btn b-btn-primary" style={{background:"#F79009", borderColor:"#F79009", padding:"9px 16px", fontSize:"13px"}}>
+                        className="b-input boris-f2-668d18fb0c60" />
+                      <Button onClick={runBatchBanners} disabled={batchBannerLoading}
+                        className="b-btn b-btn-primary boris-f2-c24f9a613530">
                         🎨 {batchBannerLoading ? "Генерирую..." : "Баннеры на партию"}
-                      </button>
-                      <button onClick={runBatchValidate} disabled={pipelineValidateLoading}
-                        className="b-btn b-btn-primary" style={{background:"#7C5CFC", borderColor:"#7C5CFC", padding:"9px 16px", fontSize:"13px"}}>
+                      </Button>
+                      <Button onClick={runBatchValidate} disabled={pipelineValidateLoading}
+                        className="b-btn b-btn-primary boris-f2-96b5a01a96d6">
                         🔍 {pipelineValidateLoading ? "Проверяю..." : "Проверить фид (до публикации)"}
-                      </button>
-                      <button onClick={runBatchPublish} disabled={pipelinePublishLoading}
-                        className="b-btn b-btn-primary" style={{background:"#2F6FED", borderColor:"#2F6FED", padding:"9px 16px", fontSize:"13px"}}>
+                      </Button>
+                      <Button onClick={runBatchPublish} disabled={pipelinePublishLoading}
+                        className="b-btn b-btn-primary boris-f2-872c8e2020b6">
                         🚀 {pipelinePublishLoading ? "Публикую..." : "Опубликовать сейчас"}
-                      </button>
+                      </Button>
                     </div>
-                    {bannerResult && <div style={{fontSize:"13px", color:"#5B6472", marginBottom:"8px"}}>{bannerResult}</div>}
+                    {bannerResult && <div className="boris-f2-f413d1eacb96">{bannerResult}</div>}
                     {pipelineValidateResult && (
-                      <div style={{background: pipelineValidateResult.status === "ok" ? "#F0FBF6" : "#FEF7EC", border:"1px solid " + (pipelineValidateResult.status === "ok" ? "#C7EBDC" : "#FDE9C8"), borderRadius:"8px", padding:"12px", fontSize:"12px", color:"#344054", whiteSpace:"pre-wrap", maxHeight:"260px", overflowY:"auto"}}>
+                      <div style={{background: pipelineValidateResult.status === "ok" ? "#F0FBF6" : "#FEF7EC", border:"1px solid " + (pipelineValidateResult.status === "ok" ? "#C7EBDC" : "#FDE9C8"), borderRadius:"8px", padding:"12px", fontSize:"12px", color:"var(--boris-text-2)", whiteSpace:"pre-wrap", maxHeight:"260px", overflowY:"auto"}}>
                         <b>{pipelineValidateResult.status === "ok" ? "✅ Фид корректен" : "⚠️ Есть замечания"}</b>
-                        <div style={{marginTop:"6px"}}>{pipelineValidateResult.raw_text}</div>
+                        <div className="boris-f2-2fd7789b397a">{pipelineValidateResult.raw_text}</div>
                       </div>
                     )}
-                  </div>
+                  </BorisCard>
                 )}
 
                 {parsedProducts.length === 0 ? (
-                  <div style={{textAlign:"center", padding:"40px", color:"#8A93A6", fontSize:"14px"}}>Пока нет выгруженных карточек. Вставьте ссылку выше и нажмите «Выгрузить».</div>
+                  <div className="boris-f2-0cbb631ca992">Пока нет выгруженных карточек. Вставьте ссылку выше и нажмите «Выгрузить».</div>
                 ) : (
-                  <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:"16px"}}>
+                  <div className="boris-f2-81ebad604be0">
                     {parsedProducts.map((p, idx) => (
-                      <div key={idx} className="b-card" style={{padding:0, border:"1px solid #E3E7F0", display:"flex", flexDirection:"column"}}>
-                        <div style={{height:"180px", background:"#F5FAFF", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden", position:"relative"}}>
+                      <BorisCard key={idx} className="b-card boris-f2-102c74593fc1">
+                        <div className="boris-f2-4e1513940c7e">
                           <input type="checkbox" checked={selectedParsedIdx.has(idx)} onChange={() => toggleParsedSelect(idx)}
-                            style={{position:"absolute", top:"8px", left:"8px", width:"20px", height:"20px", cursor:"pointer", zIndex:5, accentColor:"#2F6FED"}} />
-                          {p.image ? <img src={p.image} alt={p.title} onClick={() => { const imgs = p.images && p.images.length > 0 ? p.images : [p.image]; setPgLightbox(imgs); setPgLightboxIdx(0); }} style={{width:"100%", height:"100%", objectFit:"contain", background:"#F6F7FB", cursor:"zoom-in"}} /> : <span style={{color:"#C9D2E3", fontSize:"13px"}}>нет фото</span>}
-                          {p.images && p.images.length > 1 && <span style={{position:"absolute", bottom:"6px", right:"6px", background:"rgba(0,0,0,0.6)", color:"#fff", fontSize:"11px", padding:"2px 6px", borderRadius:"4px"}}>📷 {p.images.length}</span>}
+  className="boris-f2-1d75ba679561"/>
+                          {p.image ? <img src={p.image} alt={p.title} onClick={() => { const imgs = p.images && p.images.length > 0 ? p.images : [p.image]; setPgLightbox(imgs); setPgLightboxIdx(0); }}  className="boris-f2-58ce61779478"/> : <span className="boris-f2-20730004e9bf">нет фото</span>}
+                          {p.images && p.images.length > 1 && <span className="boris-f2-3f118decb119">📷 {p.images.length}</span>}
                         </div>
-                        <div style={{padding:"14px", display:"flex", flexDirection:"column", gap:"8px", flex:1}}>
+                        <div className="boris-f2-cd0803287ba5">
                           {editingParsedIdx === idx ? (
                             <>
-                              <input defaultValue={p.title} id={`parsed-title-${idx}`} style={{width:"100%", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 8px", fontSize:"13px", fontWeight:600}} />
-                              <input defaultValue={p.price} id={`parsed-price-${idx}`} style={{width:"100%", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 8px", fontSize:"13px"}} />
+                              <input defaultValue={p.title} id={`parsed-title-${idx}`}  className="boris-f2-d56343673fe1"/>
+                              <input defaultValue={p.price} id={`parsed-price-${idx}`}  className="boris-f2-8c3148cf53ea"/>
                               <FormatToolbar textareaId={`parsed-desc-${idx}`} />
                               <textarea defaultValue={p.ai_description || p.description || ""} id={`parsed-desc-${idx}`} rows={5}
                                 placeholder="Описание товара (можно сгенерировать через ИИ ниже)"
-                                style={{width:"100%", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 8px", fontSize:"12px", fontFamily:"inherit"}} />
-                              <button onClick={() => genDescriptionForCard(idx)} disabled={genDescLoading}
-                                className="b-btn b-btn-primary" style={{background:"#7C5CFC", borderColor:"#7C5CFC", padding:"8px", fontSize:"12px"}}>
+  className="boris-f2-b4b58f7330c6"/>
+                              <Button onClick={() => genDescriptionForCard(idx)} disabled={genDescLoading}
+                                className="b-btn b-btn-primary boris-f2-8c30217501a9">
                                 ✨ {genDescLoading ? "Генерирую..." : "Сгенерировать ИИ-описание"}
-                              </button>
-                              <select className="b-select" id={`parsed-template-${idx}`} defaultValue="" style={{width:"100%", boxSizing:"border-box", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 8px", fontSize:"12px"}}>
+                              </Button>
+                              <select className="b-select boris-f2-6cc0017bc62d" id={`parsed-template-${idx}`} defaultValue="">
                                 <option value="">— применить структуру шаблона —</option>
                                 {templates.filter((t:any) => t.id).map((t:any) => <option key={t.id} value={t.id}>{t.name}</option>)}
                               </select>
-                              <div style={{display:"flex", gap:"6px"}}>
-                                <button onClick={() => {
+                              <div className="boris-f2-1d8943fa86ea">
+                                <Button onClick={() => {
                                     const title = (document.getElementById(`parsed-title-${idx}`) as HTMLInputElement)?.value;
                                     const price = (document.getElementById(`parsed-price-${idx}`) as HTMLInputElement)?.value;
                                     const desc = (document.getElementById(`parsed-desc-${idx}`) as HTMLTextAreaElement)?.value;
                                     saveParsedEdit(idx, { title, price, ai_description: desc });
-                                  }} style={{flex:1, background:"#2F6FED", color:"#fff", border:"none", borderRadius:"6px", padding:"7px", fontSize:"13px", fontWeight:600, cursor:"pointer"}}>Сохранить</button>
-                                <button onClick={() => setEditingParsedIdx(null)} style={{flex:1, background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"7px", fontSize:"13px", cursor:"pointer"}}>Отмена</button>
+                                  }} className="boris-f2-947326341b1f">Сохранить</Button>
+                                <Button onClick={() => setEditingParsedIdx(null)} className="boris-f2-378162fc8e01">Отмена</Button>
                               </div>
                             </>
                           ) : (
                             <>
-                          <div style={{fontSize:"14px", fontWeight:600, color:"#14161A", lineHeight:1.3}}>{p.title}</div>
-                          {p.price && <div style={{fontSize:"16px", fontWeight:800, color:"#2F6FED"}}>{p.price}</div>}
-                          {p.ai_description && <div style={{fontSize:"12px", color:"#1E8E5A", background:"#F0FBF6", borderRadius:"6px", padding:"6px 8px"}}>✨ {p.ai_description.slice(0,120)}...</div>}
+                          <div className="boris-f2-7ebe3bb57427">{p.title}</div>
+                          {p.price && <div className="boris-f2-7ee8fd6aab78">{p.price}</div>}
+                          {p.ai_description && <div className="boris-f2-5b6568e4d996">✨ {p.ai_description.slice(0,120)}...</div>}
                           {p.characteristics && Object.keys(p.characteristics).length > 0 && (
-                            <div style={{fontSize:"12px", color:"#5B6472", lineHeight:1.5}}>
+                            <div className="boris-f2-3a21fe8461c9">
                               {Object.entries(p.characteristics).slice(0,4).map(([k,v]: any, i) => (
                                 <div key={i}><b>{k}:</b> {String(v).slice(0,50)}</div>
                               ))}
                             </div>
                           )}
-                          <button className="boris-btn-hover" onClick={() => setEditingParsedIdx(idx)} style={{alignSelf:"flex-start", fontSize:"11px", color:"#7C5CFC", background:"#FFFFFF", border:"none", cursor:"pointer", padding:0, textDecoration:"underline"}}>✏️ Редактировать</button>
+                          <Button className="boris-btn-hover boris-f2-49571d99a41b" onClick={() => setEditingParsedIdx(idx)}>✏️ Редактировать</Button>
                             </>
                           )}
                           {p.banner_url && (
-                            <div style={{marginTop:"8px"}}>
-                              <img src={p.banner_url} alt="Баннер" onClick={() => { setPgLightbox([p.banner_url]); setPgLightboxIdx(0); }} style={{width:"100%", borderRadius:"8px", border:"1px solid #EAF4FF", cursor:"zoom-in"}} />
-                              <div style={{fontSize:"11px", color:"#1E8E5A", marginTop:"4px"}}>✅ Баннер готов</div>
+                            <div className="boris-f2-b1ecc496e0c7">
+                              <img src={p.banner_url} alt="Баннер" onClick={() => { setPgLightbox([p.banner_url]); setPgLightboxIdx(0); }}  className="boris-f2-10e527d6e220"/>
+                              <div className="boris-f2-5a87d59b8664">✅ Баннер готов</div>
                             </div>
                           )}
-                          <div style={{marginTop:"auto", display:"flex", gap:"8px", flexWrap:"wrap", paddingTop:"8px"}}>
-                            {p.product_url && <a href={p.product_url} target="_blank" rel="noopener noreferrer" className="boris-btn-hover" style={{fontSize:"12px", color:"#2F6FED", textDecoration:"none", border:"1px solid #2F6FED", borderRadius:"6px", padding:"6px 10px", fontWeight:600}}>↗ На сайте</a>}
-                            <button className="boris-btn-hover" onClick={() => fetchGalleryForCard(idx)} disabled={galleryLoading === idx}
-                              style={{fontSize:"12px", background:"#F5F5F7", color:"#5B6472", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 10px", fontWeight:600, cursor:"pointer"}}>
+                          <div className="boris-f2-2cdde190c54f">
+                            {p.product_url && <a href={p.product_url} target="_blank" rel="noopener noreferrer" className="boris-btn-hover boris-f2-77729ab23993">↗ На сайте</a>}
+                            <Button className="boris-btn-hover boris-f2-b0060101407a" onClick={() => fetchGalleryForCard(idx)} disabled={galleryLoading === idx}
+>
                               🖼 {galleryLoading === idx ? "Собираю..." : "Все фото"}
-                            </button>
-                            <button className="boris-btn-hover" onClick={() => genProductBanner(p, idx)} style={{fontSize:"12px", background:"#E08A2C", color:"#fff", border:"none", borderRadius:"10px", padding:"6px 10px", fontWeight:600, cursor:"pointer"}}>🎨 {p.banner_url ? "Пересоздать" : "Баннер"}</button>
+                            </Button>
+                            <Button className="boris-btn-hover boris-f2-6241354d7d33" onClick={() => genProductBanner(p, idx)}>🎨 {p.banner_url ? "Пересоздать" : "Баннер"}</Button>
                           </div>
                         </div>
-                      </div>
+                      </BorisCard>
                     ))}
                   </div>
                 )}
               </div>
             {pgLightbox.length > 0 && (
-              <div onClick={() => setPgLightbox([])} style={{position:"fixed", inset:0, background:"rgba(10,14,20,0.93)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:5000, padding:"30px"}}>
-                <button onClick={(e) => { e.stopPropagation(); setPgLightbox([]); }} style={{position:"absolute", top:"20px", right:"30px", background:"#fff", border:"none", color:"#101828", fontSize:"15px", fontWeight:700, cursor:"pointer", padding:"10px 22px", borderRadius:"22px", zIndex:10, boxShadow:"0 4px 16px rgba(0,0,0,0.3)"}}>✕ Закрыть</button>
+              <div onClick={() => setPgLightbox([])} className="boris-f2-826c7dca20b8">
+                <Button onClick={(e) => { e.stopPropagation(); setPgLightbox([]); }} className="boris-f2-d3b22bbd5bbc">✕ Закрыть</Button>
                 {pgLightbox.length > 1 && (
-                  <button onClick={(e) => { e.stopPropagation(); setPgLightboxIdx(i => (i - 1 + pgLightbox.length) % pgLightbox.length); }} style={{position:"absolute", left:"30px", top:"50%", transform:"translateY(-50%)", background:"rgba(255,255,255,0.15)", border:"none", color:"#fff", fontSize:"34px", cursor:"pointer", width:"56px", height:"56px", borderRadius:"50%", zIndex:10}}>‹</button>
+                  <Button onClick={(e) => { e.stopPropagation(); setPgLightboxIdx(i => (i - 1 + pgLightbox.length) % pgLightbox.length); }} className="boris-f2-d396edb6859f">‹</Button>
                 )}
-                <img src={pgLightbox[pgLightboxIdx]} alt="Фото" onClick={e => e.stopPropagation()} style={{maxWidth:"88vw", maxHeight:"88vh", objectFit:"contain", borderRadius:"10px", boxShadow:"0 20px 60px rgba(0,0,0,0.5)"}} />
+                <img src={pgLightbox[pgLightboxIdx]} alt="Фото" onClick={e => e.stopPropagation()}  className="boris-f2-52023a8056d7"/>
                 {pgLightbox.length > 1 && (
-                  <button onClick={(e) => { e.stopPropagation(); setPgLightboxIdx(i => (i + 1) % pgLightbox.length); }} style={{position:"absolute", right:"30px", top:"50%", transform:"translateY(-50%)", background:"rgba(255,255,255,0.15)", border:"none", color:"#fff", fontSize:"34px", cursor:"pointer", width:"56px", height:"56px", borderRadius:"50%", zIndex:10}}>›</button>
+                  <Button onClick={(e) => { e.stopPropagation(); setPgLightboxIdx(i => (i + 1) % pgLightbox.length); }} className="boris-f2-24a38cd42a1e">›</Button>
                 )}
                 {pgLightbox.length > 1 && (
-                  <div style={{position:"absolute", bottom:"24px", left:"50%", transform:"translateX(-50%)", color:"#fff", fontSize:"14px", background:"rgba(0,0,0,0.4)", padding:"6px 16px", borderRadius:"16px"}}>{pgLightboxIdx + 1} / {pgLightbox.length}</div>
+                  <div className="boris-f2-3675fa1e8473">{pgLightboxIdx + 1} / {pgLightbox.length}</div>
                 )}
               </div>
             )}
@@ -7016,23 +7237,23 @@ export default function Home() {
         {activeTab === "webdesign" && (
           <div>
             {invoiceOpen && (
-  <div onClick={()=>setInvoiceOpen(false)} style={{position:"fixed", inset:0, background:"rgba(16,24,40,0.55)", zIndex:9999, display:"flex", alignItems:"center", justifyContent:"center", padding:"20px"}}>
-    <div onClick={e=>e.stopPropagation()} style={{background:"#fff", borderRadius:"16px", maxWidth:"460px", width:"100%", padding:"26px 28px"}}>
-      <div style={{fontSize:"18px", fontWeight:800, color:"#1D2939", marginBottom:"6px"}}>Счёт для оплаты по безналу</div>
-      <div style={{fontSize:"13px", color:"#667085", marginBottom:"18px"}}>Укажите реквизиты вашей организации — счёт сформируется автоматически с суммой и назначением платежа.</div>
-      <label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>Название организации *</label>
-      <input value={payerName} onChange={e=>setPayerName(e.target.value)} placeholder="ООО «Ромашка» / ИП Иванов И.И." style={{width:"100%", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px", marginBottom:"14px"}} />
-      <label style={{display:"block", fontSize:"13px", color:"#667085", marginBottom:"5px"}}>ИНН плательщика</label>
-      <input value={payerInn} onChange={e=>setPayerInn(e.target.value)} placeholder="7700000000" style={{width:"100%", padding:"10px 12px", border:"1px solid #E3E7F0", borderRadius:"10px", fontSize:"14px", marginBottom:"20px"}} />
-      <div style={{display:"flex", gap:"10px"}}>
-        <button onClick={createInvoice} disabled={invoiceBusy} style={{flex:1, background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"12px", fontSize:"15px", fontWeight:700, cursor: invoiceBusy?"default":"pointer", opacity: invoiceBusy?0.6:1}}>{invoiceBusy ? "Формируем…" : "Сформировать счёт (PDF)"}</button>
-        <button onClick={()=>setInvoiceOpen(false)} style={{background:"#F2F4F7", color:"#475467", border:"none", borderRadius:"10px", padding:"12px 18px", fontSize:"15px", fontWeight:600, cursor:"pointer"}}>Отмена</button>
+  <div onClick={()=>setInvoiceOpen(false)} className="boris-f2-e5cf81d91efd">
+    <div onClick={e=>e.stopPropagation()} className="boris-f2-ef79515cc497">
+      <div className="boris-f2-47f0643dc590">Счёт для оплаты по безналу</div>
+      <div className="boris-f2-68b5f0c2785d">Укажите реквизиты вашей организации — счёт сформируется автоматически с суммой и назначением платежа.</div>
+      <label className="boris-f2-465ca3ab2ea4">Название организации *</label>
+      <input value={payerName} onChange={e=>setPayerName(e.target.value)} placeholder="ООО «Ромашка» / ИП Иванов И.И."  className="boris-f2-8279a7300a6c"/>
+      <label className="boris-f2-465ca3ab2ea4">ИНН плательщика</label>
+      <input value={payerInn} onChange={e=>setPayerInn(e.target.value)} placeholder="7700000000"  className="boris-f2-b7a5f5e58b8f"/>
+      <div className="boris-f2-6b00e75351fc">
+        <Button onClick={createInvoice} disabled={invoiceBusy} style={{flex:1, background:"var(--boris-blue)", color:"#fff", border:"none", borderRadius:"10px", padding:"12px", fontSize:"15px", fontWeight:700, cursor: invoiceBusy?"default":"pointer", opacity: invoiceBusy?0.6:1}}>{invoiceBusy ? "Формируем…" : "Сформировать счёт (PDF)"}</Button>
+        <Button onClick={()=>setInvoiceOpen(false)} className="boris-f2-246fbff19082">Отмена</Button>
       </div>
     </div>
   </div>
 )}
-{lightboxUrl && (<div onClick={() => setLightboxUrl("")} style={{position:"fixed", top:0, left:0, width:"100vw", height:"100vh", background:"rgba(16,24,40,0.88)", zIndex:99999, maxWidth:"none", margin:0, display:"flex", alignItems:"center", justifyContent:"center", cursor:"zoom-out", padding:"40px"}}><img src={lightboxUrl} onClick={(e) => e.stopPropagation()} style={{maxWidth:"calc(100vw - 48px)", maxHeight:"calc(100vh - 48px)", width:"auto", height:"auto", objectFit:"contain", borderRadius:"12px", display:"block", cursor:"default"}} /><button onClick={() => setLightboxUrl("")} style={{position:"absolute", top:"24px", right:"28px", background:"#FFFFFF", color:"#2F6FED", border:"none", borderRadius:"10px", width:"44px", height:"44px", fontSize:"22px", cursor:"pointer"}}>×</button></div>)}
-            <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"20px", marginBottom:"28px", alignItems:"stretch", minHeight:"calc(100vh - 190px)"}}>
+{lightboxUrl && (<div onClick={() => setLightboxUrl("")} className="boris-f2-9a5c1a734f51"><img src={lightboxUrl} onClick={(e) => e.stopPropagation()}  className="boris-f2-333c9e636e33"/><Button onClick={() => setLightboxUrl("")} className="boris-f2-1a3789d3e076">×</Button></div>)}
+            <div className="boris-f2-02af0c528efa">
               {(() => {
                 const now = new Date();
                                 const daySeed = now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
@@ -7047,283 +7268,283 @@ export default function Home() {
                 };
                 const cards = [
                   { icon: "🎨", grad: "linear-gradient(135deg,#F06AA8,#D93D86)", n: grown(1, 1, 100), label: "баннеров для объявлений", verb: "Сделал" },
-                  { icon: "📸", grad: "linear-gradient(135deg,#4C8DFF,#2F6FED)", n: grown(2, 140, 1600), label: "качественных фото", verb: "Собрал" },
+                  { icon: "📸", grad: "linear-gradient(135deg,var(--boris-blue),var(--boris-blue))", n: grown(2, 140, 1600), label: "качественных фото", verb: "Собрал" },
                   { icon: "🖼", grad: "linear-gradient(135deg,#7C5CFC,#5B3FD9)", n: grown(3, 1, 90), label: "баннеров для тарифов Максимальный и Расширенный", verb: "Оформил" },
                 ];
                 return (
                   <div>
-                    <div className="b-label" style={{marginBottom:"14px", fontSize:"14px"}}>Сегодня Борис для наших клиентов:</div>
-                    <div style={{display:"flex", flexDirection:"column", gap:"20px", height:"100%", justifyContent:"space-between"}}>
+                    <div className="b-label boris-f2-77b9facee35a">Сегодня Борис для наших клиентов:</div>
+                    <div className="boris-f2-267295db1bf4">
                       {cards.map((c, i) => (
-                        <div key={i} className="b-card b-stat" style={{animationDelay: `${i * 0.13}s`}}>
-                          <span className="b-stat-ico" style={{background: c.grad}}>{c.icon}</span>
-                          <div style={{minWidth:0, flex:1}}>
-                            <div className="b-meta" style={{marginBottom:"4px", fontWeight:700, color:"#98A2B3", textTransform:"uppercase", letterSpacing:"0.06em", fontSize:"11px"}}>{c.verb}</div>
-                            <div className="b-stat-num"><CountUp to={c.n} delay={i * 130} /></div>
-                            <div className="b-meta" style={{whiteSpace:"normal", lineHeight:1.4, marginTop:"5px", fontSize:"13px"}}>{c.label}</div>
+                        <BorisCard key={i} className="b-card b-stat boris-g1-card" style={{animationDelay: `${i * 0.13}s`}}>
+                          <span className="b-stat-ico boris-g1-card boris-g1-icon" style={{background: c.grad}}>{c.icon}</span>
+                          <div className="boris-f2-ec923525254c">
+                            <div className="b-meta boris-f2-0820770ed772">{c.verb}</div>
+                            <BorisCard className="b-stat-num boris-g1-card"><CountUp to={c.n} delay={i * 130} /></BorisCard>
+                            <div className="b-meta boris-f2-765bfbe3b879">{c.label}</div>
                           </div>
-                        </div>
+                        </BorisCard>
                       ))}
                     </div>
                   </div>
                 );
               })()}
             <div>
-              <div className="b-label" style={{marginBottom:"14px", fontSize:"14px", visibility:"hidden"}}>.</div>
-              <div style={{display:"flex", flexDirection:"column", gap:"20px", height:"100%", justifyContent:"space-between"}}>
-                <div className="b-card b-stat" onClick={() => setWebdesignFolder(webdesignFolder === "photos" ? null : "photos")} style={{cursor:"pointer", animationDelay:"0.06s", background: webdesignFolder === "photos" ? "#E7EFFE" : "#FFFFFF", borderColor: webdesignFolder === "photos" ? "#2F6FED" : "#E3E7F0"}}>
-                  <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#4C8DFF,#2F6FED)"}}>📤</span>
-                  <div><div style={{color:"#2F6FED", fontWeight:700, fontSize:"16px"}}>Мои фото</div><div className="b-meta" style={{marginTop:"3px"}}>Загруженные вами изображения</div></div>
-                </div>
-                <div className="b-card b-stat" onClick={() => setWebdesignFolder(webdesignFolder === "studio" ? null : "studio")} style={{cursor:"pointer", animationDelay:"0.19s", background: webdesignFolder === "studio" ? "#F0ECFF" : "#FFFFFF", borderColor: webdesignFolder === "studio" ? "#7C5CFC" : "#E3E7F0"}}>
-                  <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#F06AA8,#D93D86)"}}>🎨</span>
-                  <div><div style={{color:"#7C5CFC", fontWeight:700, fontSize:"16px"}}>Студия картинок Бориса</div><div className="b-meta" style={{marginTop:"3px"}}>Баннеры и инфографика от ИИ</div></div>
-                </div>
-                <div className="b-card b-stat" onClick={() => { const next = webdesignFolder === "buy" ? null : "buy"; setWebdesignFolder(next); if (next === "buy") { loadBannerGallery(); loadSavedPrompts(); } }} style={{cursor:"pointer", animationDelay:"0.32s", background: webdesignFolder === "buy" ? "#FEF3E2" : "#FFFFFF", borderColor: webdesignFolder === "buy" ? "#F79009" : "#E3E7F0"}}>
-                  <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#F7A440,#E8850B)"}}>🛒</span>
-                  <div><div style={{color:"#F79009", fontWeight:700, fontSize:"16px"}}>Купить баннеры</div><div className="b-meta" style={{marginTop:"3px"}}>Готовые баннеры из галереи</div></div>
-                </div>
+              <div className="b-label boris-f2-cc7eced42484">.</div>
+              <div className="boris-f2-267295db1bf4">
+                <BorisCard className="b-card b-stat boris-g1-card" onClick={() => setWebdesignFolder(webdesignFolder === "photos" ? null : "photos")} style={{cursor:"pointer", animationDelay:"0.06s", background: webdesignFolder === "photos" ? "var(--boris-blue-soft)" : "var(--boris-surface)", borderColor: webdesignFolder === "photos" ? "var(--boris-blue)" : "var(--boris-border)"}}>
+                  <span className="b-stat-ico boris-f2-79a4d50add5b boris-g1-card">📤</span>
+                  <div><div className="boris-f2-0bffb6e4abfb">Мои фото</div><div className="b-meta boris-f2-b7ecdfaf5aa3">Загруженные вами изображения</div></div>
+                </BorisCard>
+                <BorisCard className="b-card b-stat boris-g1-card" onClick={() => setWebdesignFolder(webdesignFolder === "studio" ? null : "studio")} style={{cursor:"pointer", animationDelay:"0.19s", background: webdesignFolder === "studio" ? "#F0ECFF" : "var(--boris-surface)", borderColor: webdesignFolder === "studio" ? "#7C5CFC" : "var(--boris-border)"}}>
+                  <span className="b-stat-ico boris-f2-cfa8c19ebe09 boris-g1-card">🎨</span>
+                  <div><div className="boris-f2-afdba7425fa8">Студия картинок Бориса</div><div className="b-meta boris-f2-b7ecdfaf5aa3">Баннеры и инфографика от ИИ</div></div>
+                </BorisCard>
+                <BorisCard className="b-card b-stat boris-g1-card" onClick={() => { const next = webdesignFolder === "buy" ? null : "buy"; setWebdesignFolder(next); if (next === "buy") { loadBannerGallery(); loadSavedPrompts(); } }} style={{cursor:"pointer", animationDelay:"0.32s", background: webdesignFolder === "buy" ? "#FEF3E2" : "var(--boris-surface)", borderColor: webdesignFolder === "buy" ? "#F79009" : "var(--boris-border)"}}>
+                  <span className="b-stat-ico boris-f2-c7c2ac9ce619 boris-g1-card">🛒</span>
+                  <div><div className="boris-f2-8debb147e7a0">Купить баннеры</div><div className="b-meta boris-f2-b7ecdfaf5aa3">Готовые баннеры из галереи</div></div>
+                </BorisCard>
               </div>
             </div>
             </div>
-              <details style={{display: webdesignFolder === "buy" ? "block" : "none", marginTop:"0", marginBottom:"28px", marginLeft:"0"}}><summary style={{cursor:"pointer", color:"#1D2939", fontSize:"18px", fontWeight:600, marginBottom:"10px"}}>Купить баннеры</summary><div style={{fontSize:"14px", color:"#667085", marginBottom:"14px"}}>20 инфографик в месяц уже входят в подписку. Ниже — докупка сверх лимита.</div><div style={{display:"grid", gridTemplateColumns:"repeat(4, minmax(0, 1fr))", gap:"12px", alignItems:"stretch"}}><div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative", overflow:"hidden"}}><div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#98A2B3,#667085)", opacity:0.08}} /><div className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#98A2B3,#667085)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px", marginBottom:"10px"}}>📋</div><div style={{fontSize:"15px", fontWeight:700, color:"#1D2939", marginBottom:"4px"}}>1 баннер</div><div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"4px"}}>250 ₽</div><div style={{fontSize:"13px", color:"#98A2B3", marginBottom:"14px", minHeight:"34px"}}>инфографика для объявления</div><div style={{marginTop:"auto", width:"100%"}}><RobokassaButton invoiceId="hlcZfzwZDUWWMhJitJ_wnQ" pack="ban1" accountId={currentAccount} /></div></div><div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative", overflow:"hidden"}}><div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#4C8DFF,#2F6FED)", opacity:0.08}} /><div className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#4C8DFF,#2F6FED)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px", marginBottom:"10px"}}>📋</div><div style={{fontSize:"15px", fontWeight:700, color:"#1D2939", marginBottom:"4px"}}>10 баннеров</div><div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"4px"}}>2 300 ₽</div><div style={{fontSize:"13px", color:"#98A2B3", marginBottom:"14px", minHeight:"34px"}}>популярный пакет</div><div style={{marginTop:"auto", width:"100%"}}><RobokassaButton invoiceId="i_DhFWpOYEyAf120Y4Djzg" pack="ban10" accountId={currentAccount} /></div></div><div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative", overflow:"hidden"}}><div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#32D583,#12805C)", opacity:0.08}} /><div className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#32D583,#12805C)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px", marginBottom:"10px"}}>📋</div><div style={{fontSize:"15px", fontWeight:700, color:"#1D2939", marginBottom:"4px"}}>30 баннеров</div><div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"4px"}}>6 300 ₽</div><div style={{fontSize:"13px", color:"#98A2B3", marginBottom:"14px", minHeight:"34px"}}>выгоднее за штуку</div><div style={{marginTop:"auto", width:"100%"}}><RobokassaButton invoiceId="scSJQwIYv0Ke4vDJwMjC3w" pack="ban30" accountId={currentAccount} /></div></div><div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative", overflow:"hidden"}}><div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#98A2B3,#667085)", opacity:0.08}} /><div className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#98A2B3,#667085)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px", marginBottom:"10px"}}>📋</div><div style={{fontSize:"15px", fontWeight:700, color:"#1D2939", marginBottom:"4px"}}>50 баннеров</div><div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"4px"}}>10 500 ₽</div><div style={{fontSize:"13px", color:"#98A2B3", marginBottom:"14px", minHeight:"34px"}}>для каталога</div><div style={{marginTop:"auto", width:"100%"}}><RobokassaButton invoiceId="Lc7XU4driEuytzx6a9453w" pack="ban50" accountId={currentAccount} /></div></div><div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative", overflow:"hidden"}}><div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#FF6B6B,#F04438)", opacity:0.08}} /><div className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#FF6B6B,#F04438)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px", marginBottom:"10px"}}>📋</div><div style={{fontSize:"15px", fontWeight:700, color:"#1D2939", marginBottom:"4px"}}>100 баннеров</div><div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"4px"}}>20 000 ₽</div><div style={{fontSize:"13px", color:"#98A2B3", marginBottom:"14px", minHeight:"34px"}}>максимум</div><div style={{marginTop:"auto", width:"100%"}}><RobokassaButton invoiceId="gA5P5092U0KhSaT3diCv1Q" pack="ban100" accountId={currentAccount} /></div></div><div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative", overflow:"hidden"}}><div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#9B87F5,#7C5CFC)", opacity:0.08}} /><div className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#9B87F5,#7C5CFC)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px", marginBottom:"10px"}}>🏪</div><div style={{fontSize:"15px", fontWeight:700, color:"#1D2939", marginBottom:"4px"}}>Расширенный тариф</div><div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"4px"}}>800 ₽</div><div style={{fontSize:"13px", color:"#98A2B3", marginBottom:"14px", minHeight:"34px"}}>профиль: 1 ПК + 1 моб</div><div style={{marginTop:"auto", width:"100%"}}><RobokassaButton invoiceId="rpurvpER-UmZnPckeCCkiQ" pack="prof_ext" accountId={currentAccount} /></div></div><div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative", overflow:"hidden"}}><div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#FDB022,#F79009)", opacity:0.08}} /><div className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#FDB022,#F79009)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px", marginBottom:"10px"}}>🏪</div><div style={{fontSize:"15px", fontWeight:700, color:"#1D2939", marginBottom:"4px"}}>Максимальный тариф</div><div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"4px"}}>2 400 ₽</div><div style={{fontSize:"13px", color:"#98A2B3", marginBottom:"14px", minHeight:"34px"}}>профиль: 3 ПК + 3 моб</div><div style={{marginTop:"auto", width:"100%"}}><RobokassaButton invoiceId="O1Xeq-_fAkeAija1zkFpvw" pack="prof_max" accountId={currentAccount} /></div></div></div></details>
+              <details style={{display: webdesignFolder === "buy" ? "block" : "none", marginTop:"0", marginBottom:"28px", marginLeft:"0"}}><summary className="boris-f2-edba65204236">Купить баннеры</summary><div className="boris-f2-3740881efa64">20 инфографик в месяц уже входят в подписку. Ниже — докупка сверх лимита.</div><div className="boris-f2-f7618e064427"><BorisCard className="boris-card-hover boris-f2-f6bac6124541 boris-g1-card"><div  className="boris-f2-9925a2443d3e"/><div className="b-ref-ic boris-f2-6eb71abc715b">📋</div><div className="boris-f2-242b783ffd40">1 баннер</div><div className="boris-f2-c852af6b2ccb">250 ₽</div><div className="boris-f2-f1a901467a71">инфографика для объявления</div><div className="boris-f2-ff71126d36e1"><RobokassaButton invoiceId="hlcZfzwZDUWWMhJitJ_wnQ" pack="ban1" accountId={currentAccount} /></div></BorisCard><BorisCard className="boris-card-hover boris-f2-f6bac6124541 boris-g1-card"><div  className="boris-f2-f4e03e24cfce"/><div className="b-ref-ic boris-f2-f9a3abd958d1">📋</div><div className="boris-f2-242b783ffd40">10 баннеров</div><div className="boris-f2-c852af6b2ccb">2 300 ₽</div><div className="boris-f2-f1a901467a71">популярный пакет</div><div className="boris-f2-ff71126d36e1"><RobokassaButton invoiceId="i_DhFWpOYEyAf120Y4Djzg" pack="ban10" accountId={currentAccount} /></div></BorisCard><BorisCard className="boris-card-hover boris-f2-f6bac6124541 boris-g1-card"><div  className="boris-f2-63fae23744eb"/><div className="b-ref-ic boris-f2-59af67595616">📋</div><div className="boris-f2-242b783ffd40">30 баннеров</div><div className="boris-f2-c852af6b2ccb">6 300 ₽</div><div className="boris-f2-f1a901467a71">выгоднее за штуку</div><div className="boris-f2-ff71126d36e1"><RobokassaButton invoiceId="scSJQwIYv0Ke4vDJwMjC3w" pack="ban30" accountId={currentAccount} /></div></BorisCard><BorisCard className="boris-card-hover boris-f2-f6bac6124541 boris-g1-card"><div  className="boris-f2-9925a2443d3e"/><div className="b-ref-ic boris-f2-6eb71abc715b">📋</div><div className="boris-f2-242b783ffd40">50 баннеров</div><div className="boris-f2-c852af6b2ccb">10 500 ₽</div><div className="boris-f2-f1a901467a71">для каталога</div><div className="boris-f2-ff71126d36e1"><RobokassaButton invoiceId="Lc7XU4driEuytzx6a9453w" pack="ban50" accountId={currentAccount} /></div></BorisCard><BorisCard className="boris-card-hover boris-f2-f6bac6124541 boris-g1-card"><div  className="boris-f2-2c4fec02cea2"/><div className="b-ref-ic boris-f2-68c33a8457a0">📋</div><div className="boris-f2-242b783ffd40">100 баннеров</div><div className="boris-f2-c852af6b2ccb">20 000 ₽</div><div className="boris-f2-f1a901467a71">максимум</div><div className="boris-f2-ff71126d36e1"><RobokassaButton invoiceId="gA5P5092U0KhSaT3diCv1Q" pack="ban100" accountId={currentAccount} /></div></BorisCard><BorisCard className="boris-card-hover boris-f2-f6bac6124541 boris-g1-card"><div  className="boris-f2-f2082c9afe40"/><div className="b-ref-ic boris-f2-394906a129bd">🏪</div><div className="boris-f2-242b783ffd40">Расширенный тариф</div><div className="boris-f2-c852af6b2ccb">800 ₽</div><div className="boris-f2-f1a901467a71">профиль: 1 ПК + 1 моб</div><div className="boris-f2-ff71126d36e1"><RobokassaButton invoiceId="rpurvpER-UmZnPckeCCkiQ" pack="prof_ext" accountId={currentAccount} /></div></BorisCard><BorisCard className="boris-card-hover boris-f2-f6bac6124541 boris-g1-card"><div  className="boris-f2-212ed57b15c0"/><div className="b-ref-ic boris-f2-f5728095a887">🏪</div><div className="boris-f2-242b783ffd40">Максимальный тариф</div><div className="boris-f2-c852af6b2ccb">2 400 ₽</div><div className="boris-f2-f1a901467a71">профиль: 3 ПК + 3 моб</div><div className="boris-f2-ff71126d36e1"><RobokassaButton invoiceId="O1Xeq-_fAkeAija1zkFpvw" pack="prof_max" accountId={currentAccount} /></div></BorisCard></div></details>
 
-            <div style={{display: (webdesignFolder === "buy" && userRole === "owner") ? "block" : "none", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"24px", marginBottom:"24px"}}>
+            <div style={{display: (webdesignFolder === "buy" && userRole === "owner") ? "block" : "none", background:"var(--boris-surface)", border:"1px solid var(--boris-border)", borderRadius:"16px", padding:"24px", marginBottom:"24px"}}>
               <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: showBannerPricing ? "8px" : 0}}>
-                <h3 style={{margin:0, color:"#1D2939", fontSize:"18px", display:"flex", alignItems:"center", gap:"10px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#32D583,#12805C)", width:"30px", height:"30px", fontSize:"15px", display:"inline-flex", alignItems:"center", justifyContent:"center", borderRadius:"50%", flexShrink:0}}>💰</span>Себестоимость (видите только вы)</h3>
-                <button className="boris-btn-hover" onClick={() => setShowBannerPricing(!showBannerPricing)} style={{background:"#FFFFFF", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", color:"#2F6FED", cursor:"pointer", fontSize:"15px"}}>{showBannerPricing ? "Скрыть цены" : "Показать цены"}</button>
+                <h3 className="boris-f2-24475118349d"><span className="b-icon-sm boris-f2-b6d7d93afe6e boris-g1-icon">💰</span>Себестоимость (видите только вы)</h3>
+                <Button className="boris-btn-hover boris-f2-9f14aa887aa8" onClick={() => setShowBannerPricing(!showBannerPricing)}>{showBannerPricing ? "Скрыть цены" : "Показать цены"}</Button>
               </div>
-              <p style={{color:"#2F6FED", fontSize:"15px", marginBottom: showBannerPricing ? "18px" : 0}}>✅ 20 инфографик/мес входят в подписку бесплатно. Расширенный/Максимальный — отдельно.</p>
+              <p style={{color:"var(--boris-blue)", fontSize:"15px", marginBottom: showBannerPricing ? "18px" : 0}}>✅ 20 инфографик/мес входят в подписку бесплатно. Расширенный/Максимальный — отдельно.</p>
               <div style={{display: showBannerPricing ? "grid" : "none", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:"14px"}}>
-                <div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"24px", position:"relative", overflow:"hidden"}}>
-                  <div style={{position:"absolute", top:"-40px", right:"-40px", width:"120px", height:"120px", borderRadius:"50%", background:"linear-gradient(135deg,#2F6FED,#1E4FD8)", opacity:0.08}} /><div style={{width:"56px", height:"56px", borderRadius:"50%", background:"linear-gradient(135deg,#2F6FED,#1E4FD8)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"24px", marginBottom:"14px"}}>📋</div><div style={{color:"#1D2939", fontWeight:700, fontSize:"17px", marginBottom:"12px"}}>Инфографика (объявление)</div>
-                  <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"4px"}}>1080×1080 · 1 изображение</div>
-                  <div style={{display:"flex", justifyContent:"space-between", fontSize:"15px", marginTop:"10px"}}><span style={{color:"#667085"}}>Черновик</span><span style={{color:"#2F6FED"}}>~0.45₽</span></div>
-                  <div style={{display:"flex", justifyContent:"space-between", fontSize:"15px"}}><span style={{color:"#667085"}}>Стандарт</span><span style={{color:"#2F6FED"}}>~3.6₽</span></div>
-                  <div style={{display:"flex", justifyContent:"space-between", fontSize:"15px"}}><span style={{color:"#667085"}}>Премиум</span><span style={{color:"#2F6FED"}}>~19₽</span></div>
-                </div>
-                <div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"24px", position:"relative", overflow:"hidden"}}>
-                  <div style={{position:"absolute", top:"-40px", right:"-40px", width:"120px", height:"120px", borderRadius:"50%", background:"linear-gradient(135deg,#7C5CFC,#6344E8)", opacity:0.08}} /><div style={{width:"56px", height:"56px", borderRadius:"50%", background:"linear-gradient(135deg,#7C5CFC,#6344E8)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"24px", marginBottom:"14px"}}>💎</div><div style={{color:"#1D2939", fontWeight:700, fontSize:"17px", marginBottom:"12px"}}>Расширенный тариф</div>
-                  <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"4px"}}>ПК 1202×436 + моб 1242×936 · 2 изображения</div>
-                  <div style={{display:"flex", justifyContent:"space-between", fontSize:"15px", marginTop:"10px"}}><span style={{color:"#667085"}}>Черновик</span><span style={{color:"#2F6FED"}}>~0.9₽</span></div>
-                  <div style={{display:"flex", justifyContent:"space-between", fontSize:"15px"}}><span style={{color:"#667085"}}>Стандарт</span><span style={{color:"#2F6FED"}}>~7.2₽</span></div>
-                  <div style={{display:"flex", justifyContent:"space-between", fontSize:"15px"}}><span style={{color:"#667085"}}>Премиум</span><span style={{color:"#2F6FED"}}>~38₽</span></div>
-                </div>
-                <div className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"24px", position:"relative", overflow:"hidden"}}>
-                  <div style={{position:"absolute", top:"-40px", right:"-40px", width:"120px", height:"120px", borderRadius:"50%", background:"linear-gradient(135deg,#F79009,#E8850B)", opacity:0.08}} /><div style={{width:"56px", height:"56px", borderRadius:"50%", background:"linear-gradient(135deg,#F79009,#E8850B)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"24px", marginBottom:"14px"}}>👑</div><div style={{color:"#1D2939", fontWeight:700, fontSize:"17px", marginBottom:"12px"}}>Максимальный тариф</div>
-                  <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"4px"}}>Карусель 3 слайда × ПК/моб · 6 изображений</div>
-                  <div style={{display:"flex", justifyContent:"space-between", fontSize:"15px", marginTop:"10px"}}><span style={{color:"#667085"}}>Черновик</span><span style={{color:"#2F6FED"}}>~2.7₽</span></div>
-                  <div style={{display:"flex", justifyContent:"space-between", fontSize:"15px"}}><span style={{color:"#667085"}}>Стандарт</span><span style={{color:"#2F6FED"}}>~21.6₽</span></div>
-                  <div style={{display:"flex", justifyContent:"space-between", fontSize:"15px"}}><span style={{color:"#667085"}}>Премиум</span><span style={{color:"#2F6FED"}}>~114₽</span></div>
-                </div>
+                <BorisCard className="boris-card-hover boris-f2-7bbcffb4609d boris-g1-card">
+                  <div  className="boris-f2-a97425d6acb2"/><div className="boris-f2-ee74a9cfcd73">📋</div><div className="boris-f2-039b1068b4b6">Инфографика (объявление)</div>
+                  <div className="boris-f2-6cd12038b46f">1080×1080 · 1 изображение</div>
+                  <div className="boris-f2-101232f759bc"><span className="boris-f2-de52905d633b">Черновик</span><span className="boris-f2-b5d95bf86ec9">~0.45₽</span></div>
+                  <div className="boris-f2-cbdc03d7af64"><span className="boris-f2-de52905d633b">Стандарт</span><span className="boris-f2-b5d95bf86ec9">~3.6₽</span></div>
+                  <div className="boris-f2-cbdc03d7af64"><span className="boris-f2-de52905d633b">Премиум</span><span className="boris-f2-b5d95bf86ec9">~19₽</span></div>
+                </BorisCard>
+                <BorisCard className="boris-card-hover boris-f2-7bbcffb4609d boris-g1-card">
+                  <div  className="boris-f2-5c86b576f4e2"/><div className="boris-f2-87d11c38eb52">💎</div><div className="boris-f2-039b1068b4b6">Расширенный тариф</div>
+                  <div className="boris-f2-6cd12038b46f">ПК 1202×436 + моб 1242×936 · 2 изображения</div>
+                  <div className="boris-f2-101232f759bc"><span className="boris-f2-de52905d633b">Черновик</span><span className="boris-f2-b5d95bf86ec9">~0.9₽</span></div>
+                  <div className="boris-f2-cbdc03d7af64"><span className="boris-f2-de52905d633b">Стандарт</span><span className="boris-f2-b5d95bf86ec9">~7.2₽</span></div>
+                  <div className="boris-f2-cbdc03d7af64"><span className="boris-f2-de52905d633b">Премиум</span><span className="boris-f2-b5d95bf86ec9">~38₽</span></div>
+                </BorisCard>
+                <BorisCard className="boris-card-hover boris-f2-7bbcffb4609d boris-g1-card">
+                  <div  className="boris-f2-04411ac582a1"/><div className="boris-f2-290a1c921ae3">👑</div><div className="boris-f2-039b1068b4b6">Максимальный тариф</div>
+                  <div className="boris-f2-6cd12038b46f">Карусель 3 слайда × ПК/моб · 6 изображений</div>
+                  <div className="boris-f2-101232f759bc"><span className="boris-f2-de52905d633b">Черновик</span><span className="boris-f2-b5d95bf86ec9">~2.7₽</span></div>
+                  <div className="boris-f2-cbdc03d7af64"><span className="boris-f2-de52905d633b">Стандарт</span><span className="boris-f2-b5d95bf86ec9">~21.6₽</span></div>
+                  <div className="boris-f2-cbdc03d7af64"><span className="boris-f2-de52905d633b">Премиум</span><span className="boris-f2-b5d95bf86ec9">~114₽</span></div>
+                </BorisCard>
               </div>
-              {showBannerPricing && <p style={{color:"#98A2B3", fontSize:"15px", marginTop:"14px", marginBottom:0}}>20 инфографик/месяц на Стандарт-качестве — себестоимость ~72₽.</p>}
+              {showBannerPricing && <p className="boris-f2-24ef0a86e96a">20 инфографик/месяц на Стандарт-качестве — себестоимость ~72₽.</p>}
             </div>
 
-            <div style={{display: webdesignFolder === "photos" ? "block" : "none", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"24px", marginBottom:"24px"}}>
-              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"16px"}}>
-                <h3 style={{margin:0, color:"#1D2939", fontSize:"18px", display:"flex", alignItems:"center", gap:"10px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#4C8DFF,#2F6FED)", width:"30px", height:"30px", fontSize:"15px", display:"inline-flex", alignItems:"center", justifyContent:"center", borderRadius:"50%", flexShrink:0}}>📤</span>Мои фото</h3>
-                <button className="boris-btn-hover" onClick={() => createNewFolder(true)} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 14px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>➕ Создать папку</button>
+            <div style={{display: webdesignFolder === "photos" ? "block" : "none", background:"var(--boris-surface)", border:"1px solid var(--boris-border)", borderRadius:"16px", padding:"24px", marginBottom:"24px"}}>
+              <div className="boris-f2-bcbb844d17df">
+                <h3 className="boris-f2-24475118349d"><span className="b-icon-sm boris-f2-ac305422ad3b boris-g1-icon">📤</span>Мои фото</h3>
+                <Button className="boris-btn-hover boris-f2-071a8067b547" onClick={() => createNewFolder(true)}>➕ Создать папку</Button>
               </div>
-              <p style={{color:"#667085", fontSize:"15px", marginBottom:"16px"}}>Ваши личные фото (не сгенерированные ИИ) — своя удобная организация, отдельно от Студии картинок.</p>
+              <p className="boris-f2-8d66ef11ddb7">Ваши личные фото (не сгенерированные ИИ) — своя удобная организация, отдельно от Студии картинок.</p>
               {openedFolder && openedFolder.startsWith("Личное_") && (
-                <div style={{marginBottom:"14px"}}>
-                  <input id="personal-upload-input" type="file" accept="image/*" multiple style={{display:"none"}} onChange={e => uploadForPool(e.target.files)} />
-                  <button className="boris-btn-hover" onClick={() => document.getElementById("personal-upload-input")?.click()} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 18px", fontWeight:"bold", cursor:"pointer", fontSize:"15px"}}>📤 Загрузить фото в «{openedFolder.replace("Личное_", "")}»</button>
+                <div className="boris-f2-a82d7062cc5e">
+                  <input id="personal-upload-input" type="file" accept="image/*" multiple onChange={e => uploadForPool(e.target.files)}  className="boris-f2-c8be1ccba60b"/>
+                  <Button className="boris-btn-hover boris-f2-5b5b4a9ff383" onClick={() => document.getElementById("personal-upload-input")?.click()}>📤 Загрузить фото в «{openedFolder.replace("Личное_", "")}»</Button>
                 </div>
               )}
-              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(120px, 1fr))", gap:"10px"}}>
+              <div className="boris-f2-9dc685abe29f">
                 {Object.keys(allFolders).filter(f => f.startsWith("Личное_")).map(folder => (
-                  <div key={folder} onClick={() => openFolder(folder)} style={{cursor:"pointer", border: openedFolder===folder ? "2px solid #2F6FED" : "2px solid #EEF2FA", borderRadius:"8px", overflow:"hidden", background:"#F6F7FB", position:"relative"}}>
-                    <div style={{width:"100%", height:"80px", background:"#FFFFFF", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden"}}>
-                      {allFolders[folder][0] ? <img src={allFolders[folder][0]} style={{width:"100%", height:"100%", objectFit:"cover"}} /> : <span style={{fontSize:"23px"}}>📁</span>}
+                  <div key={folder} onClick={() => openFolder(folder)} style={{cursor:"pointer", border: openedFolder===folder ? "2px solid var(--boris-blue)" : "2px solid #EEF2FA", borderRadius:"8px", overflow:"hidden", background:"var(--boris-bg)", position:"relative"}}>
+                    <div className="boris-f2-2e99924fd231">
+                      {allFolders[folder][0] ? <img src={allFolders[folder][0]}  className="boris-f2-b1279a8389d1"/> : <span className="boris-f2-f9c0def1c100">📁</span>}
                     </div>
-                    <button className="boris-btn-hover" onClick={(e:any) => { e.stopPropagation(); renameFolderPrompt(folder); }} title="Переименовать" style={{position:"absolute", top:"4px", right:"26px", background:"rgba(0,0,0,0.7)", color:"#2F6FED", border:"none", borderRadius:"4px", width:"20px", height:"20px", cursor:"pointer", fontSize:"15px"}}>✏️</button>
-                    <button className="boris-btn-hover" onClick={(e:any) => { e.stopPropagation(); deleteFolder(folder); }} title="Удалить папку (только пустую)" style={{position:"absolute", top:"4px", right:"4px", background:"rgba(0,0,0,0.7)", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"4px", width:"20px", height:"20px", cursor:"pointer", fontSize:"15px"}}>🗑</button>
-                    <div style={{padding:"6px 8px"}}>
-                      <div style={{color:"#344054", fontSize:"15px", fontWeight:"bold", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{folder.replace("Личное_", "")}</div>
-                      <div style={{color:"#8A93A6", fontSize:"15px"}}>{allFolders[folder].length} фото</div>
-                      {openedFolder === folder && <div style={{color:"#2F6FED", fontSize:"15px", marginTop:"2px"}}>✓ Открыто ниже ↓</div>}
+                    <Button className="boris-btn-hover boris-f2-ca601affa1ea" onClick={(e:any) => { e.stopPropagation(); renameFolderPrompt(folder); }} title="Переименовать">✏️</Button>
+                    <Button className="boris-btn-hover boris-f2-bc80dd423717" onClick={(e:any) => { e.stopPropagation(); deleteFolder(folder); }} title="Удалить папку (только пустую)">🗑</Button>
+                    <div className="boris-f2-6463d40ad060">
+                      <div className="boris-f2-01394527d497">{folder.replace("Личное_", "")}</div>
+                      <div className="boris-f2-316437256d37">{allFolders[folder].length} фото</div>
+                      {openedFolder === folder && <div className="boris-f2-fb88e3ec0a5f">✓ Открыто ниже ↓</div>}
                     </div>
                   </div>
                 ))}
-                {Object.keys(allFolders).filter(f => f.startsWith("Личное_")).length === 0 && <div style={{color:"#8A93A6", fontSize:"15px"}}>Пока нет личных папок — создайте первую</div>}
+                {Object.keys(allFolders).filter(f => f.startsWith("Личное_")).length === 0 && <div className="boris-f2-316437256d37">Пока нет личных папок — создайте первую</div>}
               </div>
             </div>
 
-            <div className="b-panel" style={{display: webdesignFolder === "studio" ? "block" : "none", marginBottom:"24px"}}>
-              <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #7C5CFC, #6344E8)"}}>🎨</span>Студия картинок Бориса</h3>
-              <div className="b-meta" style={{marginTop:"4px"}}>Борис сам рисует баннеры и инфографику для объявлений — опишите товар и получите готовую картинку</div>
-              <p style={{color:"#667085", fontSize:"15px", marginBottom:"20px"}}>Опиши конкретно: главный объект первым, меньше сущностей, добавь контекст сцены</p>
+            <BorisCard className="b-panel boris-g1-card" style={{display: webdesignFolder === "studio" ? "block" : "none", marginBottom:"24px"}}>
+              <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-42bebf635359 boris-g1-icon">🎨</span>Студия картинок Бориса</h3>
+              <div className="b-meta boris-f2-a3a5568692be">Борис сам рисует баннеры и инфографику для объявлений — опишите товар и получите готовую картинку</div>
+              <p className="boris-f2-5209fe92f5d0">Опиши конкретно: главный объект первым, меньше сущностей, добавь контекст сцены</p>
 
-              <div className="b-card" style={{marginBottom:"20px", padding:"16px"}}>
-                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"12px"}}>
-                  <span style={{color:"#7C5CFC", fontWeight:700, fontSize:"16px"}}>📁 Все папки проектов</span>
-                  <button className="boris-btn-hover" onClick={loadAllFolders} style={{background:"#FFFFFF", color:"#7C5CFC", border:"1px solid #F0ECFF", borderRadius:"10px", padding:"4px 10px", cursor:"pointer", fontSize:"15px"}}>🔄 Обновить</button>
+              <BorisCard className="b-card boris-f2-232233b277bc">
+                <div className="boris-f2-bebbec744221">
+                  <span className="boris-f2-afdba7425fa8">📁 Все папки проектов</span>
+                  <Button className="boris-btn-hover boris-f2-2476d65ce100" onClick={loadAllFolders}>🔄 Обновить</Button>
                 </div>
-                <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(120px, 1fr))", gap:"10px"}}>
+                <div className="boris-f2-9dc685abe29f">
                   {Object.keys(allFolders).map(folder => (
-                    <div key={folder} onClick={() => openFolder(folder)} style={{cursor:"pointer", border: openedFolder===folder ? "2px solid #7C5CFC" : "2px solid #EEF2FA", borderRadius:"8px", overflow:"hidden", background:"#F6F7FB", position:"relative"}}>
-                      <div style={{width:"100%", height:"80px", background:"#FFFFFF", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden"}}>
-                        {allFolders[folder][0] ? <img src={allFolders[folder][0]} style={{width:"100%", height:"100%", objectFit:"cover"}} /> : <span style={{fontSize:"23px"}}>📁</span>}
+                    <div key={folder} onClick={() => openFolder(folder)} style={{cursor:"pointer", border: openedFolder===folder ? "2px solid #7C5CFC" : "2px solid #EEF2FA", borderRadius:"8px", overflow:"hidden", background:"var(--boris-bg)", position:"relative"}}>
+                      <div className="boris-f2-2e99924fd231">
+                        {allFolders[folder][0] ? <img src={allFolders[folder][0]}  className="boris-f2-b1279a8389d1"/> : <span className="boris-f2-f9c0def1c100">📁</span>}
                       </div>
-                      <button className="boris-btn-hover" onClick={(e:any) => { e.stopPropagation(); renameFolderPrompt(folder); }} title="Переименовать" style={{position:"absolute", top:"4px", right:"26px", background:"rgba(0,0,0,0.7)", color:"#7C5CFC", border:"none", borderRadius:"4px", width:"20px", height:"20px", cursor:"pointer", fontSize:"15px"}}>✏️</button>
-                      <button className="boris-btn-hover" onClick={(e:any) => { e.stopPropagation(); deleteFolder(folder); }} title="Удалить папку (только пустую)" style={{position:"absolute", top:"4px", right:"4px", background:"rgba(0,0,0,0.7)", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"4px", width:"20px", height:"20px", cursor:"pointer", fontSize:"15px"}}>🗑</button>
-                      <div style={{padding:"6px 8px"}}>
-                        <div style={{color:"#344054", fontSize:"15px", fontWeight:"bold", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{folder}</div>
-                        <div style={{color:"#8A93A6", fontSize:"15px"}}>{allFolders[folder].length} фото</div>
+                      <Button className="boris-btn-hover boris-f2-e9152a6c0f3e" onClick={(e:any) => { e.stopPropagation(); renameFolderPrompt(folder); }} title="Переименовать">✏️</Button>
+                      <Button className="boris-btn-hover boris-f2-bc80dd423717" onClick={(e:any) => { e.stopPropagation(); deleteFolder(folder); }} title="Удалить папку (только пустую)">🗑</Button>
+                      <div className="boris-f2-6463d40ad060">
+                        <div className="boris-f2-01394527d497">{folder}</div>
+                        <div className="boris-f2-316437256d37">{allFolders[folder].length} фото</div>
                       </div>
                     </div>
                   ))}
-                  {Object.keys(allFolders).length === 0 && <div style={{color:"#8A93A6", fontSize:"15px"}}>Папок пока нет</div>}
+                  {Object.keys(allFolders).length === 0 && <div className="boris-f2-316437256d37">Папок пока нет</div>}
                 </div>
-              </div>
+              </BorisCard>
 
-              <div style={{marginBottom:"16px"}}>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Что нарисовать (промпт под конкретную задачу)</label>
+              <div className="boris-f2-79a1c5a5db96">
+                <label className="boris-f2-5a0de0cf2264">Что нарисовать (промпт под конкретную задачу)</label>
                 <textarea value={imgPrompt} onChange={e => setImgPrompt(e.target.value)} placeholder="Например: большой пышный букет красных роз в подарочной упаковке, крупным планом, праздничный фон с боке" rows={3} style={{...inputStyle, resize:"vertical", fontFamily:"inherit"}} />
               </div>
-              <div style={{display:"grid", gridTemplateColumns:"2fr 1fr 1fr", gap:"16px", marginBottom:"16px"}}>
+              <div className="boris-f2-1f442ae36742">
                 <div>
-                  <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Стиль</label>
+                  <label className="boris-f2-5a0de0cf2264">Стиль</label>
                   <input value={imgStyle} onChange={e => setImgStyle(e.target.value)} style={inputStyle} />
                 </div>
                 <div>
-                  <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Сколько (1-50)</label>
-                  <input type="number" value={imgCount} min={1} max={50} onChange={e => setImgCount(Math.max(1, Math.min(50, Number(e.target.value) || 1)))} style={inputStyle} />
+                  <label className="boris-f2-5a0de0cf2264">Сколько (1-50)</label>
+                  <input type="number" value={Number(imgCount) === 0 ? "" : imgCount} min={1} max={50} onChange={e => setImgCount(Math.max(1, Math.min(50, Number(e.target.value) || 1)))} style={inputStyle} />
                 </div>
                 <div>
-                  <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>Папка проекта</label>
+                  <label className="boris-f2-5a0de0cf2264">Папка проекта</label>
                   <input value={imgFolder} onChange={e => setImgFolder(e.target.value)} placeholder="поздравления" style={inputStyle} />
                 </div>
-              <div style={{background:"#FEF3E2", border:"1px solid #F79009", borderRadius:"8px", padding:"10px 14px", marginBottom:"14px", fontSize:"15px", color:"#F79009"}}>
+              <div className="boris-f2-949ddfcacf91">
                 ✅ Задача встанет в очередь на сервере — можно закрыть вкладку, генерация продолжится в фоне. Результат появится в галерее, когда будет готов.
               </div>
               </div>
-              <button className="boris-btn-hover" onClick={() => setShowImageConfirm(true)} disabled={imgLoading} style={{background: imgLoading ? "#E3E7F0" : "#7C5CFC", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"12px 24px", fontWeight:"bold", cursor: imgLoading ? "wait" : "pointer", fontSize:"23px"}}>
+              <Button className="boris-btn-hover" onClick={() => setShowImageConfirm(true)} disabled={imgLoading} style={{background: imgLoading ? "var(--boris-border)" : "#7C5CFC", color:"var(--boris-bg)", border:"none", borderRadius:"10px", padding:"12px 24px", fontWeight:"bold", cursor: imgLoading ? "wait" : "pointer", fontSize:"23px"}}>
                 {imgLoading ? "🎨 В очереди..." : "🎨 Нарисовать"}
-              </button>
-              {imgQueueStatus && <div style={{color:"#2F6FED", fontSize:"15px", marginTop:"10px"}}>{imgQueueStatus}</div>}
+              </Button>
+              {imgQueueStatus && <div className="boris-f2-ad2a81b5745b">{imgQueueStatus}</div>}
               {showImageConfirm && (
-                <div style={{position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.7)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center"}} onClick={() => setShowImageConfirm(false)}>
-                  <div onClick={(e:any) => e.stopPropagation()} style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"28px", maxWidth:"480px", width:"90%"}}>
-                    <h3 style={{margin:"0 0 16px", color:"#1D2939", fontSize:"18px"}}>Проверьте перед генерацией</h3>
-                    <div style={{fontSize:"23px", color:"#344054", lineHeight:"2"}}>
-                      <div><b style={{color:"#667085"}}>Промпт:</b> {imgPrompt ? imgPrompt.slice(0,80)+(imgPrompt.length>80?"…":"") : "не задан"}</div>
-                      <div><b style={{color:"#667085"}}>Стиль:</b> {imgStyle}</div>
-                      <div><b style={{color:"#667085"}}>Количество:</b> {imgCount}</div>
-                      <div><b style={{color:"#667085"}}>Папка:</b> {imgFolder || "общая"}</div>
-                      <div><b style={{color:"#667085"}}>Время:</b> ~{Math.ceil(imgCount/2)*1}-{Math.ceil(imgCount/2)*1.5} мин (пачками по 2)</div>
+                <div onClick={() => setShowImageConfirm(false)} className="boris-f2-40ee1e11790e">
+                  <div onClick={(e:any) => e.stopPropagation()} className="boris-f2-5a9e0467fb61">
+                    <h3 className="boris-f2-ab7a0549a1dc">Проверьте перед генерацией</h3>
+                    <div className="boris-f2-aa5939599233">
+                      <div><b className="boris-f2-de52905d633b">Промпт:</b> {imgPrompt ? imgPrompt.slice(0,80)+(imgPrompt.length>80?"…":"") : "не задан"}</div>
+                      <div><b className="boris-f2-de52905d633b">Стиль:</b> {imgStyle}</div>
+                      <div><b className="boris-f2-de52905d633b">Количество:</b> {imgCount}</div>
+                      <div><b className="boris-f2-de52905d633b">Папка:</b> {imgFolder || "общая"}</div>
+                      <div><b className="boris-f2-de52905d633b">Время:</b> ~{Math.ceil(imgCount/2)*1}-{Math.ceil(imgCount/2)*1.5} мин (пачками по 2)</div>
                     </div>
-                    <div style={{background:"#FEF3E2", border:"1px solid #F79009", borderRadius:"8px", padding:"10px", marginTop:"14px", fontSize:"15px", color:"#F79009"}}>
+                    <div className="boris-f2-53dab9e79de2">
                       ⚠️ Не закрывайте вкладку до конца генерации. Для {imgCount >= 10 ? "такой партии лучше использовать компьютер, не телефон." : "надёжности держите вкладку открытой."}
                     </div>
-                    <div style={{display:"flex", gap:"12px", marginTop:"20px"}}>
-                      <button className="boris-btn-hover" onClick={() => { setShowImageConfirm(false); generateImage(); }} style={{flex:1, background:"#7C5CFC", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"12px", fontWeight:"bold", cursor:"pointer"}}>✅ Всё верно, рисуем</button>
-                      <button className="boris-btn-hover" onClick={() => setShowImageConfirm(false)} style={{flex:1, background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"12px", cursor:"pointer"}}>Отмена</button>
+                    <div className="boris-f2-d4268e91708c">
+                      <Button className="boris-btn-hover boris-f2-a720c2c9f5b8" onClick={() => { setShowImageConfirm(false); generateImage(); }}>✅ Всё верно, рисуем</Button>
+                      <Button className="boris-btn-hover boris-f2-cc812ecc9f36" onClick={() => setShowImageConfirm(false)}>Отмена</Button>
                     </div>
                   </div>
                 </div>
               )}
 
-              <div style={{marginTop:"20px", padding:"16px", background:"#E7EFFE", borderRadius:"10px", border:"1px solid #E7EFFE"}}>
-                <label style={{color:"#2F6FED", fontSize:"15px", display:"block", marginBottom:"8px", fontWeight:"bold"}}>🖼️ Собрать реальные фото по теме (бесплатные фотостоки)</label>
-                <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"10px", lineHeight:"1.5"}}>
+              <div className="boris-f2-e06e2221170d">
+                <label className="boris-f2-72ed274e58a5">🖼️ Собрать реальные фото по теме (бесплатные фотостоки)</label>
+                <div className="boris-f2-f55faf5c931d">
                   Просто напиши тему на английском (лучше находит) — Борис сам найдёт и скачает нужное количество реальных бесплатных фото. Например: "бетон товарный и растворы" или "concrete construction".
                 </div>
-                <div style={{display:"flex", gap:"10px", marginBottom:"10px"}}>
+                <div className="boris-f2-a5804c9176e1">
                   <input value={stockQuery} onChange={e => setStockQuery(e.target.value)} placeholder="Например: бетон товарный и растворы" style={{...inputStyle, flex:1}} />
-                  <input type="number" min={1} max={80} value={stockCount} onChange={e => setStockCount(Math.max(1, Math.min(80, Number(e.target.value)||1)))} style={{...inputStyle, width:"80px"}} />
-                  <button className="boris-btn-hover" onClick={searchStockPhotos} disabled={stockLoading} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"12px 20px", fontWeight:"bold", cursor:"pointer", whiteSpace:"nowrap"}}>
+                  <input type="number" min={1} max={80} value={Number(stockCount) === 0 ? "" : stockCount} onChange={e => setStockCount(Math.max(1, Math.min(80, Number(e.target.value)||1)))} style={{...inputStyle, width:"80px"}} />
+                  <Button className="boris-btn-hover boris-f2-29dab1003fa4" onClick={searchStockPhotos} disabled={stockLoading}>
                     {stockLoading ? "⏳ Собираю..." : "🖼️ Собрать фото"}
-                  </button>
+                  </Button>
                 </div>
               </div>
 
-              <div style={{marginTop:"20px", padding:"16px", background:"#F6F7FB", borderRadius:"10px", border:"1px solid #EEF2FA"}}>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"8px"}}>📥 Или скачать по прямой ссылке (JPG/PNG) в папку проекта</label>
-                <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"8px", lineHeight:"1.5"}}>
+              <div className="boris-f2-fe706cba890a">
+                <label className="boris-f2-5a0de0cf2264">📥 Или скачать по прямой ссылке (JPG/PNG) в папку проекта</label>
+                <div className="boris-f2-6208a3666d62">
                   💡 Нужна ссылка именно на КАРТИНКУ, не на страницу сайта. Открой картинку → правый клик → "Копировать адрес изображения" (обычно заканчивается на .jpg/.png). Ссылка на страницу поиска/каталога не сработает.<br/>
-                  Файл сохранится в текущую папку проекта: <b style={{color:"#7C5CFC"}}>{imgFolder || "общая"}</b> (если папки ещё нет — она создастся автоматически).
+                  Файл сохранится в текущую папку проекта: <b className="boris-f2-517924e0b69a">{imgFolder || "общая"}</b> (если папки ещё нет — она создастся автоматически).
                 </div>
-                <div style={{display:"flex", gap:"12px"}}>
+                <div className="boris-f2-37bfc2fc415a">
                   <input value={dlUrl} onChange={e => setDlUrl(e.target.value)} placeholder="https://site.com/photo.jpg" style={{...inputStyle, flex:1}} />
-                  <button className="boris-btn-hover" onClick={downloadByUrl} disabled={imgLoading} style={{background:"#2F6FED", color:"#1D2939", border:"none", borderRadius:"10px", padding:"12px 20px", fontWeight:"bold", cursor:"pointer", whiteSpace:"nowrap"}}>📥 Скачать</button>
+                  <Button className="boris-btn-hover boris-f2-8cc388244ecf" onClick={downloadByUrl} disabled={imgLoading}>📥 Скачать</Button>
                 </div>
               </div>
 
               {genImages.length > 0 && (
-                <div style={{marginTop:"24px"}}>
-                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"16px"}}>
-                    <div style={{color:"#7C5CFC", fontWeight:"bold"}}>Галерея ({genImages.length})</div>
-                    <a href={`/api/avito/download_folder_zip?folder=${encodeURIComponent(imgFolder || "общая")}&account_id=${currentAccount}`} style={{background:"#FFFFFF", color:"#2F6FED", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"6px 14px", fontSize:"15px", textDecoration:"none", fontWeight:"bold"}}>📦 Скачать всё папкой (zip)</a>
+                <div className="boris-f2-3343fd6464ac">
+                  <div className="boris-f2-bcbb844d17df">
+                    <div className="boris-f2-4159ac1197bb">Галерея ({genImages.length})</div>
+                    <a href={`/api/avito/download_folder_zip?folder=${encodeURIComponent(imgFolder || "общая")}&account_id=${currentAccount}`} className="boris-f2-7d7d6f522f39">📦 Скачать всё папкой (zip)</a>
                   </div>
-                  <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:"16px"}}>
+                  <div className="boris-f2-81ebad604be0">
                     {genImages.map((img, i) => (
-                      <div key={i} style={{background:"#F6F7FB", border:"1px solid #EEF2FA", borderRadius:"10px", padding:"12px", position:"relative"}}>
-                        <a href={`/api/avito/download_single?url=${encodeURIComponent(img.url)}`} title="Скачать на компьютер" style={{position:"absolute", top:"18px", right:"52px", background:"rgba(29,78,216,0.9)", color:"#1D2939", borderRadius:"6px", width:"28px", height:"28px", display:"flex", alignItems:"center", justifyContent:"center", textDecoration:"none", fontWeight:"bold"}}>⬇️</a>
-                        <button className="boris-btn-hover" onClick={() => deleteImage(img.url)} title="Удалить с сервера" style={{position:"absolute", top:"18px", right:"18px", background:"rgba(220,38,38,0.9)", color:"#1D2939", border:"1.5px solid #F04438", borderRadius:"10px", width:"28px", height:"28px", cursor:"pointer", fontWeight:"bold"}}>🗑</button>
-                        <button className="boris-btn-hover" onClick={() => setMovePickerFor(movePickerFor === i ? null : i)} title="Перенести в другую папку" style={{position:"absolute", top:"18px", right:"86px", background:"rgba(192,132,252,0.9)", color:"#F6F7FB", border:"none", borderRadius:"10px", width:"28px", height:"28px", cursor:"pointer", fontWeight:"bold"}}>➡️</button>
+                      <div key={i} className="boris-f2-a29e9db64645">
+                        <a href={`/api/avito/download_single?url=${encodeURIComponent(img.url)}`} title="Скачать на компьютер" className="boris-f2-14439b70dbde">⬇️</a>
+                        <Button className="boris-btn-hover boris-f2-ee927b3fa7a9" onClick={() => deleteImage(img.url)} title="Удалить с сервера">🗑</Button>
+                        <Button className="boris-btn-hover boris-f2-b3ad77eb7633" onClick={() => setMovePickerFor(movePickerFor === i ? null : i)} title="Перенести в другую папку">➡️</Button>
                         {movePickerFor === i && (
-                          <div style={{position:"absolute", top:"50px", right:"18px", zIndex:10, background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"6px", maxHeight:"160px", overflowY:"auto", minWidth:"140px"}}>
+                          <div className="boris-f2-245f59e349d3">
                             {Object.keys(allFolders).map(f => (
-                              <div key={f} onClick={() => moveImageToFolder(i, f)} style={{padding:"6px 8px", cursor:"pointer", borderRadius:"6px", fontSize:"15px", color:"#344054"}} onMouseEnter={e => (e.currentTarget.style.background = "#EEF2FA")} onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>📁 {f}</div>
+                              <div key={f} onClick={() => moveImageToFolder(i, f)} onMouseEnter={e => (e.currentTarget.style.background = "#EEF2FA")} onMouseLeave={e => (e.currentTarget.style.background = "transparent")} className="boris-f2-27c897000182">📁 {f}</div>
                             ))}
                           </div>
                         )}
-                        <img src={img.url} style={{width:"100%", borderRadius:"8px", marginBottom:"8px"}} />
-                        <div style={{fontSize:"15px", color:"#8A93A6", marginBottom:"8px"}}>{(img.prompt || "").slice(0,60)}…</div>
-                        <input readOnly value={img.url} onClick={(e: any) => { e.target.select(); document.execCommand("copy"); }} style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px", color:"#2F6FED", fontSize:"15px", cursor:"pointer"}} title="Клик — скопировать ссылку" />
+                        <img src={img.url}  className="boris-f2-ea0f892ade29"/>
+                        <div className="boris-f2-e037bc33e711">{(img.prompt || "").slice(0,60)}…</div>
+                        <input readOnly value={img.url} onClick={(e: any) => { e.target.select(); document.execCommand("copy"); }} title="Клик — скопировать ссылку"  className="boris-f2-aebec2f2cf60"/>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
-            </div>
+            </BorisCard>
 
-            <div style={{display: webdesignFolder === "buy" ? "block" : "none", background:"#F6F7FB", border:"1px solid #FEF3E2", borderRadius:"16px", padding:"24px", marginBottom:"24px"}}>
-              <h3 style={{margin:"0 0 4px", color:"#1D2939", fontSize:"18px", display:"flex", alignItems:"center", gap:"10px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#4C8DFF,#2F6FED)", width:"30px", height:"30px", fontSize:"15px", display:"inline-flex", alignItems:"center", justifyContent:"center", borderRadius:"50%", flexShrink:0}}>✨</span>Создать баннер</h3>
-              <details style={{margin:"0 0 16px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Как составить описание</summary><p style={{color:"#667085", fontSize:"15px", margin:"8px 0 0"}}>Опишите нишу и что нужно на баннере — Борис придумает текст и сгенерирует изображение через AI. Максимум 5 попыток правки на один баннер.</p></details>
+            <div style={{display: webdesignFolder === "buy" ? "block" : "none", background:"var(--boris-bg)", border:"1px solid #FEF3E2", borderRadius:"16px", padding:"24px", marginBottom:"24px"}}>
+              <h3 className="boris-f2-7d8a6640ea49"><span className="b-icon-sm boris-f2-ac305422ad3b boris-g1-icon">✨</span>Создать баннер</h3>
+              <details className="boris-f2-489e16440bc3"><summary className="boris-f2-c0e3ed53fc0c">Как составить описание</summary><p className="boris-f2-183644454912">Опишите нишу и что нужно на баннере — Борис придумает текст и сгенерирует изображение через ИИ. Максимум 5 попыток правки на один баннер.</p></details>
 
-              <div style={{marginBottom:"20px"}}>
-                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"10px"}}>
-                  <div style={{fontSize:"15px", fontWeight:"bold", color:"#1D2939"}}>🖼 Витрина примеров {selectedExampleUrls.length > 0 ? `(выбрано ${selectedExampleUrls.length}/3)` : ""}</div>
-                  <div style={{display:"flex", gap:"8px"}}>
-                    <label className="boris-btn-hover" style={{background:"#FFFFFF", color:"#F79009", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 12px", cursor:"pointer", fontSize:"15px", display:"inline-block"}}>
+              <div className="boris-f2-7dde5e56b3f3">
+                <div className="boris-f2-40eee6f1a1fd">
+                  <div className="boris-f2-870a64560bdb">🖼 Витрина примеров {selectedExampleUrls.length > 0 ? `(выбрано ${selectedExampleUrls.length}/3)` : ""}</div>
+                  <div className="boris-f2-b9bbe540d342">
+                    <label className="boris-btn-hover boris-f2-48654127e76c">
                       {showcaseUploading ? "⏳ Загружаю..." : "📤 Загрузить своё"}
-                      <input type="file" accept="image/*" multiple style={{display:"none"}} onChange={(e) => { const fs = e.target.files; if (fs && fs.length > 0) uploadMultipleExamplesToShowcase(fs); e.target.value = ""; }} />
+                      <input type="file" accept="image/*" multiple onChange={(e) => { const fs = e.target.files; if (fs && fs.length > 0) uploadMultipleExamplesToShowcase(fs); e.target.value = ""; }}  className="boris-f2-c8be1ccba60b"/>
                     </label>
-                    <button className="boris-btn-hover" onClick={() => { setShowBrowseAllBanners((v) => !v); if (!showBrowseAllBanners) loadAllBanners(); }} style={{background:"#FFFFFF", color:"#F79009", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", cursor:"pointer", fontSize:"15px"}}>
+                    <Button className="boris-btn-hover boris-f2-17de572b964b" onClick={() => { setShowBrowseAllBanners((v) => !v); if (!showBrowseAllBanners) loadAllBanners(); }}>
                       {showBrowseAllBanners ? "Скрыть" : "📂 Смотреть все баннеры"}
-                    </button>
+                    </Button>
                   </div>
                 </div>
 
                 {bannerShowcase.length === 0 && !showBrowseAllBanners && (
-                  <p style={{color:"#667085", fontSize:"15px"}}>Витрина пока пуста — нажмите «Смотреть все баннеры», чтобы добавить примеры.</p>
+                  <p className="boris-f2-96046ead62a3">Витрина пока пуста — нажмите «Смотреть все баннеры», чтобы добавить примеры.</p>
                 )}
-                <details style={{marginBottom:"4px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Показать примеры стилей</summary>
-                <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(110px, 1fr))", gap:"10px"}}>
+                <details className="boris-f2-d982937dda0f"><summary className="boris-f2-c0e3ed53fc0c">Показать примеры стилей</summary>
+                <div className="boris-f2-d7dad7e3c47e">
                   {bannerShowcase.map((item: any, i: number) => (
-                    <div key={i} onClick={() => toggleExampleSelected(item.url)} style={{cursor:"pointer", position:"relative", borderRadius:"8px", overflow:"hidden", border: selectedExampleUrls.includes(item.url) ? "3px solid #F79009" : "1px solid #E3E7F0"}}>
-                      <img src={item.url} style={{width:"100%", height:"90px", objectFit:"cover", display:"block"}} />
+                    <div key={i} onClick={() => toggleExampleSelected(item.url)} style={{cursor:"pointer", position:"relative", borderRadius:"8px", overflow:"hidden", border: selectedExampleUrls.includes(item.url) ? "3px solid #F79009" : "1px solid var(--boris-border)"}}>
+                      <img src={item.url}  className="boris-f2-ce9af9c778e9"/>
                       {selectedExampleUrls.includes(item.url) && (
-                        <div style={{position:"absolute", top:"4px", right:"4px", background:"#F79009", color:"#FFFFFF", borderRadius:"50%", width:"20px", height:"20px", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"15px", fontWeight:"bold"}}>✓</div>
+                        <div className="boris-f2-bfd54d04f7c9">✓</div>
                       )}
-                      <button onClick={(e) => { e.stopPropagation(); removeBannerFromShowcase(item.url); }} style={{position:"absolute", bottom:"4px", right:"4px", background:"rgba(0,0,0,0.6)", color:"#FFFFFF", border:"none", borderRadius:"4px", padding:"2px 6px", cursor:"pointer", fontSize:"15px"}}>✕</button>
+                      <Button onClick={(e) => { e.stopPropagation(); removeBannerFromShowcase(item.url); }} className="boris-f2-2ea96f88fb3c">✕</Button>
                     </div>
                   ))}
                 </div>
 
                 {showBrowseAllBanners && (
-                  <div style={{marginTop:"16px", paddingTop:"16px", borderTop:"1px solid #E3E7F0"}}>
-                    <div style={{fontSize:"15px", fontWeight:"bold", color:"#1D2939", marginBottom:"10px"}}>Все сгенерированные баннеры — нажмите ⭐, чтобы добавить в витрину</div>
-                    {browseAllLoading ? <p style={{color:"#667085", fontSize:"15px"}}>Загружаю...</p> : (
-                      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(110px, 1fr))", gap:"10px", maxHeight:"340px", overflowY:"auto"}}>
+                  <div className="boris-f2-f29c80c45e20">
+                    <div className="boris-f2-021c13804a10">Все сгенерированные баннеры — нажмите ⭐, чтобы добавить в витрину</div>
+                    {browseAllLoading ? <p className="boris-f2-96046ead62a3">Загружаю...</p> : (
+                      <div className="boris-f2-c0e6f79d27ae">
                         {allBannersList.map((b: any, i: number) => (
-                          <div key={i} style={{position:"relative", borderRadius:"8px", overflow:"hidden", border:"1px solid #E3E7F0"}}>
-                            <img src={b.url} style={{width:"100%", height:"90px", objectFit:"cover", display:"block"}} />
-                            <button onClick={() => addBannerToShowcase(b.url)} style={{position:"absolute", top:"4px", right:"4px", background:"rgba(255,255,255,0.9)", color:"#F79009", border:"none", borderRadius:"4px", padding:"2px 6px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>⭐ В витрину</button>
+                          <div key={i} className="boris-f2-e61d9534d306">
+                            <img src={b.url}  className="boris-f2-ce9af9c778e9"/>
+                            <Button onClick={() => addBannerToShowcase(b.url)} className="boris-f2-8b92c2aca936">⭐ В витрину</Button>
                           </div>
                         ))}
                       </div>
@@ -7333,13 +7554,13 @@ export default function Home() {
                 </details>
               </div>
 
-              <div style={{fontSize:"13px", color:"#98A2B3", marginBottom:"16px"}}>
+              <div className="boris-f2-b8598b29767e">
 
               </div>
 
-              <div style={{marginBottom:"20px"}}>
-                <label style={{display:"block", color:"#667085", fontSize:"15px", marginBottom:"6px"}}>Формат баннера</label>
-                <select className="b-select" value={bannerFormat} onChange={e => setBannerFormat(e.target.value)} style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"10px", color:"#1D2939", fontSize:"15px"}}>
+              <div className="boris-f2-7dde5e56b3f3">
+                <label className="boris-f2-22d1b9c90dff">Формат баннера</label>
+                <select className="b-select boris-f2-55ba34549ffb" value={bannerFormat} onChange={e => setBannerFormat(e.target.value)}>
                   <option value="infographic">📋 Инфографика для объявления (1080×1080)</option>
                   <option value="extended_pc">💎 Расширенный тариф — ПК/планшет (1202×436)</option>
                   <option value="extended_mobile">💎 Расширенный тариф — смартфон (1242×936)</option>
@@ -7350,78 +7571,79 @@ export default function Home() {
               </div>
 
               {bannerFormat === "custom" && (
-                <div style={{display:"flex", gap:"10px", marginBottom:"20px"}}>
-                  <input type="number" placeholder="Ширина, px" value={customBannerW} onChange={e => setCustomBannerW(e.target.value)} style={{flex:1, boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"10px", color:"#1D2939", fontSize:"15px"}} />
-                  <input type="number" placeholder="Высота, px" value={customBannerH} onChange={e => setCustomBannerH(e.target.value)} style={{flex:1, boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"10px", color:"#1D2939", fontSize:"15px"}} />
+                <div className="boris-f2-f67e6e3ba330">
+                  <input type="number" placeholder="Ширина, px" value={Number(customBannerW) === 0 ? "" : customBannerW} onChange={e => setCustomBannerW(e.target.value)}  className="boris-f2-fc890299d79c"/>
+                  <input type="number" placeholder="Высота, px" value={Number(customBannerH) === 0 ? "" : customBannerH} onChange={e => setCustomBannerH(e.target.value)}  className="boris-f2-fc890299d79c"/>
                 </div>
               )}
 
-              <div style={{marginBottom:"20px"}}>
-                <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"6px", flexWrap:"wrap", gap:"8px"}}>
-                  <label style={{color:"#667085", fontSize:"15px"}}>Опишите нишу</label>
-                  <div style={{display:"flex", gap:"8px", alignItems:"center"}}>
+              <div className="boris-f2-7dde5e56b3f3">
+                <div className="boris-f2-66111486da64">
+                  <label className="boris-f2-96046ead62a3">Опишите нишу</label>
+                  <div className="boris-f2-78cead6503f9">
                     {savedPrompts.length > 0 && (
-                      <select className="b-select" onChange={e => { const p = savedPrompts.find(x => String(x.id) === e.target.value); if (p) setBannerPrompt(p.text); }} defaultValue="" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"7px 10px", color:"#1D2939", fontSize:"14px", cursor:"pointer", maxWidth:"220px"}}>
+                      <select className="b-select boris-f2-9cb98274577d" onChange={e => { const p = savedPrompts.find(x => String(x.id) === e.target.value); if (p) setBannerPrompt(p.text); }} defaultValue="">
                         <option value="">📥 Загрузить промт…</option>
                         {savedPrompts.map(sp => (<option key={sp.id} value={sp.id}>{sp.title}</option>))}
                       </select>
                     )}
-                    <button className="boris-btn-hover" onClick={savePromptAsTemplate} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"7px 12px", fontSize:"14px", cursor:"pointer", whiteSpace:"nowrap"}}>💾 Сохранить как шаблон</button>
+                    <Button className="boris-btn-hover boris-f2-1305772b6e12" onClick={savePromptAsTemplate}>💾 Сохранить как шаблон</Button>
                   </div>
                 </div>
-                <textarea value={bannerPrompt} onChange={e => setBannerPrompt(e.target.value)} placeholder="Например: делаем шкафы-купе на заказ в Пензе, работаем 5 лет, цены от 18000 рублей, гарантия 3 года, бесплатный замер. Хочу яркий оранжевый стиль." style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"10px", color:"#1D2939", fontSize:"15px", minHeight:"110px", fontFamily:"inherit", resize:"vertical"}} />
+                <textarea value={bannerPrompt} onChange={e => setBannerPrompt(e.target.value)} placeholder="Например: делаем шкафы-купе на заказ в Пензе, работаем 5 лет, цены от 18000 рублей, гарантия 3 года, бесплатный замер. Хочу яркий оранжевый стиль."  className="boris-f2-411d50eb0d92"/>
               </div>
 
-              <details style={{marginBottom:"20px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Тонкая настройка (необязательно)</summary>
-              <div style={{marginBottom:"20px"}}>
-                <label style={{display:"block", color:"#667085", fontSize:"15px", marginBottom:"6px"}}>Свой текст на баннере</label>
-                <textarea value={bannerExactText} onChange={e => setBannerExactText(e.target.value)} placeholder="Например: «5 июля — День семьи, любви и верности»" style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"10px", color:"#1D2939", fontSize:"15px", minHeight:"60px", fontFamily:"inherit", resize:"vertical"}} />
+              <details className="boris-f2-7dde5e56b3f3"><summary className="boris-f2-c0e3ed53fc0c">Тонкая настройка (необязательно)</summary>
+              <div className="boris-f2-7dde5e56b3f3">
+                <label className="boris-f2-22d1b9c90dff">Свой текст на баннере</label>
+                <textarea value={bannerExactText} onChange={e => setBannerExactText(e.target.value)} maxLength={70} placeholder="Короткий оффер — до 6 слов, крупно для телефона"  className="boris-f2-ab04bf3f40a4"/>
+                <div style={{fontSize:12,color:"var(--boris-text-3)",marginTop:6}}>Для Avito BORIS оставляет только крупный заголовок: максимум 6 слов. Мелкий текст на баннер не помещается.</div>
               </div>
 
-              <div style={{marginBottom:"20px", background:"#F6F7FB", border: bannerUseOwnPhoto ? "1px solid #2F6FED" : "1px solid #EEF2FA", borderRadius:"8px", padding:"14px"}}>
-                <label style={{display:"flex", alignItems:"center", gap:"10px", marginBottom: bannerUseOwnPhoto ? "12px" : "0", cursor:"pointer", color:"#475467", fontSize:"15px"}}>
-                  <input type="checkbox" checked={bannerUseOwnPhoto} onChange={e => { setBannerUseOwnPhoto(e.target.checked); if (e.target.checked) { loadAllFolders(); } else { setBannerOwnPhotoUrl(""); } }} style={{width:"18px", height:"18px", cursor:"pointer"}} />
-                  Использовать моё фото {(bannerFormat !== "infographic" && bannerFormat !== "custom") && <span style={{color:"#F04438", fontSize:"15px"}}>(пока только для формата «Инфографика»)</span>}
+              <div style={{marginBottom:"20px", background:"var(--boris-bg)", border: bannerUseOwnPhoto ? "1px solid var(--boris-blue)" : "1px solid #EEF2FA", borderRadius:"8px", padding:"14px"}}>
+                <label style={{display:"flex", alignItems:"center", gap:"10px", marginBottom: bannerUseOwnPhoto ? "12px" : "0", cursor:"pointer", color:"var(--boris-text-2)", fontSize:"15px"}}>
+                  <input type="checkbox" checked={bannerUseOwnPhoto} onChange={e => { setBannerUseOwnPhoto(e.target.checked); if (e.target.checked) { loadAllFolders(); } else { setBannerOwnPhotoUrl(""); } }}  className="boris-f2-ccd87a40655a"/>
+                  Использовать моё фото {(bannerFormat !== "infographic" && bannerFormat !== "custom") && <span className="boris-f2-4e518f114f40">(пока только для формата «Инфографика»)</span>}
                 </label>
                 {bannerUseOwnPhoto && (
-                  <div style={{display:"flex", flexWrap:"wrap", gap:"8px", maxHeight:"180px", overflowY:"auto", padding:"8px", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px"}}>
+                  <div className="boris-f2-3079d2fe21fd">
                     {Object.entries(allFolders).filter(([folder]) => folder.startsWith("Личное_")).flatMap(([folder, urls]: [string, any]) =>
                       (urls as string[]).map((url: string) => (
-                        <div key={url} onClick={() => setBannerOwnPhotoUrl(url)} style={{position:"relative", width:"64px", height:"64px", borderRadius:"6px", overflow:"hidden", cursor:"pointer", border: bannerOwnPhotoUrl === url ? "3px solid #2F6FED" : "1px solid #E3E7F0"}}>
-                          <img src={url} style={{width:"100%", height:"100%", objectFit:"cover"}} />
+                        <div key={url} onClick={() => setBannerOwnPhotoUrl(url)} style={{position:"relative", width:"64px", height:"64px", borderRadius:"6px", overflow:"hidden", cursor:"pointer", border: bannerOwnPhotoUrl === url ? "3px solid var(--boris-blue)" : "1px solid var(--boris-border)"}}>
+                          <img src={url}  className="boris-f2-b1279a8389d1"/>
                           {bannerOwnPhotoUrl === url && (
-                            <div style={{position:"absolute", top:0, right:0, background:"#2F6FED", color:"#F6F7FB", fontSize:"15px", fontWeight:"bold", padding:"1px 4px", borderRadius:"0 0 0 6px"}}>✓</div>
+                            <div className="boris-f2-124d97d1aaec">✓</div>
                           )}
                         </div>
                       ))
                     )}
-                    {Object.keys(allFolders).filter(f => f.startsWith("Личное_")).length === 0 && <div style={{color:"#8A93A6", fontSize:"15px"}}>Личных папок нет — загрузите свои фото во вкладке «Выгрузка с сайта».</div>}
+                    {Object.keys(allFolders).filter(f => f.startsWith("Личное_")).length === 0 && <div className="boris-f2-316437256d37">Личных папок нет — загрузите свои фото во вкладке «Выгрузка с сайта».</div>}
                   </div>
                 )}
               </div>
 
-              <div style={{marginBottom:"20px"}}>
-                <label style={{display:"block", color:"#667085", fontSize:"15px", marginBottom:"6px"}}>Пример дизайна для подражания</label>
-                <label style={{display:"inline-block", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px 18px", color:"#2F6FED", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>
+              <div className="boris-f2-7dde5e56b3f3">
+                <label className="boris-f2-22d1b9c90dff">Пример дизайна для подражания</label>
+                <label className="boris-f2-da049cbfb798">
                   📁 Выбрать фото
-                  <input type="file" accept="image/*" onChange={handleRefImageUpload} style={{display:"none"}} />
+                  <input type="file" accept="image/*" onChange={handleRefImageUpload}  className="boris-f2-c8be1ccba60b"/>
                 </label>
                 {bannerRefImagePreview && (
-                  <div style={{marginTop:"10px"}}>
-                    <img src={bannerRefImagePreview} style={{maxWidth:"200px", borderRadius:"8px", border:"1px solid #E3E7F0"}} />
-                    <button className="boris-btn-hover" onClick={() => { setBannerRefImageBase64(""); setBannerRefImagePreview(""); }} style={{display:"block", marginTop:"6px", background:"none", border:"1.5px solid #F04438", borderRadius:"10px", padding:"4px 10px", color:"#F04438", cursor:"pointer", fontSize:"15px"}}>Убрать фото</button>
+                  <div className="boris-f2-d8a81eac84c9">
+                    <img src={bannerRefImagePreview}  className="boris-f2-ee2813a5390c"/>
+                    <Button className="boris-btn-hover boris-f2-bad0de146220" onClick={() => { setBannerRefImageBase64(""); setBannerRefImagePreview(""); }}>Убрать фото</Button>
                   </div>
                 )}
               </div>
 
-              <div style={{display:"flex", gap:"10px", marginBottom:"20px"}}>
-                <div style={{flex:1}}>
-                  <label style={{display:"block", color:"#667085", fontSize:"15px", marginBottom:"6px"}}>Акцентный цвет</label>
-                  <input type="color" value={bannerAccentColor} onChange={e => setBannerAccentColor(e.target.value)} style={{width:"100%", height:"42px", borderRadius:"8px", border:"1px solid #E3E7F0", background:"#FFFFFF", cursor:"pointer"}} />
+              <div className="boris-f2-f67e6e3ba330">
+                <div className="boris-f2-7623f0554520">
+                  <label className="boris-f2-22d1b9c90dff">Акцентный цвет</label>
+                  <input type="color" value={bannerAccentColor} onChange={e => setBannerAccentColor(e.target.value)}  className="boris-f2-fedef0d993ec"/>
                 </div>
-                <div style={{flex:1}}>
-                  <label style={{display:"block", color:"#667085", fontSize:"15px", marginBottom:"6px"}}>Качество генерации</label>
-                  <select className="b-select" value={bannerQuality} onChange={e => setBannerQuality(e.target.value)} style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"10px", color:"#1D2939", fontSize:"15px"}}>
+                <div className="boris-f2-7623f0554520">
+                  <label className="boris-f2-22d1b9c90dff">Качество генерации</label>
+                  <select className="b-select boris-f2-55ba34549ffb" value={bannerQuality} onChange={e => setBannerQuality(e.target.value)}>
                     <option value="low">Дёшево и быстро (черновик)</option>
                     <option value="medium">Стандарт (для клиента)</option>
                     <option value="high">Премиум (дороже)</option>
@@ -7429,23 +7651,23 @@ export default function Home() {
                 </div>
               </div>
 
-              <div style={{marginBottom:"20px", background:"#F5FAFF", border:"1px solid #EAF4FF", borderRadius:"10px", padding:"14px"}}>
-                <label style={{display:"block", color:"#667085", fontSize:"15px", marginBottom:"8px", fontWeight:600}}>Вариантов: {bannerVaryCount}</label>
-                <input type="range" min={1} max={5} value={bannerVaryCount} onChange={e => setBannerVaryCount(Number(e.target.value))} style={{width:"100%", marginBottom:"12px"}} />
+              <div className="boris-f2-99dd07ace0fe">
+                <label className="boris-f2-339e217f7224">Вариантов: {bannerVaryCount}</label>
+                <input type="range" min={1} max={5} value={bannerVaryCount} onChange={e => setBannerVaryCount(Number(e.target.value))}  className="boris-f2-91b46317bed7"/>
                 {bannerVaryCount > 1 && (
                   <>
-                    <div style={{fontSize:"13px", color:"#8A93A6", marginBottom:"8px"}}>Отличие вариантов по:</div>
-                    <div style={{display:"flex", gap:"14px", flexWrap:"wrap"}}>
-                      <label style={{display:"flex", alignItems:"center", gap:"6px", fontSize:"15px", color:"#1D2939", cursor:"pointer"}}>
+                    <div className="boris-f2-6d9bb5b46d8b">Отличие вариантов по:</div>
+                    <div className="boris-f2-7c33f2688f41">
+                      <label className="boris-f2-6d67af7cb811">
                         <input type="checkbox" checked={bannerVaryAll ? true : bannerVaryColors} disabled={bannerVaryAll} onChange={e => setBannerVaryColors(e.target.checked)} /> Цветам
                       </label>
-                      <label style={{display:"flex", alignItems:"center", gap:"6px", fontSize:"15px", color:"#1D2939", cursor:"pointer"}}>
+                      <label className="boris-f2-6d67af7cb811">
                         <input type="checkbox" checked={bannerVaryAll ? true : bannerVaryImage} disabled={bannerVaryAll} onChange={e => setBannerVaryImage(e.target.checked)} /> Картинке
                       </label>
-                      <label style={{display:"flex", alignItems:"center", gap:"6px", fontSize:"15px", color:"#1D2939", cursor:"pointer"}}>
+                      <label className="boris-f2-6d67af7cb811">
                         <input type="checkbox" checked={bannerVaryAll ? true : bannerVaryIcons} disabled={bannerVaryAll} onChange={e => setBannerVaryIcons(e.target.checked)} /> Иконкам
                       </label>
-                      <label style={{display:"flex", alignItems:"center", gap:"6px", fontSize:"15px", color:"#7C5CFC", cursor:"pointer", fontWeight:600}}>
+                      <label className="boris-f2-09c075ad624d">
                         <input type="checkbox" checked={bannerVaryAll} onChange={e => {
                           setBannerVaryAll(e.target.checked);
                           if (e.target.checked) { setBannerVaryColors(false); setBannerVaryImage(false); setBannerVaryIcons(false); }
@@ -7457,20 +7679,20 @@ export default function Home() {
               </div>
               </details>
 
-              <button className="boris-btn-hover" onClick={generateBanner} disabled={bannerLoading} style={{background: bannerLoading ? "#E3E7F0" : "#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 20px", fontWeight:"bold", cursor: bannerLoading ? "default" : "pointer", width:"auto", fontSize:"15px"}}>
+              <Button className="boris-btn-hover" onClick={generateBanner} disabled={bannerLoading} style={{background: bannerLoading ? "var(--boris-border)" : "var(--boris-blue)", color:"var(--boris-bg)", border:"none", borderRadius:"10px", padding:"10px 20px", fontWeight:"bold", cursor: bannerLoading ? "default" : "pointer", width:"auto", fontSize:"15px"}}>
                 {bannerLoading ? `⏳ Борис рисует ${bannerVaryCount > 1 ? bannerVaryCount + " баннера" : "баннер"}...` : `✨ Сгенерировать ${bannerVaryCount > 1 ? bannerVaryCount + " варианта" : "баннер"}`}
-              </button>
+              </Button>
 
               {bannerResultUrls.length > 0 && (
-                <div style={{marginTop:"28px"}}>
-                  <h4 style={{margin:"0 0 12px", color:"#1D2939", fontSize:"18px"}}>Результат:</h4>
-                  <div style={{display:"flex", flexWrap:"wrap", gap:"14px"}}>
+                <div className="boris-f2-f0778f9dce9c">
+                  <h4 className="boris-f2-78af5e942847">Результат:</h4>
+                  <div className="boris-f2-9979355b54ec">
                     {bannerResultUrls.map((url, i) => (
-                      <div key={i} style={{border:"1px solid #E3E7F0", borderRadius:"10px", overflow:"hidden", background:"#FFFFFF"}}>
-                        <img src={url} alt={`banner-${i}`} style={{display:"block", maxWidth:"340px", width:"100%"}} />
-                        <div style={{padding:"10px", display:"flex", gap:"8px"}}>
-                          <a href={url} target="_blank" rel="noreferrer" style={{flex:1, textAlign:"center", background:"#EEF2FA", color:"#F79009", borderRadius:"6px", padding:"8px", fontSize:"15px", textDecoration:"none"}}>Открыть</a>
-                          <a href={url} download style={{flex:1, textAlign:"center", background:"#EEF2FA", color:"#F79009", borderRadius:"6px", padding:"8px", fontSize:"15px", textDecoration:"none"}}>Скачать</a>
+                      <div key={i} className="boris-f2-3da477895706">
+                        <img src={url} alt={`banner-${i}`}  className="boris-f2-3ffd560134f1"/>
+                        <div className="boris-f2-3bac393eafb8">
+                          <a href={url} target="_blank" rel="noreferrer" className="boris-f2-d634642831f5">Открыть</a>
+                          <a href={url} download className="boris-f2-d634642831f5">Скачать</a>
                         </div>
                       </div>
                     ))}
@@ -7479,27 +7701,27 @@ export default function Home() {
               )}
 
               {(bannerGallery.infographic.length > 0 || bannerGallery.extended.length > 0 || bannerGallery.max_carousel.length > 0) && (
-                <div style={{marginTop:"32px", borderTop:"1px solid #E3E7F0", paddingTop:"24px"}}>
-                  <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"16px", flexWrap:"wrap", gap:"10px"}}>
-                    <h4 style={{margin:0, color:"#1D2939", fontSize:"18px", display:"flex", alignItems:"center", gap:"10px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#98A2B3,#667085)", width:"30px", height:"30px", fontSize:"15px", display:"inline-flex", alignItems:"center", justifyContent:"center", borderRadius:"50%", flexShrink:0}}>📁</span>Все ваши баннеры</h4>
-                    <div style={{display:"flex", gap:"8px", alignItems:"center"}}>
-                      <button className="boris-btn-hover" onClick={selectAllBanners} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 14px", fontSize:"14px", cursor:"pointer"}}>Выбрать все</button>
-                      <button className="boris-btn-hover" onClick={downloadSelectedBanners} disabled={selectedBanners.length === 0} style={{background: selectedBanners.length === 0 ? "#E3E7F0" : "#2F6FED", color: selectedBanners.length === 0 ? "#98A2B3" : "#FFFFFF", border:"none", borderRadius:"10px", padding:"8px 14px", fontSize:"14px", fontWeight:"bold", cursor: selectedBanners.length === 0 ? "default" : "pointer"}}>⬇ Скачать выбранные{selectedBanners.length > 0 ? ` (${selectedBanners.length})` : ""}</button>
-                      <button className="boris-btn-hover" onClick={deleteSelectedBanners} disabled={selectedBanners.length === 0} style={{background: selectedBanners.length === 0 ? "#E3E7F0" : "#E24B4A", color: selectedBanners.length === 0 ? "#98A2B3" : "#FFFFFF", border:"1.5px solid #F04438", borderRadius:"10px", padding:"8px 14px", fontSize:"14px", fontWeight:"bold", cursor: selectedBanners.length === 0 ? "default" : "pointer"}}>🗑 Удалить выбранные{selectedBanners.length > 0 ? ` (${selectedBanners.length})` : ""}</button>
+                <div className="boris-f2-2594d24e8b9b">
+                  <div className="boris-f2-a0768cfa75f7">
+                    <h4 className="boris-f2-24475118349d"><span className="b-icon-sm boris-f2-7404d9a9c9e9 boris-g1-icon">📁</span>Все ваши баннеры</h4>
+                    <div className="boris-f2-78cead6503f9">
+                      <Button className="boris-btn-hover boris-f2-ffcac3d73933" onClick={selectAllBanners}>Выбрать все</Button>
+                      <Button className="boris-btn-hover" onClick={downloadSelectedBanners} disabled={selectedBanners.length === 0} style={{background: selectedBanners.length === 0 ? "var(--boris-border)" : "var(--boris-blue)", color: selectedBanners.length === 0 ? "var(--boris-text-3)" : "var(--boris-surface)", border:"none", borderRadius:"10px", padding:"8px 14px", fontSize:"14px", fontWeight:"bold", cursor: selectedBanners.length === 0 ? "default" : "pointer"}}>⬇ Скачать выбранные{selectedBanners.length > 0 ? ` (${selectedBanners.length})` : ""}</Button>
+                      <Button className="boris-btn-hover" onClick={deleteSelectedBanners} disabled={selectedBanners.length === 0} style={{background: selectedBanners.length === 0 ? "var(--boris-border)" : "#E24B4A", color: selectedBanners.length === 0 ? "var(--boris-text-3)" : "var(--boris-surface)", border:"1.5px solid #F04438", borderRadius:"10px", padding:"8px 14px", fontSize:"14px", fontWeight:"bold", cursor: selectedBanners.length === 0 ? "default" : "pointer"}}>🗑 Удалить выбранные{selectedBanners.length > 0 ? ` (${selectedBanners.length})` : ""}</Button>
                     </div>
                   </div>
                   {Object.entries(bannerGallery).map(([subfolder, urls]) => (
                     urls.length > 0 && (
-                      <div key={subfolder} style={{marginBottom:"20px"}}>
-                        <div style={{color:"#1D2939", fontSize:"16px", fontWeight:600, marginBottom:"12px"}}>{subfolder === "infographic" ? "Инфографика" : subfolder === "extended" ? "Расширенный тариф" : "Максимальный тариф"} ({urls.length})</div>
-                        <div style={{display:"flex", flexWrap:"wrap", gap:"12px"}}>
+                      <div key={subfolder} className="boris-f2-7dde5e56b3f3">
+                        <div className="boris-f2-73e8a9f7ea0e">{subfolder === "infographic" ? "Инфографика" : subfolder === "extended" ? "Расширенный тариф" : "Максимальный тариф"} ({urls.length})</div>
+                        <div className="boris-f2-68772bea9957">
                           {urls.map((url, i) => (
-                            <div key={i} className="boris-card-hover" style={{border: selectedBanners.includes(url) ? "2px solid #2F6FED" : "1px solid #E3E7F0", borderRadius:"16px", overflow:"hidden", background:"#FFFFFF", position:"relative", width:"200px"}}>
-                              <img src={url} onClick={() => setLightboxUrl(url)} alt={`gallery-${i}`} style={{display:"block", width:"100%", height:"130px", objectFit:"contain", background:"#F6F7FB", cursor:"zoom-in", opacity: selectedBanners.includes(url) ? 0.75 : 1}} />
-                              <div style={{padding:"10px 12px"}}><div style={{fontSize:"14px", fontWeight:600, color:"#1D2939"}}>{String(subfolder).includes("infographic") ? "Инфографика" : String(subfolder).includes("extended") ? "Расширенный тариф" : "Максимальный тариф"}</div></div>
-                              <input type="checkbox" checked={selectedBanners.includes(url)} onChange={() => toggleBannerSelect(url)} style={{position:"absolute", top:"8px", left:"8px", width:"20px", height:"20px", cursor:"pointer", accentColor:"#2F6FED"}} />
-                              <button className="boris-btn-hover" onClick={() => deleteBannerFile(subfolder, url)} title="Удалить" style={{position:"absolute", top:"6px", right:"6px", background:"rgba(220,38,38,0.9)", color:"#1D2939", border:"1.5px solid #F04438", borderRadius:"10px", width:"24px", height:"24px", cursor:"pointer", fontSize:"15px"}}>🗑</button>
-                            </div>
+                            <BorisCard key={i} className="boris-card-hover boris-g1-card" style={{border: selectedBanners.includes(url) ? "2px solid var(--boris-blue)" : "1px solid var(--boris-border)", borderRadius:"16px", overflow:"hidden", background:"var(--boris-surface)", position:"relative", width:"200px"}}>
+                              <img src={url} onClick={() => setLightboxUrl(url)} alt={`gallery-${i}`} style={{display:"block", width:"100%", height:"130px", objectFit:"contain", background:"var(--boris-bg)", cursor:"zoom-in", opacity: selectedBanners.includes(url) ? 0.75 : 1}} />
+                              <div className="boris-f2-76bb143b4824"><div className="boris-f2-29be9e0cb513">{String(subfolder).includes("infographic") ? "Инфографика" : String(subfolder).includes("extended") ? "Расширенный тариф" : "Максимальный тариф"}</div></div>
+                              <input type="checkbox" checked={selectedBanners.includes(url)} onChange={() => toggleBannerSelect(url)}  className="boris-f2-89ef1cbce2d1"/>
+                              <Button className="boris-btn-hover boris-f2-95cbcdb8b618" onClick={() => deleteBannerFile(subfolder, url)} title="Удалить">🗑</Button>
+                            </BorisCard>
                           ))}
                         </div>
                       </div>
@@ -7512,23 +7734,23 @@ export default function Home() {
         )}
 
         {activeTab === "marketing" && (
-          <div style={{display:"flex", flexDirection:"column", gap:"20px"}}>
+          <div className="boris-f2-2e40e87e54ae">
             <div className="b-grid-2">
-              <div className="b-panel b-card-eq">
-                <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #F79009, #E8890B)"}}>🎯</span>Цель по лидам (KPI)</h3>
-                <p style={{color:"#667085", fontSize:"15px", marginBottom:"16px"}}>Задайте цель — Борис будет ориентироваться на неё при принятии решений об изменениях в объявлениях.</p>
-                <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))", gap:"14px", marginBottom:"16px"}}>
+              <BorisCard className="b-panel b-card-eq boris-g1-card">
+                <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-3402db1f72e2 boris-g1-icon">🎯</span>Цель по лидам</h3>
+                <p className="boris-f2-8d66ef11ddb7">Задайте цель — Борис будет ориентироваться на неё при принятии решений об изменениях в объявлениях.</p>
+                <div className="boris-f2-ddf54a2efb76">
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"5px"}}>Лидов в день</label>
-                    <input type="number" value={kpiTargetLeads} onChange={e => setKpiTargetLeads(Number(e.target.value))} style={{...inputStyle, width:"100%", boxSizing:"border-box"}} />
+                    <label className="boris-f2-5c5fa1b234c9">Лидов в день</label>
+                    <input type="number" value={Number(kpiTargetLeads) === 0 ? "" : kpiTargetLeads} onChange={e => setKpiTargetLeads(Number(e.target.value))} style={{...inputStyle, width:"100%", boxSizing:"border-box"}} />
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"5px"}}>Макс. ₽ за лид</label>
-                    <input type="number" value={kpiMaxCpl} onChange={e => setKpiMaxCpl(Number(e.target.value))} style={{...inputStyle, width:"100%", boxSizing:"border-box"}} />
+                    <label className="boris-f2-5c5fa1b234c9">Макс. ₽ за лид</label>
+                    <input type="number" value={Number(kpiMaxCpl) === 0 ? "" : kpiMaxCpl} onChange={e => setKpiMaxCpl(Number(e.target.value))} style={{...inputStyle, width:"100%", boxSizing:"border-box"}} />
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"5px"}}>Температура лидов</label>
-                    <div style={{color:"#98A2B3", fontSize:"13px", marginBottom:"6px", lineHeight:1.4}}>Горячий — спрашивает цену, тёплый — интересуется, холодный — просто смотрит</div>
+                    <label className="boris-f2-5c5fa1b234c9">Температура лидов</label>
+                    <div className="boris-f2-4ba58f256316">Горячий — спрашивает цену, тёплый — интересуется, холодный — просто смотрит</div>
                     <select className="b-select" value={kpiLeadTemp} onChange={e => setKpiLeadTemp(e.target.value)} style={{...inputStyle, width:"100%", boxSizing:"border-box"}}>
                       <option value="любые">Любые</option>
                       <option value="горячие">🔥 Горячие</option>
@@ -7537,165 +7759,214 @@ export default function Home() {
                     </select>
                   </div>
                 </div>
-                <div style={{display:"flex", gap:"10px", marginBottom:"16px"}}>
-                  <button className="boris-btn-hover" onClick={saveKpiSettings} style={{background: kpiSaved ? "#E7EFFE" : "#2F6FED", color: kpiSaved ? "#2F6FED" : "#F6F7FB", border: kpiSaved ? "1px solid #2F6FED" : "none", borderRadius:"10px", padding:"9px 14px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>
-                    {kpiSaved ? "✓ Сохранено" : "Сохранить цель по лидам"}
-                  </button>
-                  <button className="boris-btn-hover" onClick={deleteKpiSettings} style={{marginLeft:"auto", background:"#FFFFFF", color:"#98A2B3", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"9px 14px", fontSize:"15px", cursor:"pointer"}}>
+                <div style={{marginTop:14,padding:"14px 16px",border:"1px solid var(--boris-border)",borderRadius:12,background:"var(--boris-card)"}}>
+                  <div style={{fontWeight:700,marginBottom:5}}>Цель BORIS: получить не менее {kpiTargetLeads || "—"} обращений в день при цене обращения не выше {kpiMaxCpl || "—"} ₽.</div>
+                  <label style={{display:"flex",gap:10,alignItems:"flex-start",cursor:"pointer",fontSize:14,lineHeight:1.45}}>
+                    <input type="checkbox" checked={kpiGoalAuto === true} onChange={e => setKpiGoalAuto(e.target.checked)} style={{marginTop:3}} />
+                    <span><b>Автоматически достигать цели</b><br/><span style={{color:"var(--boris-muted)"}}>BORIS будет автоматически управлять разрешёнными рекламными действиями для выполнения этого плана. Ограничения безопасности сохраняются.</span></span>
+                  </label>
+                  <div style={{marginTop:8,fontSize:13,color:"var(--boris-muted)"}}>Автопилот по цели: <b>{kpiGoalAuto === null ? "Требуется настройка" : kpiGoalAuto ? "Включён" : "Выключен"}</b></div>
+                </div>
+
+                {kpiReadiness && <div style={{marginTop:14,padding:"14px 16px",border:"1px solid var(--boris-border)",borderRadius:12,background:"var(--boris-card)",fontSize:13,lineHeight:1.55}}>
+                  <div style={{fontWeight:800,fontSize:15}}>ИИ-маркетолог · рабочее состояние</div>
+                  <div><b>План:</b> {kpiReadiness.current_kpi?.target_leads_per_day ?? kpiTargetLeads} лидов · <b>Получено:</b> {kpiReadiness.current_kpi?.contacts_today ?? "—"}</div>
+                  <div><b>Красная цена:</b> {kpiReadiness.current_kpi?.max_cost_per_lead_rub ?? kpiMaxCpl} ₽ · <b>Текущая цена лида:</b> {kpiReadiness.current_kpi?.cost_per_lead_today != null ? `${kpiReadiness.current_kpi.cost_per_lead_today} ₽` : "нет достаточных данных"}</div>
+                  <div><b>Автопилот:</b> {kpiReadiness.goal_auto_enabled ? (kpiReadiness.capabilities?.publish_feed_change?.allowed ? "работает, публикация разрешена" : "работает, внешняя публикация ограничена") : "выключен"}</div>
+                  <div><b>Что делает BORIS сейчас:</b> {humanizeBusinessText(kpiReadiness.current_work,"контролирует цель")}</div>
+                  <div><b>Что сделал сегодня:</b> {humanizeBusinessText(kpiReadiness.last_action?.reason,"новых изменений пока нет")}</div>
+                  <div><b>Что мешает:</b> {(kpiReadiness.human_blockers || []).map((x:any)=>humanizeBusinessText(x,"требуется дополнительная проверка")).join("; ") || "нет блокеров"}</div>
+                  {kpiReadiness.required_avito_tariff && kpiReadiness.required_tariff_active !== true && <div style={{marginTop:8,padding:10,border:"1px solid var(--boris-border)",borderRadius:10}}><b>Автопилот готов, но публикация изменений остановлена.</b> Подтвердите тариф Avito «{kpiReadiness.required_avito_tariff}» для этого аккаунта.<div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8}}><Button onClick={()=>confirmKpiTariff("CONFIRMED_ACTIVE")}>Да, нужный тариф подключён</Button><Button onClick={()=>confirmKpiTariff("CONFIRMED_NOT_ACTIVE")}>Нет, ещё не подключён</Button></div></div>}
+                </div>}
+
+                <div className="boris-f2-8d05cacc41d6">
+                  <Button className="boris-btn-hover" onClick={saveKpiSettings} style={{background: kpiSaved ? "var(--boris-blue-soft)" : "var(--boris-blue)", color: kpiSaved ? "var(--boris-blue)" : "var(--boris-bg)", border: kpiSaved ? "1px solid var(--boris-blue)" : "none", borderRadius:"10px", padding:"9px 14px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>
+                    {kpiSaved ? ("✓ Сохранено: " + kpiTargetLeads + " лид/день, до " + kpiMaxCpl + " ₽" + (kpiLeadTemp && kpiLeadTemp !== "любые" ? ", лиды: " + kpiLeadTemp : "")) : "Сохранить цель по лидам"}
+                  </Button>
+                  <Button className="boris-btn-hover boris-f2-f31df8f7f70d" onClick={deleteKpiSettings}>
                     🗑 Удалить цель
-                  </button>
-                  <button className="boris-btn-hover" onClick={checkKpi} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"9px 14px", fontSize:"15px", cursor:"pointer"}}>
+                  </Button>
+                  <Button className="boris-btn-hover boris-f2-9e816afdf26b" onClick={checkKpi}>
                     📊 Как идут дела по цели
-                  </button>
+                  </Button>
                 </div>
 
                 {kpiCheckResult && kpiCheckResult.status === "ok" && (
-                  <div style={{background:"#F6F7FB", border:"1px solid #EEF2FA", borderRadius:"8px", padding:"14px", marginBottom:"16px", fontSize:"15px"}}>
-                    <div style={{color:"#667085", marginBottom:"6px"}}>
-                      Лидов сегодня: <b style={{color:"#2F6FED"}}>{kpiCheckResult.contacts_today}</b> из цели <b>{kpiCheckResult.target_leads_per_day}</b>
-                      {kpiCheckResult.cost_per_lead_today != null && <> · Цена лида: <b style={{color:"#F79009"}}>{kpiCheckResult.cost_per_lead_today}₽</b></>}
+                  <div className="boris-f2-8916a90632ec">
+                    <div className="boris-f2-c3a72d20de66">
+                      Лидов сегодня: <b className="boris-f2-b5d95bf86ec9">{kpiCheckResult.contacts_today}</b> из цели <b>{kpiCheckResult.target_leads_per_day}</b>
+                      {kpiCheckResult.cost_per_lead_today != null && <> · Цена лида: <b className="boris-f2-b26be2f96183">{kpiCheckResult.cost_per_lead_today}₽</b></>}
                     </div>
-                    <div style={{color:"#344054"}}>{kpiCheckResult.recommendation}</div>
+                    <div className="boris-f2-de52905d633b">{humanizeBusinessText(kpiCheckResult.recommendation,"BORIS продолжает контроль цели")}</div>
                   </div>
                 )}
                 {kpiCheckResult && kpiCheckResult.status === "no_goal" && (
-                  <div style={{color:"#667085", fontSize:"15px", marginBottom:"16px"}}>{kpiCheckResult.message}</div>
+                  <div className="boris-f2-8d66ef11ddb7">{humanizeBusinessText(kpiCheckResult.message,"Цель пока не задана")}</div>
                 )}
 
-                <div style={{borderTop:"1px solid #EEF2FA", paddingTop:"14px"}}>
-                  <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>План по направлению (необязательно)</label>
-                  <div style={{color:"#98A2B3", fontSize:"13px", marginBottom:"8px", lineHeight:1.4}}>Введите начало id ваших объявлений — например boris-shkaf. Борис покажет, что улучшить именно в этом направлении. Оставьте пустым, чтобы посмотреть по всем.</div>
-                  <div style={{display:"flex", gap:"10px", marginBottom:"10px"}}>
+                <div style={{marginTop:16, padding:"14px 16px", border:"1px solid var(--boris-border)", borderRadius:12, background:"var(--boris-card)"}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:10}}>
+                    <b style={{fontSize:15}}>Действия ИИ-маркетолога</b>
+                    <Button onClick={loadKpiActionMemory} style={{padding:"6px 10px",fontSize:12}}>Обновить</Button>
+                  </div>
+                  {!kpiActionMemory.length && <div style={{fontSize:13,color:"var(--boris-muted)"}}>Изменений по цели пока нет.</div>}
+                  {kpiActionMemory.slice(0,5).map((a:any) => {
+                    const ch = a.changes || {}; const fields = Object.keys(ch);
+                    return <div key={a.operation_id} style={{padding:"10px 0",borderTop:"1px solid var(--boris-border)",fontSize:13,lineHeight:1.5}}>
+                      <div><b>Объявление Avito #{a.avito_item_id || "—"}</b>{a.version ? <> · версия {a.version}</> : null}</div>
+                      <div style={{color:"var(--boris-muted)"}}>{humanizeBusinessText(a.reason,"Оптимизация результата")}</div>
+                      {a.kpi_before && <div>До изменения: {a.kpi_before.views ?? "—"} просмотров · {a.kpi_before.contacts ?? "—"} обращений · {a.kpi_before.conversion ?? "—"}%</div>}
+                      {!!fields.length && <div>Изменено: {fields.map((f:string) => `${humanizeBusinessText(f,"Поле")}: «${ch[f]?.old ?? ""}» → «${ch[f]?.new ?? ""}»`).join("; ")}</div>}
+                      <div>Статус: <b>{humanizeBusinessText(a.status, "В работе")}</b> · наблюдение: {humanizeBusinessText(a.effect_status || a.observation_window?.status, "Ожидает данных")} · публикация: {humanizeBusinessText(a.safe_feed_status, "Не подготовлена")}</div>
+                      {a.kpi_after && <div>После изменения: {a.kpi_after.views ?? "—"} просмотров · {a.kpi_after.contacts ?? "—"} обращений · {a.kpi_after.conversion ?? "—"}%</div>}
+                    </div>
+                  })}
+                </div>
+
+                <div className="boris-f2-e56f695a465a">
+                  <label className="boris-f2-200d23dd578d">План по направлению (необязательно)</label>
+                  <div className="boris-f2-b39f797acc2b">Введите начало id ваших объявлений — например boris-shkaf. Борис покажет, что улучшить именно в этом направлении. Оставьте пустым, чтобы посмотреть по всем.</div>
+                  <div className="boris-f2-a5804c9176e1">
                     <input value={kpiPlanIdPrefix} onChange={e => setKpiPlanIdPrefix(e.target.value)} style={{...inputStyle, flex:1}} placeholder="boris-shkaf-..." />
-                    <button className="boris-btn-hover" onClick={getKpiPlan} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 18px", fontSize:"15px", fontWeight:"bold", cursor:"pointer", whiteSpace:"nowrap"}}>
+                    <Button className="boris-btn-hover boris-f2-cf0e8474c5a6" onClick={getKpiPlan}>
                       Показать план по лидам
-                    </button>
+                    </Button>
                   </div>
                   {kpiPlan && (
-                    <div style={{background:"#F6F7FB", border:"1px solid #EEF2FA", borderRadius:"8px", padding:"14px"}}>
-                      <div style={{color:"#F79009", fontWeight:"bold", marginBottom:"8px"}}>План для «{kpiPlan.direction}» ({kpiPlan.affected_items} объявлений)</div>
-                      <ol style={{color:"#344054", fontSize:"15px", paddingLeft:"18px", marginBottom:"12px"}}>
-                        {kpiPlan.steps.map((s: string, i: number) => <li key={i} style={{marginBottom:"4px"}}>{s}</li>)}
+                    <div className="boris-f2-832a5bb60604">
+                      <div className="boris-f2-52c8cf7afe01">План для «{kpiPlan.direction}» ({kpiPlan.affected_items} объявлений)</div>
+                      <ol className="boris-f2-050068336b93">
+                        {kpiPlan.steps.map((s: string, i: number) => <li key={i} className="boris-f2-d982937dda0f">{s}</li>)}
                       </ol>
-                      <button className="boris-btn-hover" onClick={executeKpiPlan} disabled={kpiPlanExecuting} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 16px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>
+                      <Button className="boris-btn-hover boris-f2-cf7f2c0c42ae" onClick={executeKpiPlan} disabled={kpiPlanExecuting}>
                         {kpiPlanExecuting ? "⏳ Выполняю..." : "✅ Одобрить и внедрить"}
-                      </button>
+                      </Button>
                     </div>
                   )}
                 </div>
-              </div>
+              </BorisCard>
 
-              <div className="b-panel b-card-eq">
-                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"10px"}}>
-                  <h3 className="b-title" style={{margin:0, display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #12B76A, #039855)"}}>🔄</span>Перепубликация</h3>
-                  <button className="boris-btn-hover" onClick={loadRepublishCandidates} disabled={republishLoading} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"6px 12px", fontSize:"15px", cursor:"pointer"}}>
+              <BorisCard className="b-panel b-card-eq boris-g1-card">
+                <div className="boris-f2-40eee6f1a1fd">
+                  <h3 className="b-title boris-f2-ea8ce7c7e635"><span className="b-icon-sm boris-f2-e179ca50e9d4 boris-g1-icon">🔄</span>Перепубликация</h3>
+                  <Button className="boris-btn-hover boris-f2-f2b717e5985b" onClick={loadRepublishCandidates} disabled={republishLoading}>
                     {republishLoading ? "⏳..." : "🔄 Обновить"}
-                  </button>
+                  </Button>
                 </div>
-                <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(140px, 1fr))", gap:"14px", marginBottom:"14px", alignItems:"end"}}>
+                <div className="boris-f2-efa48b908bd0">
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"5px"}}>Мин. просмотров без контакта</label>
-                    <input type="number" value={republishMinViews} onChange={e => setRepublishMinViews(Number(e.target.value))} style={{...inputStyle, width:"100%", boxSizing:"border-box"}} />
+                    <label className="boris-f2-5c5fa1b234c9">Мин. просмотров без контакта</label>
+                    <input type="number" value={Number(republishMinViews) === 0 ? "" : republishMinViews} onChange={e => setRepublishMinViews(Number(e.target.value))} style={{...inputStyle, width:"100%", boxSizing:"border-box"}} />
                   </div>
                   <div>
-                    <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"5px"}}>Дней без просмотров</label>
-                    <input type="number" value={republishZeroDays} onChange={e => setRepublishZeroDays(Number(e.target.value))} style={{...inputStyle, width:"100%", boxSizing:"border-box"}} />
+                    <label className="boris-f2-5c5fa1b234c9">Дней без просмотров</label>
+                    <input type="number" value={Number(republishZeroDays) === 0 ? "" : republishZeroDays} onChange={e => setRepublishZeroDays(Number(e.target.value))} style={{...inputStyle, width:"100%", boxSizing:"border-box"}} />
                   </div>
-                  <label style={{display:"flex", alignItems:"center", gap:"6px", color:"#667085", fontSize:"15px", cursor:"pointer", paddingBottom:"10px"}}>
+                  <label className="boris-f2-f4ba3c9dd4f8">
                     <input type="checkbox" checked={republishEnabled} onChange={e => setRepublishEnabled(e.target.checked)} />
                     Включено
                   </label>
                 </div>
-                <div style={{display:"flex", gap:"10px", marginBottom:"14px"}}>
-                  <button className="boris-btn-hover" onClick={saveRepublishSettings} style={{background: republishSettingsSaved ? "#E7EFFE" : "#2F6FED", color: republishSettingsSaved ? "#2F6FED" : "#F6F7FB", border: republishSettingsSaved ? "1px solid #2F6FED" : "none", borderRadius:"10px", padding:"9px 14px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>
+                <div className="boris-f2-e719c609826c">
+                  <Button className="boris-btn-hover" onClick={saveRepublishSettings} style={{background: republishSettingsSaved ? "var(--boris-blue-soft)" : "var(--boris-blue)", color: republishSettingsSaved ? "var(--boris-blue)" : "var(--boris-bg)", border: republishSettingsSaved ? "1px solid var(--boris-blue)" : "none", borderRadius:"10px", padding:"9px 14px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>
                     {republishSettingsSaved ? "✓ Сохранено" : "Сохранить правила перепубликации"}
-                  </button>
-                  <button className="boris-btn-hover" onClick={deleteRepublishSettings} style={{background:"#FFFFFF", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"9px 14px", fontSize:"15px", cursor:"pointer"}}>
+                  </Button>
+                  <Button className="boris-btn-hover boris-f2-a94042aaa708" onClick={deleteRepublishSettings}>
                     🗑 Сбросить
-                  </button>
+                  </Button>
                 </div>
-                <p style={{color:"#667085", fontSize:"15px", marginBottom:"12px"}}>
+                <p className="boris-f2-a6dd61d4390b">
                   {republishTotal !== null && `Проверено объявлений в фиде: ${republishTotal}.`}
                 </p>
                 {republishCandidates.length === 0 ? (
-                  <p style={{color:"#667085", fontSize:"15px"}}>Кандидатов на снятие нет — все объявления эффективны или ещё слишком новые для оценки.</p>
+                  <p className="boris-f2-96046ead62a3">Кандидатов на снятие нет — все объявления эффективны или ещё слишком новые для оценки.</p>
                 ) : (
                   <>
-                    <div style={{display:"flex", flexDirection:"column", gap:"6px", maxHeight:"240px", overflowY:"auto", marginBottom:"12px"}}>
+                    <div className="boris-f2-ae1456d7b46b">
                       {republishCandidates.map((c: any) => (
-                        <div key={c.id} style={{background:"#FFFFFF", borderRadius:"6px", padding:"8px 12px", fontSize:"15px"}}>
-                          <div style={{color:"#F79009"}}>{c.title}</div>
-                          <div style={{color:"#F04438"}}>{c.reason}</div>
+                        <div key={c.id} className="boris-f2-7d97bf25a61e">
+                          <div className="boris-f2-b26be2f96183">{c.title}</div>
+                          <div className="boris-f2-de4c8a9423c7">{humanizeBusinessText(c.reason,"Причина уточняется")}</div>
                         </div>
                       ))}
                     </div>
-                    <button className="boris-btn-hover" onClick={applyRepublish} style={{background:"#FDEDEC", color:"#F04438", border:"1.5px solid #F04438", borderRadius:"10px", padding:"10px 16px", fontSize:"15px", cursor:"pointer", fontWeight:"bold"}}>
+                    <Button className="boris-btn-hover boris-f2-3b991c9a9054" onClick={applyRepublish}>
                       🗑 Снять {republishCandidates.length} и создать замену
-                    </button>
+                    </Button>
                   </>
                 )}
-              </div>
+              </BorisCard>
 
               <div className="b-cell">
-            <div className="b-panel b-card-eq" style={{marginBottom:"24px"}}>
-              <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #9B87F5, #7C5CFC)"}}>📈</span>Аналитика выдачи по городам</h3>
+            <BorisCard className="b-panel b-card-eq boris-f2-8b9688e6e090 boris-g1-card">
+              <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-fc42933d2a24 boris-g1-icon">📈</span>Аналитика выдачи по городам</h3>
               <p className="b-sub">Узнай сколько объявлений, какие цены и названия у конкурентов</p>
-              <div style={{marginBottom:"16px"}}>
+              <div className="boris-f2-79a1c5a5db96">
                 <label className="b-label">Запрос</label>
                 <input value={analysisQuery} onChange={e => setAnalysisQuery(e.target.value)} placeholder="продажа тротуарной плитки" className="b-input" />
               </div>
-              <div style={{marginBottom:"20px"}}>
+              <div className="boris-f2-7dde5e56b3f3">
                 <label className="b-label">Города (через запятую)</label>
                 <input value={analysisCities} onChange={e => setAnalysisCities(e.target.value)} placeholder="Москва, Санкт-Петербург" className="b-input" />
               </div>
-              <button className="b-btn b-btn-primary" onClick={runAnalysis}>
+              <Button className="b-btn b-btn-primary" onClick={runAnalysis}>
                 📊 Запустить анализ
-              </button>
-            </div>
-            {analysisLoading && <p style={{color:"#667085"}}>БОРИС анализирует выдачу...{analysisProgress ? ` (город ${analysisProgress.done} из ${analysisProgress.total})` : ""}</p>}
+              </Button>
+            </BorisCard>
+            {analysisLoading && <p className="boris-f2-de52905d633b">БОРИС анализирует выдачу...{analysisProgress ? ` (город ${analysisProgress.done} из ${analysisProgress.total})` : ""}</p>}
             {analysisResults.length > 0 && (
-              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:"16px"}}>
+              <div className="boris-f2-c0b553b558c8">
                 {analysisResults.map((r: any, i: number) => (
-                  <div key={i} style={{background:"#F6F7FB", borderRadius:"12px", padding:"20px", border:"1px solid #EEF2FA"}}>
-                    <div style={{fontSize:"23px", fontWeight:"bold", marginBottom:"16px"}}>📍 {r.city}</div>
-                    {r.error ? <div style={{color:"#F04438", fontSize:"15px"}}>{r.error}</div> : (
+                  <div key={i} className="boris-f2-8ca8ff789792">
+                    <div className="boris-f2-1e7e7b12364a">📍 {r.city}</div>
+                    {r.error ? <div className="boris-f2-4e518f114f40">{r.error}</div> : (
                       <>
                         <div style={{display:"grid", gridTemplateColumns: r.total_count ? "1fr 1fr" : "1fr 1fr", gap:"8px", marginBottom:"8px"}}>
-                          <div style={{background:"#FFFFFF", borderRadius:"8px", padding:"8px", textAlign:"center"}}>
-                            <div style={{color:"#667085", fontSize:"15px"}}>В выборке</div>
-                            <div style={{fontSize:"23px", fontWeight:"bold", color:"#2F6FED"}}>{r.count_found}</div>
+                          <div className="boris-f2-75f1ce275fd1">
+                            <div className="boris-f2-96046ead62a3">В выборке</div>
+                            <div className="boris-f2-0ae69d771622">{r.count_found}</div>
                           </div>
-                          <div style={{background:"#FFFFFF", borderRadius:"8px", padding:"8px", textAlign:"center"}}>
-                            <div style={{color:"#667085", fontSize:"15px"}}>Ср. цена</div>
-                            <div style={{fontSize:"23px", fontWeight:"bold", color:"#2F6FED"}}>{r.avg_price || "—"}</div>
+                          <div className="boris-f2-75f1ce275fd1">
+                            <div className="boris-f2-96046ead62a3">Ср. цена</div>
+                            <div className="boris-f2-0ae69d771622">{r.avg_price || "—"}</div>
                           </div>
                         </div>
                         {r.total_count && (
-                          <div style={{background:"#F0F5FF", borderRadius:"8px", padding:"10px", marginBottom:"12px", textAlign:"center"}}>
-                            <div style={{color:"#667085", fontSize:"13px"}}>Всего объявлений в базе Avito</div>
-                            <div style={{fontSize:"18px", fontWeight:"bold", color:"#1D2939"}}>{r.total_count.toLocaleString("ru-RU")}</div>
+                          <div className="boris-f2-9da97a0e298c">
+                            <div className="boris-f2-274b6124e0e0">Всего объявлений в базе Avito</div>
+                            <div className="boris-f2-6d20d2d2002c">{r.total_count.toLocaleString("ru-RU")}</div>
                           </div>
                         )}
-                        <div style={{color:"#98A2B3", fontSize:"13px", marginBottom:"12px", textAlign:"center", fontStyle:"italic"}}>
-                          Показан срез первой страницы выдачи (топ-конкуренты по цене), не полный охват рынка
+                        <div className="boris-f2-cc477ae01908">
+                          Показан реальный порядок первой страницы выдачи Авито через модуль BORIS для браузера. Это срез выдачи, а не полный объём рынка.
                         </div>
+                        {r.own_positions?.length > 0 ? (
+                          <div className="boris-f2-d55856efd7e2">
+                            Ваши позиции: {r.own_positions.map((x: any) => `№${x.position} — ${x.title}`).join(" · ")}
+                          </div>
+                        ) : (
+                          <div className="boris-f2-cc477ae01908">Ваших активных объявлений в первых {r.count_on_page || r.count_found || 20} позициях не найдено.</div>
+                        )}
+                        {typeof r.promoted_count === "number" && (
+                          <div className="boris-f2-cc477ae01908">Продвигаемых объявлений в срезе: {r.promoted_count}</div>
+                        )}
                         {(r.min_price || r.max_price) && (
-                          <div style={{color:"#667085", fontSize:"15px", marginBottom:"12px", textAlign:"center"}}>
+                          <div className="boris-f2-d55856efd7e2">
                             Цены: {r.min_price || "?"}–{r.max_price || "?"} ₽
-                            {r.from_cache && <span style={{color:"#98A2B3", marginLeft:"8px"}}>(из кэша)</span>}
+                            {r.from_cache && <span className="boris-f2-637d9820b075">(из кэша)</span>}
                           </div>
                         )}
                         {r.top5?.length > 0 && (
-                          <div style={{borderTop:"1px solid #EEF2FA", paddingTop:"12px"}}>
-                            <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"10px"}}>Топ-5 конкурентов (по цене):</div>
+                          <div className="boris-f2-162811ca157a">
+                            <div className="boris-f2-9ade317dcdce">Топ конкурентов в фактическом порядке выдачи:</div>
                             {r.top5.map((item: any, idx: number) => (
-                              <div key={idx} style={{background:"#FFFFFF", borderRadius:"8px", padding:"12px", marginBottom:"8px"}}>
-                                <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:"8px", marginBottom:"6px"}}>
-                                  <a href={item.url} target="_blank" rel="noreferrer" style={{color:"#1D2939", fontSize:"15px", fontWeight:"bold", textDecoration:"none", flex:1}}>{item.title}</a>
-                                  <span style={{color:"#2F6FED", fontSize:"15px", fontWeight:"bold", whiteSpace:"nowrap"}}>{item.price ? item.price + " ₽" : "—"}</span>
+                              <div key={idx} className="boris-f2-24f38799f06e">
+                                <div className="boris-f2-518da517eeca">
+                                  <a href={item.url} target="_blank" rel="noreferrer" className="boris-f2-c7f47f1b0a13">{item.title}</a>
+                                  <span className="boris-f2-ef1230f7e4ea">{item.price ? item.price + " ₽" : "—"}</span>
                                 </div>
-                                <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"6px"}}>📷 {item.photos_count ?? "?"} фото</div>
-                                {item.advantages && <div style={{color:"#999", fontSize:"15px", lineHeight:"1.4"}}>💡 {item.advantages}</div>}
+                                <div className="boris-f2-92cc9bab1829">📷 {item.photos_count ?? "?"} фото</div>
+                                {item.advantages && <div className="boris-f2-2fe8aea37286">💡 {item.advantages}</div>}
                               </div>
                             ))}
                           </div>
@@ -7707,53 +7978,53 @@ export default function Home() {
               </div>
             )}
           </div>
-            <div className="b-panel b-card-eq">
-              <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #4C8DFF, #2F6FED)"}}>📊</span>Анализ спроса (Яндекс.Вордстат)</h3>
-              <details style={{margin:"0 0 16px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Зачем это нужно</summary><p style={{color:"#667085", fontSize:"15px", margin:"8px 0 0"}}>Узнайте реальный объём поисковых запросов по вашей нише, похожие запросы и долю коммерческих (с намерением купить) среди них — это помогает понять, стоит ли расширять направление.</p></details>
-              <div style={{display:"flex", gap:"10px", marginBottom:"16px"}}>
+            <BorisCard className="b-panel b-card-eq boris-g1-card">
+              <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-3ab1bb33aea8 boris-g1-icon">📊</span>Анализ спроса (Яндекс.Вордстат)</h3>
+              <details className="boris-f2-489e16440bc3"><summary className="boris-f2-c0e3ed53fc0c">Зачем это нужно</summary><p className="boris-f2-183644454912">Узнайте реальный объём поисковых запросов по вашей нише, похожие запросы и долю коммерческих (с намерением купить) среди них — это помогает понять, стоит ли расширять направление.</p></details>
+              <div className="boris-f2-8d05cacc41d6">
                 <input value={wordstatQuery} onChange={e => setWordstatQuery(e.target.value)} placeholder="например: шкаф купе на заказ"
-                  className="b-input" style={{flex:1}} onKeyDown={e => { if (e.key === "Enter") analyzeWordstat(); }} />
-                <button className="b-btn b-btn-primary" onClick={analyzeWordstat} disabled={wordstatLoading} style={{whiteSpace:"nowrap"}}>
+                  className="b-input boris-f2-7623f0554520" onKeyDown={e => { if (e.key === "Enter") analyzeWordstat(); }} />
+                <Button className="b-btn b-btn-primary boris-f2-a9efa5449f9f" onClick={analyzeWordstat} disabled={wordstatLoading}>
                   {wordstatLoading ? "⏳ Анализирую..." : "🔍 Проверить спрос"}
-                </button>
+                </Button>
               </div>
 
               {wordstatResult && wordstatResult.status === "error" && (
-                <div style={{background:"#FDEDEC", border:"1px solid #F04438", borderRadius:"8px", padding:"14px", color:"#F04438", fontSize:"15px"}}>
+                <div className="boris-f2-8ef9224398cc">
                   {wordstatResult.message}
                 </div>
               )}
 
               {wordstatResult && wordstatResult.status === "ok" && (
-                <div style={{background:"#F6F7FB", border:"1px solid #EEF2FA", borderRadius:"8px", padding:"18px"}}>
-                  <div style={{display:"flex", gap:"24px", marginBottom:"16px"}}>
+                <div className="boris-f2-67d96171210f">
+                  <div className="boris-f2-fcca2d984753">
                     <div>
-                      <div style={{color:"#667085", fontSize:"15px"}}>Всего запросов в месяц</div>
-                      <div style={{color:"#2F6FED", fontSize:"23px", fontWeight:"bold"}}>{wordstatResult.total_count?.toLocaleString("ru-RU")}</div>
+                      <div className="boris-f2-96046ead62a3">Всего запросов в месяц</div>
+                      <div className="boris-f2-177eacbfc07c">{wordstatResult.total_count?.toLocaleString("ru-RU")}</div>
                     </div>
                     <div>
-                      <div style={{color:"#667085", fontSize:"15px"}}>Доля коммерческих запросов</div>
-                      <div style={{color:"#F79009", fontSize:"23px", fontWeight:"bold"}}>{wordstatResult.commercial_share_percent}%</div>
+                      <div className="boris-f2-96046ead62a3">Доля коммерческих запросов</div>
+                      <div className="boris-f2-5fd5675c3ec9">{wordstatResult.commercial_share_percent}%</div>
                     </div>
                   </div>
 
-                  <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"20px"}}>
+                  <div className="boris-f2-0a1d28e275a3">
                     <div>
                       <div className="b-label">Топ запросов</div>
-                      <div style={{display:"flex", flexDirection:"column", gap:"4px", maxHeight:"280px", overflowY:"auto"}}>
+                      <div className="boris-f2-09fa8778ccc8">
                         {wordstatResult.top_requests?.map((r: any, i: number) => (
-                          <div key={i} style={{display:"flex", justifyContent:"space-between", fontSize:"15px", color:"#667085", borderBottom:"1px solid #FFFFFF", paddingBottom:"4px"}}>
-                            <span>{r.phrase}</span><span style={{color:"#8A93A6"}}>{r.count?.toLocaleString("ru-RU")}</span>
+                          <div key={i} className="boris-f2-286f6e1b1c3e">
+                            <span>{r.phrase}</span><span className="boris-f2-6607ac287d11">{r.count?.toLocaleString("ru-RU")}</span>
                           </div>
                         ))}
                       </div>
                     </div>
                     <div>
                       <div className="b-label">Похожие запросы</div>
-                      <div style={{display:"flex", flexDirection:"column", gap:"4px", maxHeight:"280px", overflowY:"auto"}}>
+                      <div className="boris-f2-09fa8778ccc8">
                         {wordstatResult.associations?.map((r: any, i: number) => (
-                          <div key={i} style={{display:"flex", justifyContent:"space-between", fontSize:"15px", color:"#667085", borderBottom:"1px solid #FFFFFF", paddingBottom:"4px"}}>
-                            <span>{r.phrase}</span><span style={{color:"#8A93A6"}}>{r.count?.toLocaleString("ru-RU")}</span>
+                          <div key={i} className="boris-f2-286f6e1b1c3e">
+                            <span>{r.phrase}</span><span className="boris-f2-6607ac287d11">{r.count?.toLocaleString("ru-RU")}</span>
                           </div>
                         ))}
                       </div>
@@ -7761,93 +8032,93 @@ export default function Home() {
                   </div>
                 </div>
               )}
-            </div>
+            </BorisCard>
             </div>
 
             {wordstatHistory.length > 0 && (
-              <div className="b-panel">
+              <BorisCard className="b-panel boris-g1-card">
                 <h4 className="b-title">📚 История проверок</h4>
-                <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+                <div className="boris-f2-f67b86e0fb4c">
                   {wordstatHistory.map((h: any, i: number) => (
-                    <div key={i} style={{display:"flex", justifyContent:"space-between", background:"#FFFFFF", borderRadius:"6px", padding:"10px 14px", fontSize:"15px", cursor:"pointer"}}
-                      onClick={() => { setWordstatQuery(h.query); setWordstatResult(h); }}>
-                      <span style={{color:"#344054"}}>{h.query}</span>
-                      <span style={{color:"#8A93A6"}}>{h.total_count?.toLocaleString("ru-RU")} запросов/мес · {h.commercial_share_percent}% коммерческих</span>
+                    <div key={i}
+                      onClick={() => { setWordstatQuery(h.query); setWordstatResult(h); }} className="boris-f2-4d72df668da6">
+                      <span className="boris-f2-de52905d633b">{h.query}</span>
+                      <span className="boris-f2-6607ac287d11">{h.total_count?.toLocaleString("ru-RU")} запросов/мес · {h.commercial_share_percent}% коммерческих</span>
                     </div>
                   ))}
                 </div>
-              </div>
+              </BorisCard>
             )}
           </div>
         )}
 
         {activeTab === "sales" && (
-          <div style={{display:"flex", flexDirection:"column", gap:"20px"}}>
+          <div className="boris-f2-2e40e87e54ae">
             {salesView === "home" && (
               <>
-              <div style={{fontSize:"14px", color:"#475467", marginBottom:"4px", lineHeight:1.6, background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"14px 18px"}}>
+              <div className="boris-f2-7527de288d06">
                 Два разных помощника для продаж. <b>Менеджер</b> общается с вашими покупателями в чатах Avito вместо вас. <b>Руководитель отдела продаж</b> контролирует работу ваших менеджеров: разбирает звонки и переписки, находит ошибки, даёт отчёты. Выберите, что открыть:
               </div>
-              <div data-block="sales-home-cards" style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:"20px"}}>
-                <div onClick={()=>{ setSalesView("mop"); loadAllLimits(); }} className="boris-btn-hover" style={{cursor:"pointer", borderRadius:"18px", padding:"28px", background:"linear-gradient(135deg,#ECFDF3,#F6FEF9)", border:"1px solid #A6F4C5"}}>
-                  <div style={{fontSize:"38px", marginBottom:"10px"}}>🤝</div>
-                  <div style={{fontSize:"20px", fontWeight:800, color:"#054F31"}}>ИИ Менеджер по продажам</div>
-                  <div style={{fontSize:"15px", color:"#475467", marginTop:"8px", lineHeight:1.5}}>Отвечает покупателям в чатах Avito за секунды — 24/7, ночью и в выходные, не упуская горячего клиента.</div>
-                  <div style={{marginTop:"14px", display:"flex", flexDirection:"column", gap:"8px"}}>
-                    <div style={{fontSize:"15px", color:"#054F31", display:"flex", gap:"8px"}}><span>⚡</span><span>Отвечает за секунды, 24/7 — ночью и в выходные</span></div>
-                    <div style={{fontSize:"15px", color:"#054F31", display:"flex", gap:"8px"}}><span>🎯</span><span>Ведёт диалог к цели: берёт телефон, договаривается о шаге</span></div>
-                    <div style={{fontSize:"15px", color:"#054F31", display:"flex", gap:"8px"}}><span>💰</span><span>Горячие лиды сразу вам в Telegram</span></div>
-                    <div style={{fontSize:"15px", color:"#054F31", display:"flex", gap:"8px"}}><span>📊</span><span>Воронка: кто в процессе, думает, оставил телефон, отвалился</span></div>
+              <div data-block="sales-home-cards" className="boris-f2-ab0a16882a04">
+                <div onClick={()=>{ setSalesView("mop"); loadAllLimits(); }} className="boris-btn-hover boris-f2-46a4337cd852">
+                  <div className="boris-f2-79ba27f21f87">🤝</div>
+                  <div className="boris-f2-93385049749c">ИИ Менеджер по продажам</div>
+                  <div className="boris-f2-a075d34d6126">Отвечает покупателям в чатах Avito за секунды — 24/7, ночью и в выходные, не упуская горячего клиента.</div>
+                  <div className="boris-f2-4e5963f33aba">
+                    <div className="boris-f2-b7bb20e44bbf"><span>⚡</span><span>Отвечает за секунды, 24/7 — ночью и в выходные</span></div>
+                    <div className="boris-f2-b7bb20e44bbf"><span>🎯</span><span>Ведёт диалог к цели: берёт телефон, договаривается о шаге</span></div>
+                    <div className="boris-f2-b7bb20e44bbf"><span>💰</span><span>Горячие лиды сразу вам в Telegram</span></div>
+                    <div className="boris-f2-b7bb20e44bbf"><span>📊</span><span>Воронка: кто в процессе, думает, оставил телефон, отвалился</span></div>
                   </div>
-                  <div style={{marginTop:"16px", display:"inline-block", fontSize:"14px", fontWeight:700, color:"#039855"}}>Открыть менеджера →</div>
+                  <div className="boris-f2-58df9b55ef83">Открыть менеджера →</div>
                 </div>
-                <div onClick={()=>{ setSalesView("rop"); loadRopCalls(); loadSavedReports(); loadRopLimits(); loadRopSetup(); loadAllLimits(); }} className="boris-btn-hover" style={{cursor:"pointer", borderRadius:"18px", padding:"28px", background:"linear-gradient(135deg,#F4F3FF,#FCFAFF)", border:"1px solid #D9D6FE"}}>
-                  <div style={{fontSize:"38px", marginBottom:"10px"}}>🧠</div>
-                  <div style={{fontSize:"20px", fontWeight:800, color:"#3E1C96"}}>ИИ Руководитель отдела продаж</div>
-                  <div style={{fontSize:"15px", color:"#475467", marginTop:"8px", lineHeight:1.5}}>Разбирает переписки менеджеров: находит где сливаются лиды, какие возражения не отрабатываются, и что улучшить в скрипте. Готовит рекомендации и может сам переписать скрипт.</div>
-                  <div style={{marginTop:"14px", display:"flex", flexDirection:"column", gap:"8px"}}>
-                    <div style={{fontSize:"15px", color:"#3E1C96", display:"flex", gap:"8px"}}><span>📞</span><span>Слушает и разбирает каждый звонок по чек-листу</span></div>
-                    <div style={{fontSize:"15px", color:"#3E1C96", display:"flex", gap:"8px"}}><span>🎯</span><span>Находит, где менеджер теряет клиента</span></div>
-                    <div style={{fontSize:"15px", color:"#3E1C96", display:"flex", gap:"8px"}}><span>⭐</span><span>Показывает сильные моменты, паразитов и точки роста</span></div>
-                    <div style={{fontSize:"15px", color:"#3E1C96", display:"flex", gap:"8px"}}><span>📄</span><span>Отчёты по звонкам и перепискам с рекомендациями</span></div>
+                <div onClick={()=>{ setSalesView("rop"); loadRopCalls(); loadSavedReports(); loadRopLimits(); loadRopSetup(); loadAllLimits(); }} className="boris-btn-hover boris-f2-962465de97ab">
+                  <div className="boris-f2-79ba27f21f87">🧠</div>
+                  <div className="boris-f2-15295984ffd0">ИИ Руководитель отдела продаж</div>
+                  <div className="boris-f2-a075d34d6126">Разбирает переписки менеджеров: находит где сливаются лиды, какие возражения не отрабатываются, и что улучшить в скрипте. Готовит рекомендации и может сам переписать скрипт.</div>
+                  <div className="boris-f2-4e5963f33aba">
+                    <div className="boris-f2-d37162fdccae"><span>📞</span><span>Слушает и разбирает каждый звонок по чек-листу</span></div>
+                    <div className="boris-f2-d37162fdccae"><span>🎯</span><span>Находит, где менеджер теряет клиента</span></div>
+                    <div className="boris-f2-d37162fdccae"><span>⭐</span><span>Показывает сильные моменты, паразитов и точки роста</span></div>
+                    <div className="boris-f2-d37162fdccae"><span>📄</span><span>Отчёты по звонкам и перепискам с рекомендациями</span></div>
                   </div>
-                  <div style={{marginTop:"16px", display:"inline-block", fontSize:"14px", fontWeight:700, color:"#6941C6"}}>Открыть РОПа →</div>
+                  <div className="boris-f2-49264b5961cf">Открыть РОПа →</div>
                 </div>
               </div>
               </>
             )}
             {salesView !== "home" && (
-              <button onClick={()=>setSalesView("home")} style={{alignSelf:"flex-start", fontSize:"14px", fontWeight:600, color:"#475467", background:"#F2F4F7", border:"none", borderRadius:"8px", padding:"8px 16px", cursor:"pointer"}}>← Назад к выбору</button>
+              <Button onClick={()=>setSalesView("home")} className="boris-f2-bdfe76b7dd41">← Назад к выбору</Button>
             )}
 {salesView === "rop" && ropLimits && !ropLimits.minutes?.unlimited && (ropLimits.period?.active !== true || ropShowPacks) && (
-  <div data-block="rop-packages" style={{margin:"0 0 16px"}}>
-    <div style={{fontSize:"18px", fontWeight:800, color:"#1D2939", marginBottom:"6px"}}>ИИ Руководитель отдела продаж</div>
-    <div style={{fontSize:"14px", color:"#667085", marginBottom:"18px"}}>{ropShowPacks ? "Докупка объёма до конца текущего периода" : "Чтобы начать, подключите базовый пакет на 30 дней. Дополнительные пакеты можно докупить после."}</div>
+  <div data-block="rop-packages" className="boris-f2-489e16440bc3">
+    <div className="boris-f2-47f0643dc590">ИИ Руководитель отдела продаж</div>
+    <div className="boris-f2-9a1cb46559dd">{ropShowPacks ? "Докупка объёма до конца текущего периода" : "Чтобы начать, подключите базовый пакет на 30 дней. Дополнительные пакеты можно докупить после."}</div>
     {ropShowPacks && (
-      <button onClick={()=>setRopShowPacks(false)} style={{marginBottom:"14px", fontSize:"14px", fontWeight:600, color:"#475467", background:"#F2F4F7", border:"none", borderRadius:"8px", padding:"8px 16px", cursor:"pointer"}}>← Назад</button>
+      <Button onClick={()=>setRopShowPacks(false)} className="boris-f2-86c710b7cd8e">← Назад</Button>
     )}
     {!ropShowPacks && (
-      <div className="boris-card-hover" style={{background:"linear-gradient(135deg,#F4F3FF,#FFFFFF)", border:"2px solid #7C5CFC", borderRadius:"18px", padding:"26px", position:"relative", overflow:"hidden", marginBottom:"20px", maxWidth:"640px"}}>
-        <div style={{position:"absolute", top:"-40px", right:"-40px", width:"120px", height:"120px", borderRadius:"50%", background:"linear-gradient(135deg,#9B87F5,#7C5CFC)", opacity:0.1}} />
-        <div style={{display:"flex", alignItems:"center", gap:"12px", marginBottom:"12px"}}>
-          <div style={{width:"56px", height:"56px", borderRadius:"50%", background:"linear-gradient(135deg,#9B87F5,#7C5CFC)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"26px"}}>🧠</div>
+      <BorisCard className="boris-card-hover boris-f2-bafdf65185a0 boris-g1-card">
+        <div  className="boris-f2-b8e8eb6b48c3"/>
+        <div className="boris-f2-5848c290c0a7">
+          <div className="boris-f2-5430fc7dc36a">🧠</div>
           <div>
-            <div style={{fontSize:"17px", fontWeight:800, color:"#1D2939"}}>Базовый пакет</div>
-            <div style={{fontSize:"13px", color:"#7C5CFC", fontWeight:700}}>на 30 дней</div>
+            <div className="boris-f2-a727c1f6bd68">Базовый пакет</div>
+            <div className="boris-f2-5a313cf1694a">на 30 дней</div>
           </div>
         </div>
-        <div style={{fontSize:"30px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"14px"}}>20 000 ₽</div>
-        <div style={{fontSize:"14px", color:"#475467", lineHeight:1.7, marginBottom:"20px"}}>
+        <div className="boris-f2-e736ec0cf924">20 000 ₽</div>
+        <div className="boris-f2-975023d72653">
           <div>🎧 1 500 минут разбора звонков</div>
           <div>💬 450 разборов переписок</div>
           <div>📄 30 отчётов по звонкам + 30 по перепискам</div>
         </div>
         <TermsGate product="rop" pack="rop1500" accountId={currentAccount}><RobokassaButton invoiceId="" pack="rop1500" accountId={currentAccount} /></TermsGate>
-        <button onClick={()=>openInvoice("rop1500")} style={{marginTop:"10px", width:"100%", background:"#fff", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"11px", fontSize:"14px", fontWeight:700, cursor:"pointer"}}>🧾 Оплатить по счёту (для юрлиц)</button>
-      </div>
+        <Button onClick={()=>openInvoice("rop1500")} className="boris-f2-3b07cbf41f32">🧾 Оплатить по счёту (для юрлиц)</Button>
+      </BorisCard>
     )}
     {ropShowPacks && (
-      <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(240px, 1fr))", gap:"14px", alignItems:"stretch"}}>
+      <div className="boris-f2-b74385e7a52e">
         {[
           {pack:"rop_a300",  t:"+300 минут",   p:"5 000 ₽",  d:"300 мин · 90 переписок · 5 + 5 отчётов"},
           {pack:"rop_a500",  t:"+500 минут",   p:"7 500 ₽",  d:"500 мин · 150 переписок · 10 + 10 отчётов"},
@@ -7856,55 +8127,55 @@ export default function Home() {
           {pack:"rop_a1500", t:"+1 500 минут", p:"21 000 ₽", d:"1500 мин · 400 переписок · 30 + 30 отчётов"},
           {pack:"rop_a2000", t:"+2 000 минут", p:"26 000 ₽", d:"2000 мин · 550 переписок · 40 + 40 отчётов"},
         ].map((it:any)=>(
-          <div key={it.pack} className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative", overflow:"hidden"}}>
-            <div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#9B87F5,#7C5CFC)", opacity:0.08}} />
-            <div className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#9B87F5,#7C5CFC)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px", marginBottom:"10px"}}>🧠</div>
-            <div style={{fontSize:"15px", fontWeight:700, color:"#1D2939", marginBottom:"4px"}}>{it.t}</div>
-            <div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"4px"}}>{it.p}</div>
-            <div style={{fontSize:"12px", color:"#98A2B3", marginBottom:"14px", minHeight:"48px"}}>{it.d}</div>
-            <div style={{marginTop:"auto", width:"100%"}}><TermsGate product="rop" pack={it.pack} accountId={currentAccount}><RobokassaButton invoiceId="" pack={it.pack} accountId={currentAccount} /></TermsGate></div>
-          </div>
+          <BorisCard key={it.pack} className="boris-card-hover boris-f2-f6bac6124541 boris-g1-card">
+            <div  className="boris-f2-f2082c9afe40"/>
+            <div className="b-ref-ic boris-f2-394906a129bd">🧠</div>
+            <div className="boris-f2-242b783ffd40">{it.t}</div>
+            <div className="boris-f2-c852af6b2ccb">{it.p}</div>
+            <div className="boris-f2-22897d0f6dd7">{it.d}</div>
+            <div className="boris-f2-ff71126d36e1"><TermsGate product="rop" pack={it.pack} accountId={currentAccount}><RobokassaButton invoiceId="" pack={it.pack} accountId={currentAccount} /></TermsGate></div>
+          </BorisCard>
         ))}
       </div>
     )}
   </div>
 )}
 {salesView === "rop" && (ropLimits?.minutes?.unlimited || ropLimits?.period?.active === true) && !ropShowPacks && (
-  <div data-block="rop-calls-block" style={{margin:"0 0 16px", padding:"14px", border:"1px solid #E9D7FE", borderRadius:"12px", background:"#fff"}}>
-    <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", justifyContent:"space-between", gap:"10px", marginBottom:"12px"}}>
-      <div style={{fontSize:"15px", fontWeight:700, color:"#3E1C96"}}>📞 Разбор звонков</div>
+  <div data-block="rop-calls-block" className="boris-f2-c3a12e6531d8">
+    <div className="boris-f2-6102b8ff572f">
+      <div className="boris-f2-4ef3b23597f6">📞 Разбор звонков</div>
       {ropLimits && !ropLimits.minutes?.unlimited && (
-        <div data-el="rop-limits" style={{width:"100%", display:"flex", flexWrap:"wrap", gap:"8px", marginTop:"8px"}}>
+        <div data-el="rop-limits" className="boris-f2-d8f2a93513e0">
           <div style={{flex:1, minWidth:"150px", background: ropLimits.minutes.left>0 ? "#F4F3FF" : "#FEF3F2", border:"1px solid "+(ropLimits.minutes.left>0?"#D9D6FE":"#FDA29B"), borderRadius:"10px", padding:"10px 12px"}}>
-            <div style={{fontSize:"13px", color:"#667085"}}>Минуты разбора</div>
-            <div style={{fontSize:"18px", fontWeight:800, color: ropLimits.minutes.left>0?"#3E1C96":"#B42318"}}>{ropLimits.minutes.left} <span style={{fontSize:"13px", fontWeight:600, color:"#667085"}}>из {ropLimits.minutes.purchased}</span></div>
+            <div className="boris-f2-6c2427e9980a">Минуты разбора</div>
+            <div style={{fontSize:"18px", fontWeight:800, color: ropLimits.minutes.left>0?"#3E1C96":"#B42318"}}>{ropLimits.minutes.left} <span className="boris-f2-41f3fc20e030">из {ropLimits.minutes.purchased}</span></div>
           </div>
           <div style={{flex:1, minWidth:"150px", background: ropLimits.reports_calls.left>0 ? "#F4F3FF" : "#FEF3F2", border:"1px solid "+(ropLimits.reports_calls.left>0?"#D9D6FE":"#FDA29B"), borderRadius:"10px", padding:"10px 12px"}}>
-            <div style={{fontSize:"13px", color:"#667085"}}>Отчёты по звонкам</div>
-            <div style={{fontSize:"18px", fontWeight:800, color: ropLimits.reports_calls.left>0?"#3E1C96":"#B42318"}}>{ropLimits.reports_calls.left} <span style={{fontSize:"13px", fontWeight:600, color:"#667085"}}>из {ropLimits.reports_calls.purchased}</span></div>
+            <div className="boris-f2-6c2427e9980a">Отчёты по звонкам</div>
+            <div style={{fontSize:"18px", fontWeight:800, color: ropLimits.reports_calls.left>0?"#3E1C96":"#B42318"}}>{ropLimits.reports_calls.left} <span className="boris-f2-41f3fc20e030">из {ropLimits.reports_calls.purchased}</span></div>
           </div>
           <div style={{flex:1, minWidth:"150px", background: ropLimits.reports_chats.left>0 ? "#F4F3FF" : "#FEF3F2", border:"1px solid "+(ropLimits.reports_chats.left>0?"#D9D6FE":"#FDA29B"), borderRadius:"10px", padding:"10px 12px"}}>
-            <div style={{fontSize:"13px", color:"#667085"}}>Отчёты по перепискам</div>
-            <div style={{fontSize:"18px", fontWeight:800, color: ropLimits.reports_chats.left>0?"#3E1C96":"#B42318"}}>{ropLimits.reports_chats.left} <span style={{fontSize:"13px", fontWeight:600, color:"#667085"}}>из {ropLimits.reports_chats.purchased}</span></div>
+            <div className="boris-f2-6c2427e9980a">Отчёты по перепискам</div>
+            <div style={{fontSize:"18px", fontWeight:800, color: ropLimits.reports_chats.left>0?"#3E1C96":"#B42318"}}>{ropLimits.reports_chats.left} <span className="boris-f2-41f3fc20e030">из {ropLimits.reports_chats.purchased}</span></div>
           </div>
           {(ropLimits.minutes.left<=0 || ropLimits.reports_calls.left<=0) && (
-            <button onClick={()=>setRopShowPacks(true)} style={{alignSelf:"center", fontSize:"13px", fontWeight:700, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"10px", padding:"11px 18px", cursor:"pointer", whiteSpace:"nowrap"}}>Докупить объём →</button>
+            <Button onClick={()=>setRopShowPacks(true)} className="boris-f2-12937d38928e">Докупить объём →</Button>
           )}
         </div>
       )}
       {ropSetup && !(ropSetup.ready && ropSetup.chats > 0) && (
-        <div data-el="rop-setup" style={{width:"100%", background:"#FCFAFF", border:"1px solid #E9D7FE", borderRadius:"12px", padding:"14px 16px", marginTop:"8px"}}>
-          <div style={{fontSize:"15px", fontWeight:700, color:"#3E1C96", marginBottom:"8px"}}>🧠 Чтобы я заработал в полную силу</div>
-          <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+        <div data-el="rop-setup" className="boris-f2-5bd4eb3696d2">
+          <div className="boris-f2-6b2b845beaa7">🧠 Чтобы я заработал в полную силу</div>
+          <div className="boris-f2-f67b86e0fb4c">
             {ropSetup.steps.map((st:any)=>(
-              <div key={st.key} style={{display:"flex", gap:"9px", alignItems:"flex-start"}}>
-                <span style={{fontSize:"15px", lineHeight:1.4}}>{st.ok ? "✅" : "⬜️"}</span>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:"15px", fontWeight:600, color: st.ok ? "#027A48" : "#1D2939"}}>{st.title}</div>
-                  {!st.ok && <div style={{fontSize:"14px", color:"#667085", marginTop:"2px", lineHeight:1.5}}>{st.hint}</div>}
+              <div key={st.key} className="boris-f2-2a3060bc7f5a">
+                <span className="boris-f2-61521f1d2b56">{st.ok ? "✅" : "⬜️"}</span>
+                <div className="boris-f2-7623f0554520">
+                  <div style={{fontSize:"15px", fontWeight:600, color: st.ok ? "#027A48" : "var(--boris-text)"}}>{st.title}</div>
+                  {!st.ok && <div className="boris-f2-dfb36b35816e">{st.hint}</div>}
                 </div>
                 {!st.ok && st.key === "chats" && (
-                  <button onClick={syncChats} disabled={syncing} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor: syncing?"default":"pointer", opacity: syncing?0.6:1, whiteSpace:"nowrap"}}>{syncing ? "Тяну…" : "Подтянуть переписки"}</button>
+                  <Button onClick={syncChats} disabled={syncing} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor: syncing?"default":"pointer", opacity: syncing?0.6:1, whiteSpace:"nowrap"}}>{syncing ? "Тяну…" : "Подтянуть переписки"}</Button>
                 )}
               </div>
             ))}
@@ -7912,72 +8183,72 @@ export default function Home() {
         </div>
       )}
       {allLimits && (
-        <div data-el="rop-limits-cards" style={{width:"100%", display:"flex", flexWrap:"wrap", gap:"10px", marginTop:"10px"}}>
+        <div data-el="rop-limits-cards" className="boris-f2-59d100aa537b">
           {limitCard("Минуты разбора", allLimits.rop.minutes.left, allLimits.rop.minutes.purchased, "мин", "linear-gradient(135deg,#9B87F5,#7C5CFC)")}
-          {limitCard("Отчёты по звонкам", allLimits.rop.reports_calls.left, allLimits.rop.reports_calls.purchased, "шт", "linear-gradient(135deg,#4C8DFF,#2F6FED)")}
+          {limitCard("Отчёты по звонкам", allLimits.rop.reports_calls.left, allLimits.rop.reports_calls.purchased, "шт", "linear-gradient(135deg,var(--boris-blue),var(--boris-blue))")}
           {limitCard("Отчёты по перепискам", allLimits.rop.reports_chats.left, allLimits.rop.reports_chats.purchased, "шт", "linear-gradient(135deg,#32D583,#12805C)")}
         </div>
       )}
-      <details data-el="rop-hint" style={{width:"100%", marginTop:"6px"}}>
-        <summary style={{cursor:"pointer", fontSize:"13px", fontWeight:600, color:"#6941C6", listStyle:"none"}}>❓ Как работает разбор звонков</summary>
-        <div style={{marginTop:"8px", fontSize:"13px", color:"#475467", lineHeight:1.6, background:"#FCFAFF", border:"1px solid #E9D7FE", borderRadius:"10px", padding:"12px 14px"}}>
-          <div style={{marginBottom:"6px"}}><b style={{color:"#3E1C96"}}>1.</b> Борис забирает звонки из колтрекинга Avito — кто звонил, когда, сколько говорили, ответили или пропустили.</div>
-          <div style={{marginBottom:"6px"}}><b style={{color:"#3E1C96"}}>2.</b> Запись разговора расшифровывается в текст.</div>
-          <div style={{marginBottom:"6px"}}><b style={{color:"#3E1C96"}}>3.</b> Разговор проверяется по чек-листу продаж: представился, выявил потребность, назвал цену, отработал возражения, закрыл на следующий шаг.</div>
-          <div style={{marginBottom:"6px"}}><b style={{color:"#3E1C96"}}>4.</b> Борис отмечает сильные моменты, слова-паразиты (и чем их заменить), точки роста и советы по речи.</div>
-          <div><b style={{color:"#3E1C96"}}>5.</b> По кнопке «Скачать отчёт» — PDF за выбранный период: воронка, разбивка по менеджерам и разбор каждого звонка.</div>
+      <details data-el="rop-hint" className="boris-f2-9743c10ce2c2">
+        <summary className="boris-f2-efa0dc9af2a2">❓ Как работает разбор звонков</summary>
+        <div className="boris-f2-6a98c446690e">
+          <div className="boris-f2-6c002e218094"><b className="boris-f2-a5bb441a3ee8">1.</b> Борис забирает звонки из колтрекинга Avito — кто звонил, когда, сколько говорили, ответили или пропустили.</div>
+          <div className="boris-f2-6c002e218094"><b className="boris-f2-a5bb441a3ee8">2.</b> Запись разговора расшифровывается в текст.</div>
+          <div className="boris-f2-6c002e218094"><b className="boris-f2-a5bb441a3ee8">3.</b> Разговор проверяется по чек-листу продаж: представился, выявил потребность, назвал цену, отработал возражения, закрыл на следующий шаг.</div>
+          <div className="boris-f2-6c002e218094"><b className="boris-f2-a5bb441a3ee8">4.</b> Борис отмечает сильные моменты, слова-паразиты (и чем их заменить), точки роста и советы по речи.</div>
+          <div><b className="boris-f2-a5bb441a3ee8">5.</b> По кнопке «Скачать отчёт» — PDF за выбранный период: воронка, разбивка по менеджерам и разбор каждого звонка.</div>
         </div>
       </details>
-      <button onClick={loadRopCalls} disabled={ropCallsLoading} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor: ropCallsLoading?"default":"pointer", opacity: ropCallsLoading?0.6:1}}>{ropCallsLoading ? "Загрузка..." : "🔄 Загрузить звонки"}</button>
-      <div data-el="report-controls" style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"6px"}}>
-        <input type="date" value={reportFrom} onChange={e=>setReportFrom(e.target.value)} style={{padding:"6px 8px", borderRadius:"8px", border:"1px solid #EAECF0", fontSize:"12px"}} />
-        <span style={{fontSize:"12px", color:"#98A2B3"}}>—</span>
-        <input type="date" value={reportTo} onChange={e=>setReportTo(e.target.value)} style={{padding:"6px 8px", borderRadius:"8px", border:"1px solid #EAECF0", fontSize:"12px"}} />
-        <select data-el="report-depth" value={reportMaxCalls} onChange={e=>setReportMaxCalls(Number(e.target.value))} title="Сколько звонков разобрать в отчёте" style={{padding:"6px 8px", borderRadius:"8px", border:"1px solid #EAECF0", fontSize:"12px"}}>
+      <Button onClick={loadRopCalls} disabled={ropCallsLoading} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor: ropCallsLoading?"default":"pointer", opacity: ropCallsLoading?0.6:1}}>{ropCallsLoading ? "Загрузка..." : "🔄 Загрузить звонки"}</Button>
+      <div data-el="report-controls" className="boris-f2-eac581c2251a">
+        <input type="date" value={reportFrom} onChange={e=>setReportFrom(e.target.value)}  className="boris-f2-9ca25e521aed"/>
+        <span className="boris-f2-b68dda3a3439">—</span>
+        <input type="date" value={reportTo} onChange={e=>setReportTo(e.target.value)}  className="boris-f2-9ca25e521aed"/>
+        <select data-el="report-depth" value={reportMaxCalls} onChange={e=>setReportMaxCalls(Number(e.target.value))} title="Сколько звонков разобрать в отчёте" className="boris-f2-9ca25e521aed">
           <option value={5}>5 звонков</option>
           <option value={10}>10 звонков</option>
           <option value={15}>15 звонков</option>
           <option value={30}>30 звонков</option>
           <option value={50}>50 звонков</option>
         </select>
-        <button onClick={downloadRopReport} disabled={reportLoading} style={{fontSize:"13px", fontWeight:600, color:"#5925DC", background:"#F4F3FF", border:"1px solid #D9D6FE", borderRadius:"8px", padding:"8px 14px", cursor: reportLoading?"default":"pointer", opacity: reportLoading?0.6:1}}>{reportLoading ? "Готовлю PDF..." : "📄 Скачать отчёт"}</button>
-        <button onClick={downloadChatsReport} disabled={chatsRepLoading} style={{fontSize:"13px", fontWeight:600, color:"#027A48", background:"#ECFDF3", border:"1px solid #A6F4C5", borderRadius:"8px", padding:"8px 14px", cursor: chatsRepLoading?"default":"pointer", opacity: chatsRepLoading?0.6:1}}>{chatsRepLoading ? "Разбираю переписки..." : "💬 Отчёт по перепискам"}</button>
-        <button onClick={()=>trainManager(false)} disabled={trainLoading} style={{fontSize:"13px", fontWeight:600, color:"#B54708", background:"#FFFAEB", border:"1px solid #FEDF89", borderRadius:"8px", padding:"8px 14px", cursor: trainLoading?"default":"pointer", opacity: trainLoading?0.6:1}}>{trainLoading ? "Готовлю…" : "🎓 Обучить ИИ-менеджера"}</button>
+        <Button onClick={downloadRopReport} disabled={reportLoading} style={{fontSize:"13px", fontWeight:600, color:"#5925DC", background:"#F4F3FF", border:"1px solid #D9D6FE", borderRadius:"8px", padding:"8px 14px", cursor: reportLoading?"default":"pointer", opacity: reportLoading?0.6:1}}>{reportLoading ? "Готовлю PDF..." : "📄 Скачать отчёт"}</Button>
+        <Button onClick={downloadChatsReport} disabled={chatsRepLoading} style={{fontSize:"13px", fontWeight:600, color:"var(--b-ok)", background:"#ECFDF3", border:"1px solid #A6F4C5", borderRadius:"8px", padding:"8px 14px", cursor: chatsRepLoading?"default":"pointer", opacity: chatsRepLoading?0.6:1}}>{chatsRepLoading ? "Разбираю переписки..." : "💬 Отчёт по перепискам"}</Button>
+        <Button onClick={()=>trainManager(false)} disabled={trainLoading} style={{fontSize:"13px", fontWeight:600, color:"var(--b-warn)", background:"#FFFAEB", border:"1px solid #FEDF89", borderRadius:"8px", padding:"8px 14px", cursor: trainLoading?"default":"pointer", opacity: trainLoading?0.6:1}}>{trainLoading ? "Готовлю…" : "🎓 Обучить ИИ-менеджера"}</Button>
       </div>
     </div>
-    {ropCalls && ropCalls.status === "no_access" && (<div style={{fontSize:"13px", color:"#B54708", background:"#FFFAEB", borderRadius:"8px", padding:"10px 12px"}}>Нет доступа к колтрекингу Avito. Нужен тариф Расширенный/Максимальный с включённым Коллтрекингом и доступом ключа к CallTracking API.</div>)}
+    {ropCalls && ropCalls.status === "no_access" && (<div className="boris-f2-c638b2a16ecf">Нет доступа к колтрекингу Avito. Нужен тариф Расширенный/Максимальный с включённым Коллтрекингом и доступом ключа к CallTracking API.</div>)}
     {ropCalls && ropCalls.status === "ok" && (
       <div>
-        <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px, 1fr))", gap:"10px", marginBottom:"14px"}}>
-          <div style={{background:"#F4F3FF", borderRadius:"10px", padding:"12px"}}><div style={{fontSize:"22px", fontWeight:800, color:"#5925DC"}}>{ropCalls.total}</div><div style={{fontSize:"12px", color:"#667085"}}>Всего звонков</div></div>
-          <div style={{background:"#ECFDF3", borderRadius:"10px", padding:"12px"}}><div style={{fontSize:"22px", fontWeight:800, color:"#039855"}}>{ropCalls.answered} · {ropCalls.answered_pct}%</div><div style={{fontSize:"12px", color:"#667085"}}>Отвечено</div></div>
-          <div style={{background:"#FEF3F2", borderRadius:"10px", padding:"12px"}}><div style={{fontSize:"22px", fontWeight:800, color:"#B42318"}}>{ropCalls.missed} · {ropCalls.missed_pct}%</div><div style={{fontSize:"12px", color:"#667085"}}>Пропущено</div></div>
-          <div style={{background:"#F2F4F7", borderRadius:"10px", padding:"12px"}}><div style={{fontSize:"22px", fontWeight:800, color:"#344054"}}>{ropCalls.total_minutes} мин</div><div style={{fontSize:"12px", color:"#667085"}}>разговоров</div></div>
+        <div className="boris-f2-2f6112e44e32">
+          <div className="boris-f2-b5cc082dd7cc"><div className="boris-f2-e5d4f9e1489b">{ropCalls.total}</div><div className="boris-f2-98cb934029bf">Всего звонков</div></div>
+          <div className="boris-f2-6deca15a7a93"><div className="boris-f2-3c5fe7427c85">{ropCalls.answered} · {ropCalls.answered_pct}%</div><div className="boris-f2-98cb934029bf">Отвечено</div></div>
+          <div className="boris-f2-3471d411a032"><div className="boris-f2-22a06f2f6229">{ropCalls.missed} · {ropCalls.missed_pct}%</div><div className="boris-f2-98cb934029bf">Пропущено</div></div>
+          <div className="boris-f2-13de4aee74dd"><div className="boris-f2-9f6988c10810">{ropCalls.total_minutes} мин</div><div className="boris-f2-98cb934029bf">разговоров</div></div>
         </div>
-        <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+        <div className="boris-f2-f67b86e0fb4c">
           {(ropCalls.calls||[]).map((c:any)=>(
-            <div key={c.call_id} style={{border:"1px solid #EAECF0", borderRadius:"10px", padding:"10px 12px"}}>
-              <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", justifyContent:"space-between", gap:"8px"}}>
-                <div style={{fontSize:"13px", color:"#344054"}}><b>{c.buyer_phone||"номер скрыт"}</b> · {(c.call_time||"").slice(0,16).replace("T"," ")} · {c.talk_duration>0 ? Math.round(c.talk_duration/60*10)/10+" мин" : "не отвечен"}</div>
-                {c.talk_duration>0 && <button onClick={()=>analyzeRopCall(c.call_id)} style={{fontSize:"12px", fontWeight:600, color:"#5925DC", background:"#F4F3FF", border:"1px solid #D9D6FE", borderRadius:"8px", padding:"6px 12px", cursor:"pointer"}}>Разобрать звонок</button>}
+            <div key={c.call_id} className="boris-f2-9c984f919f7f">
+              <div className="boris-f2-632009407c6b">
+                <div className="boris-f2-6c2427e9980a"><b>{c.buyer_phone||"номер скрыт"}</b> · {(c.call_time||"").slice(0,16).replace("T"," ")} · {c.talk_duration>0 ? Math.round(c.talk_duration/60*10)/10+" мин" : "не отвечен"}</div>
+                {c.talk_duration>0 && <Button onClick={()=>analyzeRopCall(c.call_id)} className="boris-f2-9933ea8fad56">Разобрать звонок</Button>}
               </div>
               {ropDetailFor===c.call_id && ropDetail && (
-                <div style={{marginTop:"10px", paddingTop:"10px", borderTop:"1px solid #F2F4F7", fontSize:"13px", color:"#344054"}}>
-                  {ropDetail.loading && <div style={{color:"#98A2B3"}}>🎙 Расшифровываю и разбираю звонок...</div>}
-                  {ropDetail.status==="not_ready" && <div style={{color:"#B54708"}}>Запись ещё не готова (появляется до 30 мин после звонка).</div>}
-                  {ropDetail.status==="error" && <div style={{color:"#B42318"}}>Ошибка: {ropDetail.message||"не удалось разобрать"}</div>}
+                <div className="boris-f2-b7a456b47941">
+                  {ropDetail.loading && <div className="boris-f2-6607ac287d11">🎙 Расшифровываю и разбираю звонок...</div>}
+                  {ropDetail.status==="not_ready" && <div className="boris-f2-146025a3f736">Запись ещё не готова (появляется до 30 мин после звонка).</div>}
+                  {ropDetail.status==="error" && <div className="boris-f2-5659a18ecccb">Ошибка: {humanizeBusinessText(ropDetail.message,"не удалось разобрать звонок")}</div>}
                   {ropDetail.status==="ok" && ropDetail.analysis && (
                     <div>
-                      <div style={{marginBottom:"8px"}}><b>{ropDetail.analysis.client_name||"Собеседник"}</b> · <span style={{color:"#6941C6"}}>{ropDetail.analysis.role}</span> · балл <b>{ropDetail.analysis.score}/100</b></div>
-                      <div style={{display:"flex", flexDirection:"column", gap:"4px", marginBottom:"8px"}}>
+                      <div className="boris-f2-e4ad4a163b5e"><b>{ropDetail.analysis.client_name||"Собеседник"}</b> · <span className="boris-f2-4f6b82ef2f20">{humanizeBusinessText(ropDetail.analysis.role,"Собеседник")}</span> · балл <b>{ropDetail.analysis.score}/100</b></div>
+                      <div className="boris-f2-94d11c1b52fa">
                         {(ropDetail.analysis.checklist||[]).map((it:any,i:number)=>(<div key={i} style={{fontSize:"13px", color: it.done?"#027A48":"#B42318"}}>{it.done?"✅":"❌"} {it.item}</div>))}
                       </div>
-                      {ropDetail.analysis.failed_at && <div style={{marginBottom:"4px"}}><b style={{color:"#B42318"}}>Провал:</b> {ropDetail.analysis.failed_at}</div>}
-                      {ropDetail.analysis.recommendation && <div><b style={{color:"#027A48"}}>Совет:</b> {ropDetail.analysis.recommendation}</div>}
-                      {(ropDetail.analysis.filler_phrases||[]).length>0 && (<div style={{marginTop:"8px"}}><b style={{color:"#B54708"}}>🗣 Фразы-паразиты:</b><div style={{marginTop:"3px"}}>{ropDetail.analysis.filler_phrases.map((x:string,i:number)=><span key={i} style={{display:"inline-block", fontSize:"12px", background:"#FFFAEB", color:"#B54708", borderRadius:"6px", padding:"2px 8px", margin:"2px 4px 2px 0"}}>{x}</span>)}</div></div>)}
-                      {(ropDetail.analysis.strong_moments||[]).length>0 && (<div style={{marginTop:"8px"}}><b style={{color:"#027A48"}}>⭐ Крутые фишки:</b><ul style={{margin:"3px 0 0", paddingLeft:"18px"}}>{ropDetail.analysis.strong_moments.map((x:string,i:number)=><li key={i} style={{fontSize:"13px", color:"#027A48"}}>{x}</li>)}</ul></div>)}
-                      {(ropDetail.analysis.client_hooks||[]).length>0 && (<div style={{marginTop:"8px"}}><b style={{color:"#1570EF"}}>🎣 Зацепило клиента:</b><ul style={{margin:"3px 0 0", paddingLeft:"18px"}}>{ropDetail.analysis.client_hooks.map((x:string,i:number)=><li key={i} style={{fontSize:"13px", color:"#344054"}}>{x}</li>)}</ul></div>)}
-                      {(ropDetail.analysis.client_turnoffs||[]).length>0 && (<div style={{marginTop:"8px"}}><b style={{color:"#B42318"}}>🧊 Оттолкнуло:</b><ul style={{margin:"3px 0 0", paddingLeft:"18px"}}>{ropDetail.analysis.client_turnoffs.map((x:string,i:number)=><li key={i} style={{fontSize:"13px", color:"#344054"}}>{x}</li>)}</ul></div>)}
+                      {ropDetail.analysis.failed_at && <div className="boris-f2-d982937dda0f"><b className="boris-f2-5659a18ecccb">Провал:</b> {ropDetail.analysis.failed_at}</div>}
+                      {ropDetail.analysis.recommendation && <div><b className="boris-f2-f153efea0508">Совет:</b> {ropDetail.analysis.recommendation}</div>}
+                      {(ropDetail.analysis.filler_phrases||[]).length>0 && (<div className="boris-f2-b1ecc496e0c7"><b className="boris-f2-146025a3f736">🗣 Фразы-паразиты:</b><div className="boris-f2-b7ecdfaf5aa3">{ropDetail.analysis.filler_phrases.map((x:string,i:number)=><span key={i} className="boris-f2-45610cde3064">{x}</span>)}</div></div>)}
+                      {(ropDetail.analysis.strong_moments||[]).length>0 && (<div className="boris-f2-b1ecc496e0c7"><b className="boris-f2-f153efea0508">⭐ Крутые фишки:</b><ul className="boris-f2-7b9fed767c56">{ropDetail.analysis.strong_moments.map((x:string,i:number)=><li key={i} className="boris-f2-bc6da60315b4">{x}</li>)}</ul></div>)}
+                      {(ropDetail.analysis.client_hooks||[]).length>0 && (<div className="boris-f2-b1ecc496e0c7"><b className="boris-f2-f55ed7925da1">🎣 Зацепило клиента:</b><ul className="boris-f2-7b9fed767c56">{ropDetail.analysis.client_hooks.map((x:string,i:number)=><li key={i} className="boris-f2-6c2427e9980a">{x}</li>)}</ul></div>)}
+                      {(ropDetail.analysis.client_turnoffs||[]).length>0 && (<div className="boris-f2-b1ecc496e0c7"><b className="boris-f2-5659a18ecccb">🧊 Оттолкнуло:</b><ul className="boris-f2-7b9fed767c56">{ropDetail.analysis.client_turnoffs.map((x:string,i:number)=><li key={i} className="boris-f2-6c2427e9980a">{x}</li>)}</ul></div>)}
                     </div>
                   )}
                 </div>
@@ -7989,144 +8260,144 @@ export default function Home() {
     )}
   </div>
 )}
-            {salesView === "mop" && salesItems.length === 0 && (<div style={{background:"linear-gradient(135deg,#EAF3FF,#F6F7FB)", border:"1px solid #C7DDFF", borderRadius:"14px", padding:"18px 20px", marginBottom:"20px", display:"flex", alignItems:"center", gap:"16px", flexWrap:"wrap"}}><div style={{flex:1, minWidth:"200px"}}><div style={{fontWeight:800, fontSize:"17px", color:"#14161A"}}>С чего начать</div><div style={{color:"#667085", fontSize:"14px", marginTop:"3px"}}>Объявлений для менеджера нет. Сначала опубликуйте объявления на Avito.</div></div><button className="boris-btn-hover" onClick={() => setActiveTab("listings")} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"14px 26px", fontSize:"16px", fontWeight:700, cursor:"pointer", whiteSpace:"nowrap"}}>Перейти к объявлениям</button></div>)}
+            {salesView === "mop" && salesItems.length === 0 && (<div className="boris-f2-e0ebb78c5274"><div className="boris-f2-fa67ab694c2a"><div className="boris-f2-e59f0f96c3e5">С чего начать</div><div className="boris-f2-cb57d9bd0ff7">Объявлений для менеджера нет. Сначала опубликуйте объявления на Avito.</div></div><Button className="boris-btn-hover boris-f2-faac849ef21d" onClick={() => setActiveTab("listings")}>Перейти к объявлениям</Button></div>)}
             {salesView === "mop" && allLimits && (
-              <div data-el="mop-limits" style={{width:"100%", display:"flex", gap:"10px", marginBottom:"14px"}}>
+              <div data-el="mop-limits" className="boris-f2-aee817443320">
                 {limitCard("Сообщения менеджера", allLimits.mop.left, allLimits.mop.purchased, "шт", "linear-gradient(135deg,#FDB022,#F79009)")}
               </div>
             )}
-            <div className="b-panel b-card-eq" style={{width:"100%", display: (salesView === "mop" && (managerBalance?.unlimited || managerBalance?.active === true)) ? undefined : "none"}}>
-              <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #12B76A, #039855)"}}>🤝</span>Виртуальный менеджер по продажам</h3>
-              <div className="b-meta" style={{marginTop:"4px"}}>Борис сам отвечает покупателям в чатах Avito по вашему прайсу и скриптам — отмечайте галочками объявления, где он должен работать</div>
-              <details style={{margin:"0 0 16px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Как работает подтверждение ответов</summary><p style={{color:"#667085", fontSize:"15px", margin:"8px 0 0"}}>Отвечает клиентам в чатах Avito от лица вашей компании. Каждый ответ приходит вам на подтверждение (✅ отправить / ✏️ поправить / ❌ пропустить) — в Telegram и здесь.</p></details>
+            <BorisCard className="b-panel b-card-eq boris-g1-card" style={{width:"100%", display: (salesView === "mop" && (managerBalance?.unlimited || managerBalance?.active === true)) ? undefined : "none"}}>
+              <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-e179ca50e9d4 boris-g1-icon">🤝</span>Виртуальный менеджер по продажам</h3>
+              <div className="b-meta boris-f2-a3a5568692be">Борис сам отвечает покупателям в чатах Avito по вашему прайсу и скриптам — отмечайте галочками объявления, где он должен работать</div>
+              <details className="boris-f2-489e16440bc3"><summary className="boris-f2-c0e3ed53fc0c">Как работает подтверждение ответов</summary><p className="boris-f2-183644454912">Отвечает клиентам в чатах Avito от лица вашей компании. Каждый ответ приходит вам на подтверждение (✅ отправить / ✏️ поправить / ❌ пропустить) — в Telegram и здесь.</p></details>
               {salesUsage && (
-                <div style={{display:"inline-block", background:"#FFFFFF", borderRadius:"8px", padding:"8px 14px", fontSize:"15px", color:"#667085", marginTop:"4px"}}>
+                <div className="boris-f2-32bc92ff25d1">
                   📊 За месяц: {salesUsage.calls || 0} ответов · себестоимость ~{(salesUsage.cost_rub || 0).toFixed(2)}₽
                 </div>
               )}
-            </div>
+            </BorisCard>
 
-            <div className="b-panel b-card-eq" style={{width:"100%", display: (salesView === "mop") ? undefined : "none"}}>
-              <div style={{display:"flex", flexDirection:"column", alignItems:"stretch", marginBottom:"16px"}}>
-                <h3 className="b-title" style={{margin:"0 0 16px", display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #4C8DFF, #2F6FED)"}}>📋</span>Объявления для менеджера</h3>
+            <BorisCard className="b-panel b-card-eq boris-g1-card" style={{width:"100%", display: (salesView === "mop") ? undefined : "none"}}>
+              <div className="boris-f2-4b122a01f365">
+                <h3 className="b-title boris-f2-2223b51c2b1b"><span className="b-icon-sm boris-f2-3ab1bb33aea8 boris-g1-icon">📋</span>Объявления для менеджера</h3>
                 {(!managerBalance || (!managerBalance.unlimited && managerBalance.active !== true)) && (
-  <div data-block="mop-packages" style={{margin:"0 0 20px"}}>
-    <div style={{fontSize:"18px", fontWeight:800, color:"#1D2939", marginBottom:"6px"}}>ИИ Менеджер по продажам</div>
-    <div style={{fontSize:"14px", color:"#667085", marginBottom:"18px"}}>Подключите базовый пакет на 30 дней. Дополнительные сообщения можно докупить после.</div>
-    <div className="boris-card-hover" style={{background:"linear-gradient(135deg,#ECFDF3,#FFFFFF)", border:"2px solid #12B76A", borderRadius:"18px", padding:"26px", position:"relative", overflow:"hidden", marginBottom:"20px", maxWidth:"640px"}}>
-      <div style={{position:"absolute", top:"-40px", right:"-40px", width:"120px", height:"120px", borderRadius:"50%", background:"linear-gradient(135deg,#32D583,#12805C)", opacity:0.1}} />
-      <div style={{display:"flex", alignItems:"center", gap:"12px", marginBottom:"12px"}}>
-        <div style={{width:"56px", height:"56px", borderRadius:"50%", background:"linear-gradient(135deg,#32D583,#12805C)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"26px"}}>🤝</div>
+  <div data-block="mop-packages" className="boris-f2-83b63caf047e">
+    <div className="boris-f2-47f0643dc590">ИИ Менеджер по продажам</div>
+    <div className="boris-f2-9a1cb46559dd">Подключите базовый пакет на 30 дней. Дополнительные сообщения можно докупить после.</div>
+    <BorisCard className="boris-card-hover boris-f2-234a4891d533 boris-g1-card">
+      <div  className="boris-f2-0c0091162270"/>
+      <div className="boris-f2-5848c290c0a7">
+        <div className="boris-f2-1ec79ae16acf">🤝</div>
         <div>
-          <div style={{fontSize:"17px", fontWeight:800, color:"#1D2939"}}>Базовый пакет</div>
-          <div style={{fontSize:"13px", color:"#12805C", fontWeight:700}}>на 30 дней</div>
+          <div className="boris-f2-a727c1f6bd68">Базовый пакет</div>
+          <div className="boris-f2-1cb86fafe66b">на 30 дней</div>
         </div>
       </div>
-      <div style={{fontSize:"30px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"14px"}}>10 000 ₽</div>
-      <div style={{fontSize:"14px", color:"#475467", lineHeight:1.7, marginBottom:"20px"}}>💬 1 700 сообщений покупателям в чатах Avito</div>
+      <div className="boris-f2-e736ec0cf924">10 000 ₽</div>
+      <div className="boris-f2-975023d72653">💬 1 700 сообщений покупателям в чатах Avito</div>
       <TermsGate product="mop" pack="msg1700" accountId={currentAccount}><RobokassaButton invoiceId="" pack="msg1700" accountId={currentAccount} /></TermsGate>
-    </div>
+    </BorisCard>
     {(managerBalance?.active === true || managerBalance?.unlimited) && (<>
-    <div style={{fontSize:"14px", fontWeight:700, color:"#667085", marginBottom:"10px"}}>Дополнительные сообщения</div>
-    <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(240px, 1fr))", gap:"14px", alignItems:"stretch", maxWidth:"640px"}}>
+    <div className="boris-f2-47c9265beeb1">Дополнительные сообщения</div>
+    <div className="boris-f2-9f2141c314b2">
       {[
         {pack:"msg2000", t:"+2 000 сообщений", p:"8 000 ₽"},
         {pack:"msg3000", t:"+3 000 сообщений", p:"11 000 ₽"},
       ].map((it:any)=>(
-        <div key={it.pack} className="boris-card-hover" style={{background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative", overflow:"hidden"}}>
-          <div style={{position:"absolute", top:"-30px", right:"-30px", width:"90px", height:"90px", borderRadius:"50%", background:"linear-gradient(135deg,#32D583,#12805C)", opacity:0.08}} />
-          <div className="b-ref-ic" style={{width:"44px", height:"44px", borderRadius:"50%", background:"linear-gradient(135deg,#32D583,#12805C)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"20px", marginBottom:"10px"}}>💬</div>
-          <div style={{fontSize:"15px", fontWeight:700, color:"#1D2939", marginBottom:"4px"}}>{it.t}</div>
-          <div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", letterSpacing:"-0.02em", marginBottom:"14px"}}>{it.p}</div>
-          <div style={{marginTop:"auto", width:"100%"}}><TermsGate product="mop" pack={it.pack} accountId={currentAccount}><RobokassaButton invoiceId="" pack={it.pack} accountId={currentAccount} /></TermsGate></div>
-        </div>
+        <BorisCard key={it.pack} className="boris-card-hover boris-f2-f6bac6124541 boris-g1-card">
+          <div  className="boris-f2-63fae23744eb"/>
+          <div className="b-ref-ic boris-f2-59af67595616">💬</div>
+          <div className="boris-f2-242b783ffd40">{it.t}</div>
+          <div className="boris-f2-f49284a311a5">{it.p}</div>
+          <div className="boris-f2-ff71126d36e1"><TermsGate product="mop" pack={it.pack} accountId={currentAccount}><RobokassaButton invoiceId="" pack={it.pack} accountId={currentAccount} /></TermsGate></div>
+        </BorisCard>
       ))}
     </div>
     </>)}
   </div>
 )}
                 {managerBalance?.active === true && (
-  <div data-block="manager-balance-block" style={{margin:"0 0 16px", padding:"14px 16px", borderRadius:"12px", border:"1px solid #EAECF0", background: managerBalance.active ? "#F6FEF9" : "#FFFBFA"}}>
-    <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", justifyContent:"space-between", gap:"10px"}}>
+  <div data-block="manager-balance-block" style={{margin:"0 0 16px", padding:"14px 16px", borderRadius:"12px", border:"1px solid var(--boris-border)", background: managerBalance.active ? "#F6FEF9" : "#FFFBFA"}}>
+    <div className="boris-f2-bfcbb5f32b3e">
       <div>
-        <div style={{fontSize:"14px", fontWeight:600, color:"#101828"}}>
+        <div className="boris-f2-29be9e0cb513">
           {managerBalance.active ? "✅ Пакет менеджера активен" : "⛔ Пакет менеджера не оплачен"}
         </div>
-        <div style={{fontSize:"13px", color:"#475467", marginTop:"3px"}}>
+        <div className="boris-f2-f7a23c0d3f31">
           Куплено {managerBalance.purchased} · использовано {managerBalance.used} · осталось <b style={{color: managerBalance.left > 100 ? "#027A48" : "#B54708"}}>{managerBalance.left}</b> сообщений
         </div>
       </div>
-      <button onClick={() => setTariffsFinanceMode(true)} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"9px 16px", cursor:"pointer", whiteSpace:"nowrap"}}>
+      <Button onClick={() => setTariffsFinanceMode(true)} className="boris-f2-c84cb07c658e">
         Докупить сообщения →
-      </button>
+      </Button>
     </div>
     {managerBalance.purchased > 0 && (
-      <div style={{marginTop:"10px", height:"7px", background:"#EAECF0", borderRadius:"4px", overflow:"hidden"}}>
+      <div className="boris-f2-46cb4fb1c67c">
         <div style={{height:"100%", width: `${Math.max(0, Math.min(100, Math.round(managerBalance.left / managerBalance.purchased * 100)))}%`, background: managerBalance.left > 100 ? "#12B76A" : "#F79009"}} />
       </div>
     )}
   </div>
 )}
 {managerBalance?.active === true && (
-  <div data-block="reminders-settings-block" style={{margin:"0 0 16px", padding:"14px 16px", borderRadius:"12px", border:"1px solid #EAECF0", background:"#fff"}}>
-    <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", gap:"10px", flexWrap:"wrap"}}>
-      <div style={{fontSize:"14px", fontWeight:600, color:"#101828"}}>🔔 Напоминания по застрявшим лидам</div>
-      <label style={{display:"inline-flex", alignItems:"center", gap:"8px", cursor:"pointer", fontSize:"13px", color:"#475467"}}>
+  <div data-block="reminders-settings-block" className="boris-f2-65a566f4c4a4">
+    <div className="boris-f2-83ba15bdba44">
+      <div className="boris-f2-29be9e0cb513">🔔 Напоминания по застрявшим лидам</div>
+      <label className="boris-f2-bf5e42d69f4f">
         <input type="checkbox" checked={!!reminderSettings.enabled} onChange={e=>saveReminderSettings({...reminderSettings, enabled:e.target.checked})} />
         {reminderSettings.enabled ? "Вкл" : "Выкл"}
       </label>
     </div>
     {reminderSettings.enabled && (
-      <div style={{marginTop:"12px"}}>
-        <div style={{fontSize:"13px", color:"#667085", marginBottom:"8px"}}>Напоминать в Telegram по стадиям:</div>
-        <div style={{display:"flex", flexWrap:"wrap", gap:"8px"}}>
+      <div className="boris-f2-9374e8421025">
+        <div className="boris-f2-cbfc2d0836fc">Напоминать в Telegram по стадиям:</div>
+        <div className="boris-f2-eee7876950a8">
           {["ушёл подумать","оставил телефон","в процессе"].map(st => {
             const on = (reminderSettings.stages||[]).includes(st);
             return (
-              <button key={st} onClick={()=>toggleReminderStage(st)} style={{fontSize:"13px", padding:"7px 12px", borderRadius:"8px", cursor:"pointer", border: on?"1px solid #7F56D9":"1px solid #EAECF0", background: on?"#F4F3FF":"#fff", color: on?"#5925DC":"#475467", fontWeight: on?600:400}}>
+              <Button key={st} onClick={()=>toggleReminderStage(st)} style={{fontSize:"13px", padding:"7px 12px", borderRadius:"8px", cursor:"pointer", border: on?"1px solid #7F56D9":"1px solid var(--boris-border)", background: on?"#F4F3FF":"#fff", color: on?"#5925DC":"var(--boris-text-2)", fontWeight: on?600:400}}>
                 {on ? "✓ " : ""}{st}
-              </button>
+              </Button>
             );
           })}
         </div>
-        <div style={{display:"flex", alignItems:"center", gap:"8px", marginTop:"12px", fontSize:"13px", color:"#475467"}}>
+        <div className="boris-f2-93904488e9e7">
           Напоминать через
-          <input type="number" min={1} max={30} value={reminderSettings.delay_days}
+          <input type="number" min={1} max={30} value={Number(reminderSettings.delay_days) === 0 ? "" : reminderSettings.delay_days}
             onChange={e=>saveReminderSettings({...reminderSettings, delay_days: Math.max(1, parseInt(e.target.value)||1)})}
-            style={{width:"56px", padding:"6px 8px", borderRadius:"8px", border:"1px solid #EAECF0", fontSize:"13px"}} />
+  className="boris-f2-0d7f5ad805c7"/>
           дн. молчания клиента
         </div>
-        {reminderSaved && <div style={{marginTop:"8px", fontSize:"12px", color:"#027A48"}}>✓ Сохранено</div>}
+        {reminderSaved && <div className="boris-f2-976ceb9ee572">✓ Сохранено</div>}
       </div>
     )}
   </div>
 )}
 
 {salesView === "rop" && (
-  <div data-block="rop-reports-block" style={{margin:"0 0 16px", padding:"14px", border:"1px solid #E9D7FE", borderRadius:"12px", background:"#fff"}}>
-    <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", justifyContent:"space-between", gap:"10px", marginBottom:"10px"}}>
-      <div style={{fontSize:"15px", fontWeight:700, color:"#3E1C96"}}>📁 Отчёты</div>
-      <div style={{display:"flex", gap:"8px", flexWrap:"wrap"}}>
-        <button onClick={loadSavedReports} style={{fontSize:"13px", fontWeight:600, color:"#5925DC", background:"#F4F3FF", border:"1px solid #D9D6FE", borderRadius:"8px", padding:"7px 12px", cursor:"pointer"}}>🔄 Обновить</button>
-        <button onClick={()=>deleteSavedReports(false)} disabled={selectedReports.length===0} style={{fontSize:"13px", fontWeight:600, color:"#B42318", background:"#fff", border:"1.5px solid #F04438", borderRadius:"8px", padding:"7px 12px", cursor: selectedReports.length? "pointer":"default", opacity: selectedReports.length?1:0.5}}>Удалить выбранные</button>
-        <button onClick={()=>deleteSavedReports(true)} disabled={savedReports.length===0} style={{fontSize:"13px", fontWeight:600, color:"#B42318", background:"#fff", border:"1.5px solid #F04438", borderRadius:"8px", padding:"7px 12px", cursor: savedReports.length? "pointer":"default", opacity: savedReports.length?1:0.5}}>Удалить все</button>
+  <div data-block="rop-reports-block" className="boris-f2-c3a12e6531d8">
+    <div className="boris-f2-2d030424a3b5">
+      <div className="boris-f2-4ef3b23597f6">📁 Отчёты</div>
+      <div className="boris-f2-0889360d6347">
+        <Button onClick={loadSavedReports} className="boris-f2-33bcb75c55f2">🔄 Обновить</Button>
+        <Button onClick={()=>deleteSavedReports(false)} disabled={selectedReports.length===0} style={{fontSize:"13px", fontWeight:600, color:"var(--b-danger-text)", background:"#fff", border:"1.5px solid #F04438", borderRadius:"8px", padding:"7px 12px", cursor: selectedReports.length? "pointer":"default", opacity: selectedReports.length?1:0.5}}>Удалить выбранные</Button>
+        <Button onClick={()=>deleteSavedReports(true)} disabled={savedReports.length===0} style={{fontSize:"13px", fontWeight:600, color:"var(--b-danger-text)", background:"#fff", border:"1.5px solid #F04438", borderRadius:"8px", padding:"7px 12px", cursor: savedReports.length? "pointer":"default", opacity: savedReports.length?1:0.5}}>Удалить все</Button>
       </div>
     </div>
-    <div style={{fontSize:"13px", color:"#667085", marginBottom:"10px"}}>Готовые отчёты хранятся <b>30 дней</b>, затем удаляются безвозвратно. Скачивание сохранённого отчёта — бесплатно, повторный разбор звонков не запускается.</div>
-    {savedReports.length === 0 && <div style={{fontSize:"14px", color:"#98A2B3"}}>Пока нет сохранённых отчётов. Сформируйте отчёт кнопкой «📄 Скачать отчёт» выше — он появится здесь.</div>}
+    <div className="boris-f2-0cfd15ff8345">Готовые отчёты хранятся <b>30 дней</b>, затем удаляются безвозвратно. Скачивание сохранённого отчёта — бесплатно, повторный разбор звонков не запускается.</div>
+    {savedReports.length === 0 && <div className="boris-f2-e88a7eb51065">Пока нет сохранённых отчётов. Сформируйте отчёт кнопкой «📄 Скачать отчёт» выше — он появится здесь.</div>}
     {savedReports.length > 0 && (
-      <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+      <div className="boris-f2-f67b86e0fb4c">
         {savedReports.map((rp:any)=>(
-          <div key={rp.id} style={{display:"flex", alignItems:"center", gap:"10px", flexWrap:"wrap", border:"1px solid #EAECF0", borderRadius:"10px", padding:"10px 12px", background:"#FCFCFD"}}>
-            <input type="checkbox" checked={selectedReports.includes(rp.id)} onChange={()=>setSelectedReports(prev=> prev.includes(rp.id) ? prev.filter(x=>x!==rp.id) : [...prev, rp.id])} style={{width:"17px", height:"17px", accentColor:"#7F56D9"}} />
-            <div style={{flex:1, minWidth:"200px"}}>
-              <div style={{fontSize:"14px", fontWeight:600, color:"#1D2939", display:"flex", alignItems:"center", gap:"8px", flexWrap:"wrap"}}>
-                <span style={{fontSize:"11px", fontWeight:700, borderRadius:"20px", padding:"2px 10px", background: rp.kind==="chats" ? "#ECFDF3" : "#EEF4FF", color: rp.kind==="chats" ? "#027A48" : "#2F6FED"}}>{rp.kind==="chats" ? "Переписки" : "Звонки"}</span>
+          <div key={rp.id} className="boris-f2-c0cc97166d65">
+            <input type="checkbox" checked={selectedReports.includes(rp.id)} onChange={()=>setSelectedReports(prev=> prev.includes(rp.id) ? prev.filter(x=>x!==rp.id) : [...prev, rp.id])}  className="boris-f2-ee84c4c4ffbb"/>
+            <div className="boris-f2-fa67ab694c2a">
+              <div className="boris-f2-aadd58ac5106">
+                <span style={{fontSize:"11px", fontWeight:700, borderRadius:"20px", padding:"2px 10px", background: rp.kind==="chats" ? "#ECFDF3" : "var(--boris-blue-soft)", color: rp.kind==="chats" ? "#027A48" : "var(--boris-blue)"}}>{rp.kind==="chats" ? "Переписки" : "Звонки"}</span>
                 <span>{rp.date_from} — {rp.date_to}</span>
               </div>
-              <div style={{fontSize:"12px", color:"#667085", marginTop:"2px"}}>{rp.created_at} · {rp.kind==="chats" ? "диалогов" : "звонков"} {rp.calls_total} · разобрано {rp.calls_analyzed} · {rp.size_kb} КБ · хранится ещё {rp.days_left} дн.</div>
+              <div className="boris-f2-6e54a943515e">{rp.created_at} · {rp.kind==="chats" ? "диалогов" : "звонков"} {rp.calls_total} · разобрано {rp.calls_analyzed} · {rp.size_kb} КБ · хранится ещё {rp.days_left} дн.</div>
             </div>
-            <button onClick={()=>downloadSavedReport(rp.id)} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor:"pointer"}}>Скачать</button>
+            <Button onClick={()=>downloadSavedReport(rp.id)} className="boris-f2-b05c0e8a20bd">Скачать</Button>
           </div>
         ))}
       </div>
@@ -8134,63 +8405,63 @@ export default function Home() {
   </div>
 )}
 {managerBalance?.active === true && (
-  <div data-block="dlg-analysis-block" style={{margin:"0 0 16px", padding:"14px", border:"1px solid #EAECF0", borderRadius:"12px", background:"#fff"}}>
-    <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", justifyContent:"space-between", gap:"10px"}}>
-      <div style={{fontSize:"14px", fontWeight:600, color:"#101828"}}>📊 Анализ диалогов на эффективность</div>
-      <div style={{display:"flex", gap:"8px"}}>
+  <div data-block="dlg-analysis-block" className="boris-f2-2dfe94e58a8d">
+    <div className="boris-f2-bfcbb5f32b3e">
+      <div className="boris-f2-29be9e0cb513">📊 Анализ диалогов на эффективность</div>
+      <div className="boris-f2-b9bbe540d342">
         {dlgAnalysis && dlgAnalysis.summary && (
-          <button onClick={()=>setDlgAnalysisOpen(!dlgAnalysisOpen)} style={{fontSize:"13px", fontWeight:600, color:"#475467", background:"#F2F4F7", border:"none", borderRadius:"8px", padding:"8px 12px", cursor:"pointer"}}>{dlgAnalysisOpen ? "Свернуть" : "Показать"}</button>
+          <Button onClick={()=>setDlgAnalysisOpen(!dlgAnalysisOpen)} className="boris-f2-5aca7c9605a1">{dlgAnalysisOpen ? "Свернуть" : "Показать"}</Button>
         )}
-        <button onClick={runDlgAnalysis} disabled={dlgAnalysisLoading} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor: dlgAnalysisLoading?"default":"pointer", opacity: dlgAnalysisLoading?0.6:1}}>{dlgAnalysisLoading ? "Анализирую..." : "🔄 Анализировать"}</button>
+        <Button onClick={runDlgAnalysis} disabled={dlgAnalysisLoading} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor: dlgAnalysisLoading?"default":"pointer", opacity: dlgAnalysisLoading?0.6:1}}>{dlgAnalysisLoading ? "Анализирую..." : "🔄 Анализировать"}</Button>
       </div>
     </div>
     {dlgAnalysisOpen && dlgAnalysis && dlgAnalysis.summary && (
-      <div style={{marginTop:"12px", fontSize:"13px", color:"#344054"}}>
-        {dlgAnalysis.generated_at && <div style={{fontSize:"12px", color:"#98A2B3", marginBottom:"10px"}}>Обновлено {dlgAnalysis.generated_at} · диалогов: {dlgAnalysis.analyzed}</div>}
-        {(dlgAnalysis.summary.bottlenecks||[]).length>0 && (<div style={{marginBottom:"10px"}}><b style={{color:"#B42318"}}>🔻 Где сливаются лиды:</b><ul style={{margin:"6px 0 0", paddingLeft:"18px"}}>{dlgAnalysis.summary.bottlenecks.map((x:string,i:number)=><li key={i} style={{marginBottom:"3px"}}>{x}</li>)}</ul></div>)}
-        {(dlgAnalysis.summary.objections||[]).length>0 && (<div style={{marginBottom:"10px"}}><b style={{color:"#B54708"}}>🗣 Частые возражения:</b><ul style={{margin:"6px 0 0", paddingLeft:"18px"}}>{dlgAnalysis.summary.objections.map((x:string,i:number)=><li key={i} style={{marginBottom:"3px"}}>{x}</li>)}</ul></div>)}
-        {(dlgAnalysis.summary.script_tips||[]).length>0 && (<div style={{marginBottom:"10px"}}><b style={{color:"#027A48"}}>✅ Что улучшить в скрипте:</b><ul style={{margin:"6px 0 0", paddingLeft:"18px"}}>{dlgAnalysis.summary.script_tips.map((x:string,i:number)=><li key={i} style={{marginBottom:"3px"}}>{x}</li>)}</ul></div>)}
-        {(dlgAnalysis.lost||[]).length>0 && (<div style={{marginTop:"8px", paddingTop:"10px", borderTop:"1px solid #F2F4F7"}}><b style={{color:"#475467"}}>Разбор ушедших лидов:</b>{dlgAnalysis.lost.map((l:any,i:number)=><div key={i} style={{marginTop:"6px", color:"#667085"}}>• {l.reason}</div>)}</div>)}
+      <div className="boris-f2-ed72051ca236">
+        {dlgAnalysis.generated_at && <div className="boris-f2-6d42b6fc2b27">Обновлено {new Date(dlgAnalysis.generated_at).toLocaleString("ru-RU")} · диалогов: {dlgAnalysis.analyzed}</div>}
+        {(dlgAnalysis.summary.bottlenecks||[]).length>0 && (<div className="boris-f2-af3fee87a1e7"><b className="boris-f2-5659a18ecccb">🔻 Где сливаются лиды:</b><ul className="boris-f2-20ccda653c33">{dlgAnalysis.summary.bottlenecks.map((x:string,i:number)=><li key={i} className="boris-f2-c6f92fb33803">{x}</li>)}</ul></div>)}
+        {(dlgAnalysis.summary.objections||[]).length>0 && (<div className="boris-f2-af3fee87a1e7"><b className="boris-f2-146025a3f736">🗣 Частые возражения:</b><ul className="boris-f2-20ccda653c33">{dlgAnalysis.summary.objections.map((x:string,i:number)=><li key={i} className="boris-f2-c6f92fb33803">{x}</li>)}</ul></div>)}
+        {(dlgAnalysis.summary.script_tips||[]).length>0 && (<div className="boris-f2-af3fee87a1e7"><b className="boris-f2-f153efea0508">✅ Что улучшить в скрипте:</b><ul className="boris-f2-20ccda653c33">{dlgAnalysis.summary.script_tips.map((x:string,i:number)=><li key={i} className="boris-f2-c6f92fb33803">{x}</li>)}</ul></div>)}
+        {(dlgAnalysis.lost||[]).length>0 && (<div className="boris-f2-67630394752d"><b className="boris-f2-de52905d633b">Разбор ушедших лидов:</b>{dlgAnalysis.lost.map((l:any,i:number)=><div key={i} className="boris-f2-733f411effdf">• {humanizeBusinessText(l.reason,"Причина потери уточняется")}</div>)}</div>)}
       </div>
     )}
   </div>
 )}
 {dlgAnalysis && dlgAnalysis.summary && (
-  <div data-block="script-buttons-block" style={{margin:"0 0 16px", padding:"14px", border:"1px solid #E9D7FE", borderRadius:"12px", background:"#FCFAFF"}}>
-    <div style={{fontSize:"14px", fontWeight:600, color:"#5925DC", marginBottom:"10px"}}>📝 Скрипт для менеджера по этим рекомендациям</div>
-    <div style={{display:"flex", flexWrap:"wrap", gap:"10px"}}>
-      <button onClick={makeScriptAuto} disabled={scriptGenLoading} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"9px 16px", cursor: scriptGenLoading?"default":"pointer", opacity: scriptGenLoading?0.6:1}}>{scriptGenLoading ? "Борис пишет скрипт..." : "✍️ Сделай скрипт сам"}</button>
-      <button onClick={()=>setScriptManualOpen(!scriptManualOpen)} style={{fontSize:"13px", fontWeight:600, color:"#5925DC", background:"#F4F3FF", border:"1px solid #D9D6FE", borderRadius:"8px", padding:"9px 16px", cursor:"pointer"}}>✏️ Я напишу сам скрипт</button>
-      {scriptSaved && <span style={{fontSize:"12px", color:"#027A48", alignSelf:"center"}}>✓ Сохранено в активный скрипт менеджера</span>}
+  <div data-block="script-buttons-block" className="boris-f2-035cfacd10a9">
+    <div className="boris-f2-f2baf716b71c">📝 Скрипт для менеджера по этим рекомендациям</div>
+    <div className="boris-f2-760171c609da">
+      <Button onClick={makeScriptAuto} disabled={scriptGenLoading} style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"9px 16px", cursor: scriptGenLoading?"default":"pointer", opacity: scriptGenLoading?0.6:1}}>{scriptGenLoading ? "Борис пишет скрипт..." : "✍️ Сделай скрипт сам"}</Button>
+      <Button onClick={()=>setScriptManualOpen(!scriptManualOpen)} className="boris-f2-3bc31281cc8a">✏️ Я напишу сам скрипт</Button>
+      {scriptSaved && <span className="boris-f2-2a48ca45e765">✓ Сохранено в активный скрипт менеджера</span>}
     </div>
     {scriptManualOpen && (
-      <div style={{marginTop:"12px"}}>
-        <textarea value={scriptManualText} onChange={e=>setScriptManualText(e.target.value)} placeholder="Напишите скрипт для менеджера: правила ведения диалога, отработку возражений, как вести к контакту..." rows={5} style={{width:"100%", boxSizing:"border-box", padding:"10px", borderRadius:"8px", border:"1px solid #EAECF0", fontSize:"13px", resize:"vertical"}} />
-                <div style={{marginTop:"6px"}}>
-                  <button onClick={()=>pcCheck("script","manager",scriptManualText)} style={{fontSize:"13px", fontWeight:600, color:"#5925DC", background:"#F4F3FF", border:"1px solid #D9D6FE", borderRadius:"8px", padding:"7px 12px", cursor:"pointer"}}>🧠 Проверить промт Борисом</button>
-                  {pcField==="script" && pcLoading && <div style={{fontSize:"13px", color:"#667085", marginTop:"6px"}}>Борис читает…</div>}
+      <div className="boris-f2-9374e8421025">
+        <textarea value={scriptManualText} onChange={e=>setScriptManualText(e.target.value)} placeholder="Напишите скрипт для менеджера: правила ведения диалога, отработку возражений, как вести к контакту..." rows={5}  className="boris-f2-544be6848539"/>
+                <div className="boris-f2-2fd7789b397a">
+                  <Button onClick={()=>pcCheck("script","manager",scriptManualText)} className="boris-f2-33bcb75c55f2">🧠 Проверить промт Борисом</Button>
+                  {pcField==="script" && pcLoading && <div className="boris-f2-d4f2034c960f">Борис читает…</div>}
                   {pcField==="script" && pcData && !pcLoading && (
-                    <div style={{marginTop:"8px", background:"#FCFAFF", border:"1px solid #E9D7FE", borderRadius:"10px", padding:"12px 14px"}}>
-                      <div style={{fontSize:"14px", color:"#1D2939", marginBottom:"6px"}}>{pcData.verdict}</div>
+                    <div className="boris-f2-54ac54c00c71">
+                      <div className="boris-f2-316f53899bf6">{pcData.verdict}</div>
                       {(pcData.issues||[]).map((it:any,i:number)=>(
-                        <div key={i} style={{fontSize:"13px", color:"#475467", marginBottom:"4px"}}>• <b>{it.problem}</b> — {it.fix}</div>
+                        <div key={i} className="boris-f2-206d5b50e31f">• <b>{it.problem}</b> — {it.fix}</div>
                       ))}
                       {pcData.improved && (
-                        <button onClick={()=>{ setScriptManualText(pcData.improved); setPcData(null); }} style={{marginTop:"8px", fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor:"pointer"}}>✍️ Заменить на улучшенный</button>
+                        <Button onClick={()=>{ setScriptManualText(pcData.improved); setPcData(null); }} className="boris-f2-a79b259c99b7">✍️ Заменить на улучшенный</Button>
                       )}
                     </div>
                   )}
                 </div>
-        <button onClick={saveManualScript} style={{marginTop:"8px", fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"9px 16px", cursor:"pointer"}}>Сохранить скрипт</button>
+        <Button onClick={saveManualScript} className="boris-f2-4ae90575a2ab">Сохранить скрипт</Button>
       </div>
     )}
     {scriptGen && (
-      <div style={{marginTop:"12px", padding:"12px", background:"#fff", border:"1px solid #EAECF0", borderRadius:"8px", fontSize:"13px", color:"#344054", whiteSpace:"pre-wrap", maxHeight:"260px", overflowY:"auto"}}>{scriptGen}</div>
+      <div className="boris-f2-d4cd9c3db14c">{scriptGen}</div>
     )}
   </div>
 )}
 {salesLeadStats && salesLeadStats.total > 0 && (
-  <div data-block="lead-funnel-block" style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:"12px", margin:"0 0 16px"}}>
+  <div data-block="lead-funnel-block" className="boris-f2-66cb175922c9">
     {[
       {k:"в процессе", label:"В процессе", c:"#1570EF", bg:"#EFF8FF"},
       {k:"ушёл подумать", label:"Ушёл подумать", c:"#B54708", bg:"#FFFAEB"},
@@ -8202,66 +8473,66 @@ export default function Home() {
       return (
         <div key={st.k} onClick={() => openLeadStage(st.k)} style={{flex:"1 1 130px", minWidth:"120px", background:st.bg, borderRadius:"12px", padding:"12px 14px", cursor:"pointer", outline: salesLeadOpen===st.k ? `2px solid ${st.c}` : "none"}}>
           <div style={{fontSize:"26px", fontWeight:700, color:st.c, lineHeight:1.1}}>{n}</div>
-          <div style={{fontSize:"13px", color:"#475467", marginTop:"2px"}}>{st.label}</div>
+          <div className="boris-f2-e41894b51ae0">{st.label}</div>
         </div>
       );
     })}
-    <div style={{flex:"1 1 130px", minWidth:"120px", background:"#F9FAFB", borderRadius:"12px", padding:"12px 14px", border:"1px solid #EAECF0"}}>
-      <div style={{fontSize:"26px", fontWeight:700, color:"#101828", lineHeight:1.1}}>{salesLeadStats.phone_conversion}%</div>
-      <div style={{fontSize:"13px", color:"#475467", marginTop:"2px"}}>Конверсия в телефон</div>
+    <div className="boris-f2-9c8fefd7ea65">
+      <div className="boris-f2-9f858cadfe26">{salesLeadStats.phone_conversion}%</div>
+      <div className="boris-f2-e41894b51ae0">Конверсия в телефон</div>
     </div>
   </div>
 )}
 {salesLeadOpen && (
-  <div data-block="lead-list-block" style={{margin:"0 0 16px", border:"1px solid #EAECF0", borderRadius:"12px", padding:"14px", background:"#fff"}}>
-    <div style={{fontSize:"14px", fontWeight:600, color:"#101828", marginBottom:"10px"}}>Лиды: {salesLeadOpen}</div>
-    {salesLeadListLoading && <div style={{color:"#667085", fontSize:"14px"}}>Загрузка...</div>}
-    {!salesLeadListLoading && salesLeadList.length === 0 && <div style={{color:"#667085", fontSize:"14px"}}>Нет лидов на этой стадии</div>}
+  <div data-block="lead-list-block" className="boris-f2-b06a8d0c1bda">
+    <div className="boris-f2-2bcda3a2ea43">Лиды: {salesLeadOpen}</div>
+    {salesLeadListLoading && <div className="boris-f2-be57dac96f01">Загрузка...</div>}
+    {!salesLeadListLoading && salesLeadList.length === 0 && <div className="boris-f2-be57dac96f01">Нет лидов на этой стадии</div>}
     {salesLeadList.map((L:any, i:number) => (
-      <div key={i} style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"10px", padding:"10px 0", borderTop: i>0 ? "1px solid #F2F4F7" : "none"}}>
-        <div style={{flex:"1 1 240px", minWidth:"200px"}}>
-          <div style={{fontSize:"14px", color:"#101828"}}>{L.item_title || "Объявление не определено"}</div>
-          <div style={{fontSize:"13px", color:"#667085", marginTop:"2px"}}>{L.last_text || ""} · {L.msg_count} сообщ.</div>
+      <div key={i} style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"10px", padding:"10px 0", borderTop: i>0 ? "1px solid var(--boris-border-soft)" : "none"}}>
+        <div className="boris-f2-bd110a61e5c3">
+          <div className="boris-f2-9a938ed79996">{L.item_title || "Объявление не определено"}</div>
+          <div className="boris-f2-e41894b51ae0">{L.last_text || ""} · {L.msg_count} сообщ.</div>
         </div>
         {L.phone && (
-          <a href={`tel:${L.phone}`} style={{fontSize:"14px", fontWeight:600, color:"#027A48", textDecoration:"none", whiteSpace:"nowrap"}}>📞 {L.phone}</a>
+          <a href={`tel:${L.phone}`} className="boris-f2-bfb5d476669e">📞 {L.phone}</a>
         )}
-        <a href={L.chat_url} target="_blank" rel="noopener noreferrer" style={{fontSize:"13px", fontWeight:600, color:"#fff", background:"#1570EF", borderRadius:"8px", padding:"7px 12px", textDecoration:"none", whiteSpace:"nowrap"}}>💬 Открыть чат</a>
+        <a href={L.chat_url} target="_blank" rel="noopener noreferrer" className="boris-f2-74e1769773f2">💬 Открыть чат</a>
         {L.item_url && (
-          <a href={L.item_url} target="_blank" rel="noopener noreferrer" style={{fontSize:"13px", fontWeight:600, color:"#344054", background:"#F2F4F7", borderRadius:"8px", padding:"7px 12px", textDecoration:"none", whiteSpace:"nowrap"}}>📄 Объявление</a>
+          <a href={L.item_url} target="_blank" rel="noopener noreferrer" className="boris-f2-d4b1764000de">📄 Объявление</a>
         )}
       </div>
     ))}
   </div>
 )}
-<button className="boris-btn-hover" onClick={loadSalesItems} style={{background:"#EEF2FA", color:"#F79009", border:"none", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"15px"}}>
+<Button className="boris-btn-hover boris-f2-77baf42af913" onClick={loadSalesItems}>
                   {salesLoading ? "Загрузка..." : "🔄 Обновить список"}
-                </button>
+                </Button>
               </div>
-              <details style={{margin:"0 0 16px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Как работают отметки</summary><p style={{color:"#667085", fontSize:"15px", margin:"8px 0 0"}}>Отметьте галочками объявления, по которым менеджер должен вести переписку. Если ничего не отмечено — менеджер работает по всем вашим объявлениям (кроме вакансий, они отсеиваются автоматически). Дальше нажимать ничего не нужно: как только вы отметили объявления, менеджер сразу начинает отвечать покупателям в их чатах, а результаты появляются в воронке лидов выше. Каждый ответ приходит вам на подтверждение в Telegram. Дальше нажимать ничего не нужно: как только вы отметили объявления, менеджер сразу начинает отвечать покупателям в их чатах, а результаты появляются в воронке лидов выше. Каждый ответ приходит вам на подтверждение в Telegram.</p></details>
+              <details className="boris-f2-489e16440bc3"><summary className="boris-f2-c0e3ed53fc0c">Как работают отметки</summary><p className="boris-f2-183644454912">Отметьте галочками объявления, по которым менеджер должен вести переписку. Если ничего не отмечено — менеджер работает по всем вашим объявлениям (кроме вакансий, они отсеиваются автоматически). Дальше нажимать ничего не нужно: как только вы отметили объявления, менеджер сразу начинает отвечать покупателям в их чатах, а результаты появляются в воронке лидов выше. Каждый ответ приходит вам на подтверждение в Telegram. Дальше нажимать ничего не нужно: как только вы отметили объявления, менеджер сразу начинает отвечать покупателям в их чатах, а результаты появляются в воронке лидов выше. Каждый ответ приходит вам на подтверждение в Telegram.</p></details>
 
               {salesItems.length === 0 && !salesLoading && (
-                <p style={{color:"#667085"}}>Нажмите «Обновить», чтобы загрузить список объявлений.</p>
+                <p className="boris-f2-de52905d633b">Нажмите «Обновить», чтобы загрузить список объявлений.</p>
               )}
 
-              <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+              <div className="boris-f2-f67b86e0fb4c">
                 {salesItems.map((item) => (
-                  <label key={item.item_id} style={{display:"flex", alignItems:"center", gap:"12px", background:"#FFFFFF", borderRadius:"8px", padding:"12px 14px", cursor:"pointer", border: salesWhitelist.includes(item.item_id) ? "1px solid #F79009" : "1px solid #EEF2FA"}}>
+                  <label key={item.item_id} style={{display:"flex", alignItems:"center", gap:"12px", background:"var(--boris-surface)", borderRadius:"8px", padding:"12px 14px", cursor:"pointer", border: salesWhitelist.includes(item.item_id) ? "1px solid #F79009" : "1px solid #EEF2FA"}}>
                     <input
                       type="checkbox"
                       checked={salesWhitelist.includes(item.item_id)}
                       onChange={() => toggleSalesWhitelist(item.item_id)}
-                      style={{width:"18px", height:"18px", accentColor:"#F79009", cursor:"pointer"}}
-                    />
-                    <span style={{flex:1, fontSize:"15px", color: item.is_job_posting ? "#8A93A6" : "#1D2939"}}>
+
+                     className="boris-f2-af736c30d5ef"/>
+                    <span style={{flex:1, fontSize:"15px", color: item.is_job_posting ? "var(--boris-text-3)" : "var(--boris-text)"}}>
                       {item.title}
-                      {cityFromUrl(item.url) && <span style={{marginLeft:"8px", fontSize:"13px", color:"#667085"}}>· {cityFromUrl(item.url)}</span>}
-                      {item.is_job_posting && <span style={{marginLeft:"8px", fontSize:"15px", color:"#e0a", background:"#2a1a2a", borderRadius:"4px", padding:"2px 6px"}}>вакансия — не для менеджера</span>}
+                      {cityFromUrl(item.url) && <span className="boris-f2-81939b092298">· {cityFromUrl(item.url)}</span>}
+                      {item.is_job_posting && <span className="boris-f2-596961164eac">вакансия — не для менеджера</span>}
                     </span>
                   </label>
                 ))}
               </div>
-            </div>
+            </BorisCard>
           </div>
         )}
 
@@ -8277,44 +8548,44 @@ export default function Home() {
             {img:"stihi_pesni_na_zakaz.png", title:"Стихи и песни на заказ", tag:"Творчество"},
           ];
           const features = [
-            {icon:"⚙️", t:"Админ-панель", d:"Меняете тексты, цены и заявки сами, без программиста", g:"linear-gradient(135deg,#4C8DFF,#2F6FED)"},
+            {icon:"⚙️", t:"Админ-панель", d:"Меняете тексты, цены и заявки сами, без программиста", g:"linear-gradient(135deg,var(--boris-blue),var(--boris-blue))"},
             {icon:"🔍", t:"Внутреннее SEO", d:"Настройка мета-тегов и заголовков под поиск", g:"linear-gradient(135deg,#34D399,#12B76A)"},
             {icon:"✏️", t:"Лёгкое редактирование", d:"Правки контента прямо в панели, за минуту", g:"linear-gradient(135deg,#A78BFA,#7C3AED)"},
-            {icon:"📊", t:"CRM внутри сайта", d:"Заявки собираются и хранятся в кабинете (по желанию)", g:"linear-gradient(135deg,#FBBF24,#F79009)"},
+            {icon:"📊", t:"Клиенты и заявки внутри сайта", d:"Заявки собираются и хранятся в кабинете (по желанию)", g:"linear-gradient(135deg,#FBBF24,#F79009)"},
             {icon:"🎯", t:"Маркетинг-фишки", d:"Калькуляторы, таймеры, всплывающие акции, квизы", g:"linear-gradient(135deg,#F87171,#EF4444)"},
             {icon:"🧠", t:"Копирайтинг + НЛП", d:"Продающие тексты по проверенным формулам", g:"linear-gradient(135deg,#22D3EE,#0891B2)"},
           ];
           return (
-          <div style={{width:"100%"}}>
+          <div className="boris-f2-cad980f4b707">
             {/* ГЕРОЙ */}
-            <div className="b-panel" style={{background:"linear-gradient(135deg,#1a2740,#2F6FED)", color:"#fff", padding:"40px", borderRadius:"16px", marginBottom:"24px", position:"relative", overflow:"hidden"}}>
-              <div style={{position:"relative", zIndex:2, display:"flex", justifyContent:"space-between", alignItems:"center", gap:"32px", flexWrap:"wrap"}}>
-                <div style={{flex:"1 1 380px"}}>
-                  <div style={{display:"inline-block", background:"rgba(255,255,255,0.15)", padding:"6px 14px", borderRadius:"20px", fontSize:"13px", fontWeight:600, marginBottom:"16px"}}>🌐 Создание сайтов под ключ</div>
-                  <h2 style={{margin:"0 0 12px", fontSize:"32px", fontWeight:800, lineHeight:1.15}}>Сайт, который продаёт<br/>за вас</h2>
-                  <details style={{margin:"0 0 16px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Что входит в сайт</summary><p style={{color:"#667085", fontSize:"15px", margin:"8px 0 0"}}>Современный дизайн, продающий копирайтинг, админка и все маркетинг-инструменты. Готовый сайт под ваш бизнес — быстро и без головной боли.</p></details>
-                  <button onClick={() => setSiteOrderOpen(true)} className="boris-btn-hover" style={{background:"#fff", color:"#2F6FED", border:"none", borderRadius:"10px", padding:"14px 36px", fontSize:"17px", fontWeight:700, cursor:"pointer", boxShadow:"0 4px 16px rgba(0,0,0,0.15)"}}>🚀 Заказать сайт</button>
+            <BorisCard className="b-panel boris-f2-b60f8bfddfe7">
+              <div className="boris-f2-0888eb7156b9">
+                <div className="boris-f2-4a5c081831e1">
+                  <div className="boris-f2-896c7bb859af">🌐 Создание сайтов под ключ</div>
+                  <h2 className="boris-f2-b417b729e2c3">Сайт, который продаёт<br/>за вас</h2>
+                  <details className="boris-f2-489e16440bc3"><summary className="boris-f2-c0e3ed53fc0c">Что входит в сайт</summary><p className="boris-f2-183644454912">Современный дизайн, продающий копирайтинг, админка и все маркетинг-инструменты. Готовый сайт под ваш бизнес — быстро и без головной боли.</p></details>
+                  <Button onClick={() => setSiteOrderOpen(true)} className="boris-btn-hover boris-f2-ffa932c06236">🚀 Заказать сайт</Button>
                 </div>
-                <div style={{flex:"0 0 auto", background:"rgba(255,255,255,0.12)", border:"1px solid rgba(255,255,255,0.25)", borderRadius:"16px", padding:"24px 28px", textAlign:"center", minWidth:"240px"}}>
-                  <div style={{fontSize:"12px", fontWeight:700, letterSpacing:"0.5px", opacity:0.85, marginBottom:"8px"}}>🎁 ЦЕНА ПО ПОДПИСКЕ</div>
-                  <div style={{fontSize:"46px", fontWeight:800, lineHeight:1, marginBottom:"4px"}}>25 000 ₽</div>
-                  <div style={{fontSize:"20px", opacity:0.6, textDecoration:"line-through", marginBottom:"12px"}}>50 000 ₽</div>
-                  <div style={{fontSize:"12px", opacity:0.9, lineHeight:1.45}}>{hasSub ? "Ваша подписка активна ✅" : "При активной подписке тарифа «Автопилот 1»"}</div>
+                <div className="boris-f2-933b817d4d03">
+                  <div className="boris-f2-83afb3950ea3">🎁 ЦЕНА ПО ПОДПИСКЕ</div>
+                  <div className="boris-f2-6119f0817fd3">25 000 ₽</div>
+                  <div className="boris-f2-b267d06df36c">50 000 ₽</div>
+                  <div className="boris-f2-14d807926d0d">{hasSub ? "Ваша подписка активна ✅" : "При активной подписке тарифа «Автопилот 1»"}</div>
                 </div>
               </div>
-            </div>
+            </BorisCard>
 
             {/* ПРИМЕРЫ РАБОТ — карусель как на лендинге */}
-            <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px", marginBottom:"6px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#4C8DFF,#2F6FED)"}}>🖼</span>Примеры наших работ</h3>
-            <p className="b-sub" style={{marginBottom:"18px"}}>Реальные сайты, сделанные для разных ниш — от бетонного завода до бьюти-студии</p>
-            <div className="sb-marquee" style={{marginBottom:"36px"}}>
+            <h3 className="b-title boris-f2-845f0c54ca2f"><span className="b-icon-sm boris-f2-79a4d50add5b boris-g1-icon">🖼</span>Примеры наших работ</h3>
+            <p className="b-sub boris-f2-5b6aad9a3fd6">Реальные сайты, сделанные для разных ниш — от бетонного завода до бьюти-студии</p>
+            <div className="sb-marquee boris-f2-562d94e7217b">
               <div className="sb-marquee-track">
                 {[0,1].map(dup => screens.map((sc,i) => (
-                  <div key={dup + "-" + i} className="sb-slide" onClick={() => { setSbLightbox(`/images/_sitebuild/screens/${sc.img}`); setSbZoom(1); }} style={{cursor:"zoom-in"}}>
-                    <img src={`/images/_sitebuild/screens/${sc.img}`} alt={sc.title} loading="lazy" style={{width:"100%", height:"auto", display:"block", borderRadius:"14px", boxShadow:"0 8px 28px rgba(16,24,40,0.12)", border:"1px solid #EEF2FA", pointerEvents:"none"}} />
-                    <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:"10px", padding:"0 4px"}}>
-                      <span style={{fontSize:"15px", fontWeight:700, color:"#101828"}}>{sc.title}</span>
-                      <span style={{fontSize:"11px", color:"#2F6FED", background:"#E7EFFE", padding:"3px 10px", borderRadius:"12px", fontWeight:600}}>{sc.tag}</span>
+                  <div key={dup + "-" + i} className="sb-slide boris-f2-9855cb49dbaa" onClick={() => { setSbLightbox(`/images/_sitebuild/screens/${sc.img}`); setSbZoom(1); }}>
+                    <img src={`/images/_sitebuild/screens/${sc.img}`} alt={sc.title} loading="lazy"  className="boris-f2-61f1bb6c9e17"/>
+                    <div className="boris-f2-9681bee9e88b">
+                      <span className="boris-f2-47d89a03d912">{sc.title}</span>
+                      <span className="boris-f2-dc4d44def1df">{sc.tag}</span>
                     </div>
                   </div>
                 )))}
@@ -8322,33 +8593,33 @@ export default function Home() {
             </div>
 
             {/* ВИДЕО */}
-            <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px", marginBottom:"6px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#F472B6,#DB2777)"}}>🎬</span>Как это выглядит вживую</h3>
-            <p className="b-sub" style={{marginBottom:"18px"}}>Живые записи готовых сайтов — посмотрите, как всё работает</p>
+            <h3 className="b-title boris-f2-845f0c54ca2f"><span className="b-icon-sm boris-f2-3cd824b25201 boris-g1-icon">🎬</span>Как это выглядит вживую</h3>
+            <p className="b-sub boris-f2-5b6aad9a3fd6">Живые записи готовых сайтов — посмотрите, как всё работает</p>
             {userRole === "owner" && (
-              <div className="b-panel" style={{marginBottom:"16px", background:"#FFFBEB", border:"1px dashed #F79009"}}>
-                <div style={{fontSize:"14px", fontWeight:700, color:"#B54708", marginBottom:"10px"}}>🔧 Загрузка видео (видно только вам)</div>
-                <div style={{display:"flex", gap:"12px", alignItems:"center", flexWrap:"wrap"}}>
+              <BorisCard className="b-panel boris-f2-1de900a8c268">
+                <div className="boris-f2-10b40a7ee9e0">🔧 Загрузка видео (видно только вам)</div>
+                <div className="boris-f2-36370d6a0265">
                   <input value={sbVideoTitle} onChange={e => setSbVideoTitle(e.target.value)} placeholder="Название видео (напр. Сайт грузоперевозки)" style={{...inputStyle, width:"auto", minWidth:"280px"}} />
-                  <label className="boris-btn-hover" style={{background:"#2F6FED", color:"#fff", borderRadius:"8px", padding:"10px 20px", fontWeight:600, cursor:"pointer", fontSize:"15px"}}>
+                  <label className="boris-btn-hover boris-f2-ff65694deead">
                     {sbVideoUploading ? "⏳ Загрузка..." : "🎬 Выбрать видео"}
-                    <input type="file" accept="video/*" style={{display:"none"}} disabled={sbVideoUploading} onChange={e => sbUploadVideo(e.target.files)} />
+                    <input type="file" accept="video/*" disabled={sbVideoUploading} onChange={e => sbUploadVideo(e.target.files)}  className="boris-f2-c8be1ccba60b"/>
                   </label>
                   {sbVideoMsg && <span style={{fontSize:"14px", color: sbVideoMsg.startsWith("✅") ? "#12B76A" : "#F04438"}}>{sbVideoMsg}</span>}
                 </div>
-              </div>
+              </BorisCard>
             )}
             {sbVideos.length > 0 ? (
-              <div className="sb-marquee" style={{marginBottom:"32px"}}>
+              <div className="sb-marquee boris-f2-2a28d13f8dfd">
                 <div className="sb-marquee-track sb-video-track">
                   {[...sbVideos, ...sbVideos].map((v,i) => (
                     <div key={i} className="sb-slide">
-                      <video src={v.url} controls preload="metadata" style={{width:"100%", height:"300px", objectFit:"cover", borderRadius:"14px", display:"block", background:"#000", boxShadow:"0 8px 28px rgba(16,24,40,0.12)"}} />
-                      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:"10px", padding:"0 4px"}}>
-                        <span style={{fontSize:"15px", fontWeight:700, color:"#101828"}}>{v.title}</span>
+                      <video src={v.url} controls preload="metadata"  className="boris-f2-c576eb62e222"/>
+                      <div className="boris-f2-9681bee9e88b">
+                        <span className="boris-f2-47d89a03d912">{v.title}</span>
                         {userRole === "owner" && (
-                          <span style={{display:"flex", gap:"10px"}}>
-                            <button onClick={() => sbRenameVideo(v.filename, v.title)} style={{background:"transparent", color:"#2F6FED", border:"none", cursor:"pointer", fontSize:"13px"}}>✏️ Переименовать</button>
-                            <button onClick={() => sbDeleteVideo(v.filename)} style={{background:"transparent", color:"#F04438", border:"1.5px solid #F04438", cursor:"pointer", fontSize:"13px"}}>🗑 Удалить</button>
+                          <span className="boris-f2-6b00e75351fc">
+                            <Button onClick={() => sbRenameVideo(v.filename, v.title)} className="boris-f2-692d8ac3140b">✏️ Переименовать</Button>
+                            <Button onClick={() => sbDeleteVideo(v.filename)} className="boris-f2-f20bf8b7b8c0">🗑 Удалить</Button>
                           </span>
                         )}
                       </div>
@@ -8357,24 +8628,24 @@ export default function Home() {
                 </div>
               </div>
             ) : (
-              <div className="b-panel" style={{textAlign:"center", padding:"40px", color:"#98A2B3", marginBottom:"32px"}}>Видео пока не добавлены</div>
+              <BorisCard className="b-panel boris-f2-ba623a625f77">Видео пока не добавлены</BorisCard>
             )}
 
             {/* ВОЗМОЖНОСТИ */}
-            <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"16px", marginBottom:"24px"}}>
+            <div className="boris-f2-2dce2ae7eae8">
               {features.map((f,i) => (
-                <div key={i} className="b-panel b-card-eq boris-btn-hover" style={{padding:"22px"}}>
-                  <span className="b-icon-sm" style={{background:f.g, marginBottom:"12px"}}>{f.icon}</span>
-                  <div style={{fontSize:"16px", fontWeight:700, color:"#101828", marginBottom:"6px"}}>{f.t}</div>
-                  <div style={{fontSize:"14px", color:"#667085", lineHeight:1.45}}>{f.d}</div>
-                </div>
+                <BorisCard key={i} className="b-panel b-card-eq boris-btn-hover boris-f2-420a7387966e boris-g1-card">
+                  <span className="b-icon-sm boris-g1-icon" style={{background:f.g, marginBottom:"12px"}}>{f.icon}</span>
+                  <div className="boris-f2-3c11d48ee51a">{f.t}</div>
+                  <div className="boris-f2-a61395ac1f1e">{f.d}</div>
+                </BorisCard>
               ))}
             </div>
 
             {userRole === "owner" && (
-              <div className="b-panel" style={{marginBottom:"20px", background:"#FFFBEB", border:"1px dashed #F79009"}}>
-                <div style={{fontSize:"14px", fontWeight:700, color:"#B54708", marginBottom:"10px"}}>🔧 Загрузка скриншотов (видно только вам)</div>
-                <div style={{display:"flex", gap:"12px", alignItems:"center", flexWrap:"wrap"}}>
+              <BorisCard className="b-panel boris-f2-55e7e01b0b3e">
+                <div className="boris-f2-10b40a7ee9e0">🔧 Загрузка скриншотов (видно только вам)</div>
+                <div className="boris-f2-36370d6a0265">
                   <select className="b-select" value={sbUploadName} onChange={e => setSbUploadName(e.target.value)} style={{...inputStyle, width:"auto", minWidth:"220px"}}>
                     <option value="beton_zavod.png">Бетонный завод</option>
                     <option value="almaznoe_burenie.png">Алмазное бурение</option>
@@ -8384,36 +8655,36 @@ export default function Home() {
                     <option value="lazernaya_epilyaciya.png">Лазерная эпиляция</option>
                     <option value="stihi_pesni_na_zakaz.png">Стихи и песни</option>
                   </select>
-                  <label className="boris-btn-hover" style={{background:"#2F6FED", color:"#fff", borderRadius:"8px", padding:"10px 20px", fontWeight:600, cursor:"pointer", fontSize:"15px"}}>
+                  <label className="boris-btn-hover boris-f2-ff65694deead">
                     {sbUploading ? "⏳ Загрузка..." : "📁 Выбрать файл"}
-                    <input type="file" accept="image/*" style={{display:"none"}} disabled={sbUploading} onChange={e => sbUploadScreen(e.target.files)} />
+                    <input type="file" accept="image/*" disabled={sbUploading} onChange={e => sbUploadScreen(e.target.files)}  className="boris-f2-c8be1ccba60b"/>
                   </label>
                   {sbUploadMsg && <span style={{fontSize:"14px", color: sbUploadMsg.startsWith("✅") ? "#12B76A" : "#F04438"}}>{sbUploadMsg}</span>}
                 </div>
-              </div>
+              </BorisCard>
             )}
             {/* МОДАЛКА ЗАЯВКИ */}
             {siteOrderOpen && (
-              <div onClick={() => { setSiteOrderOpen(false); setSiteOrderDone(false); }} style={{position:"fixed", inset:0, background:"rgba(16,24,40,0.6)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:4000, padding:"20px"}}>
-                <div onClick={e => e.stopPropagation()} style={{background:"#fff", borderRadius:"16px", padding:"32px", maxWidth:"460px", width:"100%", boxShadow:"0 20px 60px rgba(0,0,0,0.3)"}}>
+              <div onClick={() => { setSiteOrderOpen(false); setSiteOrderDone(false); }} className="boris-f2-4a1722eaef66">
+                <div onClick={e => e.stopPropagation()} className="boris-f2-af5bd04ccbfb">
                   {siteOrderDone ? (
-                    <div style={{textAlign:"center", padding:"20px 0"}}>
-                      <div style={{fontSize:"52px", marginBottom:"12px"}}>✅</div>
-                      <h3 style={{margin:"0 0 8px", fontSize:"22px", color:"#101828"}}>Заявка отправлена!</h3>
-                      <p style={{color:"#667085", margin:"0 0 20px"}}>Свяжемся с вами в ближайшее время по указанному телефону.</p>
-                      <button onClick={() => { setSiteOrderOpen(false); setSiteOrderDone(false); setSiteOrderName(""); setSiteOrderPhone(""); setSiteOrderNiche(""); setSiteOrderComment(""); }} className="boris-btn-hover" style={{background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"12px 32px", fontWeight:700, cursor:"pointer"}}>Закрыть</button>
+                    <div className="boris-f2-d89f31f6be08">
+                      <div className="boris-f2-5a27f7cb1853">✅</div>
+                      <h3 className="boris-f2-698214a3705a">Заявка отправлена!</h3>
+                      <p className="boris-f2-2974d3ad2876">Свяжемся с вами в ближайшее время по указанному телефону.</p>
+                      <Button onClick={() => { setSiteOrderOpen(false); setSiteOrderDone(false); setSiteOrderName(""); setSiteOrderPhone(""); setSiteOrderNiche(""); setSiteOrderComment(""); }} className="boris-btn-hover boris-f2-faf2a05cf442">Закрыть</Button>
                     </div>
                   ) : (
                     <>
-                      <h3 style={{margin:"0 0 6px", fontSize:"22px", fontWeight:800, color:"#101828"}}>🚀 Заказать сайт</h3>
-                      <p style={{color:"#667085", margin:"0 0 20px", fontSize:"15px"}}>Оставьте контакты — рассчитаем стоимость под ваш бизнес и свяжемся с вами.</p>
-                      <div style={{display:"flex", flexDirection:"column", gap:"14px"}}>
+                      <h3 className="boris-f2-3484d2ea4ccf">🚀 Заказать сайт</h3>
+                      <p className="boris-f2-69cdbf8e4968">Оставьте контакты — рассчитаем стоимость под ваш бизнес и свяжемся с вами.</p>
+                      <div className="boris-f2-62c135d5726a">
                         <input value={siteOrderName} onChange={e => setSiteOrderName(e.target.value)} placeholder="Ваше имя" style={inputStyle} />
                         <input value={siteOrderPhone} onChange={e => setSiteOrderPhone(e.target.value)} placeholder="Телефон * (обязательно)" style={inputStyle} />
                         <input value={siteOrderNiche} onChange={e => setSiteOrderNiche(e.target.value)} placeholder="Сфера бизнеса (например: доставка цветов)" style={inputStyle} />
                         <textarea value={siteOrderComment} onChange={e => setSiteOrderComment(e.target.value)} placeholder="Комментарий, пожелания (необязательно)" rows={3} style={{...inputStyle, resize:"vertical" as any}} />
-                        <button onClick={submitSiteOrder} disabled={siteOrderSending} className="boris-btn-hover" style={{background: siteOrderSending ? "#E3E7F0" : "#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"14px", fontWeight:700, fontSize:"16px", cursor: siteOrderSending ? "default" : "pointer"}}>{siteOrderSending ? "⏳ Отправка..." : "Отправить заявку"}</button>
-                        <button onClick={() => setSiteOrderOpen(false)} style={{background:"transparent", color:"#98A2B3", border:"none", cursor:"pointer", fontSize:"14px"}}>Отмена</button>
+                        <Button onClick={submitSiteOrder} disabled={siteOrderSending} className="boris-btn-hover" style={{background: siteOrderSending ? "var(--boris-border)" : "var(--boris-blue)", color:"#fff", border:"none", borderRadius:"10px", padding:"14px", fontWeight:700, fontSize:"16px", cursor: siteOrderSending ? "default" : "pointer"}}>{siteOrderSending ? "⏳ Отправка..." : "Отправить заявку"}</Button>
+                        <Button onClick={() => setSiteOrderOpen(false)} className="boris-f2-bde5945dc016">Отмена</Button>
                       </div>
                     </>
                   )}
@@ -8429,12 +8700,12 @@ export default function Home() {
               @keyframes sb-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
             `}} />
             {sbLightbox && (
-              <div onClick={() => setSbLightbox(null)} style={{position:"fixed", inset:0, background:"rgba(10,14,20,0.93)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:5000, padding:"30px", overflow:"hidden"}}>
-                <button onClick={(e) => { e.stopPropagation(); setSbLightbox(null); }} style={{position:"absolute", top:"20px", right:"30px", background:"#fff", border:"none", color:"#101828", fontSize:"16px", fontWeight:700, cursor:"pointer", padding:"12px 24px", borderRadius:"24px", display:"flex", alignItems:"center", gap:"8px", zIndex:10, boxShadow:"0 4px 16px rgba(0,0,0,0.3)"}}>✕ Закрыть</button>
-                <div style={{position:"absolute", bottom:"24px", left:"50%", transform:"translateX(-50%)", display:"flex", gap:"12px", zIndex:10}}>
-                  <button onClick={(e) => { e.stopPropagation(); setSbZoom(z => Math.max(1, z - 0.25)); }} style={{background:"rgba(255,255,255,0.15)", border:"none", color:"#fff", fontSize:"24px", cursor:"pointer", width:"48px", height:"48px", borderRadius:"50%"}}>−</button>
-                  <button onClick={(e) => { e.stopPropagation(); setSbZoom(1); }} style={{background:"rgba(255,255,255,0.15)", border:"none", color:"#fff", fontSize:"13px", cursor:"pointer", height:"48px", borderRadius:"24px", padding:"0 18px"}}>{Math.round(sbZoom*100)}%</button>
-                  <button onClick={(e) => { e.stopPropagation(); setSbZoom(z => Math.min(4, z + 0.25)); }} style={{background:"rgba(255,255,255,0.15)", border:"none", color:"#fff", fontSize:"24px", cursor:"pointer", width:"48px", height:"48px", borderRadius:"50%"}}>+</button>
+              <div onClick={() => setSbLightbox(null)} className="boris-f2-f1f0aa143bfa">
+                <Button onClick={(e) => { e.stopPropagation(); setSbLightbox(null); }} className="boris-f2-f4a409c31038">✕ Закрыть</Button>
+                <div className="boris-f2-bb10a8cab478">
+                  <Button onClick={(e) => { e.stopPropagation(); setSbZoom(z => Math.max(1, z - 0.25)); }} className="boris-f2-63d3d950476f">−</Button>
+                  <Button onClick={(e) => { e.stopPropagation(); setSbZoom(1); }} className="boris-f2-428a1c183a05">{Math.round(sbZoom*100)}%</Button>
+                  <Button onClick={(e) => { e.stopPropagation(); setSbZoom(z => Math.min(4, z + 0.25)); }} className="boris-f2-63d3d950476f">+</Button>
                 </div>
                 <img src={sbLightbox} alt="Просмотр" onClick={e => e.stopPropagation()} onWheel={(e) => { e.stopPropagation(); setSbZoom(z => Math.min(4, Math.max(1, z - e.deltaY * 0.002))); }} style={{maxWidth:"92vw", maxHeight:"92vh", objectFit:"contain", borderRadius:"10px", boxShadow:"0 20px 60px rgba(0,0,0,0.5)", transform:`scale(${sbZoom})`, transition:"transform 0.15s", cursor: sbZoom > 1 ? "zoom-out" : "zoom-in"}} />
               </div>
@@ -8444,264 +8715,295 @@ export default function Home() {
         })()}
 
         {activeTab === "chatbots" && (
-          <div style={{background:"#F6F7FB", borderRadius:"12px", padding:"32px", border:"1px solid #EEF2FA"}}>
-            <h3 style={{margin:"0 0 8px", fontSize:"15px"}}>Чат-боты ИИ</h3>
-            <p style={{color:"#667085"}}>Скоро: чат-боты для соцсетей и мессенджеров на базе ИИ.</p>
+          <div className="boris-f2-779cd717b857">
+            <h3 className="boris-f2-92a3f3c23f8e">Чат-боты ИИ</h3>
+            <p className="boris-f2-de52905d633b">Скоро: чат-боты для соцсетей и мессенджеров на базе ИИ.</p>
           </div>
         )}
 
         {activeTab === "company" && (
-          <div className="b-panel b-card-eq" style={{width:"100%"}}>
-            <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #4C8DFF, #2F6FED)"}}>🏢</span>Информация о компании</h3>
-            <details style={{margin:"0 0 16px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Зачем это заполнять</summary><p style={{color:"#667085", fontSize:"15px", margin:"8px 0 0"}}>Борис берёт отсюда факты для текстов объявлений и ответов клиентам. Чем полнее заполнено — тем точнее результат и меньше выдумок.</p></details>
-            <div style={{marginBottom:"18px", padding:"16px 18px", background:"#F0F6FF", borderRadius:"12px", border:"1px solid #D5E4FB", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"12px", flexWrap:"wrap"}}>
+          <BorisCard className="b-panel b-card-eq boris-f2-cad980f4b707 boris-g1-card">
+            <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-3ab1bb33aea8 boris-g1-icon">🏢</span>Информация о компании</h3>
+            <details className="boris-f2-489e16440bc3"><summary className="boris-f2-c0e3ed53fc0c">Зачем это заполнять</summary><p className="boris-f2-183644454912">Борис берёт отсюда факты для текстов объявлений и ответов клиентам. Чем полнее заполнено — тем точнее результат и меньше выдумок.</p></details>
+            <div className="boris-f2-5d29161d2e34">
               <div>
-                <div style={{fontWeight:600, color:"#14161A", fontSize:"15px"}}>🧠 Научите Бориса про ваш бизнес</div>
-                <div style={{color:"#667085", fontSize:"13px", marginTop:"2px"}}>Доставка, гарантии, товары — Борис будет точнее отвечать вашим покупателям. Можно текстом или файлом.</div>
+                <div className="boris-f2-3217374ec54a">🧠 Научите Бориса про ваш бизнес</div>
+                <div className="boris-f2-a16cc290ede7">Доставка, гарантии, товары — Борис будет точнее отвечать вашим покупателям. Можно текстом или файлом.</div>
               </div>
-              <button onClick={() => kbOpenModal(currentAccount)} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"10px 18px", cursor:"pointer", fontSize:"14px", fontWeight:600, whiteSpace:"nowrap"}}>Обучить Бориса</button>
+              <Button onClick={() => kbOpenModal(currentAccount)} className="boris-f2-caaed2005b62">Обучить Бориса</Button>
             </div>
-            <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"18px", alignItems:"start"}}>
+            <div className="boris-f2-55c88de1e221">
               <div>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"6px"}}>Сайт</label>
+                <label className="boris-f2-f96c1ba7f13c">Сайт</label>
                 <input value={companyForm.website} onChange={e => setCompanyForm((p: any) => ({...p, website: e.target.value}))} placeholder="https://..." style={inputStyle} />
               </div>
               <div>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"6px"}}>Сфера</label>
+                <label className="boris-f2-f96c1ba7f13c">Сфера</label>
                 <input value={companyForm.niche} onChange={e => setCompanyForm((p: any) => ({...p, niche: e.target.value}))} placeholder="Например: шкафы-купе на заказ" style={inputStyle} />
               </div>
               <div>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"6px"}}>Описание</label>
+                <label className="boris-f2-f96c1ba7f13c">Описание</label>
                 <textarea value={companyForm.description} onChange={e => setCompanyForm((p: any) => ({...p, description: e.target.value}))} rows={4} style={{...inputStyle, resize:"vertical" as any}} />
-                <div style={{marginTop:"6px"}}>
-                  <button onClick={()=>pcCheck("descr","manager",companyForm.description)} style={{fontSize:"13px", fontWeight:600, color:"#5925DC", background:"#F4F3FF", border:"1px solid #D9D6FE", borderRadius:"8px", padding:"7px 12px", cursor:"pointer"}}>🧠 Проверить промт Борисом</button>
-                  {pcField==="descr" && pcLoading && <div style={{fontSize:"13px", color:"#667085", marginTop:"6px"}}>Борис читает…</div>}
+                <div className="boris-f2-2fd7789b397a">
+                  <Button onClick={()=>pcCheck("descr","manager",companyForm.description)} className="boris-f2-33bcb75c55f2">🧠 Проверить промт Борисом</Button>
+                  {pcField==="descr" && pcLoading && <div className="boris-f2-d4f2034c960f">Борис читает…</div>}
                   {pcField==="descr" && pcData && !pcLoading && (
-                    <div style={{marginTop:"8px", background:"#FCFAFF", border:"1px solid #E9D7FE", borderRadius:"10px", padding:"12px 14px"}}>
-                      <div style={{fontSize:"14px", color:"#1D2939", marginBottom:"6px"}}>{pcData.verdict}</div>
+                    <div className="boris-f2-54ac54c00c71">
+                      <div className="boris-f2-316f53899bf6">{pcData.verdict}</div>
                       {(pcData.issues||[]).map((it:any,i:number)=>(
-                        <div key={i} style={{fontSize:"13px", color:"#475467", marginBottom:"4px"}}>• <b>{it.problem}</b> — {it.fix}</div>
+                        <div key={i} className="boris-f2-206d5b50e31f">• <b>{it.problem}</b> — {it.fix}</div>
                       ))}
                       {pcData.improved && (
-                        <button onClick={()=>{ setCompanyForm((p:any)=>({...p, description: pcData.improved})); setPcData(null); }} style={{marginTop:"8px", fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor:"pointer"}}>✍️ Заменить на улучшенный</button>
+                        <Button onClick={()=>{ setCompanyForm((p:any)=>({...p, description: pcData.improved})); setPcData(null); }} className="boris-f2-a79b259c99b7">✍️ Заменить на улучшенный</Button>
                       )}
                     </div>
                   )}
                 </div>
               </div>
               <div>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"6px"}}>Преимущества</label>
+                <label className="boris-f2-f96c1ba7f13c">Преимущества</label>
                 <textarea value={companyForm.advantages} onChange={e => setCompanyForm((p: any) => ({...p, advantages: e.target.value}))} rows={3} style={{...inputStyle, resize:"vertical" as any}} />
-                <div style={{marginTop:"6px"}}>
-                  <button onClick={()=>pcCheck("adv","manager",companyForm.advantages)} style={{fontSize:"13px", fontWeight:600, color:"#5925DC", background:"#F4F3FF", border:"1px solid #D9D6FE", borderRadius:"8px", padding:"7px 12px", cursor:"pointer"}}>🧠 Проверить промт Борисом</button>
-                  {pcField==="adv" && pcLoading && <div style={{fontSize:"13px", color:"#667085", marginTop:"6px"}}>Борис читает…</div>}
+                <div className="boris-f2-2fd7789b397a">
+                  <Button onClick={()=>pcCheck("adv","manager",companyForm.advantages)} className="boris-f2-33bcb75c55f2">🧠 Проверить промт Борисом</Button>
+                  {pcField==="adv" && pcLoading && <div className="boris-f2-d4f2034c960f">Борис читает…</div>}
                   {pcField==="adv" && pcData && !pcLoading && (
-                    <div style={{marginTop:"8px", background:"#FCFAFF", border:"1px solid #E9D7FE", borderRadius:"10px", padding:"12px 14px"}}>
-                      <div style={{fontSize:"14px", color:"#1D2939", marginBottom:"6px"}}>{pcData.verdict}</div>
+                    <div className="boris-f2-54ac54c00c71">
+                      <div className="boris-f2-316f53899bf6">{pcData.verdict}</div>
                       {(pcData.issues||[]).map((it:any,i:number)=>(
-                        <div key={i} style={{fontSize:"13px", color:"#475467", marginBottom:"4px"}}>• <b>{it.problem}</b> — {it.fix}</div>
+                        <div key={i} className="boris-f2-206d5b50e31f">• <b>{it.problem}</b> — {it.fix}</div>
                       ))}
                       {pcData.improved && (
-                        <button onClick={()=>{ setCompanyForm((p:any)=>({...p, advantages: pcData.improved})); setPcData(null); }} style={{marginTop:"8px", fontSize:"13px", fontWeight:600, color:"#fff", background:"#7F56D9", border:"none", borderRadius:"8px", padding:"8px 14px", cursor:"pointer"}}>✍️ Заменить на улучшенный</button>
+                        <Button onClick={()=>{ setCompanyForm((p:any)=>({...p, advantages: pcData.improved})); setPcData(null); }} className="boris-f2-a79b259c99b7">✍️ Заменить на улучшенный</Button>
                       )}
                     </div>
                   )}
                 </div>
               </div>
-              <div style={{gridColumn:"1 / -1", display:"flex", gap:"16px", alignItems:"flex-end", flexWrap:"wrap", borderTop:"1px solid #EEF2FA", paddingTop:"18px", marginTop:"4px"}}>
-                <div style={{flex:"1 1 320px"}}>
-                  <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"6px"}}>Тон общения</label>
+              <div className="boris-f2-c5ead3da39ec">
+                <div className="boris-f2-7424a3f3fa00">
+                  <label className="boris-f2-f96c1ba7f13c">Тон общения</label>
                   <input value={companyForm.tone} onChange={e => setCompanyForm((p: any) => ({...p, tone: e.target.value}))} placeholder="Например: дружелюбный, деловой" style={inputStyle} />
                 </div>
-                <button className="boris-btn-hover" onClick={saveCompanyForm} disabled={companySaving} style={{background: companySaving ? "#E3E7F0" : "#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"0 28px", fontWeight:"bold", cursor: companySaving ? "default" : "pointer", whiteSpace:"nowrap", height:"46px", marginBottom:"1px"}}>
+                <Button className="boris-btn-hover" onClick={saveCompanyForm} disabled={companySaving} style={{background: companySaving ? "var(--boris-border)" : "var(--boris-blue)", color:"var(--boris-bg)", border:"none", borderRadius:"10px", padding:"0 28px", fontWeight:"bold", cursor: companySaving ? "default" : "pointer", whiteSpace:"nowrap", height:"46px", marginBottom:"1px"}}>
                   {companySaving ? "⏳ Сохраняю..." : "💾 Сохранить"}
-                </button>
-                {companySavedMsg && <div style={{color:"#12B76A", fontSize:"15px", fontWeight:600, alignSelf:"center"}}>{companySavedMsg}</div>}
+                </Button>
+                {companySavedMsg && <div className="boris-f2-ba3e6094ad37">{companySavedMsg}</div>}
+                {/* Файл сразу попадает в знания — отдельного «обучения» не требуется */}
+                <label style={{alignSelf:"center", color: kbFileBusy ? "var(--boris-text-3)" : "var(--boris-blue)", fontSize:"15px", fontWeight:600, cursor: kbFileBusy ? "default" : "pointer"}}>
+                  {kbFileBusy ? "Читаю файл…" : "📎 Загрузить файл (прайс, описание услуг)"}
+                  <input type="file" disabled={kbFileBusy}
+                    accept=".pdf,.docx,.xlsx,.xlsm,.txt,.md,.csv"
+                    onChange={async (e) => {
+                      const f = e.target.files && e.target.files[0];
+                      if (!f) return;
+                      setKbFileBusy(true); setKbFileMsg("");
+                      try {
+                        const fd = new FormData();
+                        fd.append("file", f);
+                        const r = await apiFetch(`/api/memory/upload_file?account_id=${encodeURIComponent(currentAccount)}`, { method: "POST", body: fd });
+                        const d = await r.json();
+                        const _kbOk = !!(d && d.status === "ok");
+                        setKbFileMsg(_kbOk ? ("✅ " + d.message) : ("⚠️ " + ((d && d.message) || "Не удалось прочитать файл")));
+                        if (_kbOk) { try { window.dispatchEvent(new Event("boris:data-changed")); } catch {} }
+                      } catch { setKbFileMsg("⚠️ Не удалось загрузить файл"); }
+                      setKbFileBusy(false);
+                      e.target.value = "";
+                    }}  className="boris-f2-c8be1ccba60b"/>
+                </label>
+                {kbFileMsg && <div style={{color: kbFileMsg.startsWith("✅") ? "#12B76A" : "#B54708", fontSize:"14px", alignSelf:"center"}}>{kbFileMsg}</div>}
               </div>
             </div>
-          </div>
+          </BorisCard>
         )}
 
         {activeTab === "settings" && (
-          <div className="b-panel">
-            <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#7C5CFC,#5B3FD9)"}}>🛡</span>Автопилот и безопасность</h3>
-            <div className="b-meta" style={{marginTop:"4px"}}>Борис сам управляет ставками и продвижением по вашим правилам — вы задаёте рамки, он работает круглосуточно. Здесь же лимиты и защита от лишних трат.</div>
-            <details style={{margin:"0 0 16px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Подробнее о подтверждениях</summary><p style={{color:"#667085", fontSize:"15px", margin:"8px 0 0"}}>Управляйте тем, когда Борису можно менять объявления на Авито без вашего подтверждения. По умолчанию — всегда спрашивать.</p></details>
+          <BorisCard className="b-panel boris-g1-card">
+            <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-042ef8607ebd boris-g1-icon">🛡</span>Автопилот и безопасность</h3>
+            <div className="b-meta boris-f2-a3a5568692be">Борис сам управляет ставками и продвижением по вашим правилам — вы задаёте рамки, он работает круглосуточно. Здесь же лимиты и защита от лишних трат.</div>
+            <details className="boris-f2-489e16440bc3"><summary className="boris-f2-c0e3ed53fc0c">Подробнее о подтверждениях</summary><p className="boris-f2-183644454912">Управляйте тем, когда Борису можно менять объявления на Авито без вашего подтверждения. По умолчанию — всегда спрашивать.</p></details>
 
-            <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(250px, 1fr))", gap:"16px", marginBottom:"26px"}}>
-              <div className="b-card b-stat" style={{animationDelay:"0s", minHeight:"116px"}}>
-                <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#7C5CFC,#5B3FD9)"}}>🛡</span>
+            <div className="boris-f2-9e1236020ccc">
+              <BorisCard className="b-card b-stat boris-f2-8319cc73dc84">
+                <span className="b-stat-ico boris-f2-042ef8607ebd boris-g1-card">🛡</span>
                 <div>
-                  <div className="b-meta" style={{fontWeight:700, color:"#98A2B3", textTransform:"uppercase", letterSpacing:"0.06em", fontSize:"11px", marginBottom:"5px"}}>Режим автопилота</div>
-                  <div style={{fontSize:"20px", fontWeight:800, color:"#2F6FED", lineHeight:1.2}}>{autopilotMode==="always_auto" ? "Работает сам" : autopilotMode==="dates" ? "Сам по датам" : "Спрашивает каждый раз"}</div>
+                  <div className="b-meta boris-f2-3320a6b66c6f">Режим автопилота</div>
+                  <div className="boris-f2-cbb8ee99b11f">{autopilotMode==="goal_auto" ? "Автопилот по цели" : autopilotMode==="always_auto" ? "Работает сам" : autopilotMode==="dates" ? "Сам по датам" : "Спрашивает каждый раз"}</div>
                 </div>
-              </div>
-              <div className="b-card b-stat" style={{animationDelay:"0.11s", minHeight:"116px"}}>
-                <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#4C8DFF,#2F6FED)"}}>📋</span>
+              </BorisCard>
+              <BorisCard className="b-card b-stat boris-f2-50f4e355286a">
+                <span className="b-stat-ico boris-f2-79a4d50add5b boris-g1-card">📋</span>
                 <div>
-                  <div className="b-meta" style={{fontWeight:700, color:"#98A2B3", textTransform:"uppercase", letterSpacing:"0.06em", fontSize:"11px", marginBottom:"4px"}}>Записей в журнале</div>
-                  <div className="b-stat-num"><CountUp to={auditLog.length} delay={110} /></div>
+                  <div className="b-meta boris-f2-870773467861">Записей в журнале</div>
+                  <BorisCard className="b-stat-num boris-g1-card"><CountUp to={auditLog.length} delay={110} /></BorisCard>
                 </div>
-              </div>
-              <div className="b-card b-stat" style={{animationDelay:"0.22s", minHeight:"116px"}}>
-                <span className="b-stat-ico" style={{background: republishCandidates.length > 0 ? "linear-gradient(135deg,#FDB022,#F79009)" : "linear-gradient(135deg,#98A2B3,#667085)"}}>🔄</span>
+              </BorisCard>
+              <BorisCard className="b-card b-stat boris-f2-0bd0caea1f4c">
+                <span className="b-stat-ico boris-g1-card boris-g1-icon" style={{background: republishCandidates.length > 0 ? "linear-gradient(135deg,#FDB022,#F79009)" : "linear-gradient(135deg,var(--boris-text-3),var(--boris-text-2))"}}>🔄</span>
                 <div>
-                  <div className="b-meta" style={{fontWeight:700, color:"#98A2B3", textTransform:"uppercase", letterSpacing:"0.06em", fontSize:"11px", marginBottom:"4px"}}>Кандидатов на переустановку</div>
-                  <div className="b-stat-num"><CountUp to={republishCandidates.length} delay={220} /></div>
+                  <div className="b-meta boris-f2-870773467861">Кандидатов на переустановку</div>
+                  <BorisCard className="b-stat-num boris-g1-card"><CountUp to={republishCandidates.length} delay={220} /></BorisCard>
                 </div>
-              </div>
+              </BorisCard>
             </div>
 
-            <div style={{marginBottom:"20px"}}>
-              <label className="b-label" style={{marginBottom:"12px", fontSize:"15px"}}>⚙️ Режим работы Бориса</label>
-              <div style={{display:"flex", flexDirection:"column", gap:"12px"}}>
-                <label className="b-card b-fcard" style={{display:"flex", flexDirection:"row", alignItems:"center", textAlign:"left", gap:"16px", cursor:"pointer", padding:"20px 22px", background: autopilotMode==="always_ask" ? "#E7EFFE" : "#FFFFFF", borderColor: autopilotMode==="always_ask" ? "#2F6FED" : "#E3E7F0", animationDelay:"0.05s"}}>
-                  <input type="radio" checked={autopilotMode==="always_ask"} onChange={() => setAutopilotMode("always_ask")} style={{width:"18px", height:"18px", accentColor:"#2F6FED", cursor:"pointer", flexShrink:0}} />
-                  <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#3DBE93,#12805C)"}}>🔒</span>
-                  <div style={{minWidth:0}}>
-                    <div style={{fontWeight:700, fontSize:"16px", color: autopilotMode==="always_ask" ? "#2F6FED" : "#1D2939", marginBottom:"3px"}}>Спрашивать каждый раз (рекомендуется)</div>
-                    <div className="b-meta" style={{whiteSpace:"normal", lineHeight:1.45}}>Борис показывает что хочет изменить и ждёт вашего «да»</div>
+            <div className="boris-f2-7dde5e56b3f3">
+              <label className="b-label boris-f2-51142c356773">⚙️ Режим работы Бориса</label>
+              <div className="boris-f2-2e1ca338d758">
+                <label className="b-card b-fcard" style={{display:"flex", flexDirection:"row", alignItems:"center", textAlign:"left", gap:"16px", cursor:"pointer", padding:"20px 22px", background: autopilotMode==="always_ask" ? "var(--boris-blue-soft)" : "var(--boris-surface)", borderColor: autopilotMode==="always_ask" ? "var(--boris-blue)" : "var(--boris-border)", animationDelay:"0.05s"}}>
+                  <input type="radio" checked={autopilotMode==="always_ask"} onChange={() => setAutopilotMode("always_ask")}  className="boris-f2-206845fbafed"/>
+                  <span className="b-stat-ico boris-f2-9b8b21123da7 boris-g1-card">🔒</span>
+                  <div className="boris-f2-367da999e5a7">
+                    <div style={{fontWeight:700, fontSize:"16px", color: autopilotMode==="always_ask" ? "var(--boris-blue)" : "var(--boris-text)", marginBottom:"3px"}}>Спрашивать каждый раз (рекомендуется)</div>
+                    <div className="b-meta boris-f2-e733f75bdd61">Борис показывает что хочет изменить и ждёт вашего «да»</div>
                   </div>
                 </label>
-                <label className="b-card b-fcard" style={{display:"flex", flexDirection:"row", alignItems:"center", textAlign:"left", gap:"16px", cursor:"pointer", padding:"20px 22px", background: autopilotMode==="always_auto" ? "#E7EFFE" : "#FFFFFF", borderColor: autopilotMode==="always_auto" ? "#2F6FED" : "#E3E7F0", animationDelay:"0.10s"}}>
-                  <input type="radio" checked={autopilotMode==="always_auto"} onChange={() => setAutopilotMode("always_auto")} style={{width:"18px", height:"18px", accentColor:"#2F6FED", cursor:"pointer", flexShrink:0}} />
-                  <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#FDB022,#F79009)"}}>⚡</span>
-                  <div style={{minWidth:0}}>
-                    <div style={{fontWeight:700, fontSize:"16px", color: autopilotMode==="always_auto" ? "#2F6FED" : "#1D2939", marginBottom:"3px"}}>Работать сам всегда</div>
-                    <div className="b-meta" style={{whiteSpace:"normal", lineHeight:1.45}}>Борис действует сам, без подтверждений. Включает также почасовую корректировку ставок в разделе «Советник».</div>
+                <label className="b-card b-fcard" style={{display:"flex", flexDirection:"row", alignItems:"center", textAlign:"left", gap:"16px", cursor:"pointer", padding:"20px 22px", background: autopilotMode==="always_auto" ? "var(--boris-blue-soft)" : "var(--boris-surface)", borderColor: autopilotMode==="always_auto" ? "var(--boris-blue)" : "var(--boris-border)", animationDelay:"0.10s"}}>
+                  <input type="radio" checked={autopilotMode==="always_auto"} onChange={() => setAutopilotMode("always_auto")}  className="boris-f2-206845fbafed"/>
+                  <span className="b-stat-ico boris-f2-d168238a51aa boris-g1-card">⚡</span>
+                  <div className="boris-f2-367da999e5a7">
+                    <div style={{fontWeight:700, fontSize:"16px", color: autopilotMode==="always_auto" ? "var(--boris-blue)" : "var(--boris-text)", marginBottom:"3px"}}>Работать сам всегда</div>
+                    <div className="b-meta boris-f2-e733f75bdd61">Борис действует сам, без подтверждений. Включает также почасовую корректировку ставок в разделе «Советник».</div>
                   </div>
                 </label>
-                <label className="b-card b-fcard" style={{display:"flex", flexDirection:"row", alignItems:"center", textAlign:"left", gap:"16px", cursor:"pointer", padding:"20px 22px", background: autopilotMode==="dates" ? "#E7EFFE" : "#FFFFFF", borderColor: autopilotMode==="dates" ? "#2F6FED" : "#E3E7F0", animationDelay:"0.15s"}}>
-                  <input type="radio" checked={autopilotMode==="dates"} onChange={() => setAutopilotMode("dates")} style={{width:"18px", height:"18px", accentColor:"#2F6FED", cursor:"pointer", flexShrink:0}} />
-                  <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#4C8DFF,#2F6FED)"}}>🏖</span>
-                  <div style={{minWidth:0}}>
-                    <div style={{fontWeight:700, fontSize:"16px", color: autopilotMode==="dates" ? "#2F6FED" : "#1D2939", marginBottom:"3px"}}>Работать сам только в отпуске</div>
-                    <div className="b-meta" style={{whiteSpace:"normal", lineHeight:1.45}}>Борис действует сам только в выбранные даты</div>
+                <label className="b-card b-fcard" style={{display:"flex", flexDirection:"row", alignItems:"center", textAlign:"left", gap:"16px", cursor:"pointer", padding:"20px 22px", background: autopilotMode==="goal_auto" ? "var(--boris-blue-soft)" : "var(--boris-surface)", borderColor: autopilotMode==="goal_auto" ? "var(--boris-blue)" : "var(--boris-border)", animationDelay:"0.15s"}}>
+                  <input type="radio" checked={autopilotMode==="goal_auto"} onChange={() => setAutopilotMode("goal_auto")} className="boris-f2-206845fbafed"/>
+                  <span className="b-stat-ico boris-g1-card boris-g1-icon">🎯</span>
+                  <div className="boris-f2-367da999e5a7">
+                    <div style={{fontWeight:700, fontSize:"16px", color: autopilotMode==="goal_auto" ? "var(--boris-blue)" : "var(--boris-text)", marginBottom:"3px"}}>Автопилот по цели</div>
+                    <div className="b-meta boris-f2-e733f75bdd61">Борис самостоятельно оптимизирует рекламу к вашему индивидуальной цели. Действия выполняются только в разрешённых рамках и сохраняются в журнале.</div>
+                  </div>
+                </label>
+                <label className="b-card b-fcard" style={{display:"flex", flexDirection:"row", alignItems:"center", textAlign:"left", gap:"16px", cursor:"pointer", padding:"20px 22px", background: autopilotMode==="dates" ? "var(--boris-blue-soft)" : "var(--boris-surface)", borderColor: autopilotMode==="dates" ? "var(--boris-blue)" : "var(--boris-border)", animationDelay:"0.20s"}}>
+                  <input type="radio" checked={autopilotMode==="dates"} onChange={() => setAutopilotMode("dates")}  className="boris-f2-206845fbafed"/>
+                  <span className="b-stat-ico boris-f2-79a4d50add5b boris-g1-card">🏖</span>
+                  <div className="boris-f2-367da999e5a7">
+                    <div style={{fontWeight:700, fontSize:"16px", color: autopilotMode==="dates" ? "var(--boris-blue)" : "var(--boris-text)", marginBottom:"3px"}}>Работать сам только в отпуске</div>
+                    <div className="b-meta boris-f2-e733f75bdd61">Борис действует сам только в выбранные даты</div>
                   </div>
                 </label>
               </div>
             </div>
 
             {autopilotMode==="dates" && (
-              <div style={{display:"flex", gap:"12px", marginBottom:"20px"}}>
-                <div style={{flex:1}}><label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"6px"}}>С</label><input type="date" value={autopilotFrom} onChange={e => setAutopilotFrom(e.target.value)} style={inputStyle} /></div>
-                <div style={{flex:1}}><label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"6px"}}>По</label><input type="date" value={autopilotTo} onChange={e => setAutopilotTo(e.target.value)} style={inputStyle} /></div>
+              <div className="boris-f2-59bbd8603ce8">
+                <div className="boris-f2-7623f0554520"><label className="boris-f2-f96c1ba7f13c">С</label><input type="date" value={autopilotFrom} onChange={e => setAutopilotFrom(e.target.value)} style={inputStyle} /></div>
+                <div className="boris-f2-7623f0554520"><label className="boris-f2-f96c1ba7f13c">По</label><input type="date" value={autopilotTo} onChange={e => setAutopilotTo(e.target.value)} style={inputStyle} /></div>
               </div>
             )}
 
-            <button className="boris-btn-hover" onClick={saveAutopilot} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"12px 24px", fontWeight:"bold", cursor:"pointer", marginBottom:"32px"}}>Сохранить настройки</button>
+            <Button className="boris-btn-hover boris-f2-eb831a6b609c" onClick={saveAutopilot}>Сохранить настройки</Button>
 
-            <div style={{borderTop:"1px solid #EEF2FA", paddingTop:"24px"}}>
-              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"16px"}}>
-                <h4 style={{margin:0, fontSize:"15px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#4C8DFF,#2F6FED)", width:"30px", height:"30px", fontSize:"15px", display:"inline-flex", alignItems:"center", justifyContent:"center", borderRadius:"50%", flexShrink:0}}>📋</span>Журнал действий Бориса</h4>
-                <button className="boris-btn-hover" onClick={loadAuditLog} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"8px 16px", cursor:"pointer", fontSize:"15px"}}>Обновить</button>
+            <div className="boris-f2-1f29d3e4bfb9">
+              <div className="boris-f2-bcbb844d17df">
+                <h4 className="boris-f2-5a9a6dee1167"><span className="b-icon-sm boris-f2-ac305422ad3b boris-g1-icon">📋</span>Журнал действий Бориса</h4>
+                <Button className="boris-btn-hover boris-f2-3b07920a9828" onClick={loadAuditLog}>Обновить</Button>
               </div>
               {auditLog.length === 0 ? (
-                <p style={{color:"#667085", fontSize:"15px"}}>Пока нет записей. Здесь появятся все действия Бориса с объявлениями.</p>
+                <p className="boris-f2-96046ead62a3">Пока нет записей. Здесь появятся все действия Бориса с объявлениями.</p>
               ) : (
-                <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+                <div className="boris-f2-f67b86e0fb4c">
                   {auditLog.map((e: any, i: number) => (
-                    <div key={i} className="boris-card-hover" style={{background:"#FFFFFF", borderRadius:"10px", padding:"12px 14px", fontSize:"15px", border:"1px solid #EEF2FA", boxShadow:"0 1px 3px rgba(16,24,40,0.05)"}}>
-                      <div style={{display:"flex", justifyContent:"space-between", color:"#667085", fontSize:"15px", marginBottom:"5px"}}>
+                    <BorisCard key={i} className="boris-card-hover boris-f2-94d805126c48 boris-g1-card">
+                      <div className="boris-f2-cb5e98f99778">
                         <span>{e.who || (e.actor === "user" ? "👤 Вы" : e.actor === "director" ? "👑 Директор" : "Борис")}</span>
-                        <span style={{fontFamily:"monospace"}}>{(e.ts || "").replace("T", " ")}</span>
+                        <span className="boris-f2-8ff99612674d">{(e.ts || "").replace("T", " ")}</span>
                       </div>
-                      <div style={{color:"#1D2939"}}>{e.human ? e.human.replace(/^(👤 Вы|Борис|👑 Директор)\s*/, "") : (<><b>{e.action}</b>{e.details ? ` — ${e.details}` : ""}</>)}</div>
-                    </div>
+                      <div className="boris-f2-012919a7cda4">{e.human ? e.human.replace(/^(👤 Вы|Борис|👑 Директор)\s*/, "") : (<><b>{e.action}</b>{e.details ? ` — ${e.details}` : ""}</>)}</div>
+                    </BorisCard>
                   ))}
                 </div>
               )}
 
                           </div>
-          </div>
+          </BorisCard>
         )}
 
         {activeTab === "billing" && (
-          <div className="b-panel">
-            <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #32D583, #12805C)"}}>💳</span>Лимиты подписки</h3>
+          <BorisCard className="b-panel boris-g1-card">
+            <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-681bd3569745 boris-g1-icon">💳</span>Лимиты подписки</h3>
             {!billingData ? (
-              <p style={{color:"#667085", fontSize:"15px"}}>Загрузка…</p>
+              <p className="boris-f2-96046ead62a3">Загрузка…</p>
             ) : (
               <>
-                <div className="b-card b-stat" style={{marginBottom:"20px", animationDelay:"0s", minHeight:"130px", background: billingData.tier === "none" ? "#FFFFFF" : "linear-gradient(135deg,#F2FBF7,#FFFFFF)"}}>
-                  <span className="b-stat-ico" style={{background: billingData.tier === "none" ? "linear-gradient(135deg,#98A2B3,#667085)" : "linear-gradient(135deg,#3DBE93,#12805C)"}}>{billingData.tier === "none" ? "🔒" : "⭐"}</span>
+                <BorisCard className="b-card b-stat boris-g1-card" style={{marginBottom:"20px", animationDelay:"0s", minHeight:"130px", background: billingData.tier === "none" ? "var(--boris-surface)" : "linear-gradient(135deg,#F2FBF7,var(--boris-surface))"}}>
+                  <span className="b-stat-ico boris-g1-card boris-g1-icon" style={{background: billingData.tier === "none" ? "linear-gradient(135deg,var(--boris-text-3),var(--boris-text-2))" : "linear-gradient(135deg,#3DBE93,#12805C)"}}>{billingData.tier === "none" ? "🔒" : "⭐"}</span>
                   <div>
-                    <div className="b-meta" style={{fontWeight:700, color:"#98A2B3", textTransform:"uppercase", letterSpacing:"0.06em", fontSize:"11px", marginBottom:"3px"}}>Ваш тариф</div>
-                    <div style={{fontSize:"22px", fontWeight:800, color:"#1D2939", lineHeight:1.15}}>{billingData.tier_name}</div>
-                    <div className="b-meta" style={{marginTop:"4px"}}>
+                    <div className="b-meta boris-f2-4f4237238fab">Ваш тариф</div>
+                    <div className="boris-f2-ae00af9646ad">{billingData.tier_name}</div>
+                    <div className="b-meta boris-f2-a3a5568692be">
                       {billingData.tier === "none" ? "Тариф не подключён" : `До обновления лимитов: ${billingData.days_left} дн.`}
                     </div>
                   </div>
-                </div>
+                </BorisCard>
 
-                <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"18px", alignItems:"stretch"}}>
+                <div className="boris-f2-ef110a887bf9">
                   {Object.entries(billingData.usage || {}).map(([unit, info]: [string, any], idx: number) => {
                     const pct = info.limit > 0 ? Math.min(100, Math.round(info.used / info.limit * 100)) : (info.used > 0 ? 100 : 0);
                     const bar = pct >= 100 ? "linear-gradient(90deg,#F97066,#F04438)" : pct >= 80 ? "linear-gradient(90deg,#FDB022,#F79009)" : "linear-gradient(90deg,#3DBE93,#12805C)";
                     const ico: any = { listings: "📋", banners: "🎨", templates: "📝", images: "🖼" };
-                    const grd: any = { listings: "linear-gradient(135deg,#4C8DFF,#2F6FED)", banners: "linear-gradient(135deg,#F06AA8,#D93D86)", templates: "linear-gradient(135deg,#7C5CFC,#5B3FD9)", images: "linear-gradient(135deg,#F7A440,#E8850B)" };
+                    const grd: any = { listings: "linear-gradient(135deg,var(--boris-blue),var(--boris-blue))", banners: "linear-gradient(135deg,#F06AA8,#D93D86)", templates: "linear-gradient(135deg,#7C5CFC,#5B3FD9)", images: "linear-gradient(135deg,#F7A440,#E8850B)" };
                     return (
-                      <div key={unit} className="b-card b-stat" style={{flexDirection:"column", alignItems:"stretch", justifyContent:"center", gap:"16px", animationDelay:`${0.08 + idx * 0.09}s`, minHeight:"150px", padding:"24px 26px"}}>
-                        <div style={{display:"flex", alignItems:"center", gap:"16px"}}>
-                          <span className="b-stat-ico" style={{background: grd[unit] || "linear-gradient(135deg,#98A2B3,#667085)"}}>{ico[unit] || "📦"}</span>
-                          <div style={{flex:1, minWidth:0}}>
-                            <div style={{color:"#1D2939", fontWeight:700, fontSize:"17px", textTransform:"capitalize"}}>{info.name}</div>
-                            <div className="b-meta" style={{marginTop:"3px", fontSize:"13px"}}>{info.limit > 0 ? `${info.used} из ${info.limit}` : "лимит не задан"}</div>
+                      <BorisCard key={unit} className="b-card b-stat boris-g1-card" style={{flexDirection:"column", alignItems:"stretch", justifyContent:"center", gap:"16px", animationDelay:`${0.08 + idx * 0.09}s`, minHeight:"150px", padding:"24px 26px"}}>
+                        <div className="boris-f2-f62967eb81d6">
+                          <span className="b-stat-ico boris-g1-card boris-g1-icon" style={{background: grd[unit] || "linear-gradient(135deg,var(--boris-text-3),var(--boris-text-2))"}}>{ico[unit] || "📦"}</span>
+                          <div className="boris-f2-a07604d33451">
+                            <div className="boris-f2-b55f53653e78">{info.name}</div>
+                            <div className="b-meta boris-f2-549f4a948597">{info.limit > 0 ? `${info.used} из ${info.limit}` : "лимит не задан"}</div>
                           </div>
                           <div style={{fontSize:"26px", fontWeight:800, color: pct >= 100 ? "#F04438" : pct >= 80 ? "#F79009" : "#12805C"}}>{info.limit > 0 ? `${pct}%` : "—"}</div>
                         </div>
-                        <div style={{background:"#EEF2FA", borderRadius:"999px", height:"10px", overflow:"hidden"}}>
+                        <div className="boris-f2-e4ab95f32875">
                           <div style={{width:`${pct}%`, height:"100%", background: bar, borderRadius:"999px", transition:"width 1s cubic-bezier(.22,1,.36,1)", transitionDelay:`${0.2 + idx * 0.09}s`}} />
                         </div>
-                      </div>
+                      </BorisCard>
                     );
                   })}
                 </div>
 
                 {billingData.tier === "none" && (
-                  <div className="b-card" style={{marginTop:"20px", display:"flex", alignItems:"center", gap:"14px", padding:"18px 20px", background:"#FFFBFA", borderColor:"#FECDCA"}}>
-                    <span className="b-stat-ico" style={{background:"linear-gradient(135deg,#F97066,#F04438)", width:"42px", height:"42px", fontSize:"20px"}}>🔔</span>
+                  <BorisCard className="b-card boris-f2-8226c724ed0f">
+                    <span className="b-stat-ico boris-f2-29d4aef36f63 boris-g1-card">🔔</span>
                     <div>
-                      <div style={{color:"#B42318", fontWeight:700, fontSize:"14px", marginBottom:"2px"}}>Тариф не подключён</div>
-                      <div className="b-meta" style={{whiteSpace:"normal", color:"#98A2B3"}}>Борис пока не может создавать объявления и баннеры. Обратитесь для подключения тарифа.</div>
+                      <div className="boris-f2-f9af1ab50602">Тариф не подключён</div>
+                      <div className="b-meta boris-f2-8c680f25d6e7">Борис пока не может создавать объявления и баннеры. Обратитесь для подключения тарифа.</div>
                     </div>
-                  </div>
+                  </BorisCard>
                 )}
               </>
             )}
-          </div>
+          </BorisCard>
         )}
 
         {activeTab === "plan" && (
-          <div style={{width:"100%", display:"flex", flexDirection:"column", gap:"20px"}}>
-            {planItems.length === 0 && (<div style={{background:"linear-gradient(135deg,#EAF3FF,#F6F7FB)", border:"1px solid #C7DDFF", borderRadius:"14px", padding:"18px 20px", marginBottom:"20px", display:"flex", alignItems:"center", gap:"16px", flexWrap:"wrap"}}><div style={{flex:1, minWidth:"200px"}}><div style={{fontWeight:800, fontSize:"17px", color:"#14161A"}}>С чего начать</div><div style={{color:"#667085", fontSize:"14px", marginTop:"3px"}}>Задач пока нет. Борис создаст их сам, когда вы запустите рекламу.</div></div><button className="boris-btn-hover" onClick={() => setActiveTab("listings")} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"14px 26px", fontSize:"16px", fontWeight:700, cursor:"pointer", whiteSpace:"nowrap"}}>Запустить рекламу</button></div>)}
+          <div className="boris-f2-0a95cb90e637">
+            {planItems.length === 0 && (<div className="boris-f2-e0ebb78c5274"><div className="boris-f2-fa67ab694c2a"><div className="boris-f2-e59f0f96c3e5">С чего начать</div><div className="boris-f2-cb57d9bd0ff7">Задач пока нет. Борис создаст их сам, когда вы запустите рекламу.</div></div><Button className="boris-btn-hover boris-f2-faac849ef21d" onClick={() => setActiveTab("listings")}>Запустить рекламу</Button></div>)}
             {/* БЛОК: задачи в очереди по аккаунту со статусами */}
-            <div className="b-panel b-card-eq account-tasks-block" style={{width:"100%"}}>
-              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"14px"}}>
-                <h3 className="b-title" style={{margin:0, display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #3DBE93, #12805C)"}}>⚙️</span>Что Борис делает прямо сейчас</h3>
-                <span style={{fontSize:"13px", color:"#8A93A6"}}>
+            <BorisCard className="b-panel b-card-eq account-tasks-block boris-f2-cad980f4b707 boris-g1-card">
+              <div className="boris-f2-a794b88522b7">
+                <h3 className="b-title boris-f2-ea8ce7c7e635"><span className="b-icon-sm boris-f2-18a679d87ff3 boris-g1-icon">⚙️</span>Что Борис делает прямо сейчас</h3>
+                <span className="boris-f2-0e36be9f6646">
                   🟡 {accountTasks.filter(t => t.status === "queued").length} в очереди · 🔵 {accountTasks.filter(t => t.status === "running").length} выполняется · ✅ {accountTasks.filter(t => t.status === "done").length} готово
                 </span>
               </div>
               {accountTasks.length === 0 ? (
-                <p style={{color:"#667085", fontSize:"14px", textAlign:"center", padding:"12px"}}>Пока нет задач в очереди по этому аккаунту</p>
+                <p className="boris-f2-19be9ae6188a">Пока нет задач в очереди по этому аккаунту</p>
               ) : (
-                <div style={{display:"flex", flexDirection:"column", gap:"8px", maxHeight:"320px", overflowY:"auto"}}>
+                <div className="boris-f2-315be772b3b9">
                   {accountTasks.map(t => {
                     const st = t.status === "queued" ? {icon:"🟡", label:"В очереди", color:"#E08A2C"}
-                             : t.status === "running" ? {icon:"🔵", label:"Выполняется", color:"#2F6FED"}
+                             : t.status === "running" ? {icon:"🔵", label:"Выполняется", color:"var(--boris-blue)"}
                              : t.status === "done" ? {icon:"✅", label:"Готово", color:"#1E8E5A"}
                              : t.status === "error" ? {icon:"❌", label:"Ошибка", color:"#D64545"}
-                             : {icon:"⚪", label:t.status, color:"#8A93A6"};
+                             : {icon:"⚪", label:humanizeBusinessText(t.status,"Состояние уточняется"), color:"var(--boris-text-3)"};
                     const typeLabels: Record<string, string> = {generate_images:"Генерация картинок", city_analysis:"Анализ конкурентов", report_back:"Отчёт Бориса", ab_test:"A/B тест", avito_categories_sync:"Синхронизация категорий", execute_plan_subtask:"Выполнение плана", enrich_descriptions:"Улучшение описаний", parse_site:"Выгрузка товаров с сайта", product_description:"Написание описания товара", product_banner:"Создание баннера", fetch_all_galleries:"Загрузка фото товаров", generate_ads:"Создание объявлений", feed_generate:"Сборка фида для Avito"};
-                    const typeLabel = typeLabels[t.task_type] || t.task_type;
+                    const typeLabel = typeLabels[t.task_type] || humanizeBusinessText(t.task_type,"Задача BORIS");
                     return (
                       <div key={t.id} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 14px", background:"#F9FBFF", borderRadius:"8px", borderLeft:`3px solid ${st.color}`}}>
-                        <div style={{display:"flex", alignItems:"center", gap:"10px"}}>
-                          <span style={{fontSize:"16px"}}>{st.icon}</span>
+                        <div className="boris-f2-7e30d285d288">
+                          <span className="boris-f2-6c28d08961ad">{st.icon}</span>
                           <div>
-                            <div style={{fontSize:"14px", fontWeight:600, color:"#14161A"}}>{typeLabel}</div>
-                            <div style={{fontSize:"12px", color:"#8A93A6"}}>№{t.id} · {new Date(t.created_at).toLocaleString("ru-RU", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"})}</div>
+                            <div className="boris-f2-29be9e0cb513">{typeLabel}</div>
+                            <div className="boris-f2-b68dda3a3439">№{t.id} · {new Date(t.created_at).toLocaleString("ru-RU", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"})}</div>
                           </div>
                         </div>
                         <span style={{fontSize:"13px", fontWeight:600, color:st.color}}>{st.label}</span>
@@ -8710,44 +9012,44 @@ export default function Home() {
                   })}
                 </div>
               )}
-            </div>
+            </BorisCard>
 
-            <div className="b-panel b-card-eq" style={{width:"100%"}}>
-              <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg, #3DBE93, #12805C)"}}>✅</span>Задачи и план</h3>
+            <BorisCard className="b-panel b-card-eq boris-f2-cad980f4b707 boris-g1-card">
+              <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-18a679d87ff3 boris-g1-icon">✅</span>Задачи и план</h3>
               <p className="b-sub">Список задач по этому аккаунту — вносите вручную или Борис фиксирует сам при выполнении оркестратором.</p>
 
-            <div style={{display:"flex", gap:"10px", marginBottom:"20px"}}>
+            <div className="boris-f2-f67e6e3ba330">
               <textarea value={newPlanItemText} onChange={e => setNewPlanItemText(e.target.value)} placeholder="Новая задача..." rows={2} style={{...inputStyle, flex:1, resize:"vertical", minHeight:"44px", fontFamily:"inherit", fontSize:"15px"}} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addPlanItem(); } }} />
-              <button className="boris-btn-hover" onClick={addPlanItem} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"11px 18px", fontWeight:"bold", cursor:"pointer", whiteSpace:"nowrap", fontSize:"15px"}}>+ Добавить</button>
+              <Button className="boris-btn-hover boris-f2-4cd9c549f6d6" onClick={addPlanItem}>+ Добавить</Button>
             </div>
 
-            <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+            <div className="boris-f2-f67b86e0fb4c">
               {planItems.map((item: any) => (
-                <div key={item.id} className="b-task-row" style={{display:"flex", alignItems:"flex-start", gap:"14px"}}>
-                  <select className="b-select" value={item.status} onChange={e => updatePlanItemStatus(item.id, e.target.value)} style={{background:"#EEF2FA", color:"#1D2939", border:"1px solid #E3E7F0", borderRadius:"6px", padding:"6px 8px", fontSize:"15px"}}>
+                <div key={item.id} className="b-task-row boris-f2-9e4d4bf15c39">
+                  <select className="b-select boris-f2-246b48efe2ef" value={item.status} onChange={e => updatePlanItemStatus(item.id, e.target.value)}>
                     <option value="planned">📋 Запланировано</option>
                     <option value="needs_launch">🚀 Требует запуска</option>
                     <option value="in_progress">⏳ В процессе</option>
                     <option value="done">✅ Сделано</option>
                     <option value="cancelled">❌ Отменено</option>
                   </select>
-                  <div style={{flex:1}}>
-                    <div style={{color:"#1D2939", fontSize:"15px", lineHeight:"1.6", textDecoration: item.status === "cancelled" ? "line-through" : "none", opacity: item.status === "done" ? 0.6 : 1}}>{item.text}</div>
-                    <div style={{color:"#8A93A6", fontSize:"15px", marginTop:"4px"}}>{item.source === "boris" ? "Борис" : "👤 Вручную"}{item.due_date ? ` · до ${item.due_date.slice(0,10)}` : ""}</div>
+                  <div className="boris-f2-7623f0554520">
+                    <div style={{color:"var(--boris-text)", fontSize:"15px", lineHeight:"1.6", textDecoration: item.status === "cancelled" ? "line-through" : "none", opacity: item.status === "done" ? 0.6 : 1}}>{item.text}</div>
+                    <div className="boris-f2-5fb72d884786">{item.source === "boris" ? "Борис" : "👤 Вручную"}{item.due_date ? ` · до ${item.due_date.slice(0,10)}` : ""}</div>
                   </div>
-                  <button className="boris-btn-hover" onClick={() => executePlanItem(item.id)} disabled={item.status === "running"} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"11px 20px", fontSize:"15px", fontWeight:"bold", cursor:"pointer", whiteSpace:"nowrap"}}>
+                  <Button className="boris-btn-hover boris-f2-7642841aa62f" onClick={() => executePlanItem(item.id)} disabled={item.status === "running"}>
                     {item.status === "running" ? "Выполняется..." : "▶️ Сделай"}
-                  </button>
-                  <button className="boris-btn-hover" onClick={() => deletePlanItem(item.id)} style={{background:"#FFFFFF", border:"none", color:"#2F6FED", cursor:"pointer", fontSize:"15px"}}>×</button>
+                  </Button>
+                  <Button className="boris-btn-hover boris-f2-ed9c6fefa922" onClick={() => deletePlanItem(item.id)}>×</Button>
                 </div>
               ))}
-              {planItems.length === 0 && <p style={{color:"#667085", fontSize:"15px", background:"#F5FAFF", borderRadius:"8px", padding:"16px", textAlign:"center"}}>📭 Пока нет задач по этому аккаунту — добавьте первую вручную выше</p>}
+              {planItems.length === 0 && <p className="boris-f2-39d6cccefd15">📭 Пока нет задач по этому аккаунту — добавьте первую вручную выше</p>}
             </div>
-            </div>
+            </BorisCard>
 
-            <div className="b-panel b-card-eq" style={{width:"100%"}}>
-              <h3 className="b-title" style={{display:"flex", alignItems:"center", gap:"12px"}}><span className="b-icon-sm" style={{background:"linear-gradient(135deg,#7C5CFC,#5B3FD9)"}}>📦</span>Пакетный запуск направлений</h3>
-              <details style={{marginBottom:"14px"}}><summary style={{cursor:"pointer",color:"#2F6FED",fontSize:"14px",fontWeight:600}}>Подробнее</summary><p className="b-sub">Опишите одним текстом несколько товарных направлений — Борис разберёт их и запустит по конвейеру на каждое. Ничего не запускается без вашего подтверждения.</p></details>
+            <BorisCard className="b-panel b-card-eq boris-f2-cad980f4b707 boris-g1-card">
+              <h3 className="b-title boris-f2-16f2d512882a"><span className="b-icon-sm boris-f2-042ef8607ebd boris-g1-icon">📦</span>Пакетный запуск направлений</h3>
+              <details className="boris-f2-a82d7062cc5e"><summary className="boris-f2-c0e3ed53fc0c">Подробнее</summary><p className="b-sub">Опишите одним текстом несколько товарных направлений — Борис разберёт их и запустит по конвейеру на каждое. Ничего не запускается без вашего подтверждения.</p></details>
 
               <textarea value={batchPromptText} onChange={e => setBatchPromptText(e.target.value)}
                 placeholder={"Например: Кухни под ключ — 5 объявлений, 3 баннера, цены 50-300к;\nШкафы-купе — 4 объявления, 2 баннера;\nГардеробные на заказ — 6 объявлений"}
@@ -8755,19 +9057,19 @@ export default function Home() {
                 style={{...inputStyle, width:"100%", resize:"vertical", fontFamily:"inherit", marginBottom:"14px"}} />
 
               {!batchPreview ? (
-                <button className="boris-btn-hover" onClick={parseBatchPrompt} disabled={batchParsing}
-                  style={{background: batchParsing ? "#E3E7F0" : "#7C5CFC", color: batchParsing ? "#667085" : "#FFFFFF", border:"none", borderRadius:"8px", padding:"11px 20px", fontWeight:"bold", cursor: batchParsing ? "wait" : "pointer"}}>
+                <Button className="boris-btn-hover" onClick={parseBatchPrompt} disabled={batchParsing}
+                  style={{background: batchParsing ? "var(--boris-border)" : "#7C5CFC", color: batchParsing ? "var(--boris-text-2)" : "var(--boris-surface)", border:"none", borderRadius:"8px", padding:"11px 20px", fontWeight:"bold", cursor: batchParsing ? "wait" : "pointer"}}>
                   {batchParsing ? "⏳ Разбираю..." : "🔍 Разобрать"}
-                </button>
+                </Button>
               ) : (
                 <div>
-                  <div style={{background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"10px", padding:"16px", marginBottom:"16px"}}>
-                    <div style={{fontWeight:"bold", fontSize:"15px", color:"#1D2939", marginBottom:"10px"}}>
+                  <div className="boris-f2-090b5f597343">
+                    <div className="boris-f2-e8c9118003b7">
                       Понял так: {batchPreview.total_directions} направлени{batchPreview.total_directions === 1 ? "е" : "й"}, ~{batchPreview.total_ads} объявлений, ~{batchPreview.total_banners} баннеров, ~{batchPreview.estimated_cost_rub}₽, ~{batchPreview.estimated_minutes} мин.
                     </div>
-                    <div style={{display:"grid", gap:"6px"}}>
+                    <div className="boris-f2-ac90f44811d6">
                       {batchPreview.directions.map((d: any, i: number) => (
-                        <div key={i} style={{fontSize:"14px", color:"#344054"}}>
+                        <div key={i} className="boris-f2-518c8acb87cd">
                           {i + 1}) <b>{d.direction}</b> — {d.count} объявл., {d.banner_count} баннер{d.banner_count === 1 ? "" : d.banner_count < 5 ? "а" : "ов"}, цены {d.price_from.toLocaleString("ru-RU")}–{d.price_to.toLocaleString("ru-RU")}₽
                         </div>
                       ))}
@@ -8775,95 +9077,95 @@ export default function Home() {
                   </div>
 
                   {batchPreview.warning && (
-                    <div style={{background:"#FDEDEC", border:"1px solid #F04438", color:"#D64545", borderRadius:"8px", padding:"12px", marginBottom:"16px", fontSize:"14px", fontWeight:"bold"}}>
+                    <div className="boris-f2-40a7d4da96e2">
                       ⚠️ {batchPreview.warning}{batchConfirmedBig ? " — нажмите «Запустить всё» ещё раз для подтверждения." : ""}
                     </div>
                   )}
 
-                  <div style={{display:"flex", gap:"12px"}}>
-                    <button className="boris-btn-hover" onClick={launchBatch} disabled={batchLaunching}
-                      style={{flex:1, background: batchLaunching ? "#E3E7F0" : "#12805C", color: batchLaunching ? "#667085" : "#FFFFFF", border:"none", borderRadius:"8px", padding:"11px", fontWeight:"bold", cursor: batchLaunching ? "wait" : "pointer"}}>
+                  <div className="boris-f2-37bfc2fc415a">
+                    <Button className="boris-btn-hover" onClick={launchBatch} disabled={batchLaunching}
+                      style={{flex:1, background: batchLaunching ? "var(--boris-border)" : "#12805C", color: batchLaunching ? "var(--boris-text-2)" : "var(--boris-surface)", border:"none", borderRadius:"8px", padding:"11px", fontWeight:"bold", cursor: batchLaunching ? "wait" : "pointer"}}>
                       {batchLaunching ? "⏳ Запускаю..." : batchPreview.big_batch && !batchConfirmedBig ? "⚠️ Всё равно запустить всё" : "✅ Запустить всё"}
-                    </button>
-                    <button className="boris-btn-hover" onClick={() => setBatchPreview(null)} disabled={batchLaunching}
-                      style={{background:"#FFFFFF", color:"#667085", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"11px 20px", cursor:"pointer"}}>
+                    </Button>
+                    <Button className="boris-btn-hover boris-f2-27ac5f27e34d" onClick={() => setBatchPreview(null)} disabled={batchLaunching}
+>
                       ✏️ Поправить
-                    </button>
-                    <button className="boris-btn-hover" onClick={() => { setBatchPreview(null); setBatchPromptText(""); setBatchConfirmedBig(false); }} disabled={batchLaunching}
-                      style={{background:"#FFFFFF", color:"#F04438", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"11px 20px", cursor:"pointer"}}>
+                    </Button>
+                    <Button className="boris-btn-hover boris-f2-985000dff604" onClick={() => { setBatchPreview(null); setBatchPromptText(""); setBatchConfirmedBig(false); }} disabled={batchLaunching}
+>
                       ❌ Отмена
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
-            </div>
+            </BorisCard>
           </div>
         )}
       </div>
 
       {trainData && (
-        <div style={{position:"fixed", inset:0, background:"rgba(16,24,40,0.45)", zIndex:1250, display:"flex", alignItems:"center", justifyContent:"center", padding:"20px"}} onClick={()=>setTrainData(null)}>
-          <div onClick={e=>e.stopPropagation()} style={{background:"#fff", borderRadius:"16px", width:"660px", maxWidth:"100%", maxHeight:"85vh", overflowY:"auto", padding:"24px", boxShadow:"0 20px 60px rgba(16,24,40,0.3)"}}>
-            <div style={{fontSize:"18px", fontWeight:800, color:"#1D2939", marginBottom:"4px"}}>🎓 РОП обучает ИИ-менеджера</div>
-            <div style={{fontSize:"14px", color:"#667085", marginBottom:"14px"}}>На основе разбора: {trainData.based_on?.calls || 0} звонков и {trainData.based_on?.chats || 0} переписок{trainData.based_on?.avg_score ? `, средний балл ${trainData.based_on.avg_score}` : ""}.</div>
-            <div style={{background:"#F9FAFB", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"16px", fontSize:"15px", color:"#1D2939", whiteSpace:"pre-wrap", lineHeight:1.55, marginBottom:"14px"}}>{trainData.rules}</div>
-            <div style={{background:"#FFFAEB", border:"1px solid #FEDF89", borderRadius:"10px", padding:"12px 14px", fontSize:"14px", color:"#B54708", marginBottom:"14px"}}>Правила добавятся отдельным блоком в скрипт ИИ-менеджера. Ваш текст не пострадает — при повторном обучении обновится только этот блок.</div>
-            <div style={{display:"flex", gap:"10px"}}>
-              <button onClick={()=>setTrainData(null)} style={{background:"#fff", color:"#475467", border:"1.5px solid #E3E7F0", borderRadius:"10px", padding:"11px 18px", fontWeight:600, cursor:"pointer", fontSize:"15px"}}>Отмена</button>
-              <button onClick={()=>trainManager(true)} disabled={trainLoading} style={{flex:1, background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"11px 18px", fontWeight:700, cursor:"pointer", fontSize:"15px", opacity: trainLoading?0.6:1}}>{trainLoading ? "Записываю…" : "Применить к ИИ-менеджеру"}</button>
+        <div onClick={()=>setTrainData(null)} className="boris-f2-2cb2d4eafc86">
+          <div onClick={e=>e.stopPropagation()} className="boris-f2-3f58684d5fc4">
+            <div className="boris-f2-3b99a31f5644">🎓 РОП обучает ИИ-менеджера</div>
+            <div className="boris-f2-3740881efa64">На основе разбора: {trainData.based_on?.calls || 0} звонков и {trainData.based_on?.chats || 0} переписок{trainData.based_on?.avg_score ? `, средний балл ${trainData.based_on.avg_score}` : ""}.</div>
+            <div className="boris-f2-e411a461121f">{trainData.rules}</div>
+            <div className="boris-f2-cede0e9e4685">Правила добавятся отдельным блоком в скрипт ИИ-менеджера. Ваш текст не пострадает — при повторном обучении обновится только этот блок.</div>
+            <div className="boris-f2-6b00e75351fc">
+              <Button onClick={()=>setTrainData(null)} className="boris-f2-5e0aabc19880">Отмена</Button>
+              <Button onClick={()=>trainManager(true)} disabled={trainLoading} style={{flex:1, background:"var(--boris-blue)", color:"#fff", border:"none", borderRadius:"10px", padding:"11px 18px", fontWeight:700, cursor:"pointer", fontSize:"15px", opacity: trainLoading?0.6:1}}>{trainLoading ? "Записываю…" : "Применить к ИИ-менеджеру"}</Button>
             </div>
           </div>
         </div>
       )}
       {pwStep !== "off" && (
-        <div style={{position:"fixed", inset:0, background:"rgba(16,24,40,0.45)", zIndex:1200, display:"flex", alignItems:"center", justifyContent:"center", padding:"20px"}} onClick={()=>setPwStep("off")}>
-          <div onClick={e=>e.stopPropagation()} style={{background:"#fff", borderRadius:"16px", width:"640px", maxWidth:"100%", maxHeight:"85vh", overflowY:"auto", padding:"24px", boxShadow:"0 20px 60px rgba(16,24,40,0.3)"}}>
-            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"14px"}}>
-              <div style={{fontSize:"18px", fontWeight:700, color:"#1D2939"}}>✨ Помощь в написании промта</div>
-              <button onClick={()=>setPwStep("off")} style={{background:"none", border:"none", fontSize:"22px", color:"#98A2B3", cursor:"pointer", lineHeight:1}}>×</button>
+        <div onClick={()=>setPwStep("off")} className="boris-f2-252455fa6413">
+          <div onClick={e=>e.stopPropagation()} className="boris-f2-2196d179e912">
+            <div className="boris-f2-a794b88522b7">
+              <div className="boris-f2-0c9626a4337f">✨ Помощь в написании промта</div>
+              <Button onClick={()=>setPwStep("off")} className="boris-f2-c78a426a3893">×</Button>
             </div>
             {pwStep === "task" && (
               <div>
-                <div style={{fontSize:"15px", color:"#667085", marginBottom:"14px"}}>Для какой задачи нужен промт?</div>
-                <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+                <div className="boris-f2-98b4835640d4">Для какой задачи нужен промт?</div>
+                <div className="boris-f2-f67b86e0fb4c">
                   {PW_TASKS.map((t:any)=>(
-                    <button key={t.id} onClick={()=>pwPickTask(t)} className="boris-btn-hover" style={{textAlign:"left", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"14px 16px", cursor:"pointer", fontSize:"15px", fontWeight:600, color:"#1D2939"}}>
-                      <span style={{marginRight:"10px"}}>{t.icon}</span>{t.name}
-                    </button>
+                    <Button key={t.id} onClick={()=>pwPickTask(t)} className="boris-btn-hover boris-f2-3d0a8aeceb8c">
+                      <span className="boris-f2-ef97e5456825">{t.icon}</span>{t.name}
+                    </Button>
                   ))}
                 </div>
               </div>
             )}
             {pwStep === "questions" && pwTask && (
               <div>
-                <div style={{fontSize:"15px", color:"#667085", marginBottom:"14px"}}>{pwTask.name} — ответьте на вопросы, Борис соберёт готовый текст</div>
-                <div style={{display:"flex", flexDirection:"column", gap:"12px"}}>
+                <div className="boris-f2-98b4835640d4">{pwTask.name} — ответьте на вопросы, Борис соберёт готовый текст</div>
+                <div className="boris-f2-2e1ca338d758">
                   {pwTask.qs.map((q:string,i:number)=>(
                     <div key={i}>
-                      <div style={{fontSize:"15px", color:"#1D2939", marginBottom:"5px"}}>{i+1}. {q}</div>
+                      <div className="boris-f2-ecd02af9a13c">{i+1}. {q}</div>
                       <textarea value={pwAnswers[i]||""} onChange={e=>{const a=[...pwAnswers]; a[i]=e.target.value; setPwAnswers(a);}} rows={2}
-                        style={{width:"100%", padding:"10px 12px", borderRadius:"10px", border:"1.5px solid #E3E7F0", fontSize:"15px", fontFamily:"inherit", resize:"vertical"}} />
+  className="boris-f2-56dcb8c406ae"/>
                     </div>
                   ))}
                 </div>
-                <div style={{display:"flex", gap:"10px", marginTop:"16px"}}>
-                  <button onClick={()=>setPwStep("task")} style={{background:"#fff", color:"#475467", border:"1.5px solid #E3E7F0", borderRadius:"10px", padding:"11px 18px", fontWeight:600, cursor:"pointer", fontSize:"15px"}}>Назад</button>
-                  <button onClick={pwGenerate} style={{flex:1, background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"11px 18px", fontWeight:700, cursor:"pointer", fontSize:"15px"}}>Собрать промт →</button>
+                <div className="boris-f2-bf7e542503ca">
+                  <Button onClick={()=>setPwStep("task")} className="boris-f2-5e0aabc19880">Назад</Button>
+                  <Button onClick={pwGenerate} className="boris-f2-f811b397f9e6">Собрать промт →</Button>
                 </div>
               </div>
             )}
             {pwStep === "result" && (
               <div>
-                {pwLoading && <div style={{fontSize:"15px", color:"#667085", padding:"20px 0"}}>Борис пишет промт…</div>}
+                {pwLoading && <div className="boris-f2-e1a0b231f542">Борис пишет промт…</div>}
                 {!pwLoading && (
                   <div>
-                    <div style={{background:"#F9FAFB", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"16px", fontSize:"15px", color:"#1D2939", whiteSpace:"pre-wrap", lineHeight:1.55, marginBottom:"14px"}}>{pwResult}</div>
-                    <div style={{background:"#EEF4FF", border:"1px solid #D0DEFF", borderRadius:"10px", padding:"12px 14px", fontSize:"14px", color:"#344054", marginBottom:"14px"}}>
+                    <div className="boris-f2-e411a461121f">{pwResult}</div>
+                    <div className="boris-f2-8b270c6435c8">
                       Скопируйте этот текст и вставьте в <b>{pwTask ? pwTask.where : ""}</b>, затем нажмите «Сохранить». После сохранения Борис изучит инструкцию и станет применять её в работе.
                     </div>
-                    <div style={{display:"flex", gap:"10px"}}>
-                      <button onClick={()=>{navigator.clipboard.writeText(pwResult); alert("Промт скопирован — вставьте его в нужное поле и сохраните");}} style={{flex:1, background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"11px 18px", fontWeight:700, cursor:"pointer", fontSize:"15px"}}>Скопировать</button>
-                      <button onClick={()=>setPwStep("questions")} style={{background:"#fff", color:"#475467", border:"1.5px solid #E3E7F0", borderRadius:"10px", padding:"11px 18px", fontWeight:600, cursor:"pointer", fontSize:"15px"}}>Изменить ответы</button>
+                    <div className="boris-f2-6b00e75351fc">
+                      <Button onClick={()=>{navigator.clipboard.writeText(pwResult); alert("Промт скопирован — вставьте его в нужное поле и сохраните");}} className="boris-f2-f811b397f9e6">Скопировать</Button>
+                      <Button onClick={()=>setPwStep("questions")} className="boris-f2-5e0aabc19880">Изменить ответы</Button>
                     </div>
                   </div>
                 )}
@@ -8873,81 +9175,81 @@ export default function Home() {
         </div>
       )}
       {borisOpen && (
-        <div style={{position:"fixed", bottom:"90px", right:"24px", width:"360px", maxWidth:"calc(100vw - 48px)", height:"480px", background:"#F6F7FB", border:"1px solid #2F6FED", borderRadius:"16px", display:"flex", flexDirection:"column", boxShadow:"0 8px 32px rgba(0,0,0,0.6)", zIndex:1000}}>
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"16px", borderBottom:"1px solid #EEF2FA"}}>
-            <span style={{fontWeight:"bold", color:"#2F6FED"}}>Борис — помощник</span>
-            <button className="boris-btn-hover" onClick={() => setBorisOpen(false)} style={{background:"#FFFFFF", border:"none", color:"#2F6FED", fontSize:"15px", cursor:"pointer", lineHeight:1}}>×</button>
+        <div className="boris-f2-26eabeab1574">
+          <div className="boris-f2-1944d35633a2">
+            <span className="boris-f2-8baa2a1e8844">Борис — помощник</span>
+            <Button className="boris-btn-hover boris-f2-a53f52a888cd" onClick={() => setBorisOpen(false)}>×</Button>
           </div>
-          <div style={{flex:1, overflowY:"auto", padding:"16px", display:"flex", flexDirection:"column", gap:"12px"}}>
+          <div className="boris-f2-2e4ede691e85">
             {notifications.map((n: any, ni: number) => (
-              <div key={ni} style={{background:"#E7EFFE", border:"1px solid #2F6FED", borderRadius:"10px", padding:"12px"}}>
-                <div style={{color:"#2F6FED", fontSize:"15px", fontWeight:"bold", marginBottom:"6px"}}>📊 Борис вернулся с результатом</div>
-                <div style={{color:"#1D2939", fontSize:"15px", lineHeight:1.4, marginBottom:"8px"}}>{n.text}</div>
-                <button className="boris-btn-hover" onClick={() => markNotificationRead(n.ts)} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"11px 20px", fontSize:"15px", fontWeight:"bold", cursor:"pointer"}}>Прочитано</button>
+              <div key={ni} className="boris-f2-aae2a87345eb">
+                <div className="boris-f2-1e0a8ff8c454">📊 Борис вернулся с результатом</div>
+                <div className="boris-f2-7d2cd51844c2">{n.text}</div>
+                <Button className="boris-btn-hover boris-f2-fe50257115dd" onClick={() => markNotificationRead(n.ts)}>Прочитано</Button>
               </div>
             ))}
             {borisHistory.length === 0 && (
-              <div style={{color:"#667085", fontSize:"15px"}}>Привет! Я Борис 👋 Спроси меня о чём угодно: как пользоваться сервисом, куда нажать, что делать. Помогу разобраться.</div>
+              <div className="boris-f2-96046ead62a3">Привет! Я Борис 👋 Спроси меня о чём угодно: как пользоваться сервисом, куда нажать, что делать. Помогу разобраться.</div>
             )}
             {borisHistory.map((m: any, i: number) => (
-              <div key={i} style={{alignSelf: m.role==="user" ? "flex-end" : "flex-start", maxWidth:"90%", background: m.role==="user" ? "#2F6FED" : "#FFFFFF", color:"#1D2939", padding:"10px 14px", borderRadius:"12px", fontSize:"23px", lineHeight:1.4, whiteSpace:"pre-wrap"}}>
+              <div key={i} style={{alignSelf: m.role==="user" ? "flex-end" : "flex-start", maxWidth:"90%", background: m.role==="user" ? "var(--boris-blue)" : "var(--boris-surface)", color:"var(--boris-text)", padding:"10px 14px", borderRadius:"12px", fontSize:"23px", lineHeight:1.4, whiteSpace:"pre-wrap"}}>
                 {m.content}
                 {m.plan && (
-                  <div style={{marginTop:"10px", paddingTop:"10px", borderTop:"1px solid #E3E7F0"}}>
+                  <div className="boris-f2-00467ea76bd7">
                     {m.plan.steps.map((step: any, si: number) => (
-                      <div key={si} style={{color:"#344054", fontSize:"15px", marginBottom:"6px"}}>{stepLabel(step)}</div>
+                      <div key={si} className="boris-f2-4e980330a99a">{stepLabel(step)}</div>
                     ))}
                     {m.plan.clarifying_question && (
-                      <div style={{color:"#F79009", fontSize:"15px", marginTop:"6px", marginBottom:"6px"}}>❓ {m.plan.clarifying_question}</div>
+                      <div className="boris-f2-1f5300ea9760">❓ {m.plan.clarifying_question}</div>
                     )}
                     {!m.planResolved && (
-                      <div style={{display:"flex", gap:"8px", marginTop:"10px"}}>
-                        <button className="boris-btn-hover" onClick={() => acceptPlan(m.plan, i)} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"11px 20px", fontWeight:"bold", cursor:"pointer", fontSize:"15px"}}>🤝 Бери в работу, Борис</button>
-                        <button className="boris-btn-hover" onClick={() => rejectPlan(i)} style={{background:"#E3E7F0", color:"#344054", border:"none", borderRadius:"10px", padding:"8px 14px", cursor:"pointer", fontSize:"15px"}}>✏️ Поправить</button>
+                      <div className="boris-f2-3fed563e917c">
+                        <Button className="boris-btn-hover boris-f2-3da096912514" onClick={() => acceptPlan(m.plan, i)}>🤝 Бери в работу, Борис</Button>
+                        <Button className="boris-btn-hover boris-f2-376583938b1d" onClick={() => rejectPlan(i)}>✏️ Поправить</Button>
                       </div>
                     )}
                   </div>
                 )}
               </div>
             ))}
-            {borisLoading && <div style={{alignSelf:"flex-start", color:"#667085", fontSize:"15px"}}>Борис печатает…</div>}
+            {borisLoading && <div className="boris-f2-e8c76063708f">Борис печатает…</div>}
           </div>
           {/* Плашка поддержки внутри помощника */}
-          <div style={{padding:"10px 12px", borderTop:"1px solid #EEF2FA"}}>
-            <button onClick={pwStart} style={{width:"100%", background:"#F4F3FF", color:"#5925DC", border:"1px solid #D9D6FE", borderRadius:"10px", padding:"9px", fontWeight:"bold", cursor:"pointer", fontSize:"14px", marginBottom:"8px"}}>✨ Помоги написать промт</button>
+          <div className="boris-f2-d6697719473a">
+            <Button onClick={pwStart} className="boris-f2-a7b10d9e99c1">✨ Помоги написать промт</Button>
             {!supportOpen ? (
-              <button onClick={()=>{setSupportOpen(true); setSupSent(false);}} style={{width:"100%", background:"#F0F4FF", color:"#2F6FED", border:"1px solid #D6E0FF", borderRadius:"10px", padding:"9px", fontWeight:"bold", cursor:"pointer", fontSize:"14px"}}>📮 Обратиться в поддержку</button>
+              <Button onClick={()=>{setSupportOpen(true); setSupSent(false);}} className="boris-f2-daee02b75942">📮 Обратиться в поддержку</Button>
             ) : supSent ? (
-              <div style={{color:"#12805C", fontSize:"14px", padding:"6px 0"}}>
+              <div className="boris-f2-f080b2e28c41">
                 ✅ Обращение{supTicket ? " №" + supTicket : ""} принято. Ответим в рабочие часы — ежедневно с 9:00 до 18:00 по Москве. Ответ придёт сюда, в кабинет, и в Telegram.
-                <button onClick={()=>{setSupportOpen(false);}} style={{marginLeft:"8px", background:"#FFFFFF", border:"none", color:"#2F6FED", cursor:"pointer", textDecoration:"underline"}}>закрыть</button>
+                <Button onClick={()=>{setSupportOpen(false);}} className="boris-f2-12498cd552d3">закрыть</Button>
               </div>
             ) : (
               <div>
-                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"8px"}}>
-                  <span style={{fontWeight:"bold", fontSize:"14px", color:"#344054"}}>📮 Поддержка</span>
-                  <button onClick={()=>setSupportOpen(false)} style={{background:"#FFFFFF", border:"none", color:"#98A2B3", cursor:"pointer", fontSize:"16px"}}>✕</button>
+                <div className="boris-f2-5a9738ff9ea1">
+                  <span className="boris-f2-44b38035c82e">📮 Поддержка</span>
+                  <Button onClick={()=>setSupportOpen(false)} className="boris-f2-dbe51c4af708">✕</Button>
                 </div>
-                <div style={{fontSize:"12px", color:"#667085", marginBottom:"8px", lineHeight:1.5}}>
+                <div className="boris-f2-70ce45459ed9">
                   Работаем ежедневно с 9:00 до 18:00 по Москве. Написать можно в любое время — ответим в рабочие часы.
                 </div>
-                <input placeholder="Ваше имя" value={supName} onChange={e=>setSupName(e.target.value)} style={{width:"100%", padding:"8px", marginBottom:"6px", border:"1px solid #E3E7F0", borderRadius:"7px", boxSizing:"border-box", fontSize:"14px"}} />
-                <input placeholder="Телефон / Telegram / почта" value={supContact} onChange={e=>setSupContact(e.target.value)} style={{width:"100%", padding:"8px", marginBottom:"6px", border:"1px solid #E3E7F0", borderRadius:"7px", boxSizing:"border-box", fontSize:"14px"}} />
-                <textarea placeholder="Ваше сообщение" value={supText} onChange={e=>setSupText(e.target.value)} rows={2} style={{width:"100%", padding:"8px", marginBottom:"8px", border:"1px solid #E3E7F0", borderRadius:"7px", boxSizing:"border-box", resize:"vertical", fontSize:"14px"}} />
-                <button onClick={sendSupport} disabled={supSending} style={{width:"100%", padding:"9px", background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", fontWeight:"bold", cursor:"pointer", fontSize:"14px"}}>{supSending?"Отправка...":"Отправить"}</button>
-                <button onClick={loadMyTickets} style={{width:"100%", marginTop:"6px", padding:"8px", background:"#FFFFFF", color:"#2F6FED", border:"1px solid #D6E0FF", borderRadius:"10px", cursor:"pointer", fontSize:"13px"}}>Мои обращения</button>
+                <input placeholder="Ваше имя" value={supName} onChange={e=>setSupName(e.target.value)}  className="boris-f2-49681e89671b"/>
+                <input placeholder="Телефон / Telegram / почта" value={supContact} onChange={e=>setSupContact(e.target.value)}  className="boris-f2-49681e89671b"/>
+                <textarea placeholder="Ваше сообщение" value={supText} onChange={e=>setSupText(e.target.value)} rows={2}  className="boris-f2-2ce9e632343d"/>
+                <Button onClick={sendSupport} disabled={supSending} className="boris-f2-8b6d8acf0d91">{supSending?"Отправка...":"Отправить"}</Button>
+                <Button onClick={loadMyTickets} className="boris-f2-479c23253106">Мои обращения</Button>
                 {supMyOpen && (
-                  <div style={{marginTop:"8px", maxHeight:"220px", overflowY:"auto"}}>
+                  <div className="boris-f2-ef52733787bf">
                     {supMy.length === 0 ? (
-                      <div style={{color:"#98A2B3", fontSize:"13px"}}>Обращений пока не было.</div>
+                      <div className="boris-f2-6774eea0e0db">Обращений пока не было.</div>
                     ) : supMy.map((t:any) => (
-                      <div key={t["номер"]} style={{borderTop:"1px solid #EEF2FA", padding:"8px 0"}}>
-                        <div style={{fontSize:"13px", color:"#344054"}}>
-                          <b>№{t["номер"]}</b> · <span style={{color: t["статус"]==="решено" ? "#12805C" : t["статус"]==="в работе" ? "#E8850B" : "#667085"}}>{t["статус"]}</span>
+                      <div key={t["номер"]} className="boris-f2-50ba035cf7e5">
+                        <div className="boris-f2-6c2427e9980a">
+                          <b>№{t["номер"]}</b> · <span style={{color: t["статус"]==="решено" ? "#12805C" : t["статус"]==="в работе" ? "#E8850B" : "var(--boris-text-2)"}}>{t["статус"]}</span>
                         </div>
-                        <div style={{fontSize:"13px", color:"#667085", marginTop:"2px"}}>{t["текст"]}</div>
+                        <div className="boris-f2-e41894b51ae0">{t["текст"]}</div>
                         {(t["ответы"]||[]).map((rp:any, i:number) => (
-                          <div key={i} style={{fontSize:"13px", marginTop:"4px", padding:"6px 8px", background: rp["кто"]==="поддержка" ? "#F0F4FF" : "#F8FAFF", borderRadius:"8px", color:"#344054"}}>
+                          <div key={i} style={{fontSize:"13px", marginTop:"4px", padding:"6px 8px", background: rp["кто"]==="поддержка" ? "#F0F4FF" : "#F8FAFF", borderRadius:"8px", color:"var(--boris-text-2)"}}>
                             <b>{rp["кто"]}:</b> {rp["текст"]}
                           </div>
                         ))}
@@ -8958,159 +9260,159 @@ export default function Home() {
               </div>
             )}
           </div>
-          <div style={{display:"flex", gap:"8px", padding:"12px", borderTop:"1px solid #EEF2FA"}}>
+          <div className="boris-f2-1136532a4984">
             <input value={borisInput} onChange={e => setBorisInput(e.target.value)} onKeyDown={e => { if(e.key==="Enter") askBoris(); }} placeholder="Спроси Бориса…"
-              style={{flex:1, background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"23px", outline:"none"}} />
-            <button className="boris-btn-hover" onClick={askBoris} style={{background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"10px 16px", fontWeight:"bold", cursor:"pointer"}}>➤</button>
+  className="boris-f2-91f1c0e0f357"/>
+            <Button className="boris-btn-hover boris-f2-45117500ae13" onClick={askBoris}>➤</Button>
           </div>
         </div>
       )}
 
       {!borisOpen && borisCurrentQ && borisBubbleOpen && (
-        <div className="b-boris-bubble" style={{position:"fixed", bottom:"104px", right:"24px", width:"320px", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"16px", padding:"18px", zIndex:1001, boxShadow:"0 12px 32px rgba(16,24,40,.16)"}}>
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"8px"}}>
-            <span style={{fontSize:"12px", fontWeight:800, color:"#2F6FED", letterSpacing:".04em"}}>БОРИС СПРАШИВАЕТ</span>
-            <button onClick={() => setBorisBubbleOff(true)} title="Больше не показывать подсказки" style={{background:"#FFFFFF", border:"none", color:"#2F6FED", cursor:"pointer", fontSize:"22px", lineHeight:1, padding:"0 4px"}}>×</button>
+        <div className="b-boris-bubble boris-f2-2865171f04ac">
+          <div className="boris-f2-5a9738ff9ea1">
+            <span className="boris-f2-960cbf4db453">БОРИС СПРАШИВАЕТ</span>
+            <Button onClick={() => setBorisBubbleOff(true)} title="Больше не показывать подсказки" className="boris-f2-f75e8565f71f">×</Button>
           </div>
-          <div style={{color:"#344054", fontSize:"14px", lineHeight:1.55, marginBottom:"14px"}}>{borisCurrentQ.text}</div>
-          <div style={{display:"flex", gap:"8px"}}>
+          <div className="boris-f2-dee1db4978c5">{borisCurrentQ.text}</div>
+          <div className="boris-f2-b9bbe540d342">
             {borisCurrentQ.actions.map((a: any) => (
-              <button key={a.label} className="boris-btn-hover" onClick={() => { setActiveTab(a.go); setBorisAsked((prev: any) => ({...prev, [borisCurrentQ.id]: true})); }}
-                style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"8px", padding:"8px 16px", fontSize:"14px", fontWeight:"bold", cursor:"pointer"}}>{a.label}</button>
+              <Button key={a.label} className="boris-btn-hover boris-f2-946405ad44e9" onClick={() => { setActiveTab(a.go); setBorisAsked((prev: any) => ({...prev, [borisCurrentQ.id]: true})); }}
+>{a.label}</Button>
             ))}
-            <button className="boris-btn-hover" onClick={() => setBorisAsked((prev: any) => ({...prev, [borisCurrentQ.id]: true}))}
-              style={{background:"#FFFFFF", color:"#667085", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"8px 16px", fontSize:"14px", cursor:"pointer"}}>Позже</button>
+            <Button className="boris-btn-hover boris-f2-42fc0fd1ec23" onClick={() => setBorisAsked((prev: any) => ({...prev, [borisCurrentQ.id]: true}))}
+>Позже</Button>
           </div>
-          <div style={{position:"absolute", bottom:"-8px", right:"32px", width:"16px", height:"16px", background:"#FFFFFF", borderRight:"1px solid #E3E7F0", borderBottom:"1px solid #E3E7F0", transform:"rotate(45deg)"}} />
+          <div  className="boris-f2-4509816a1893"/>
         </div>
       )}
 
-      <button className={"b-boris-fab" + (borisMood === "alert" ? " b-boris-alert" : "")} onClick={() => { if (borisCurrentQ && !borisBubbleOpen) { setBorisBubbleOpen(true); } else { setBorisBubbleOpen(false); setBorisOpen(!borisOpen); } }} style={{position:"fixed", bottom:"24px", right:"24px", width:"68px", height:"68px", borderRadius:"50%", background:"linear-gradient(135deg, #4C8DFF, #2F6FED)", border:"none", cursor:"pointer", boxShadow:"0 6px 20px rgba(47,111,237,0.45)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center"}}>
-        {borisOpen ? <span style={{color:"#fff", fontSize:"26px"}}>×</span> : <Mascot size={44} interactive={true} mood={borisMood} />}
+      <Button className={["b-boris-fab" + (borisMood === "alert" ? " b-boris-alert" : ""), "boris-f2-1caaeebcec62"].filter(Boolean).join(" ")} onClick={() => { if (borisCurrentQ && !borisBubbleOpen) { setBorisBubbleOpen(true); } else { setBorisBubbleOpen(false); setBorisOpen(!borisOpen); } }}>
+        {borisOpen ? <span className="boris-f2-28fb59d9485a">×</span> : <Mascot size={44} interactive={true} mood={borisMood} />}
         {!borisOpen && notifications.length > 0 && (
-          <span style={{position:"absolute", top:"-4px", right:"-4px", background:"#F04438", color:"#1D2939", borderRadius:"50%", width:"22px", height:"22px", fontSize:"15px", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:"bold"}}>{notifications.length}</span>
+          <span className="boris-f2-f7b5f3a56f09">{notifications.length}</span>
         )}
-      </button>
+      </Button>
 
       {showPipelineForm && (
-        <div style={{position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.8)", zIndex:2000, display:"flex", alignItems:"center", justifyContent:"center", padding:"20px"}}
-          onClick={() => { if (!directionStarting) setShowPipelineForm(false); }}>
-          <div onClick={(e:any) => e.stopPropagation()} style={{background:"#F6F7FB", border:"1px solid #12805C", borderRadius:"14px", padding:"28px", maxWidth:"520px", width:"100%", maxHeight:"85vh", overflowY:"auto"}}>
-            <h3 style={{margin:"0 0 6px", color:"#12805C", fontSize:"18px"}}>🚀 Конвейер направления</h3>
-            <p style={{margin:"0 0 20px", color:"#667085", fontSize:"15px"}}>Полный цикл по одному товарному направлению: тексты → категория → баннеры → проверка → публикация.</p>
+        <div
+          onClick={() => { if (!directionStarting) setShowPipelineForm(false); }} className="boris-f2-39e28d65ac7c">
+          <div onClick={(e:any) => e.stopPropagation()} className="boris-f2-3b6ed6ab4dc6">
+            <h3 className="boris-f2-5e907f3edc62">🚀 Конвейер направления</h3>
+            <p className="boris-f2-e7c5bd14a445">Полный цикл по одному товарному направлению: тексты → категория → баннеры → проверка → публикация.</p>
 
-            <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>Направление</label>
+            <label className="boris-f2-200d23dd578d">Направление</label>
             <input value={directionForm.direction} onChange={e => setDirectionForm({...directionForm, direction: e.target.value})}
               placeholder="Например, Гардеробные на заказ" disabled={directionStarting}
-              style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"15px", marginBottom:"14px"}} />
+  className="boris-f2-89692fce466b"/>
 
-            <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"14px", marginBottom:"14px"}}>
+            <div className="boris-f2-6894e065411c">
               <div>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>Объявлений</label>
-                <input type="number" min={1} value={directionForm.count} disabled={directionStarting}
+                <label className="boris-f2-200d23dd578d">Объявлений</label>
+                <input type="number" min={1} value={Number(directionForm.count) === 0 ? "" : directionForm.count} disabled={directionStarting}
                   onChange={e => setDirectionForm({...directionForm, count: Number(e.target.value)})}
-                  style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"15px"}} />
+  className="boris-f2-2f19a0435dd7"/>
               </div>
               <div>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>Баннеров</label>
-                <input type="number" min={1} value={directionForm.bannerCount} disabled={directionStarting}
+                <label className="boris-f2-200d23dd578d">Баннеров</label>
+                <input type="number" min={1} value={Number(directionForm.bannerCount) === 0 ? "" : directionForm.bannerCount} disabled={directionStarting}
                   onChange={e => setDirectionForm({...directionForm, bannerCount: Number(e.target.value)})}
-                  style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"15px"}} />
+  className="boris-f2-2f19a0435dd7"/>
               </div>
               <div>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>Цена от</label>
-                <input type="number" min={0} value={directionForm.priceFrom} disabled={directionStarting}
+                <label className="boris-f2-200d23dd578d">Цена от</label>
+                <input type="number" min={0} value={Number(directionForm.priceFrom) === 0 ? "" : directionForm.priceFrom} disabled={directionStarting}
                   onChange={e => setDirectionForm({...directionForm, priceFrom: Number(e.target.value)})}
-                  style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"15px"}} />
+  className="boris-f2-2f19a0435dd7"/>
               </div>
               <div>
-                <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>Цена до</label>
-                <input type="number" min={0} value={directionForm.priceTo} disabled={directionStarting}
+                <label className="boris-f2-200d23dd578d">Цена до</label>
+                <input type="number" min={0} value={Number(directionForm.priceTo) === 0 ? "" : directionForm.priceTo} disabled={directionStarting}
                   onChange={e => setDirectionForm({...directionForm, priceTo: Number(e.target.value)})}
-                  style={{width:"100%", boxSizing:"border-box", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"15px"}} />
+  className="boris-f2-2f19a0435dd7"/>
               </div>
             </div>
 
-            <div style={{marginBottom:"10px", color:"#667085", fontSize:"15px"}}>Уникализировать:</div>
-            <div style={{display:"flex", gap:"20px", marginBottom:"16px"}}>
-              <label style={{display:"flex", alignItems:"center", gap:"6px", fontSize:"15px", color:"#1D2939"}}>
+            <div className="boris-f2-b9341501b114">Уникализировать:</div>
+            <div className="boris-f2-787f43e1c325">
+              <label className="boris-f2-dede1240812e">
                 <input type="checkbox" checked={directionForm.uniquifyTitles} disabled={directionStarting}
                   onChange={e => setDirectionForm({...directionForm, uniquifyTitles: e.target.checked})} /> заголовки
               </label>
-              <label style={{display:"flex", alignItems:"center", gap:"6px", fontSize:"15px", color:"#1D2939"}}>
+              <label className="boris-f2-dede1240812e">
                 <input type="checkbox" checked={directionForm.uniquifyDescriptions} disabled={directionStarting}
                   onChange={e => setDirectionForm({...directionForm, uniquifyDescriptions: e.target.checked})} /> описания
               </label>
             </div>
 
-            <div style={{marginBottom:"10px", color:"#667085", fontSize:"15px"}}>После готовности:</div>
-            <div style={{display:"flex", gap:"20px", marginBottom:"20px"}}>
-              <label style={{display:"flex", alignItems:"center", gap:"6px", fontSize:"15px", color:"#1D2939"}}>
+            <div className="boris-f2-b9341501b114">После готовности:</div>
+            <div className="boris-f2-bcaed909275f">
+              <label className="boris-f2-dede1240812e">
                 <input type="checkbox" checked={directionForm.autoCheck} disabled={directionStarting}
                   onChange={e => setDirectionForm({...directionForm, autoCheck: e.target.checked})} /> проверить партию
               </label>
-              <label style={{display:"flex", alignItems:"center", gap:"6px", fontSize:"15px", color:"#1D2939"}}>
+              <label className="boris-f2-dede1240812e">
                 <input type="checkbox" checked={directionForm.autoPublish} disabled={directionStarting}
                   onChange={e => setDirectionForm({...directionForm, autoPublish: e.target.checked})} /> опубликовать автоматически
               </label>
             </div>
 
-            <div style={{display:"flex", gap:"12px"}}>
-              <button className="boris-btn-hover" onClick={runDirectionPipeline} disabled={directionStarting}
-                style={{flex:1, background: directionStarting ? "#E3E7F0" : "#12805C", color: directionStarting ? "#667085" : "#FFFFFF", border:"none", borderRadius:"8px", padding:"12px", fontWeight:"bold", cursor: directionStarting ? "wait" : "pointer"}}>
+            <div className="boris-f2-37bfc2fc415a">
+              <Button className="boris-btn-hover" onClick={runDirectionPipeline} disabled={directionStarting}
+                style={{flex:1, background: directionStarting ? "var(--boris-border)" : "#12805C", color: directionStarting ? "var(--boris-text-2)" : "var(--boris-surface)", border:"none", borderRadius:"8px", padding:"12px", fontWeight:"bold", cursor: directionStarting ? "wait" : "pointer"}}>
                 {directionStarting ? "⏳ Запускаю..." : "🚀 Запустить конвейер"}
-              </button>
-              <button className="boris-btn-hover" onClick={() => setShowPipelineForm(false)} disabled={directionStarting}
-                style={{background:"#FFFFFF", color:"#667085", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"12px 20px", cursor: directionStarting ? "default" : "pointer"}}>
+              </Button>
+              <Button className="boris-btn-hover" onClick={() => setShowPipelineForm(false)} disabled={directionStarting}
+                style={{background:"var(--boris-surface)", color:"var(--boris-text-2)", border:"1px solid var(--boris-border)", borderRadius:"8px", padding:"12px 20px", cursor: directionStarting ? "default" : "pointer"}}>
                 Закрыть
-              </button>
+              </Button>
             </div>
           </div>
         </div>
       )}
 
       {editingItemId && (
-        <div style={{position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.8)", zIndex:2000, display:"flex", alignItems:"center", justifyContent:"center", padding:"20px"}} onClick={() => setEditingItemId(null)}>
-          <div onClick={(e:any) => e.stopPropagation()} style={{background:"#F6F7FB", border:"1px solid #2F6FED", borderRadius:"14px", padding:"28px", maxWidth:"600px", width:"100%", maxHeight:"85vh", overflowY:"auto"}}>
-            <h3 style={{margin:"0 0 16px", color:"#1D2939", fontSize:"18px"}}>✏️ Редактирование объявления</h3>
-            <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>Заголовок</label>
+        <div onClick={() => setEditingItemId(null)} className="boris-f2-39e28d65ac7c">
+          <div onClick={(e:any) => e.stopPropagation()} className="boris-f2-c16516408c36">
+            <h3 className="boris-f2-ab7a0549a1dc">✏️ Редактирование объявления</h3>
+            <label className="boris-f2-200d23dd578d">Заголовок</label>
             <input value={editItemForm.title} onChange={e => setEditItemForm({...editItemForm, title: e.target.value})}
-              style={{width:"100%", boxSizing:"border-box", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"23px", marginBottom:"12px"}} />
-            <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>Цена</label>
-            <input type="number" value={editItemForm.price} onChange={e => setEditItemForm({...editItemForm, price: Number(e.target.value)})}
-              style={{width:"160px", boxSizing:"border-box", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"23px", marginBottom:"12px"}} />
-            <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>Описание</label>
+  className="boris-f2-1486e5b8c2ad"/>
+            <label className="boris-f2-200d23dd578d">Цена</label>
+            <input type="number" value={Number(editItemForm.price) === 0 ? "" : editItemForm.price} onChange={e => setEditItemForm({...editItemForm, price: Number(e.target.value)})}
+  className="boris-f2-27cf221f533c"/>
+            <label className="boris-f2-200d23dd578d">Описание</label>
             <textarea value={editItemForm.description} onChange={e => setEditItemForm({...editItemForm, description: e.target.value})} rows={10}
-              style={{width:"100%", boxSizing:"border-box", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#344054", fontSize:"15px", lineHeight:1.5, fontFamily:"inherit", resize:"vertical", marginBottom:"16px"}} />
-            <div style={{display:"flex", gap:"12px"}}>
-              <button className="boris-btn-hover" onClick={saveEditItem} disabled={editItemSaving} style={{flex:1, background: editItemSaving ? "#E3E7F0" : "#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"12px", fontWeight:"bold", cursor: editItemSaving ? "wait" : "pointer"}}>
+  className="boris-f2-a5728e69f7ee"/>
+            <div className="boris-f2-37bfc2fc415a">
+              <Button className="boris-btn-hover" onClick={saveEditItem} disabled={editItemSaving} style={{flex:1, background: editItemSaving ? "var(--boris-border)" : "var(--boris-blue)", color:"var(--boris-bg)", border:"none", borderRadius:"10px", padding:"12px", fontWeight:"bold", cursor: editItemSaving ? "wait" : "pointer"}}>
                 {editItemSaving ? "Сохраняю..." : "✅ Сохранить"}
-              </button>
-              <button className="boris-btn-hover" onClick={() => setEditingItemId(null)} style={{flex:1, background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"12px", cursor:"pointer"}}>Отмена</button>
+              </Button>
+              <Button className="boris-btn-hover boris-f2-cc812ecc9f36" onClick={() => setEditingItemId(null)}>Отмена</Button>
             </div>
           </div>
         </div>
       )}
 
       {aiPreview && (
-        <div style={{position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.8)", zIndex:2000, display:"flex", alignItems:"center", justifyContent:"center", padding:"20px"}} onClick={() => setAiPreview(null)}>
-          <div onClick={(e:any) => e.stopPropagation()} style={{background:"#F6F7FB", border:"1px solid #7C5CFC", borderRadius:"14px", padding:"28px", maxWidth:"600px", width:"100%", maxHeight:"85vh", overflowY:"auto"}}>
-            <h3 style={{margin:"0 0 16px", color:"#1D2939", fontSize:"18px"}}>Результат генерации ИИ</h3>
-            {aiPreview.images[0] && <img src={aiPreview.images[0]} style={{width:"100%", maxHeight:"220px", objectFit:"cover", borderRadius:"8px", marginBottom:"14px"}} />}
-            <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"4px"}}>Заголовок</label>
+        <div onClick={() => setAiPreview(null)} className="boris-f2-39e28d65ac7c">
+          <div onClick={(e:any) => e.stopPropagation()} className="boris-f2-20f9502cd133">
+            <h3 className="boris-f2-ab7a0549a1dc">Результат генерации ИИ</h3>
+            {aiPreview.images[0] && <img src={aiPreview.images[0]}  className="boris-f2-a4880151119c"/>}
+            <label className="boris-f2-200d23dd578d">Заголовок</label>
             <textarea value={aiPreview.title} onChange={e => updateAiPreview("title", e.target.value)} rows={2}
-              style={{width:"100%", boxSizing:"border-box", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#1D2939", fontSize:"23px", fontWeight:"bold", fontFamily:"inherit", resize:"vertical", marginBottom:"12px"}} />
-            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"4px"}}>
-              <label style={{color:"#667085", fontSize:"15px"}}>Описание</label>
-              <button className="boris-btn-hover" onClick={applyBoldPreview} style={{background:"#FFFFFF", color:"#fff", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"3px 10px", cursor:"pointer", fontWeight:"bold", fontSize:"15px"}}>Ж</button>
+  className="boris-f2-c197b41fe481"/>
+            <div className="boris-f2-5f0e18046928">
+              <label className="boris-f2-96046ead62a3">Описание</label>
+              <Button className="boris-btn-hover boris-f2-6420ef49d699" onClick={applyBoldPreview}>Ж</Button>
             </div>
             <textarea id="ai-preview-desc" value={aiPreview.description} onChange={e => updateAiPreview("description", e.target.value)} rows={10}
-              style={{width:"100%", boxSizing:"border-box", background:"#F6F7FB", border:"1px solid #E3E7F0", borderRadius:"8px", padding:"10px", color:"#344054", fontSize:"15px", lineHeight:1.5, fontFamily:"inherit", resize:"vertical", marginBottom:"8px"}} />
-            <div style={{color:"#8A93A6", fontSize:"15px", marginBottom:"8px"}}>Предпросмотр:</div>
-            <div style={{fontSize:"15px", color:"#344054", lineHeight:1.5, background:"#F6F7FB", padding:"14px", borderRadius:"8px", border:"1px dashed #E3E7F0", whiteSpace:"pre-wrap", wordBreak:"break-word", overflowWrap:"break-word"}} dangerouslySetInnerHTML={{__html: aiPreview.description}} />
-            <div style={{display:"flex", gap:"12px", marginTop:"20px"}}>
-              <button className="boris-btn-hover" onClick={applyAiPreview} style={{flex:1, background:"#2F6FED", color:"#F6F7FB", border:"none", borderRadius:"10px", padding:"12px", fontWeight:"bold", cursor:"pointer"}}>✅ Применить к карточке</button>
-              <button className="boris-btn-hover" onClick={() => setAiPreview(null)} style={{flex:1, background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"12px", cursor:"pointer"}}>Отмена</button>
+  className="boris-f2-7ff4f8f41c1b"/>
+            <div className="boris-f2-5135dd715e5e">Предпросмотр:</div>
+            <div dangerouslySetInnerHTML={{__html: aiPreview.description}}  className="boris-f2-487e721346d4"/>
+            <div className="boris-f2-d4268e91708c">
+              <Button className="boris-btn-hover boris-f2-b68f130f1f82" onClick={applyAiPreview}>✅ Применить к карточке</Button>
+              <Button className="boris-btn-hover boris-f2-cc812ecc9f36" onClick={() => setAiPreview(null)}>Отмена</Button>
             </div>
           </div>
         </div>
@@ -9122,86 +9424,108 @@ export default function Home() {
         confirmText="OK" cancelText="Закрыть"
         onConfirm={() => setNotifyMsg(null)} onCancel={() => setNotifyMsg(null)} />
       <ConfirmModal open={autopilotModalOpen} kind="danger" title="Включить автопилот ставок?"
-        message="Борис будет САМ менять ставки каждый час в рамках предохранителей (потолок ставки, шаг не более 20%, суточный лимит бюджета). Это реальные траты на вашем аккаунте."
+        message="Борис будет САМ менять ставки каждый час в рамках предохранителей (потолок ставки, шаг не более 10%, суточный лимит бюджета). Это реальные траты на вашем аккаунте."
         confirmText="Включить" cancelText="Отмена"
         onConfirm={doToggleAutopilot} onCancel={() => setAutopilotModalOpen(false)} />
       <ConfirmModal open={payModalAccount !== null} kind="confirm" title="💳 Отметить оплату клиента"
         confirmText="Сохранить" cancelText="Отмена"
         onConfirm={savePayment} onCancel={() => setPayModalAccount(null)}>
-        <div style={{display:"flex", flexDirection:"column", gap:"12px"}}>
+        <div className="boris-f2-2e1ca338d758">
           <div>
-            <div style={{fontSize:"13px", color:"#667085", marginBottom:"4px"}}>Сумма оплаты, ₽</div>
-            <input type="number" value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="7000" style={{width:"100%", padding:"9px 12px", border:"1px solid #D0D5DD", borderRadius:"8px", fontSize:"15px"}} />
+            <div className="boris-f2-206d5b50e31f">Сумма оплаты, ₽</div>
+            <input type="number" value={Number(payAmount) === 0 ? "" : payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="7000"  className="boris-f2-955f7989a722"/>
           </div>
           <div>
-            <div style={{fontSize:"13px", color:"#667085", marginBottom:"4px"}}>Период, дней</div>
-            <input type="number" value={payPeriod} onChange={e => setPayPeriod(e.target.value)} placeholder="30" style={{width:"100%", padding:"9px 12px", border:"1px solid #D0D5DD", borderRadius:"8px", fontSize:"15px"}} />
+            <div className="boris-f2-206d5b50e31f">Период, дней</div>
+            <input type="number" value={Number(payPeriod) === 0 ? "" : payPeriod} onChange={e => setPayPeriod(e.target.value)} placeholder="30"  className="boris-f2-955f7989a722"/>
           </div>
-          <div style={{fontSize:"12px", color:"#8A93A6"}}>Напоминания: 🟡 за 10 дней · 🔴 за 4 дня до конца.</div>
+          <div className="boris-f2-b68dda3a3439">Напоминания: 🟡 за 10 дней · 🔴 за 4 дня до конца.</div>
         </div>
       </ConfirmModal>
             {borisModal.open && (
-                          <div style={{position:"fixed", inset:0, background:"rgba(16,24,40,0.5)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:2000, padding:"20px"}} onClick={closeBorisModal}>
-                <div style={{background:"#FFFFFF", borderRadius:"16px", padding:"28px", maxWidth:"460px", width:"100%", boxShadow:"0 12px 40px rgba(16,24,40,0.2)"}} onClick={e => e.stopPropagation()}>
-                  <div style={{fontSize:"18px", fontWeight:"bold", color:"#1D2939", marginBottom:"12px"}}>{borisModal.title}</div>
-                  <div style={{fontSize:"15px", color:"#475467", lineHeight:"1.5", marginBottom:"24px", whiteSpace:"pre-line"}}>{borisModal.message}</div>
-                  <div style={{display:"flex", gap:"10px", justifyContent:"flex-end"}}>
+                          <div onClick={closeBorisModal} className="boris-f2-2783e11c6d6e">
+                <div onClick={e => e.stopPropagation()} className="boris-f2-ac712986e09f">
+                  <div className="boris-f2-1b6d66a19529">{borisModal.title}</div>
+                  <div className="boris-f2-4976c09e2ce0">{borisModal.message}</div>
+                  <div className="boris-f2-6060124ddbec">
                     {borisModal.onConfirm && (
-                      <button className="boris-btn-hover" onClick={closeBorisModal} style={{background:"#FFFFFF", color:"#2F6FED", border:"1.5px solid #2F6FED", borderRadius:"10px", padding:"10px 20px", cursor:"pointer", fontSize:"15px", fontWeight:"600"}}>Отмена</button>
+                      <Button className="boris-btn-hover boris-f2-3c6c7d7175f9" onClick={closeBorisModal}>Отмена</Button>
                     )}
-                    <button className="boris-btn-hover" onClick={() => { const cb = borisModal.onConfirm; closeBorisModal(); if (cb) cb(); }} style={{background:"#2F6FED", color:"#FFFFFF", border:"none", borderRadius:"10px", padding:"10px 20px", cursor:"pointer", fontSize:"15px", fontWeight:"bold"}}>{borisModal.confirmText}</button>
+                    <Button className="boris-btn-hover boris-f2-b808cb2238b2" onClick={() => { const cb = borisModal.onConfirm; closeBorisModal(); if (cb) cb(); }}>{borisModal.confirmText}</Button>
                   </div>
                 </div>
               </div>
             )}
 
       {kbModalOpen && (
-        <div onClick={() => setKbModalOpen(false)} style={{position:"fixed", inset:0, background:"rgba(15,17,21,0.55)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:9999, padding:"16px"}}>
-          <div onClick={e => e.stopPropagation()} style={{width:"540px", maxWidth:"100%", maxHeight:"90vh", overflowY:"auto", background:"#FFFFFF", borderRadius:"20px", border:"0.5px solid #E3E7F0", boxShadow:"0 20px 60px rgba(0,0,0,0.3)"}}>
-            <div style={{display:"flex", alignItems:"center", gap:"14px", padding:"24px 26px 20px", borderBottom:"0.5px solid #EEF1F6"}}>
-              <div style={{width:"46px", height:"46px", borderRadius:"14px", background:"#EAF3FF", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"24px"}}>🧠</div>
-              <div style={{flex:1}}>
-                <div style={{fontSize:"18px", fontWeight:600, color:"#14161A"}}>Обучить Бориса</div>
-                <div style={{fontSize:"13px", color:"#667085", marginTop:"2px"}}>{kbModalAccount==="global" ? "Общие знания — для всех клиентов" : "Знания об этом клиенте"}</div>
+        <div onClick={() => setKbModalOpen(false)} className="boris-f2-75d61e485a9a">
+          <div onClick={e => e.stopPropagation()} className="boris-f2-6358954eb67e">
+            <div className="boris-f2-7488648a373d">
+              <div className="boris-f2-29c425886f33">🧠</div>
+              <div className="boris-f2-7623f0554520">
+                <div className="boris-f2-84648c12f056">Обучить Бориса</div>
+                <div className="boris-f2-e41894b51ae0">{kbModalAccount==="global" ? "Общие знания — для всех клиентов" : "Знания об этом клиенте"}</div>
               </div>
-              <button onClick={() => setKbModalOpen(false)} style={{width:"34px", height:"34px", borderRadius:"10px", border:"none", background:"#F4F6FA", cursor:"pointer", fontSize:"18px", color:"#667085"}}>✕</button>
+              <Button onClick={() => setKbModalOpen(false)} className="boris-f2-2a421a9cad50">✕</Button>
             </div>
-            <div style={{padding:"22px 26px"}}>
-              <div style={{display:"flex", justifyContent:"space-between", marginBottom:"10px"}}>
-                <label style={{fontSize:"15px", color:"#667085"}}>Текст знания</label>
-                <span style={{fontSize:"12px", color:"#98A2B3"}}>{kbText.length} символов</span>
+            <div className="boris-f2-f75e26e1fb36">
+              <div className="boris-f2-afd5bb1e8a56">
+                <label className="boris-f2-aa3b68a6a257">Текст знания</label>
+                <span className="boris-f2-b68dda3a3439">{kbText.length} символов</span>
               </div>
-              <textarea value={kbText} onChange={e => setKbText(e.target.value)} placeholder="Например: доставка по вашему городу за 1 день. Или вставь текст из документа — Борис запомнит." style={{width:"100%", minHeight:"110px", resize:"vertical", fontSize:"14px", lineHeight:1.6, padding:"14px 16px", boxSizing:"border-box", borderRadius:"12px", border:"1px solid #E3E7F0", outline:"none", fontFamily:"inherit"}} />
+              <textarea value={kbText} onChange={e => setKbText(e.target.value)} placeholder="Например: доставка по вашему городу за 1 день. Или вставь текст из документа — Борис запомнит."  className="boris-f2-2fd54ef8b520"/>
               <label
                 onDragOver={e => { e.preventDefault(); setKbDragOver(true); }}
                 onDragLeave={() => setKbDragOver(false)}
                 onDrop={e => { e.preventDefault(); setKbDragOver(false); Array.from(e.dataTransfer.files).forEach(f => kbUploadFile(f as File)); }}
-                style={{marginTop:"18px", display:"block", border:`2px dashed ${kbDragOver ? "#2F6FED" : "#D3D9E4"}`, borderRadius:"14px", padding:"26px 20px", textAlign:"center", background: kbDragOver ? "#EAF3FF" : "#F9FAFC", cursor:"pointer", transition:"all 0.2s"}}>
-                <input type="file" multiple accept=".pdf,.docx,.txt,.md,.csv" onChange={e => { Array.from(e.target.files||[]).forEach(f => kbUploadFile(f as File)); e.target.value=""; }} style={{display:"none"}} />
-                <div style={{fontSize:"28px"}}>📎</div>
-                <div style={{fontSize:"14px", color:"#14161A", marginTop:"8px", fontWeight:600}}>Перетащи файл или нажми</div>
-                <div style={{fontSize:"12px", color:"#98A2B3", marginTop:"4px"}}>PDF, Word, txt — Борис прочитает текст</div>
+                style={{marginTop:"18px", display:"block", border:`2px dashed ${kbDragOver ? "var(--boris-blue)" : "#D3D9E4"}`, borderRadius:"14px", padding:"26px 20px", textAlign:"center", background: kbDragOver ? "#EAF3FF" : "#F9FAFC", cursor:"pointer", transition:"all 0.2s"}}>
+                <input type="file" multiple accept=".pdf,.docx,.txt,.md,.csv" onChange={e => { Array.from(e.target.files||[]).forEach(f => kbUploadFile(f as File)); e.target.value=""; }}  className="boris-f2-c8be1ccba60b"/>
+                <div className="boris-f2-2778029a5819">📎</div>
+                <div className="boris-f2-290d6d7e0a6d">Перетащи файл или нажми</div>
+                <div className="boris-f2-ff909e414344">PDF, Word, txt — Борис прочитает текст</div>
               </label>
+              {kbFiles.some((f:any)=>f.facts && f.facts.length>0) && (
+                <div className="boris-f2-8a359a76ebec">
+                  {kbFiles.filter((f:any)=>f.facts && f.facts.length).map((f:any)=>(
+                    <div key={"fr-"+f.id} className="boris-f2-9374e8421025">
+                      <div className="boris-f2-93e24f3d4ded">
+                        Из файла «{f.name}» я понял {f.facts.length} фрагментов — отметьте, что запомнить
+                      </div>
+                      <div className="boris-f2-79f8a56a053a">
+                        {f.facts.map((fr:any)=>(
+                          <label key={f.id+"-"+fr.i} className="boris-f2-cf4ca4644061">
+                            <input type="checkbox" checked={(f.keep||[]).includes(fr.i)} onChange={()=>kbToggleFact(f.id, fr.i)}  className="boris-f2-b7ecdfaf5aa3"/>
+                            <span className="boris-f2-7623f0554520">
+                              <span className="boris-f2-6f529e29f14f">{fr.name}</span>
+                              <span className="boris-f2-af695054edbb">{String(fr.value||"").slice(0,180)}</span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               {kbFiles.length > 0 && (
-                <div style={{marginTop:"14px", display:"flex", flexDirection:"column", gap:"10px"}}>
+                <div className="boris-f2-34801765ea00">
                   {kbFiles.map((f: any) => (
-                    <div key={f.id} style={{display:"flex", alignItems:"center", gap:"12px", padding:"12px 14px", background:"#F9FAFC", borderRadius:"12px", border:"0.5px solid #EEF1F6"}}>
-                      <span style={{fontSize:"20px"}}>{f.status==="done" ? "✅" : f.status==="error" ? "❌" : "⏳"}</span>
-                      <div style={{flex:1, minWidth:0}}>
-                        <div style={{fontSize:"13px", color:"#14161A", fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{f.name}</div>
-                        <div style={{fontSize:"12px", color: f.status==="done" ? "#12805C" : f.status==="error" ? "#C4320A" : "#667085", marginTop:"2px"}}>
+                    <div key={f.id} className="boris-f2-6ec6aac3b1f5">
+                      <span className="boris-f2-9b49c245f092">{f.status==="done" ? "✅" : f.status==="error" ? "❌" : "⏳"}</span>
+                      <div className="boris-f2-a07604d33451">
+                        <div className="boris-f2-9233632f9f8b">{f.name}</div>
+                        <div style={{fontSize:"12px", color: f.status==="done" ? "#12805C" : f.status==="error" ? "#C4320A" : "var(--boris-text-2)", marginTop:"2px"}}>
                           {f.status==="done" ? `текст извлечён · ${f.chars||0} символов` : f.status==="error" ? "не удалось прочитать" : "читаю…"}
                         </div>
                       </div>
-                      <button onClick={() => setKbFiles((prev: any[]) => prev.filter(x => x.id!==f.id))} style={{width:"28px", height:"28px", border:"none", background:"transparent", cursor:"pointer", color:"#98A2B3", fontSize:"16px"}}>✕</button>
+                      <Button onClick={() => setKbFiles((prev: any[]) => prev.filter(x => x.id!==f.id))} className="boris-f2-88ae1d3c8876">✕</Button>
                     </div>
                   ))}
                 </div>
               )}
             </div>
-            <div style={{display:"flex", gap:"12px", padding:"18px 26px", borderTop:"0.5px solid #EEF1F6", background:"#F9FAFC"}}>
-              <button onClick={() => setKbModalOpen(false)} style={{flex:1, padding:"12px", borderRadius:"10px", border:"1.5px solid #2F6FED", background:"#FFFFFF", cursor:"pointer", fontSize:"14px", color:"#2F6FED"}}>Отмена</button>
-              <button onClick={kbSubmit} disabled={kbSaving} style={{flex:2, padding:"12px", borderRadius:"10px", border:"none", background:"#2F6FED", color:"#FFFFFF", cursor:"pointer", fontSize:"14px", fontWeight:600}}>{kbSaving ? "Сохраняю…" : "Обучить Бориса"}</button>
+            <div className="boris-f2-ea642f74a3c1">
+              <Button onClick={() => setKbModalOpen(false)} className="boris-f2-cffb4dfbc4a5">Отмена</Button>
+              <Button onClick={kbSubmit} disabled={kbSaving} className="boris-f2-ce825ad62f10">{kbSaving ? "Сохраняю…" : "Обучить Бориса"}</Button>
             </div>
           </div>
         </div>

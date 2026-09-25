@@ -1,0 +1,231 @@
+openapi: 3.1.0
+info:
+  title: BORIS Agent Gateway
+  description: API BORIS для агента разработки. Job закрывается только с доказательством.
+  version: "1.0.0"
+servers:
+  - url: https://boris-ai.pro/api/v1
+paths:
+  /health/production:
+    get:
+      operationId: healthProduction
+      summary: Состояние базы, очереди задач и интеграций
+      responses: { "200": { description: OK } }
+  /capabilities:
+    get:
+      operationId: capabilities
+      summary: Какие операции реально доступны
+      responses: { "200": { description: OK } }
+  /agents:
+    get:
+      operationId: listAgents
+      summary: Реестр агентов и их доступность
+      responses: { "200": { description: OK } }
+  /agents/{agent_name}/heartbeat:
+    post:
+      operationId: agentHeartbeat
+      summary: Сообщить свою доступность
+      parameters:
+        - name: agent_name
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [available, limited, unavailable] }
+                note: { type: string }
+      responses: { "200": { description: OK } }
+  /dev/board:
+    get:
+      operationId: devBoard
+      summary: Доска задач разработки
+      responses: { "200": { description: OK } }
+  /dev/jobs:
+    get:
+      operationId: listDevJobs
+      summary: Список задач разработки
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+      responses: { "200": { description: OK } }
+    post:
+      operationId: createDevJob
+      summary: Завести задачу разработки с критериями приёмки
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, goal, acceptance_criteria]
+              properties:
+                title: { type: string }
+                goal: { type: string }
+                acceptance_criteria: { type: array, items: { type: string } }
+                scope: { type: object }
+                priority: { type: integer }
+                locks: { type: array, items: { type: string } }
+      responses: { "201": { description: OK } }
+  /dev/jobs/{dev_job_id}:
+    get:
+      operationId: getDevJob
+      summary: Состояние задачи разработки
+      parameters:
+        - name: dev_job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses: { "200": { description: OK } }
+  /dev/jobs/{dev_job_id}/phase:
+    post:
+      operationId: updateDevPhase
+      summary: Отметить фазу; pass принимается только с evidence
+      parameters:
+        - name: dev_job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phase, state]
+              properties:
+                phase:
+                  type: string
+                  enum: [PLANNING, BACKEND, FRONTEND, UX, INTEGRATION, TESTING, FIXING, REGRESSION, ACCEPTANCE, DEPLOYMENT, PRODUCTION_QA]
+                state: { type: string, enum: [pending, running, pass, fail, skipped, blocked] }
+                evidence: { type: string }
+                files_changed: { type: array, items: { type: string } }
+                tests: { type: array, items: { type: object } }
+                errors: { type: array, items: { type: object } }
+                notes: { type: string }
+      responses: { "200": { description: OK } }
+  /dev/jobs/{dev_job_id}/criteria:
+    post:
+      operationId: markDevCriteria
+      summary: Закрыть критерий приёмки с доказательством
+      parameters:
+        - name: dev_job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [index]
+              properties:
+                index: { type: integer }
+                done: { type: boolean }
+                evidence: { type: string }
+      responses: { "200": { description: OK } }
+  /dev/jobs/{dev_job_id}/ops:
+    post:
+      operationId: setDevOperation
+      summary: Статус дочерней операции TEXT IMAGES BANNERS FEED PUBLISH QA
+      parameters:
+        - name: dev_job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, status]
+              properties:
+                name: { type: string, enum: [TEXT, IMAGES, BANNERS, FEED, PUBLISH, QA] }
+                status: { type: string, enum: [waiting, running, completed, blocked, failed, skipped] }
+                requested: { type: integer }
+                actual: { type: integer }
+                evidence: { type: string }
+      responses: { "200": { description: OK } }
+  /dev/jobs/{dev_job_id}/complete:
+    post:
+      operationId: completeDevJob
+      summary: Закрыть задачу; отклоняется, пока не пройдены все гейты
+      parameters:
+        - name: dev_job_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { summary: { type: string } }
+      responses: { "200": { description: OK } }
+  /dev/jobs/{dev_job_id}/report:
+    get:
+      operationId: devReport
+      summary: Итоговый отчёт по задаче
+      parameters:
+        - name: dev_job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses: { "200": { description: OK } }
+  /handoffs:
+    post:
+      operationId: createHandoff
+      summary: Передать задачу другому агенту
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to: { type: string }
+                kind: { type: string }
+                job_id: { type: string }
+                reason: { type: string }
+                context: { type: object }
+      responses: { "201": { description: OK } }
+  /commands:
+    post:
+      operationId: sendCommand
+      summary: Команда BORIS с обязательным idempotency_key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation, idempotency_key]
+              properties:
+                operation: { type: string }
+                account_id: { type: string }
+                params: { type: object }
+                idempotency_key: { type: string }
+                confirm: { type: boolean }
+                dry_run: { type: boolean }
+      responses: { "200": { description: OK } }
+  /clients/{account_id}/status:
+    get:
+      operationId: clientStatus
+      summary: Сводка по аккаунту клиента
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses: { "200": { description: OK } }

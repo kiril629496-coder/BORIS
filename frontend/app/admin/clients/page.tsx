@@ -13,20 +13,20 @@ const S: any = {
   page: { maxWidth: 1000, margin: "0 auto", padding: 24, fontFamily: "system-ui, sans-serif", color: "#1B2437" },
   h1: { fontSize: 24, fontWeight: 800, margin: "0 0 4px" },
   sub: { color: "#6B7688", fontSize: 14, margin: "0 0 20px" },
-  card: { background: "#fff", border: "1px solid #E3E7F0", borderRadius: 16, padding: 20, marginBottom: 16 },
+  card: { background: "#fff", border: "1px solid var(--boris-border)", borderRadius: 16, padding: 20, marginBottom: 16 },
   row: { display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" },
   input: { border: "1px solid #D6DCE8", borderRadius: 10, padding: "10px 12px", fontSize: 14, minWidth: 180 },
   label: { fontSize: 12, color: "#6B7688", display: "block", marginBottom: 4 },
   btn: { background: "#2F6BFF", color: "#fff", border: 0, borderRadius: 10, padding: "10px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer" },
   btnGhost: { background: "#fff", color: "#2F6BFF", border: "1px solid #2F6BFF", borderRadius: 10, padding: "10px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer" },
   btnDanger: { background: "#E5484D", color: "#fff", border: 0, borderRadius: 10, padding: "10px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
-  item: { padding: "10px 12px", border: "1px solid #E3E7F0", borderRadius: 10, marginBottom: 8, cursor: "pointer", background: "#fff" },
-  tag: { display: "inline-block", fontSize: 12, padding: "2px 8px", borderRadius: 999, background: "#EEF3FF", color: "#2F6BFF", marginLeft: 8 },
+  item: { padding: "10px 12px", border: "1px solid var(--boris-border)", borderRadius: 10, marginBottom: 8, cursor: "pointer", background: "#fff" },
+  tag: { display: "inline-block", fontSize: 12, padding: "2px 8px", borderRadius: 999, background: "var(--boris-blue-soft)", color: "#2F6BFF", marginLeft: 8 },
   plan: { background: "#FFF8E6", border: "1px solid #F5D98B", borderRadius: 12, padding: 16, marginTop: 12 },
   err: { background: "#FDECEC", border: "1px solid #F3B5B5", borderRadius: 12, padding: 12, marginTop: 12, color: "#9B1C1C" },
   okBox: { background: "#EAF7EE", border: "1px solid #A9DDB9", borderRadius: 12, padding: 12, marginTop: 12, color: "#14663A" },
   th: { textAlign: "left", fontSize: 12, color: "#6B7688", fontWeight: 600, padding: "6px 8px" },
-  td: { fontSize: 13, padding: "6px 8px", borderTop: "1px solid #EEF1F6" },
+  td: { fontSize: 13, padding: "6px 8px", borderTop: "1px solid var(--boris-border-soft)" },
 };
 
 async function api(path: string, method = "GET", body?: any) {
@@ -139,7 +139,7 @@ export default function AdminClientsPage() {
         </div>
 
         {list.length > 0 && (
-          <div style={{ marginTop: 16 }}>
+          <div className="boris-f3-76977cc9f24231">
             {list.map((c) => (
               <div key={c.id} style={S.item} onClick={() => openCard(c.id)}>
                 <b>{c.email}</b>
@@ -157,16 +157,16 @@ export default function AdminClientsPage() {
       {card && card.user && (
         <>
           <div style={S.card}>
-            <h2 style={{ fontSize: 18, fontWeight: 700, marginTop: 0 }}>{card.user.email}</h2>
-            <div style={{ fontSize: 13, color: "#6B7688", marginBottom: 12 }}>
+            <h2 className="boris-f3-d678338adc1bb6">{card.user.email}</h2>
+            <div className="boris-f3-b33f84f1a7045a">
               id {card.user.id} · роль {card.user.role} · статус {card.user.status} ·
               основной аккаунт {card.user.account_id || "—"}
             </div>
 
-            <div style={{ fontSize: 13, fontWeight: 700, margin: "12px 0 4px" }}>
+            <div className="boris-f3-7f3ff6713fa965">
               Аккаунты ({(card.accounts || []).length})
             </div>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <table className="boris-f3-fa7edf809321fe">
               <thead><tr>
                 <th style={S.th}>account_id</th><th style={S.th}>название</th><th style={S.th}>биллинг</th>
               </tr></thead>
@@ -181,13 +181,13 @@ export default function AdminClientsPage() {
               </tbody>
             </table>
 
-            <div style={{ fontSize: 13, fontWeight: 700, margin: "16px 0 4px" }}>
+            <div className="boris-f3-1a03fde4a44c2a">
               Слоты ({(card.slots || []).length})
             </div>
             {(card.slots || []).length === 0
-              ? <div style={{ fontSize: 13, color: "#6B7688" }}>слотов нет</div>
+              ? <div className="boris-f3-82259d267eb8c6">слотов нет</div>
               : (
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <table className="boris-f3-fa7edf809321fe">
                   <thead><tr>
                     <th style={S.th}>№</th><th style={S.th}>статус</th><th style={S.th}>аккаунт</th>
                     <th style={S.th}>цена</th><th style={S.th}>оплачен до</th>
@@ -208,7 +208,7 @@ export default function AdminClientsPage() {
           </div>
 
           <div style={S.card}>
-            <h2 style={{ fontSize: 18, fontWeight: 700, marginTop: 0 }}>Оформление</h2>
+            <h2 className="boris-f3-d678338adc1bb6">Оформление</h2>
             <div style={S.row}>
               <div>
                 <label style={S.label}>Тариф</label>
@@ -222,12 +222,12 @@ export default function AdminClientsPage() {
               <div>
                 <label style={S.label}>Слотов всего должно быть</label>
                 <input style={{ ...S.input, minWidth: 110 }} type="number" min={0} max={50}
-                       value={slots} onChange={(e) => { setSlots(e.target.value); reset(); }} />
+                       value={Number(slots) === 0 ? "" : slots} onChange={(e) => { setSlots(e.target.value); reset(); }} />
               </div>
               <div>
                 <label style={S.label}>Слоты на дней</label>
                 <input style={{ ...S.input, minWidth: 110 }} type="number" min={1}
-                       value={slotDays} onChange={(e) => { setSlotDays(e.target.value); reset(); }} />
+                       value={Number(slotDays) === 0 ? "" : slotDays} onChange={(e) => { setSlotDays(e.target.value); reset(); }} />
               </div>
             </div>
 
@@ -235,12 +235,12 @@ export default function AdminClientsPage() {
               <div>
                 <label style={S.label}>Оплачено, ₽</label>
                 <input style={{ ...S.input, minWidth: 140 }} type="number" min={0}
-                       value={amount} onChange={(e) => { setAmount(e.target.value); reset(); }} />
+                       value={Number(amount) === 0 ? "" : amount} onChange={(e) => { setAmount(e.target.value); reset(); }} />
               </div>
               <div>
                 <label style={S.label}>Период, дней</label>
                 <input style={{ ...S.input, minWidth: 110 }} type="number" min={1}
-                       value={periodDays} onChange={(e) => { setPeriodDays(e.target.value); reset(); }} />
+                       value={Number(periodDays) === 0 ? "" : periodDays} onChange={(e) => { setPeriodDays(e.target.value); reset(); }} />
               </div>
               <div>
                 <label style={S.label}>Дата оплаты</label>
@@ -254,17 +254,15 @@ export default function AdminClientsPage() {
               </div>
             </div>
 
-            <div style={{ marginTop: 16, padding: 14, border: "1px solid #E3E7F0", borderRadius: 12 }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <div className="boris-f3-873d518dcb64ce">
+              <label className="boris-f3-ba1ecfece147d2">
                 <input type="checkbox" checked={rop}
                        onChange={(e) => { setRop(e.target.checked); reset(); }} />
-                <b style={{ fontSize: 14 }}>Начислить пакет РОП</b>
+                <b className="boris-f3-905228b6d52d18">Начислить пакет РОП</b>
               </label>
               {rop && (
                 <>
-                  <div style={{ fontSize: 13, color: "#8A5A00", background: "#FFF8E6",
-                                border: "1px solid #F5D98B", borderRadius: 8,
-                                padding: "8px 10px", margin: "10px 0" }}>
+                  <div className="boris-f3-50be097abf2e34">
                     РОП будет начислен на {(card.accounts || []).length} аккаунт(ов).
                     Каждый аккаунт получит ОТДЕЛЬНЫЙ лимит: {ropMinutes} минут,
                     {" "}{ropChats} разборов, {ropRepCalls} отчётов по звонкам и
@@ -297,11 +295,10 @@ export default function AdminClientsPage() {
                              onChange={(e) => { setRopDays(e.target.value); reset(); }} />
                     </div>
                   </div>
-                  <label style={{ display: "flex", alignItems: "center", gap: 8,
-                                  marginTop: 10, cursor: "pointer" }}>
+                  <label className="boris-f3-c8c25d7165b46c">
                     <input type="checkbox" checked={ropRenew}
                            onChange={(e) => { setRopRenew(e.target.checked); reset(); }} />
-                    <span style={{ fontSize: 13, color: "#9B1C1C" }}>
+                    <span className="boris-f3-dcbaeca76a4328">
                       Начать новый период РОП (перезапишет активный период, израсходованное обнулится)
                     </span>
                   </label>
@@ -309,7 +306,7 @@ export default function AdminClientsPage() {
               )}
             </div>
 
-            <div style={{ marginTop: 12 }}>
+            <div className="boris-f3-b6d781cbbc10a4">
               <label style={S.label}>Комментарий (уходит в журнал)</label>
               <textarea style={{ ...S.input, width: "100%", minHeight: 70 }} value={comment}
                         onChange={(e) => { setComment(e.target.value); reset(); }}
@@ -320,7 +317,7 @@ export default function AdminClientsPage() {
               <button style={S.btnGhost} onClick={preview} disabled={busy}>Показать план</button>
               <button style={plan ? S.btnDanger : { ...S.btnDanger, opacity: 0.4, cursor: "not-allowed" }}
                       onClick={apply} disabled={!plan || busy}>Применить</button>
-              {!plan && <span style={{ fontSize: 12, color: "#6B7688" }}>
+              {!plan && <span className="boris-f3-ed1523ac8dbf33">
                 сначала предпросмотр — без него запись невозможна
               </span>}
             </div>
@@ -328,8 +325,8 @@ export default function AdminClientsPage() {
             {plan && (
               <div style={S.plan}>
                 <b>Будет выполнено:</b>
-                <ul style={{ margin: "8px 0 0 18px", padding: 0 }}>
-                  {plan.map((p, i) => <li key={i} style={{ fontSize: 14, marginBottom: 4 }}>{p}</li>)}
+                <ul className="boris-f3-1f06a917afdbc7">
+                  {plan.map((p, i) => <li key={i} className="boris-f3-b946ddb8eedb4f">{p}</li>)}
                 </ul>
               </div>
             )}
@@ -337,13 +334,13 @@ export default function AdminClientsPage() {
             {result && (
               <div style={(result.errors || []).length ? S.err : S.okBox}>
                 <b>Готово.</b>
-                <ul style={{ margin: "8px 0 0 18px", padding: 0 }}>
+                <ul className="boris-f3-1f06a917afdbc7">
                   {(result.done || []).map((d: string, i: number) => <li key={i}>{d}</li>)}
                 </ul>
                 {(result.errors || []).length > 0 && (
                   <>
                     <b>Ошибки:</b>
-                    <ul style={{ margin: "8px 0 0 18px", padding: 0 }}>
+                    <ul className="boris-f3-1f06a917afdbc7">
                       {(result.errors || []).map((d: string, i: number) => <li key={i}>{d}</li>)}
                     </ul>
                   </>

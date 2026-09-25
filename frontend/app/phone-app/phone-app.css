@@ -1,0 +1,388 @@
+*{box-sizing:border-box}.phoneApp{min-height:100vh;background:#f7f9fd;color:#16233b;display:grid;grid-template-columns:220px 1fr;font-family:var(--font-manrope),Arial,sans-serif}.phoneNav{background:#fff;border-right:1px solid #e6ebf4;padding:20px 14px;display:flex;flex-direction:column;min-height:100vh}.brand{display:flex;align-items:center;gap:10px;padding:4px 8px 24px;font-size:20px}.brand>span{width:34px;height:34px;border-radius:12px;background:linear-gradient(135deg,#326cff,#8757ff);display:grid;place-items:center;color:#fff;font-weight:900}.brand b{font-weight:850}.brand em{font-style:normal;color:#6c4cff}.phoneNav nav{display:grid;gap:6px}.phoneNav nav button{border:0;background:transparent;border-radius:12px;padding:12px 12px;display:flex;gap:11px;align-items:center;color:#34445f;font:700 14px inherit;text-align:left;cursor:pointer}.phoneNav nav button i{font-style:normal;width:22px;text-align:center;font-size:18px}.phoneNav nav button small{margin-left:auto;background:#eef0ff;color:#6148ff;border-radius:999px;padding:2px 7px}.phoneNav nav button.active{background:#eef0ff;color:#4c3cf4}.navBottom{margin-top:auto;border:1px solid #e6ebf4;border-radius:14px;padding:13px;display:grid;gap:8px}.navBottom>div,.topStatus{display:flex;gap:8px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;background:#c4ccda}.dot.on{background:#11b76a;box-shadow:0 0 0 4px #e6f9f0}.navBottom small{color:#8793a8}.navBottom a{color:#5d4af5;text-decoration:none;font-weight:700;font-size:12px}.phoneBody{padding:18px 20px 28px;min-width:0}.phoneTop{height:62px;display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.phoneTop h1{margin:0;font-size:27px;letter-spacing:-.6px}.phoneTop p{margin:2px 0 0;color:#8a96aa;font-size:12px}.topStatus{background:#fff;border:1px solid #e3e9f3;border-radius:999px;padding:9px 14px;font-size:12px;font-weight:800}.card{background:#fff;border:1px solid #e5eaf3;border-radius:16px;box-shadow:0 8px 24px rgba(31,55,95,.045)}.callLayout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px}.mainCol,.rightCol{display:grid;gap:14px;align-content:start}.activeCall{padding:20px}.cardHead{display:flex;justify-content:space-between;gap:18px}.cardHead small{font-weight:800;color:#6f7d93}.cardHead h2{margin:6px 0 2px;font-size:24px}.cardHead p{margin:0;color:#6e7d95}.timer{color:#08a85d;font-size:15px}.wave{height:62px;display:flex;align-items:center;gap:4px;margin:8px 0 12px;overflow:hidden}.wave i{display:block;width:3px;border-radius:3px;background:linear-gradient(#6d55ff,#88a9ff);opacity:.62}.controls{display:flex;justify-content:center;gap:25px;flex-wrap:wrap}.controls button{width:68px;border:0;background:transparent;color:#33435e;display:grid;gap:6px;place-items:center;font-size:23px;cursor:pointer}.controls button span{font-size:11px}.controls button.end{color:#ef3c42}.twoCols{display:grid;grid-template-columns:1fr 1fr;gap:14px}.clientCard,.aiCard,.interactions,.queue,.stats,.quick,.clients,.history,.tasks,.dialer,.recent{padding:16px}.sectionTitle{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.sectionTitle h3,.stats h3,.quick h3{margin:0;font-size:15px}.sectionTitle a,.sectionTitle span{font-size:11px;color:#5f49ff;text-decoration:none;font-weight:800}.clientCard dl,.stats dl{display:grid;grid-template-columns:110px 1fr;gap:9px;margin:0}.clientCard dt,.stats dt{color:#8490a4;font-size:12px}.clientCard dd,.stats dd{margin:0;font-size:12px;font-weight:750}.dealBox{margin-top:14px;background:#f8f9ff;border:1px solid #eceefe;border-radius:12px;padding:12px;display:grid;gap:4px}.dealBox small{color:#8792a6}.dealBox span{color:#5d4af5;font-size:12px}.aiSummary{font-size:13px;line-height:1.55;color:#4e5d75}.aiPoints{background:#faf9ff;border-radius:12px;padding:12px;margin:10px 0}.aiPoints b{font-size:12px}.aiPoints p{margin:5px 0 0;font-size:12px}.taskQuick{display:grid;grid-template-columns:1fr auto;gap:8px}.taskQuick input,.dialer>input,.clientsHead input{border:1px solid #dfe5ef;border-radius:10px;padding:10px 12px;outline:none;background:#fbfcfe}.taskQuick button,.quick button,.bp{border:0}.taskQuick button{background:#6652ff;color:#fff;border-radius:10px;padding:0 12px;font-weight:800}.interaction{display:grid;grid-template-columns:34px 1fr auto;gap:9px;align-items:center;padding:9px 0;border-top:1px solid #f0f2f6}.interaction>span{width:30px;height:30px;border-radius:10px;background:#eafbf2;color:#0fae64;display:grid;place-items:center}.interaction b,.interaction small{display:block}.interaction b{font-size:12px}.interaction small{color:#8b96a9;font-size:10px;margin-top:2px}.interaction time,.queue time,.historyRow time,.taskRow time{font-size:10px;color:#8d98aa}.queue button,.recent button{width:100%;border:0;background:transparent;border-radius:12px;padding:9px;display:grid;grid-template-columns:32px 1fr auto;gap:8px;align-items:center;text-align:left;cursor:pointer}.queue button.selected{background:#f2f4ff}.queue button>span{width:30px;height:30px;border-radius:50%;background:#eafbf2;color:#0aae62;display:grid;place-items:center}.queue button>span.missed,.callIcon.missed{background:#fff0f1;color:#ed3b43}.queue b,.queue small,.recent b,.recent small{display:block}.queue b,.recent b{font-size:11px}.queue small,.recent small{font-size:10px;color:#8d98aa}.stats dl{grid-template-columns:1fr auto}.quick{display:grid;gap:8px}.quick button{border:1px solid #e5eaf3;background:#fff;border-radius:10px;padding:10px;text-align:left;color:#43536d;cursor:pointer}.simpleGrid{display:grid;grid-template-columns:minmax(300px,520px) minmax(300px,1fr);gap:14px;max-width:1000px}.dialer h2,.recent h2,.clients h2,.history h2,.tasks h2{margin:0 0 14px}.dialer>input{width:100%;font-size:20px;text-align:center}.keys{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}.keys button{height:58px;border:1px solid #e5eaf3;background:#fafbfe;border-radius:14px;font-size:20px;font-weight:800;cursor:pointer}.callBtn{width:100%;border:0;border-radius:14px;padding:14px;background:#19b766;color:#fff;font-weight:900;font-size:16px}.notice,.toast{font-size:12px}.notice{color:#5a6780}.recent button{grid-template-columns:1fr auto}.recent button span{font-size:20px;color:#11ae62}.clientsHead{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:12px}.clientsHead h2{margin-bottom:3px}.clientsHead p{margin:0;color:#8b96a8;font-size:12px}.clientsHead input{width:min(390px,45%)}.clientRow,.historyRow{width:100%;display:grid;grid-template-columns:40px minmax(0,1fr) auto auto;gap:10px;align-items:center;border:0;border-top:1px solid #eff2f6;background:#fff;padding:11px 4px;text-align:left;cursor:pointer}.avatar{width:36px;height:36px;border-radius:12px;background:#eef0ff;color:#5a48f2;display:grid;place-items:center;font-weight:900}.clientRow b,.clientRow small,.historyRow b,.historyRow small{display:block}.clientRow b,.historyRow b{font-size:12px}.clientRow small,.historyRow small{font-size:10px;color:#8793a7}.dealCount{font-size:10px;background:#eef9f3;color:#14935b;padding:5px 8px;border-radius:999px}.clientRow em{font-style:normal;color:#5d4af5;font-size:11px}.historyRow{grid-template-columns:40px minmax(0,1fr) 70px 90px}.callIcon{width:34px;height:34px;border-radius:50%;background:#eafbf2;color:#0ead63;display:grid;place-items:center}.taskRow{display:grid;grid-template-columns:34px 1fr auto;gap:10px;align-items:center;border-top:1px solid #eff2f6;padding:12px 0}.taskRow>span{width:30px;height:30px;border-radius:10px;background:#eef0ff;color:#5e49ff;display:grid;place-items:center}.taskRow b,.taskRow small{display:block}.taskRow b{font-size:12px}.taskRow small{font-size:10px;color:#8a96a9}.empty{padding:22px 6px;color:#8c98ab;font-size:12px}.toast{position:fixed;right:22px;bottom:22px;background:#1f2b41;color:#fff;border-radius:12px;padding:12px 16px;box-shadow:0 10px 30px rgba(20,30,50,.2)}
+@media(max-width:1100px){.callLayout{grid-template-columns:1fr}.rightCol{grid-template-columns:repeat(3,1fr)}.twoCols{grid-template-columns:1fr 1fr}}@media(max-width:760px){.phoneApp{grid-template-columns:1fr}.phoneNav{position:fixed;z-index:10;left:0;right:0;bottom:0;min-height:0;border-right:0;border-top:1px solid #e5eaf3;padding:7px 8px}.brand,.navBottom{display:none}.phoneNav nav{display:grid;grid-template-columns:repeat(5,1fr)}.phoneNav nav button{font-size:9px;display:grid;place-items:center;gap:2px;padding:6px}.phoneNav nav button i{font-size:17px}.phoneNav nav button small{display:none}.phoneBody{padding:10px 10px 80px}.phoneTop{height:55px}.phoneTop h1{font-size:22px}.topStatus{padding:7px 10px}.twoCols,.rightCol,.simpleGrid{grid-template-columns:1fr}.callLayout{display:block}.rightCol{display:grid;margin-top:10px}.controls{gap:12px}.clientCard dl{grid-template-columns:90px 1fr}.clientsHead{display:block}.clientsHead input{width:100%;margin-top:10px}.clientRow{grid-template-columns:40px 1fr auto}.clientRow .dealCount{display:none}.clientRow em{display:none}.historyRow{grid-template-columns:38px 1fr 55px}.historyRow time{display:none}}
+.incomingOverlay{position:fixed;inset:0;z-index:100;background:rgba(32,48,78,.18);backdrop-filter:blur(8px);display:grid;place-items:center;padding:20px}.incomingCard{width:min(420px,100%);background:#fff;border:1px solid #e5eaf4;border-radius:24px;box-shadow:0 28px 80px rgba(31,55,95,.24);padding:30px;text-align:center}.incomingPulse{width:68px;height:68px;border-radius:50%;display:grid;place-items:center;margin:0 auto 14px;background:#eefaf4;color:#10ad63;font-size:30px;box-shadow:0 0 0 10px #f5fcf8}.incomingCard small{display:block;color:#8290a7;font-weight:800}.incomingCard h2{margin:8px 0 4px;font-size:26px}.incomingCard p{margin:0 0 24px;color:#8190a6}.incomingCard>div{display:grid;grid-template-columns:1fr 1fr;gap:12px}.incomingCard button{border:0;border-radius:14px;padding:14px;font-weight:900;cursor:pointer}.incomingCard .reject{background:#fff0f1;color:#e9343d}.incomingCard .answer{background:#19b766;color:#fff}
+.taskRow{grid-template-columns:34px 1fr auto auto}.taskDone{border:1px solid #dfe6f0;background:#fff;color:#5848ef;border-radius:9px;padding:7px 10px;font-size:10px;font-weight:850;cursor:pointer}.taskDone:hover{background:#f4f2ff}
+.topActions{display:flex;align-items:center;gap:8px}.presenceBtn{border:1px solid #e3e9f3;background:#fff;border-radius:999px;padding:9px 13px;display:flex;align-items:center;gap:8px;color:#35445e;font-weight:800;font-size:12px;cursor:pointer}.presenceBtn.dnd{background:#fff7f7;border-color:#f4d8da;color:#b33a41}.incomingOverlay{position:fixed;inset:0;background:rgba(20,31,52,.18);backdrop-filter:blur(3px);z-index:90;display:grid;place-items:center;padding:20px}.incomingCard{width:min(390px,94vw);background:#fff;border:1px solid #e6ebf4;border-radius:24px;box-shadow:0 24px 70px rgba(29,42,72,.2);padding:30px;text-align:center}.incomingPulse{width:66px;height:66px;border-radius:50%;background:#edf9f3;color:#10ad64;display:grid;place-items:center;margin:0 auto 12px;font-size:28px}.incomingCard small{color:#7e8ba1;font-weight:800}.incomingCard h2{font-size:25px;margin:8px 0}.incomingCard p{color:#8a96aa;margin:0 0 22px}.incomingCard>div{display:grid;grid-template-columns:1fr 1fr;gap:10px}.incomingCard button{border:0;border-radius:13px;padding:13px;font-weight:900;cursor:pointer}.incomingCard .reject{background:#fff0f1;color:#dc3540}.incomingCard .answer{background:#17b767;color:#fff}.taskRow{grid-template-columns:34px minmax(0,1fr) auto auto}.taskDone{border:1px solid #dfe5ef;background:#fff;border-radius:9px;padding:7px 10px;color:#56647b;font-weight:800;font-size:11px;cursor:pointer}@media(max-width:760px){.topActions{gap:5px}.presenceBtn,.topStatus{font-size:10px;padding:7px 9px}.taskRow{grid-template-columns:30px 1fr auto}.taskRow time{display:none}}
+.liveSuggestion{border:1px solid #e5ddff;background:#faf8ff;border-radius:13px;padding:12px;margin-bottom:10px;display:grid;gap:6px}.liveSuggestion small{color:#7057e8;font-weight:800}.liveSuggestion b{font-size:13px;line-height:1.45}.liveSuggestion button{justify-self:start;border:0;background:#6550f5;color:#fff;border-radius:8px;padding:6px 9px;font-size:10px;font-weight:800;cursor:pointer}.liveTranscript{background:#f8fafc;border-radius:12px;padding:10px 12px;margin-bottom:10px;max-height:160px;overflow:auto}.liveTranscript>small{font-weight:800;color:#7a879b}.liveTranscript p{font-size:11px;line-height:1.45;margin:7px 0;color:#4e5d75}.liveTranscript p b{color:#293a54}
+
+.dispositionCard{padding:16px}.dispositionGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.dispositionGrid label{display:grid;gap:5px;color:#7d899d;font-size:11px;font-weight:800}.dispositionGrid input,.dispositionGrid select,.dispositionGrid textarea{width:100%;border:1px solid #dfe5ef;border-radius:10px;padding:10px;background:#fbfcfe;color:#24334c;font:inherit}.dispositionGrid textarea{min-height:78px;resize:vertical}.saveDisposition{margin-top:11px;border:0;border-radius:10px;padding:11px 14px;background:#6652ff;color:#fff;font-weight:850;cursor:pointer}@media(max-width:760px){.dispositionGrid{grid-template-columns:1fr}}
+.qualityCard{position:relative}.qualityCard .sectionTitle button{border:1px solid #d8dce8;background:#fff;border-radius:10px;padding:8px 12px;font-weight:700;cursor:pointer}.qualityScore{display:flex;align-items:baseline;gap:4px;margin:12px 0}.qualityScore b{font-size:34px}.qualityScore span{color:#8b91a2}.qualityGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.qualityGrid>div{border:1px solid #edf0f6;border-radius:12px;padding:10px}.qualityGrid span{display:block;color:#737b8d;font-size:12px}.qualityGrid b{font-size:18px}.qualityGrid i{display:block;height:5px;background:#eef0f5;border-radius:99px;margin-top:7px;overflow:hidden}.qualityGrid i em{display:block;height:100%;background:linear-gradient(90deg,#7667ef,#4b8ff7);border-radius:99px}.qualityGaps,.qualityGood{margin:12px 0 0;font-size:13px}.qualityGaps{color:#8a5a18}.qualityGood{color:#2b7a54}@media(max-width:700px){.qualityGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.streamStatus{font-size:12px;font-weight:700;padding:7px 10px;border-radius:999px;background:#f2f4f8;color:#697080}.streamStatus.sse{background:#edf9f2;color:#25784b}.streamStatus.polling{background:#fff7e8;color:#9a6816}
+
+.phoneOffline{margin:10px 18px 0;padding:10px 14px;border-radius:12px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:700;font-size:13px}
+.installPhoneBtn{border:1px solid #dfe5ef;background:#fff;color:#5646ef;border-radius:999px;padding:9px 13px;font-size:12px;font-weight:850;cursor:pointer}.installPhoneBtn:hover{background:#f5f3ff}.installOverlay{position:fixed;inset:0;z-index:140;background:rgba(21,31,52,.28);backdrop-filter:blur(7px);display:grid;place-items:center;padding:20px}.installCard{position:relative;width:min(470px,94vw);background:#fff;border:1px solid #e3e8f2;border-radius:24px;box-shadow:0 28px 90px rgba(25,39,68,.25);padding:28px}.installClose{position:absolute;right:14px;top:12px;width:34px;height:34px;border:0;background:#f3f5f8;border-radius:50%;font-size:23px;color:#667085;cursor:pointer}.installIcon{width:58px;height:58px;border-radius:17px;background:linear-gradient(135deg,#326cff,#8757ff);display:grid;place-items:center;color:#fff;font-size:26px;font-weight:950;margin-bottom:14px}.installCard h2{margin:0 0 8px;font-size:23px}.installCard>p{margin:0 0 16px;color:#69768d;line-height:1.55;font-size:13px}.installCard>small{display:block;margin-top:15px;padding-top:14px;border-top:1px solid #edf0f5;color:#8a96aa;line-height:1.5}.installSteps{display:grid;grid-template-columns:30px 1fr;gap:10px 11px;align-items:start}.installSteps>b{width:27px;height:27px;border-radius:9px;background:#eef0ff;color:#5e49ef;display:grid;place-items:center;font-size:12px}.installSteps>span{font-size:13px;line-height:1.55;color:#40506a;padding-top:3px}@media(max-width:760px){.installPhoneBtn{padding:7px 9px;font-size:10px}.installCard{padding:24px 20px}.installCard h2{font-size:21px}}
+@supports(padding:max(0px)){@media(max-width:760px){.phoneBody{padding-top:max(10px,env(safe-area-inset-top));padding-left:max(10px,env(safe-area-inset-left));padding-right:max(10px,env(safe-area-inset-right));padding-bottom:max(80px,calc(70px + env(safe-area-inset-bottom)))}.phoneNav{padding-bottom:max(7px,env(safe-area-inset-bottom))}}}
+.streamStatus.updateReady{background:#eef6ff;color:#1d5fbf;border:1px solid #d9e9ff}
+@media(max-width:760px){.installPhoneBtn{font-size:10px;padding:7px 9px}.streamStatus.updateReady{display:none}}
+.phoneDeviceBlocked{margin:10px 18px 0;padding:12px 14px;border-radius:12px;background:#fff1f2;border:1px solid #fecdd3;color:#9f1239;display:flex;align-items:center;gap:10px;flex-wrap:wrap}.phoneDeviceBlocked b{font-size:13px}.phoneDeviceBlocked span{font-size:12px;flex:1 1 320px}.phoneDeviceBlocked button{border:0;border-radius:9px;background:#be123c;color:#fff;padding:8px 11px;font-weight:800;cursor:pointer}.installPhoneBtn.update{background:#ecfdf3;border-color:#a7f3d0;color:#067647}.audioCard{max-width:520px}.audioLabel{display:grid;gap:6px;text-align:left;font-weight:800;font-size:12px;color:#58677e;margin:12px 0}.audioLabel select{width:100%;border:1px solid #dfe5ef;background:#fff;border-radius:10px;padding:10px;color:#24334c}.audioCard small{display:block;margin-top:14px;line-height:1.5;color:#7d899d}
+.releaseUpdateBtn{border:0;cursor:pointer}.releaseUpdateBtn:hover{filter:brightness(.98)}
+.audioTestResult{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 12px;border:1px solid #dbe4f0;border-radius:12px;background:#f8fbff}.audioTestResult b{font-size:13px}.audioTestResult span{font-size:12px;color:#64748b}
+
+/* BORIS Phone mobile product pass — native-like, dense enough to use with one hand. */
+@media(max-width:760px){
+  html,body{background:#f5f7fb;overflow-x:hidden}
+  .phoneApp{display:block;min-height:100dvh;background:#f5f7fb}
+  .phoneBody{padding:max(12px,env(safe-area-inset-top)) 12px max(92px,calc(78px + env(safe-area-inset-bottom)));width:100%;overflow:hidden}
+  .phoneTop{height:auto;min-height:58px;margin:0 0 12px;gap:10px;align-items:flex-start}
+  .phoneTop>div:first-child{min-width:0;padding-top:2px}
+  .phoneTop h1{font-size:24px;line-height:1.05;letter-spacing:-.45px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .phoneTop p{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:56vw}
+  .topActions{margin-left:auto;max-width:48vw;display:flex;justify-content:flex-end;gap:5px;flex-wrap:wrap}
+  .topStatus,.streamStatus,.presenceBtn,.installPhoneBtn{height:30px;padding:0 9px;border-radius:10px;font-size:9px;line-height:1;box-shadow:none}
+  .topStatus{display:none}
+  .streamStatus:not(.sse):not(.polling),.streamStatus.updateReady{display:none}
+  .presenceBtn{max-width:112px}
+  .presenceBtn .dot{width:7px;height:7px}
+  .card{border-radius:20px;border-color:#e7ebf2;box-shadow:0 5px 18px rgba(31,55,95,.045)}
+  .callLayout{display:block}
+  .mainCol{gap:12px}
+  .rightCol{grid-template-columns:1fr;gap:12px;margin-top:12px}
+  .activeCall{padding:18px 16px 14px}
+  .cardHead{align-items:flex-start;gap:10px}
+  .cardHead>div{min-width:0}
+  .cardHead small{font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+  .cardHead h2{font-size:22px;line-height:1.15;margin:5px 0 3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:68vw}
+  .cardHead p{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:62vw}
+  .timer{flex:none;background:#edf9f3;border-radius:10px;padding:6px 8px;font-size:12px}
+  .wave{height:46px;margin:8px 0 8px;gap:3px;opacity:.78}
+  .controls{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px;justify-content:stretch}
+  .controls button{width:100%;min-width:0;height:62px;border-radius:14px;background:#f7f9fc;font-size:20px;gap:4px}
+  .controls button.end{background:#fff1f2}
+  .controls button span{font-size:9px;white-space:nowrap}
+  .twoCols{grid-template-columns:1fr;gap:12px}
+  .clientCard,.aiCard,.interactions,.queue,.stats,.quick,.clients,.history,.tasks,.dialer,.recent,.qualityCard,.dispositionCard{padding:15px}
+  .sectionTitle{margin-bottom:10px;gap:10px}
+  .sectionTitle h3,.stats h3,.quick h3{font-size:15px}
+  .clientCard dl{grid-template-columns:92px minmax(0,1fr);gap:8px}
+  .clientCard dd{overflow-wrap:anywhere}
+  .taskQuick{grid-template-columns:1fr;margin-top:9px}
+  .taskQuick button{min-height:42px;padding:10px 12px}
+  .qualityGrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .qualityGrid>div{padding:9px}
+  .qualityGrid span{font-size:10px}
+  .qualityGrid b{font-size:17px}
+  .queue{order:1}.stats{order:2}.quick{order:3}
+  .queue button{grid-template-columns:34px minmax(0,1fr) auto;padding:10px 6px}
+  .queue b{font-size:12px}.queue small{font-size:10px}
+  .quick{grid-template-columns:1fr 1fr}.quick h3{grid-column:1/-1}.quick button{min-height:42px}
+  .simpleGrid{display:block;max-width:none}
+  .simpleGrid>.recent{margin-top:12px}
+  .dialer>input{height:52px;font-size:20px}
+  .keys{gap:8px;margin:12px 0}.keys button{height:54px;border-radius:16px;background:#f8fafc}
+  .callBtn{height:50px;border-radius:16px}
+  .clientsHead{margin-bottom:6px}.clientsHead input{height:44px}
+  .clientRow{grid-template-columns:42px minmax(0,1fr);padding:11px 2px}.avatar{width:38px;height:38px}
+  .historyRow{grid-template-columns:38px minmax(0,1fr) 52px;padding:11px 2px}.historyRow>span:nth-last-of-type(1){font-size:11px;text-align:right}
+  .taskRow{grid-template-columns:32px minmax(0,1fr) auto;padding:11px 0}.taskDone{min-height:34px}
+  .phoneOffline,.phoneDeviceBlocked{margin:0 0 10px;padding:10px 12px;border-radius:14px}
+  .toast{left:12px;right:12px;bottom:max(86px,calc(76px + env(safe-area-inset-bottom)));font-size:11px;text-align:center;border-radius:14px;padding:11px 12px;z-index:160}
+  .phoneNav{left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));border:1px solid rgba(216,223,234,.92);border-radius:22px;padding:7px;background:rgba(255,255,255,.94);box-shadow:0 14px 40px rgba(24,39,70,.16);backdrop-filter:blur(18px)}
+  .phoneNav nav{grid-template-columns:repeat(5,1fr);gap:2px}
+  .phoneNav nav button{height:54px;border-radius:15px;padding:5px 2px;font-size:9px;color:#7a879c;font-weight:750}
+  .phoneNav nav button i{font-size:18px;line-height:1}
+  .phoneNav nav button.active{background:#edf2ff;color:#315fe8}
+  .incomingOverlay{padding:14px;background:rgba(21,31,52,.28);backdrop-filter:blur(10px)}
+  .incomingCard{width:100%;max-width:390px;border-radius:28px;padding:28px 20px 20px}
+  .incomingCard h2{font-size:24px}.incomingCard button{min-height:50px;border-radius:16px}
+  .installOverlay{align-items:end;padding:12px}
+  .installCard{width:100%;max-width:520px;border-radius:26px 26px 20px 20px;padding:24px 18px calc(22px + env(safe-area-inset-bottom))}
+  .audioCard{max-width:520px}.audioTestResult{align-items:flex-start;flex-direction:column;gap:4px}
+}
+@media(max-width:390px){
+  .phoneBody{padding-left:9px;padding-right:9px}
+  .phoneTop h1{font-size:21px}.phoneTop p{max-width:48vw}
+  .topActions{max-width:52vw}.installPhoneBtn{padding:0 7px}
+  .controls button{height:58px;font-size:18px}.controls button span{font-size:8px}
+  .cardHead h2{font-size:20px;max-width:64vw}.cardHead p{max-width:60vw}
+  .quick{grid-template-columns:1fr}
+  .quick h3{grid-column:auto}
+}
+/* BORIS Phone reference style — authoritative visual layer */
+.phoneApp{--bp-blue:#2563eb;--bp-blue2:#4f46e5;--bp-ink:#10233f;--bp-muted:#728096;--bp-line:#e5ebf4;--bp-bg:#f5f8fc;--bp-shadow:0 14px 38px rgba(31,55,95,.07);background:radial-gradient(circle at 74% -8%,rgba(92,139,255,.10),transparent 28%),var(--bp-bg);color:var(--bp-ink)}
+.phoneNav{border-color:rgba(219,228,240,.86);box-shadow:8px 0 30px rgba(40,67,110,.025)}
+.brand>span{background:linear-gradient(145deg,#1677ff,#5b5cf6);box-shadow:0 8px 20px rgba(37,99,235,.22)}
+.phoneNav nav button{min-height:44px;border-radius:14px;color:#506079;transition:background .18s ease,color .18s ease,transform .18s ease}.phoneNav nav button:hover i{transform:translateY(-2px)}.phoneNav nav button i{transition:transform .18s ease}.phoneNav nav button.active{background:rgba(37,99,235,.09);color:#175cd3}.phoneNav nav button.active i{color:#2563eb}
+.phoneTop h1{font-size:30px;font-weight:850;letter-spacing:-.9px;color:#10233f}.phoneTop p{font-size:13px;color:#8290a5}.topStatus,.presenceBtn,.installPhoneBtn{border-color:#e1e8f2;box-shadow:0 5px 18px rgba(32,55,90,.035)}
+.card{border-color:rgba(220,229,240,.9);border-radius:22px;box-shadow:var(--bp-shadow)}
+.activeCall{position:relative;overflow:hidden;padding:24px;background:linear-gradient(135deg,#fff 0%,#fbfdff 55%,#f1f6ff 100%)}.activeCall:after{content:"";position:absolute;width:180px;height:180px;border-radius:50%;right:-80px;top:-95px;background:rgba(69,114,255,.08);pointer-events:none}.cardHead{position:relative;z-index:1}.cardHead small{color:#7d8ca2}.cardHead h2{font-size:28px;letter-spacing:-.55px;color:#12243e}.timer{background:#eaf9f1;color:#087a48;border-radius:999px;padding:7px 10px;height:max-content}
+.wave i{background:linear-gradient(#4d78ff,#8a7cff);opacity:.5}.controls{position:relative;z-index:1}.controls button{width:72px;color:#43536c}.controls button>span:first-child,.controls button:not(.end){border-radius:16px}.controls button:hover>span:first-child{transform:translateY(-2px)}
+.clientCard{background:linear-gradient(145deg,#fff,#f7fbff)}.aiCard{background:linear-gradient(145deg,#fff,#faf8ff)}.aiPoints{background:#f4f1ff;border:1px solid #ebe6ff}.dealBox{background:#f0f7ff;border-color:#e0ecff}.queue{background:linear-gradient(180deg,#fff,#fbfcff)}.stats{background:linear-gradient(145deg,#fff,#f4fbf8)}.quick{background:linear-gradient(145deg,#fff,#fff9f3)}
+.sectionTitle h3,.stats h3,.quick h3{font-size:16px;color:#162942}.sectionTitle a,.sectionTitle span{color:#2563eb}.taskQuick button,.saveDisposition{background:linear-gradient(135deg,#2563eb,#4f46e5);box-shadow:0 8px 18px rgba(37,99,235,.18)}
+.keys button{height:64px;border-color:#e4eaf2;background:#fff;border-radius:18px;box-shadow:0 5px 15px rgba(31,55,95,.035)}.keys button:hover{transform:translateY(-1px)}.callBtn{background:linear-gradient(135deg,#13b86a,#0fa65f);border-radius:17px;box-shadow:0 10px 24px rgba(16,177,101,.2)}
+.clientRow,.historyRow{background:transparent}.clientRow:hover,.historyRow:hover,.queue button:hover{background:#f6f9fd}.avatar{background:linear-gradient(145deg,#eaf2ff,#f0edff);color:#315fc9}.callIcon{background:#e9f8f1}.incomingCard{border-radius:28px;box-shadow:0 32px 90px rgba(25,45,78,.24)}.incomingPulse{background:linear-gradient(145deg,#e9fbf3,#eff7ff);box-shadow:0 0 0 12px rgba(20,184,106,.06)}
+.installCard,.audioCard{border-radius:26px}.installIcon{background:linear-gradient(145deg,#1677ff,#5b5cf6);box-shadow:0 10px 25px rgba(37,99,235,.22)}
+@media(max-width:760px){.phoneApp{background:linear-gradient(180deg,#f7faff 0,#f3f7fc 100%)}.phoneBody{padding:14px 13px max(100px,calc(88px + env(safe-area-inset-bottom)))}.phoneTop{height:auto;min-height:62px;margin:0 2px 12px}.phoneTop h1{font-size:25px;letter-spacing:-.65px}.phoneTop p{font-size:11px}.phoneNav{left:10px;right:10px;bottom:max(8px,env(safe-area-inset-bottom));border:1px solid rgba(218,226,238,.92);border-radius:22px;padding:7px 6px;box-shadow:0 16px 40px rgba(31,55,95,.16);background:rgba(255,255,255,.94);backdrop-filter:blur(18px)}.phoneNav nav button{min-height:48px;border-radius:15px;color:#78869a}.phoneNav nav button.active{background:#edf4ff;color:#175cd3}.phoneNav nav button i{font-size:19px}.phoneNav nav button span{font-size:9px;font-weight:800}.card{border-radius:20px;box-shadow:0 9px 26px rgba(31,55,95,.055)}.activeCall{padding:18px 17px}.cardHead h2{font-size:23px}.timer{font-size:12px;padding:6px 8px}.wave{height:42px;margin:5px 0 8px}.controls{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}.controls button{width:100%;min-width:0;font-size:20px;gap:4px}.controls button span{font-size:9px}.clientCard,.aiCard,.interactions,.queue,.stats,.quick,.clients,.history,.tasks,.dialer,.recent,.dispositionCard{padding:15px}.twoCols{gap:10px}.rightCol{gap:10px}.keys{gap:9px}.keys button{height:60px;font-size:21px}.callBtn{min-height:50px}.incomingOverlay{align-items:end;padding:12px}.incomingCard{width:100%;max-width:none;border-radius:28px;padding:26px 20px max(24px,env(safe-area-inset-bottom))}.incomingCard h2{font-size:27px}.installOverlay{align-items:end;padding:0}.installCard,.audioCard{width:100%;max-width:none;border-radius:28px 28px 0 0;padding:26px 20px max(24px,calc(18px + env(safe-area-inset-bottom)))}}
+/* BORIS PHONE — ETALON CONVERGENCE V1. Canonical BORIS work-card language. */
+.phoneApp{--phone-blue:#315bea;--phone-mint:#12a66a;--phone-violet:#7c3aed;--phone-orange:#e8790c;--phone-pink:#e83e76;--phone-text:#182230;--phone-muted:#718096;--phone-line:#dfe7f5;--phone-shadow:0 8px 24px rgba(31,58,103,.06);--phone-shadow-up:0 18px 42px rgba(31,58,103,.12);background:linear-gradient(180deg,#f7faff 0%,#f4f7fb 100%);color:var(--phone-text)}
+.phoneBody{max-width:1680px;width:100%;margin:0 auto;padding:22px 24px 34px}.phoneTop{height:auto;min-height:72px;margin-bottom:18px}.phoneTop h1{font-size:30px;line-height:1.08;font-weight:850;color:#15213b;letter-spacing:-.035em}.phoneTop p{font-size:13px;color:#718096;margin-top:5px}.card{border:1px solid var(--phone-line);border-radius:17px;box-shadow:var(--phone-shadow);background:linear-gradient(180deg,#fff 0%,#fbfdff 100%)}
+.activeCall{position:relative;overflow:hidden;border-color:#cfdcf4;background:linear-gradient(135deg,#f4f8ff 0%,#fff 64%);padding:22px}.activeCall:before{content:"";position:absolute;right:-54px;top:-70px;width:230px;height:230px;border-radius:44%;background:linear-gradient(145deg,rgba(49,91,234,.16),rgba(49,91,234,0));transform:rotate(14deg);pointer-events:none}.activeCall .cardHead,.activeCall .wave,.activeCall .controls{position:relative;z-index:1}.cardHead h2{font-size:27px;font-weight:850;color:#182230;letter-spacing:-.025em}.timer{display:inline-flex;align-items:center;min-height:32px;padding:0 11px;border-radius:999px;background:#ecfdf3;color:#079455;font-size:13px}.wave i{background:linear-gradient(#315bea,#8cb3ff)}
+.controls{gap:12px;justify-content:flex-start}.controls button{width:78px;min-height:70px;border:1px solid #e2e8f3;border-radius:15px;background:rgba(255,255,255,.84);font-size:21px;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease}.controls button span{font-size:10px;font-weight:800;color:#667085}.controls button.end{background:#fff2f3;border-color:#ffd9dc;color:#e33b44}.controls button.end span{color:#c9323b}@media(hover:hover) and (pointer:fine){.controls button:hover{transform:translateY(-3px);box-shadow:0 10px 24px rgba(31,58,103,.1);border-color:#c8d7f0}}
+.clientCard{border-color:#c9eadb;background:linear-gradient(135deg,#f4fcf7 0%,#fff 55%)}.aiCard{border-color:#ddd0f7;background:linear-gradient(135deg,#f8f5ff 0%,#fff 55%)}.qualityCard{border-color:#f4d3ac;background:linear-gradient(135deg,#fff8ef 0%,#fff 55%)}.interactions{border-color:#f5c6d6;background:linear-gradient(135deg,#fff6f9 0%,#fff 55%)}
+.sectionTitle h3,.stats h3,.quick h3{font-size:15px;font-weight:850;color:#182230}.sectionTitle a,.sectionTitle span{color:#315bea}.dealBox{background:rgba(255,255,255,.72);border-color:#dce7f5}.aiPoints{background:rgba(255,255,255,.72);border:1px solid #e8e1fb}.liveSuggestion{background:#faf7ff;border-color:#ddd0f7}.qualityGrid>div{background:rgba(255,255,255,.72)}
+.queue button,.recent button,.clientRow,.historyRow,.taskRow{transition:background .16s ease,transform .16s ease}.queue button.selected{background:#eef4ff}.queue button>span,.callIcon{background:#ecfdf3;color:#12a66a}.avatar{background:#eef4ff;color:#315bea}.taskRow>span{background:#f5f0ff;color:#7c3aed}.dealCount{background:#ecfdf3;color:#087a4e}.taskDone{color:#315bea;border-color:#d5e1f5}.callBtn,.taskQuick button,.saveDisposition,.bp-primary{background:#315bea}.keys button{background:#fff;border-color:#dfe7f5}.keys button:active{background:#eef4ff;transform:scale(.97)}
+.phoneNav{border-color:#e1e8f3}.brand>span,.installIcon{background:linear-gradient(135deg,#315bea,#7c3aed)}.brand em{color:#315bea}.phoneNav nav button.active{background:#eef4ff;color:#315bea}.topStatus,.presenceBtn,.installPhoneBtn{border-color:#dfe7f5;box-shadow:0 3px 12px rgba(31,58,103,.04)}
+.incomingOverlay{background:rgba(24,34,48,.24);backdrop-filter:blur(10px)}.incomingCard{border:1px solid #cfdcf4;border-radius:28px;background:linear-gradient(145deg,#f4f8ff,#fff 58%);box-shadow:0 28px 90px rgba(31,58,103,.22)}.incomingPulse{background:#ecfdf3;color:#12a66a;box-shadow:0 0 0 12px rgba(18,166,106,.08)}
+@media(max-width:760px){.phoneBody{padding:14px 12px max(106px,calc(92px + env(safe-area-inset-bottom)));}.phoneTop{min-height:60px;margin-bottom:12px}.phoneTop h1{font-size:26px}.phoneTop p{font-size:12px}.card{border-radius:18px}.activeCall{padding:18px 16px}.activeCall:before{width:180px;height:180px;right:-65px;top:-72px}.cardHead h2{font-size:24px}.controls{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px}.controls button{width:100%;min-width:0;min-height:66px;border-radius:14px}.controls button span{font-size:9px}.twoCols{gap:10px}.clientCard,.aiCard,.interactions,.queue,.stats,.quick,.clients,.history,.tasks,.dialer,.recent,.qualityCard{padding:15px}.phoneNav{left:10px;right:10px;bottom:max(8px,env(safe-area-inset-bottom));border:1px solid #dfe7f5;border-radius:20px;background:rgba(255,255,255,.94);box-shadow:0 14px 40px rgba(31,58,103,.16);backdrop-filter:blur(18px)}.phoneNav nav button.active{background:#eef4ff}.phoneNav nav button{border-radius:13px;color:#718096}.incomingCard{padding:26px 20px;border-radius:26px}.dialer>input{font-size:25px;font-weight:750;letter-spacing:.02em}.keys button{height:64px;border-radius:18px;font-size:23px}}
+/* APPROVED MOBILE REFERENCE V2 — 2026-08-31 */
+.dialActions{display:grid;grid-template-columns:1fr 52px auto;gap:10px;align-items:stretch}.eraseBtn,.clearBtn{border:1px solid #dfe7f5;background:#fff;color:#475467;border-radius:14px;font-weight:850;cursor:pointer}.eraseBtn{font-size:20px}.clearBtn{padding:0 14px;font-size:12px}.dialActions .callBtn{margin:0}.recent{min-height:120px}
+@media(max-width:760px){
+ .phoneApp{background:#f7f9fd}.phoneBody{padding-left:14px;padding-right:14px}.phoneTop{padding:2px 1px}.phoneTop h1{font-size:28px;font-weight:850}.phoneTop p{font-size:13px}.topActions{display:none}
+ .activeCall{background:linear-gradient(145deg,#5f7df8 0%,#6b69ef 100%);border:0;color:#fff;box-shadow:0 16px 36px rgba(79,93,230,.22)}.activeCall:before{background:linear-gradient(145deg,rgba(255,255,255,.18),rgba(255,255,255,0))}.activeCall .cardHead small,.activeCall .cardHead h2,.activeCall .cardHead p,.activeCall .timer{color:#fff}.activeCall .timer{background:rgba(255,255,255,.15)}.activeCall .wave i{background:rgba(255,255,255,.72)}.activeCall .controls button{background:rgba(255,255,255,.96);border:0;box-shadow:0 6px 18px rgba(20,35,90,.10)}.activeCall .controls button.end{background:#ff4d56;color:#fff}.activeCall .controls button.end span{color:#fff}
+ .clientCard{background:linear-gradient(145deg,#effcf4 0%,#fff 72%);border-color:#d2f1df}.aiCard{background:linear-gradient(145deg,#f5efff 0%,#fff 72%);border-color:#e5d8fb}.qualityCard{background:linear-gradient(145deg,#fff4e8 0%,#fff 72%);border-color:#f6dcc2}.interactions{background:linear-gradient(145deg,#fff0f5 0%,#fff 72%);border-color:#f7d4df}
+ .sectionTitle h3{font-size:17px}.aiCard,.clientCard,.qualityCard,.interactions{box-shadow:0 8px 22px rgba(31,58,103,.06)}
+ .simpleGrid{display:block}.dialer{padding:18px 16px 16px}.dialer h2{font-size:19px}.dialer>input{height:58px;border-radius:15px;background:#fff;font-size:24px}.keys{gap:10px}.keys button{height:62px;background:#fff;border:1px solid #e2e8f3;border-radius:17px;box-shadow:0 3px 12px rgba(31,58,103,.04)}.dialActions{grid-template-columns:1fr 54px}.clearBtn{grid-column:1/-1;height:42px}.callBtn{height:54px;border-radius:15px;background:#20bd68}.eraseBtn{border-radius:15px}.recent{margin-top:12px}
+ .clients,.history,.tasks{padding:16px 14px}.clientsHead h2,.history h2,.tasks h2{font-size:21px}.clientsHead input{height:44px;border-radius:13px}.clientRow,.historyRow,.taskRow{padding:13px 2px}.avatar,.callIcon,.taskRow>span{border-radius:13px}
+ .phoneNav{left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));border-radius:22px;padding:6px 7px;background:rgba(255,255,255,.96)}.phoneNav nav button{min-height:52px;font-size:9px}.phoneNav nav button i{font-size:19px}.phoneNav nav button.active{background:#eef0ff;color:#5b50ed}
+ .incomingOverlay{background:linear-gradient(180deg,#10234f 0%,#173c78 100%);backdrop-filter:none}.incomingCard{width:100%;height:100%;max-width:none;border:0;border-radius:0;background:transparent;box-shadow:none;color:#fff;display:flex;flex-direction:column;justify-content:center}.incomingCard small,.incomingCard h2,.incomingCard p{color:#fff}.incomingPulse{background:rgba(255,255,255,.1);color:#fff;box-shadow:none;width:100px;height:100px;font-size:42px}.incomingCard>div{margin-top:34px;gap:24px}.incomingCard button{min-height:60px;border-radius:999px;font-size:15px}.incomingCard .reject{background:#ff4b55;color:#fff}.incomingCard .answer{background:#24c66a;color:#fff}
+}
+.mobileSettingsBtn{display:none;text-decoration:none}
+@media(max-width:760px){.mobileSettingsBtn{display:grid;place-items:center;margin-left:auto;width:38px;height:38px;border:1px solid #dfe7f5;border-radius:13px;background:#fff;color:#315bea;font-size:18px;box-shadow:0 6px 18px rgba(31,58,103,.07);flex:0 0 38px}.phoneTop>div:first-child{min-width:0}.phoneTop>div:first-child h1,.phoneTop>div:first-child p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+/* Dialer usability */
+.dialInputWrap{position:relative}.dialInputWrap>input{width:100%;padding-right:54px!important}.dialInputWrap>button{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:42px;height:42px;border:0;border-radius:12px;background:#eef4ff;color:#315bea;font-size:20px;cursor:pointer}.dialMatch{display:grid;grid-template-columns:42px 1fr auto;gap:10px;align-items:center;margin-top:10px;padding:10px 12px;border:1px solid #c9eadb;border-radius:14px;background:linear-gradient(135deg,#f1fcf6,#fff)}.dialMatch b,.dialMatch small{display:block}.dialMatch small{margin-top:2px;color:#7a8798}.dialMatch em{font-style:normal;font-size:10px;font-weight:850;color:#12a66a;background:#ecfdf3;border-radius:999px;padding:4px 8px}.dialHint{margin-top:10px;padding:9px 11px;border-radius:12px;background:#f8fafc;color:#718096;font-size:11px;line-height:1.4}.dialTools{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 9px}.dialTools button{min-height:40px;border:1px solid #dfe7f5;border-radius:11px;background:#fff;color:#315bea;font-weight:800;cursor:pointer}@media(max-width:760px){.dialInputWrap>input{font-size:25px!important;min-height:58px}.dialInputWrap>button{width:46px;height:46px}.dialTools button{min-height:44px}.dialMatch{grid-template-columns:40px 1fr auto}}
+.phoneSettingsBtn{width:36px;height:36px;display:grid;place-items:center;border:1px solid #dfe7f5;border-radius:999px;background:#fff;color:#315bea;text-decoration:none;font-size:17px;box-shadow:0 3px 12px rgba(31,58,103,.04)}@media(max-width:760px){.phoneSettingsBtn{width:38px;height:38px;flex:0 0 38px}.phoneSettingsBtn+ .installPhoneBtn{display:none}}
+.phoneSettingsBtn{cursor:pointer}.phoneSettingsGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;max-width:980px}.phoneSettingHero{grid-column:1/-1;padding:22px;display:flex;gap:16px;align-items:center;background:linear-gradient(135deg,#eef4ff,#fff 64%);border-color:#cfdcf4}.phoneSettingHero .settingIcon{width:54px;height:54px;border-radius:17px;background:linear-gradient(135deg,#315bea,#7c3aed);display:grid;place-items:center;color:#fff;font-size:24px;box-shadow:0 10px 24px rgba(49,91,234,.2)}.phoneSettingHero small{font-size:10px;font-weight:900;letter-spacing:.1em;color:#315bea}.phoneSettingHero h2{margin:3px 0 4px;font-size:22px}.phoneSettingHero p,.phoneSettingCard p{margin:0;color:#718096;font-size:12px;line-height:1.5}.phoneSettingCard{padding:17px;display:grid;gap:12px}.phoneSettingCard.auto{background:linear-gradient(135deg,#f7f3ff,#fff 64%);border-color:#ddd0f7}.phoneSettingCard.audio{background:linear-gradient(135deg,#f1fcf6,#fff 64%);border-color:#c9eadb}.phoneSettingCard.app{background:linear-gradient(135deg,#f4f8ff,#fff 64%);border-color:#cfdcf4}.phoneSettingCard.line{background:linear-gradient(135deg,#fff7ed,#fff 64%);border-color:#f4d3ac}.settingHead{display:flex;align-items:center;gap:10px}.settingHead>span{width:42px;height:42px;border-radius:13px;background:rgba(255,255,255,.8);display:grid;place-items:center;font-size:19px}.settingHead>div{display:grid;gap:2px;min-width:0}.settingHead b{font-size:14px}.settingHead small{font-size:11px;color:#718096}.settingHead em{margin-left:auto;font-style:normal;font-size:10px;font-weight:900;padding:5px 8px;border-radius:999px;background:#fff0f1;color:#c93434}.settingHead em.on{background:#ecfdf3;color:#087a4e}.settingAction{justify-self:start;border:0;background:transparent;color:#315bea;text-decoration:none;font-weight:850;font-size:12px;padding:0;cursor:pointer}.settingOk{justify-self:start;color:#087a4e;background:#ecfdf3;border-radius:999px;padding:6px 9px;font-size:11px;font-weight:850}.dialTools{grid-template-columns:repeat(3,1fr)}
+@media(max-width:760px){.phoneSettingsGrid{grid-template-columns:1fr;gap:10px}.phoneSettingHero{grid-column:auto;padding:18px}.phoneSettingHero h2{font-size:20px}.phoneSettingCard{padding:16px}.phoneSettingsBtn{border:1px solid #dfe7f5!important;background:#fff!important}.dialTools button{min-height:40px}}
+
+.mobileAutoModes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.mobileAutoModes button{min-height:40px;border:1px solid #dddaf3;border-radius:12px;background:rgba(255,255,255,.82);color:#566179;font-weight:800;font-size:11px;cursor:pointer}.mobileAutoModes button.active{background:#eef4ff;border-color:#a9c0f6;color:#315bea;box-shadow:0 0 0 2px rgba(49,91,234,.08)}.mobileAutoModes button:disabled,.mobileAutoDelay button:disabled{opacity:.55;cursor:default}.mobileAutoDelay{display:grid;grid-template-columns:1fr 64px auto auto;align-items:center;gap:7px;font-size:11px;color:#667085}.mobileAutoDelay input{width:64px;min-height:38px;border:1px solid #dfe7f5;border-radius:11px;padding:6px 8px;background:#fff;font:inherit;color:#182230;text-align:center}.mobileAutoDelay button{border:0;border-radius:11px;background:#315bea;color:#fff;min-height:38px;padding:0 12px;font-weight:800;font-size:11px;cursor:pointer}@media(max-width:390px){.mobileAutoDelay{grid-template-columns:1fr 58px auto}.mobileAutoDelay button{grid-column:1/-1;min-height:40px}.mobileAutoDelay input{width:58px}}
+
+
+/* BORIS PHONE — PRODUCT DESIGN FINAL V3 20260901
+   Single last-mile layer: canonical BORIS work cards + phone-native mobile ergonomics. */
+.phoneApp{--phone-shell:#f6f8fc;--phone-card:#fff;--phone-ink:#182230;--phone-muted:#718096;--phone-line:#dfe7f5;--phone-blue:#315bea;--phone-green:#12a66a;--phone-violet:#7c3aed;--phone-orange:#e8790c;--phone-pink:#e83e76;background:linear-gradient(180deg,#f8faff 0,#f5f7fb 100%)}
+.phoneBody{max-width:none;padding:24px clamp(18px,2vw,34px) 38px}.phoneTop{min-height:74px}.phoneTop h1{font-size:29px}.callLayout{grid-template-columns:minmax(0,1fr) minmax(280px,320px);gap:16px}.mainCol,.rightCol{gap:16px}.twoCols{gap:16px}.card{border-radius:16px;box-shadow:0 8px 24px rgba(31,58,103,.055)}
+.activeCall{min-height:218px;border-top:3px solid var(--phone-blue);padding:22px 24px}.activeCall .cardHead h2{font-size:28px}.activeCall .wave{height:52px;margin:10px 0 14px}.controls{gap:9px}.controls button{width:82px;min-height:72px}.controls button svg{stroke-width:2}.clientCard,.aiCard,.qualityCard,.interactions{border-top-width:3px}.clientCard{border-top-color:var(--phone-green)}.aiCard{border-top-color:var(--phone-violet)}.qualityCard{border-top-color:var(--phone-orange)}.interactions{border-top-color:var(--phone-pink)}
+.queue,.stats,.quick,.dialer,.recent,.clients,.history,.tasks{border-top:3px solid var(--phone-blue)}.stats{border-top-color:var(--phone-green)}.quick{border-top-color:var(--phone-orange)}
+.quick button{display:flex;align-items:center;gap:9px;min-height:44px;font-weight:800}.quick button svg{color:#315bea}.queue button>span,.callIcon,.interaction>span,.taskRow>span{display:grid;place-items:center}.queue button>span svg,.callIcon svg{color:currentColor}.recent button span{display:grid;place-items:center;color:#12a66a}.taskQuick input,.clientsHead input,.dialInputWrap input{min-height:44px;border-color:#dfe7f5;background:#fff}.taskQuick input:focus,.clientsHead input:focus,.dialInputWrap input:focus{outline:none;border-color:#9eb9f5;box-shadow:0 0 0 3px rgba(49,91,234,.08)}
+.phoneSettingsGrid{max-width:none;grid-template-columns:repeat(2,minmax(0,1fr))}.phoneSettingCard{border-top:3px solid var(--phone-blue)}.phoneSettingCard.auto{border-top-color:var(--phone-violet)}.phoneSettingCard.audio{border-top-color:var(--phone-green)}.phoneSettingCard.app{border-top-color:var(--phone-blue)}.phoneSettingCard.line{border-top-color:var(--phone-orange)}
+@media(hover:hover) and (pointer:fine){.card:not(.activeCall):hover{box-shadow:0 14px 34px rgba(31,58,103,.085)}.quick button:hover,.queue button:hover,.recent button:hover{transform:translateY(-1px)}}
+@media(max-width:760px){
+ html,body{background:#f6f8fc}.phoneApp{background:linear-gradient(180deg,#f8faff,#f4f7fb)}.phoneBody{padding:max(13px,env(safe-area-inset-top)) 13px max(102px,calc(88px + env(safe-area-inset-bottom)))}
+ .phoneTop{min-height:58px;margin:0 1px 12px;align-items:center}.phoneTop h1{font-size:26px;line-height:1.05}.phoneTop p{font-size:12px;margin-top:4px}.mobileSettingsBtn{border-radius:12px;box-shadow:none}
+ .card{border-radius:17px}.activeCall{min-height:0;border-top:0;padding:20px 17px 16px;border-radius:22px;background:linear-gradient(145deg,#315bea 0%,#6659e8 100%)}.activeCall .cardHead h2{font-size:24px}.activeCall .wave{height:40px;margin:6px 0 10px}.activeCall .controls{gap:6px}.activeCall .controls button{height:66px;min-height:66px;border-radius:14px}.activeCall .controls button svg{color:#40516b}.activeCall .controls button.end svg{color:#fff}.activeCall .controls button span{font-size:8.5px}
+ .clientCard,.aiCard,.qualityCard,.interactions,.queue,.stats,.quick,.dialer,.recent,.clients,.history,.tasks{border-top-width:1px}.clientCard,.aiCard,.qualityCard,.interactions{padding:16px}.sectionTitle h3{font-size:16px}.rightCol{gap:10px}.queue,.stats,.quick{padding:15px}
+ .quick{grid-template-columns:1fr}.quick h3{grid-column:auto}.quick button{min-height:46px;border-radius:12px}
+ .dialer{padding:18px 16px}.dialer h2{font-size:20px}.dialInputWrap input{min-height:60px;font-size:26px!important;border-radius:15px}.keys{gap:10px;margin:14px 0}.keys button{height:62px;border-radius:18px;font-size:22px}.dialTools{gap:7px}.dialTools button{font-size:11px}.callBtn{min-height:54px;display:flex;align-items:center;justify-content:center;gap:8px}
+ .clientsHead h2,.history h2,.tasks h2{font-size:20px}.clientRow,.historyRow,.taskRow{min-height:58px}.avatar,.callIcon,.taskRow>span{width:40px;height:40px}.queue button>span{width:36px;height:36px}.queue b,.recent b,.clientRow b,.historyRow b,.taskRow b{font-size:13px}.queue small,.recent small,.clientRow small,.historyRow small,.taskRow small{font-size:11px}
+ .phoneSettingsGrid{grid-template-columns:1fr;gap:10px}.phoneSettingHero,.phoneSettingCard{border-radius:17px}.phoneSettingHero{padding:18px}.phoneSettingCard{padding:16px;border-top-width:1px}.settingHead b{font-size:15px}.phoneSettingCard p{font-size:12px}
+ .phoneNav{left:9px;right:9px;bottom:max(8px,env(safe-area-inset-bottom));border-radius:20px;padding:6px}.phoneNav nav button{height:54px;min-height:54px;border-radius:14px}.phoneNav nav button i{font-size:0}.phoneNav nav button i svg{width:20px;height:20px}.phoneNav nav button.active{background:#eef4ff;color:#315bea}
+ .incomingOverlay{padding:0;align-items:stretch;background:linear-gradient(180deg,#102650,#173d78)}.incomingCard{height:100dvh;padding:max(68px,calc(48px + env(safe-area-inset-top))) 24px max(42px,calc(26px + env(safe-area-inset-bottom)));justify-content:center}.incomingPulse{width:96px;height:96px}.incomingPulse svg{color:#fff}.incomingCard>div{width:100%;max-width:390px;margin:38px auto 0}.incomingCard button{min-height:62px}
+}
+@media(max-width:390px){.phoneBody{padding-left:10px;padding-right:10px}.phoneTop h1{font-size:23px}.activeCall{padding:18px 13px 14px}.activeCall .controls{gap:4px}.activeCall .controls button{height:61px;min-height:61px}.activeCall .controls button span{font-size:7.8px}.keys button{height:58px}.incomingCard{padding-left:18px;padding-right:18px}}
+
+
+/* BORIS PHONE — APPROVED MOBILE REFERENCE V4 20260901
+   Final visual convergence: phone-native hierarchy, no desktop-card feel on core mobile flows. */
+.keys button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px}.keys button b{font-size:inherit;line-height:1;font-weight:750}.keys button small{font-size:8px;line-height:1;letter-spacing:.12em;color:#98a2b3;font-weight:850;min-height:8px}.incomingContext{display:flex!important;justify-content:center;gap:7px!important;flex-wrap:wrap;margin:10px 0 0!important}.incomingContext span{font-size:11px;font-weight:800;padding:6px 9px;border-radius:999px;background:rgba(255,255,255,.11);color:rgba(255,255,255,.9)}
+@media(max-width:760px){
+ .phoneBody{padding-top:max(16px,env(safe-area-inset-top));padding-left:16px;padding-right:16px}
+ .phoneTop{min-height:64px;margin-bottom:14px}.phoneTop h1{font-size:28px;letter-spacing:-.8px}.mobileSettingsBtn{width:42px;height:42px;flex-basis:42px;border-radius:14px}
+ .activeCall{padding:22px 18px 18px;border-radius:25px;box-shadow:0 18px 42px rgba(49,91,234,.23)}.activeCall:before{width:230px;height:230px;right:-78px;top:-92px;background:linear-gradient(145deg,rgba(255,255,255,.20),rgba(255,255,255,0))}.activeCall .cardHead small{opacity:.82}.activeCall .cardHead h2{font-size:25px;letter-spacing:-.45px}.activeCall .cardHead p{opacity:.86}.activeCall .timer{min-height:30px;padding:0 10px;background:rgba(255,255,255,.16);backdrop-filter:blur(8px)}
+ .activeCall .wave{height:48px;margin:10px 0 15px;opacity:.82}.activeCall .controls{grid-template-columns:repeat(4,1fr);gap:9px}.activeCall .controls button{height:70px;min-height:70px;border-radius:20px;background:rgba(255,255,255,.96)}.activeCall .controls button.end{grid-column:1/-1;display:flex;flex-direction:row;height:52px;min-height:52px;border-radius:16px;gap:9px;background:#ff4d57;box-shadow:0 9px 22px rgba(220,48,60,.25)}.activeCall .controls button.end span{font-size:12px}.activeCall .controls button:not(.end) span{font-size:9px;color:#526078}
+ .clientCard,.aiCard,.qualityCard,.interactions{border:0!important;border-radius:21px!important;box-shadow:0 8px 24px rgba(31,58,103,.055)!important}.clientCard{background:linear-gradient(145deg,#eafaf1,#fff 68%)}.aiCard{background:linear-gradient(145deg,#f3edff,#fff 68%)}.qualityCard{background:linear-gradient(145deg,#fff1e2,#fff 68%)}.interactions{background:linear-gradient(145deg,#ffedf4,#fff 68%)}
+ .queue,.stats,.quick,.recent{border:0!important;border-radius:21px!important}.sectionTitle h3,.stats h3,.quick h3{font-size:17px;letter-spacing:-.2px}
+ .dialer{border:0!important;background:transparent!important;box-shadow:none!important;padding:8px 5px 4px}.dialer h2{text-align:center;font-size:15px;color:#718096;font-weight:800;margin-bottom:10px}.dialInputWrap{max-width:360px;margin:0 auto}.dialInputWrap input{border:0!important;background:transparent!important;box-shadow:none!important;text-align:center;font-size:30px!important;font-weight:650;letter-spacing:.015em;padding-left:46px!important;padding-right:46px!important}.dialInputWrap>button{right:0;background:transparent;color:#667085}.dialMatch,.dialHint{max-width:360px;margin-left:auto;margin-right:auto}.keys{max-width:330px;margin:18px auto 16px;gap:13px 18px}.keys button{height:72px;border:0;background:#fff;border-radius:24px;font-size:26px;box-shadow:0 7px 22px rgba(31,58,103,.065)}.keys button:active{background:#eaf1ff;transform:scale(.96)}.keys button small{font-size:8px}.dialTools{max-width:360px;margin:0 auto 12px}.dialTools button{border:0;background:#eef3fb;color:#53647d;border-radius:13px}.callBtn{max-width:360px;margin:0 auto;min-height:58px;border-radius:18px;font-size:15px;box-shadow:0 12px 28px rgba(18,166,106,.22)}.simpleGrid>.recent{margin-top:18px}
+ .clients,.history,.tasks{border:0!important;box-shadow:none!important;background:transparent!important;padding:4px 1px}.clientsHead{margin-bottom:10px}.clientsHead h2,.history h2,.tasks h2{font-size:23px;letter-spacing:-.45px}.clientsHead input{background:#fff;box-shadow:0 4px 16px rgba(31,58,103,.04);border:0}.clientRow,.historyRow,.taskRow{border:0;background:#fff;margin-bottom:8px;padding:12px;border-radius:17px;box-shadow:0 5px 18px rgba(31,58,103,.045)}
+ .phoneSettingsGrid{gap:12px}.phoneSettingHero{border:0;border-radius:22px;background:linear-gradient(145deg,#eaf2ff,#fff 72%);box-shadow:0 8px 24px rgba(31,58,103,.055)}.phoneSettingCard{border:0!important;border-radius:20px;box-shadow:0 7px 22px rgba(31,58,103,.05)}.phoneSettingCard.auto{background:linear-gradient(145deg,#f2ecff,#fff 72%)}.phoneSettingCard.audio{background:linear-gradient(145deg,#eafaf1,#fff 72%)}.phoneSettingCard.app{background:linear-gradient(145deg,#eaf2ff,#fff 72%)}.phoneSettingCard.line{background:linear-gradient(145deg,#fff0e2,#fff 72%)}
+ .phoneNav{left:12px;right:12px;bottom:max(10px,env(safe-area-inset-bottom));border:0;border-radius:24px;padding:7px 6px;box-shadow:0 18px 46px rgba(31,58,103,.18)}.phoneNav nav button{height:57px;border-radius:17px}.phoneNav nav button.active{background:#edf2ff}.phoneNav nav button i svg{width:21px;height:21px}
+ .incomingCard{padding-left:28px;padding-right:28px}.incomingPulse{width:108px;height:108px;margin-bottom:24px;background:rgba(255,255,255,.10);box-shadow:0 0 0 16px rgba(255,255,255,.04)}.incomingCard small{font-size:12px;letter-spacing:.06em;text-transform:uppercase;opacity:.75}.incomingCard h2{font-size:31px;letter-spacing:-.7px;margin:10px 0 5px}.incomingCard p{font-size:15px;opacity:.8;margin-bottom:0}.incomingCard>div:last-of-type{gap:30px;margin-top:44px}.incomingCard button{min-height:68px;font-size:15px;box-shadow:0 12px 28px rgba(0,0,0,.15)}
+}
+@media(max-width:390px){.phoneBody{padding-left:12px;padding-right:12px}.activeCall{padding:20px 14px 15px}.activeCall .controls{gap:6px}.activeCall .controls button{height:65px;min-height:65px;border-radius:17px}.keys{gap:11px 15px}.keys button{height:67px;border-radius:22px}.incomingCard{padding-left:20px;padding-right:20px}.incomingCard h2{font-size:28px}}
+
+.historyHead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.historyHead h2{margin:0}.historyFilters{display:flex;gap:6px;flex-wrap:wrap}.historyFilters button{border:1px solid #dfe7f5;background:#fff;color:#667085;border-radius:999px;padding:7px 10px;font-size:10px;font-weight:800;cursor:pointer}.historyFilters button.active{background:#eef4ff;border-color:#c7d7f7;color:#315bea}@media(max-width:760px){.historyHead{display:block}.historyFilters{margin:10px 0 12px;display:grid;grid-template-columns:repeat(4,1fr);gap:5px}.historyFilters button{padding:8px 3px;font-size:9px;border:0;background:#edf1f7}.historyFilters button.active{background:#315bea;color:#fff}.historyHead h2{font-size:23px}}
+
+
+/* BORIS PHONE — DESIGN COMPLETION V4 20260901 */
+.mobileSettingsBtn{border:1px solid #dfe7f5;cursor:pointer}.topActions .installPhoneBtn{display:inline-flex;align-items:center;gap:6px}.settingIcon svg,.installIcon svg{color:currentColor}.clientFilters,.historyFilters{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px}.clientFilters button,.historyFilters button{border:1px solid #dfe7f5;background:#fff;color:#667085;border-radius:999px;min-height:34px;padding:0 12px;font-size:11px;font-weight:800;cursor:pointer;transition:background .16s ease,border-color .16s ease,color .16s ease}.clientFilters button.active,.historyFilters button.active{background:#eef4ff;border-color:#bfd2fb;color:#315bea}.historyHead{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:8px}.historyHead h2{margin:0}.historyFilters{margin:0}.incomingContext{display:flex!important;justify-content:center;gap:8px!important;flex-wrap:wrap;margin:12px 0 0!important}.incomingContext span{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.10);color:#fff;border-radius:999px;padding:6px 10px;font-size:11px;font-weight:800}.incomingCard>div:last-child button{display:flex;align-items:center;justify-content:center;gap:8px}.incomingCard .reject svg,.incomingCard .answer svg{color:#fff}.dialInputWrap>button{display:grid;place-items:center}.dialInputWrap>button svg{color:#315bea}
+@media(max-width:760px){.clientFilters,.historyFilters{overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none;padding-bottom:2px}.clientFilters::-webkit-scrollbar,.historyFilters::-webkit-scrollbar{display:none}.clientFilters button,.historyFilters button{white-space:nowrap;min-height:36px}.historyHead{display:block}.historyHead h2{margin-bottom:10px}.incomingContext{margin-top:14px!important}.incomingContext span{font-size:10px}.incomingCard>div:last-child button{flex-direction:column;gap:5px;font-size:12px}.mobileSettingsBtn svg{color:#315bea}}
+
+
+/* BORIS PHONE — DESIGN COMPLETION V5 20260901 */
+.controls button{background:transparent!important;border:0!important;box-shadow:none!important;display:grid;grid-template-rows:46px auto;justify-items:center;align-items:center;gap:6px;min-height:68px}.controls button i{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;background:#fff;border:1px solid #e2e8f3;box-shadow:0 6px 16px rgba(31,58,103,.08);font-style:normal}.controls button i svg{color:#40516b}.controls button.end i{background:#fff0f2;border-color:#ffd6da}.controls button.end i svg{color:#e33b44}.controls button span{font-weight:800;color:#667085}.historyGroup{margin-top:10px}.historyGroup:first-of-type{margin-top:4px}.historyGroup>h3{position:sticky;top:0;z-index:1;margin:0;padding:9px 2px 7px;background:rgba(255,255,255,.96);font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#98a2b3}.historyGroup .historyRow:first-of-type{border-top:0}.clientRow>div,.historyRow>div{min-width:0}.clientRow b,.clientRow small,.historyRow b,.historyRow small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:760px){.activeCall .controls button{grid-template-rows:48px auto;height:auto;min-height:66px;background:transparent!important}.activeCall .controls button i{width:48px;height:48px;border:0;background:rgba(255,255,255,.96);box-shadow:0 6px 16px rgba(20,35,90,.12)}.activeCall .controls button i svg{color:#40516b}.activeCall .controls button.end i{background:#ff4d56}.activeCall .controls button.end i svg{color:#fff}.activeCall .controls button span,.activeCall .controls button.end span{color:rgba(255,255,255,.92);font-size:8.5px}.historyGroup>h3{top:-1px;background:#fff}.historyRow{border-radius:12px;padding-left:5px;padding-right:5px}.historyRow:active{background:#f3f7fd}}
+@media(max-width:390px){.activeCall .controls button i{width:44px;height:44px}.activeCall .controls button{grid-template-rows:44px auto}.activeCall .controls button span{font-size:7.6px}}
+
+
+/* LIVE/IDLE CALL CARD — truthful product state */
+.activeCall.idle{min-height:174px}.activeCall.idle .timer{background:#eef4ff;color:#315bea}.idleCallActions{position:relative;z-index:1;margin-top:28px;padding-top:16px;border-top:1px solid rgba(49,91,234,.12);display:flex;align-items:center;justify-content:space-between;gap:16px}.idleCallActions>div{display:grid;gap:3px}.idleCallActions span{font-size:11px;color:#718096}.idleCallActions b{font-size:13px;color:#344054}.idleCallActions button{border:0;border-radius:13px;background:#315bea;color:#fff;min-height:44px;padding:0 15px;display:inline-flex;align-items:center;gap:8px;font-weight:850;cursor:pointer}.idleCallActions button svg{color:#fff}
+@media(max-width:760px){.activeCall.idle{background:linear-gradient(145deg,#edf4ff,#f5f0ff)!important;color:#182230;box-shadow:0 10px 28px rgba(31,58,103,.08)}.activeCall.idle .cardHead small,.activeCall.idle .cardHead h2,.activeCall.idle .cardHead p{color:#182230}.activeCall.idle .cardHead p{color:#718096}.activeCall.idle .timer{color:#315bea;background:rgba(255,255,255,.75)}.activeCall.idle:before{background:linear-gradient(145deg,rgba(49,91,234,.12),rgba(124,58,237,0))}.idleCallActions{margin-top:24px;display:grid;gap:12px}.idleCallActions button{width:100%;justify-content:center;min-height:48px;border-radius:14px}.activeCall.live .controls{grid-template-columns:repeat(4,1fr)}.activeCall.live .controls .end{grid-column:1/-1;grid-row:2}}
+
+
+/* BORIS PHONE — QUICK INTENT CARDS / approved product language */
+.phoneIntentSection{margin:0 0 16px}.phoneIntentHead{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:0 1px 10px}.phoneIntentHead small{display:block;font-size:10px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;color:#315bea}.phoneIntentHead h2{margin:3px 0 0;font-size:19px;letter-spacing:-.25px;color:#182230}.phoneIntentHead>span{font-size:10px;font-weight:850;color:#98a2b3}.phoneIntentGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.phoneIntentGrid button{position:relative;min-height:116px;border:1px solid #cfdcf4;border-radius:16px;padding:14px;text-align:left;background:linear-gradient(135deg,#f4f8ff,#fff 68%);display:grid;grid-template-columns:42px 1fr;grid-template-rows:auto auto;gap:5px 10px;cursor:pointer;box-shadow:0 8px 24px rgba(31,58,103,.055);overflow:hidden;transition:transform .18s ease,box-shadow .18s ease}.phoneIntentGrid button:after{content:"";position:absolute;right:-26px;top:-30px;width:100px;height:100px;border-radius:40%;background:rgba(49,91,234,.08);transform:rotate(18deg)}.phoneIntentGrid button i{grid-row:1/3;width:42px;height:42px;border-radius:13px;background:#315bea;color:#fff;display:grid;place-items:center;font-style:normal;z-index:1}.phoneIntentGrid button i svg{color:#fff}.phoneIntentGrid button b{font-size:13px;line-height:1.2;color:#182230;z-index:1}.phoneIntentGrid button small{font-size:10.5px;line-height:1.4;color:#718096;z-index:1}.phoneIntentGrid button.mint{border-color:#c9eadb;background:linear-gradient(135deg,#f1fcf6,#fff 68%)}.phoneIntentGrid button.mint i{background:#12a66a}.phoneIntentGrid button.mint:after{background:rgba(18,166,106,.08)}.phoneIntentGrid button.violet{border-color:#ddd0f7;background:linear-gradient(135deg,#f7f3ff,#fff 68%)}.phoneIntentGrid button.violet i{background:#7c3aed}.phoneIntentGrid button.violet:after{background:rgba(124,58,237,.08)}.phoneIntentGrid button.orange{border-color:#f4d3ac;background:linear-gradient(135deg,#fff7ed,#fff 68%)}.phoneIntentGrid button.orange i{background:#e8790c}.phoneIntentGrid button.orange:after{background:rgba(232,121,12,.08)}@media(hover:hover) and (pointer:fine){.phoneIntentGrid button:hover{transform:translateY(-3px);box-shadow:0 16px 34px rgba(31,58,103,.10)}}
+@media(max-width:900px){.phoneIntentGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.phoneIntentSection{margin-bottom:12px}.phoneIntentHead h2{font-size:18px}.phoneIntentHead>span{display:none}.phoneIntentGrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.phoneIntentGrid button{min-height:108px;border-radius:18px;padding:13px;grid-template-columns:38px 1fr}.phoneIntentGrid button i{width:38px;height:38px;border-radius:12px}.phoneIntentGrid button b{font-size:12px}.phoneIntentGrid button small{font-size:9.5px}}
+@media(max-width:390px){.phoneIntentGrid{grid-template-columns:1fr 1fr}.phoneIntentGrid button{min-height:104px;padding:11px;grid-template-columns:34px 1fr;gap:4px 8px}.phoneIntentGrid button i{width:34px;height:34px}.phoneIntentGrid button small{font-size:9px}}
+
+
+/* CALL CONTROL COMPLETION — mute toggle + safe transfer */
+.controls button.muted i{background:#eef4ff;border-color:#bfd2fb}.controls button.muted i svg{color:#315bea}.controls button.muted span{color:#315bea}.transferCard{max-width:470px}.transferIcon{background:linear-gradient(135deg,#315bea,#7c3aed)}.transferCard .audioLabel input{width:100%;min-height:48px;border:1px solid #dfe7f5;border-radius:12px;padding:0 13px;background:#fff;font:inherit;font-size:16px;color:#182230;outline:none}.transferCard .audioLabel input:focus{border-color:#9eb9f5;box-shadow:0 0 0 3px rgba(49,91,234,.08)}.transferSubmit{display:flex;align-items:center;justify-content:center;gap:8px}.transferSubmit svg{color:#fff}.transferSubmit:disabled{opacity:.5;cursor:not-allowed}
+@media(max-width:760px){.activeCall .controls button.muted i{background:#dfe9ff}.transferCard{border-radius:28px 28px 0 0}.transferCard h2{font-size:22px}.transferCard .audioLabel input{min-height:52px;font-size:17px}.transferSubmit{min-height:50px}}
+/* BORIS PHONE — TRANSFER DESTINATION PICKER V1 20260901 */
+.transferDeviceList{display:grid;gap:8px;margin:14px 0 16px;text-align:left}.transferDeviceList>strong{font-size:13px;color:#52627a}.transferDeviceList>button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #dfe7f5;background:#f8fbff;border-radius:16px;padding:11px 13px;color:#15213b;cursor:pointer;transition:.16s ease}.transferDeviceList>button:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(31,58,103,.08);border-color:#cbd8f4}.transferDeviceList>button span{display:grid;gap:2px;text-align:left}.transferDeviceList>button b{font-size:14px}.transferDeviceList>button small{font-size:11px;color:#70809a}.transferDeviceList>button svg{color:#315bea;flex:0 0 auto}
+/* BORIS PHONE — LIVE DTMF KEYPAD V1 20260901 */
+.dtmfCard{max-width:380px;text-align:center}.dtmfIcon{margin-left:auto;margin-right:auto}.dtmfDisplay{min-height:48px;margin:14px 0 12px;border:1px solid #dfe7f5;border-radius:14px;background:#f8fbff;display:flex;align-items:center;justify-content:center;padding:10px 14px;font-size:22px;font-weight:800;letter-spacing:.08em;color:#182230}.dtmfDisplay:empty{color:#98a2b3}.dtmfKeys{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 0 14px}.dtmfKeys button{height:58px;border:1px solid #e0e7f1;border-radius:18px;background:#fff;color:#182230;font-size:22px;font-weight:850;cursor:pointer;box-shadow:0 5px 16px rgba(31,58,103,.055);transition:transform .12s ease,background .12s ease}.dtmfKeys button:active{transform:scale(.96);background:#eef4ff}.dtmfKeys button:disabled{opacity:.5;cursor:default}@media(max-width:760px){.dtmfOverlay{align-items:end;padding:0}.dtmfCard{max-width:none;width:100%;border-radius:28px 28px 0 0;padding:24px 22px max(26px,calc(18px + env(safe-area-inset-bottom)))}.dtmfKeys{max-width:310px;margin:0 auto 16px;gap:12px}.dtmfKeys button{height:64px;border-radius:21px;font-size:24px}.dtmfDisplay{max-width:310px;margin-left:auto;margin-right:auto}}
+
+
+/* BORIS PHONE — MOBILE LAYOUT STABILIZATION V6 20260907
+   Final cascade layer for 320–760px. Keeps every mobile surface inside the
+   viewport and neutralises conflicting legacy V4/V5 responsive overrides. */
+@media(max-width:760px){
+  html,body{max-width:100%;overflow-x:hidden}
+  .phoneApp{width:100%;max-width:100%;overflow-x:clip}
+  .phoneBody{
+    width:100%;min-width:0;max-width:100%;
+    padding-left:max(12px,env(safe-area-inset-left));
+    padding-right:max(12px,env(safe-area-inset-right));
+    overflow-x:clip
+  }
+
+  /* Mobile header: one text column + one settings button. Desktop status
+     pills are intentionally hidden here because they are available inside
+     Settings and otherwise force the header to wrap. */
+  .phoneTop{
+    display:grid;grid-template-columns:minmax(0,1fr) 42px;
+    align-items:center;gap:10px;width:100%;min-width:0
+  }
+  .phoneTop>div:first-child{min-width:0;width:100%}
+  .phoneTop h1,.phoneTop p{
+    max-width:100%!important;min-width:0;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+  }
+  .topActions{display:none!important}
+  .mobileSettingsBtn{
+    display:grid!important;place-items:center!important;
+    width:42px!important;height:42px!important;min-width:42px!important;
+    margin:0!important;justify-self:end
+  }
+
+  /* Never allow cards or their grids to establish a wider intrinsic width. */
+  .phoneIntentSection,.phoneIntentGrid,.callLayout,.mainCol,.rightCol,
+  .card,.activeCall,.twoCols,.simpleGrid,.dialer,.recent,.clients,.history,
+  .tasks,.phoneSettingsGrid,.phoneSettingHero,.phoneSettingCard{
+    min-width:0;max-width:100%
+  }
+
+  .phoneIntentGrid{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  .phoneIntentGrid button{
+    min-width:0;width:100%;
+    grid-template-columns:34px minmax(0,1fr)!important
+  }
+  .phoneIntentGrid button b,.phoneIntentGrid button small{
+    min-width:0;overflow-wrap:anywhere
+  }
+
+  /* Dial pad: three equal columns at every phone width. */
+  .dialInputWrap,.dialMatch,.dialHint,.keys,.dialTools,.callBtn{
+    width:100%;max-width:100%
+  }
+  .keys{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+  .keys button{min-width:0;width:100%}
+  .dialTools{
+    display:grid!important;
+    grid-template-columns:repeat(3,minmax(0,1fr))!important
+  }
+  .dialTools button{
+    min-width:0;width:100%;padding:0 6px;
+    font-size:10px;line-height:1.15;white-space:normal;text-align:center
+  }
+
+  /* Filters must fit the screen instead of becoming a hidden horizontal rail. */
+  .clientFilters{
+    display:grid!important;
+    grid-template-columns:repeat(3,minmax(0,1fr))!important;
+    gap:6px!important;overflow:visible!important;width:100%
+  }
+  .historyFilters{
+    display:grid!important;
+    grid-template-columns:repeat(2,minmax(0,1fr))!important;
+    gap:6px!important;overflow:visible!important;width:100%
+  }
+  .clientFilters button,.historyFilters button{
+    width:100%;min-width:0!important;padding:0 6px!important;
+    white-space:normal!important;text-align:center;line-height:1.1
+  }
+
+  .clientsHead{display:grid!important;grid-template-columns:1fr;gap:8px}
+  .clientsHead input{width:100%!important;min-width:0;margin-top:0!important}
+
+  /* Rows: reserve only the columns that are actually shown on mobile. */
+  .clientRow{
+    grid-template-columns:42px minmax(0,1fr)!important;
+    width:100%;min-width:0;padding-left:10px!important;padding-right:10px!important
+  }
+  .clientRow .dealCount,.clientRow em{display:none!important}
+  .historyRow{
+    grid-template-columns:38px minmax(0,1fr) 52px!important;
+    width:100%;min-width:0;padding-left:8px!important;padding-right:8px!important
+  }
+  .historyRow time{display:none!important}
+  .clientRow>div,.historyRow>div,.taskRow>div{min-width:0}
+  .clientRow b,.clientRow small,.historyRow b,.historyRow small,
+  .taskRow b,.taskRow small{
+    max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+  }
+
+  .taskRow{
+    grid-template-columns:32px minmax(0,1fr) auto!important;
+    width:100%;min-width:0
+  }
+  .taskRow time{display:none!important}
+  .taskDone{max-width:88px;white-space:nowrap}
+
+  /* Settings cards: status chips may wrap, content may not push the card. */
+  .phoneSettingHero{
+    display:grid!important;
+    grid-template-columns:54px minmax(0,1fr)!important;
+    gap:14px!important;align-items:center
+  }
+  .phoneSettingHero>div{min-width:0}
+  .phoneSettingHero h2,.phoneSettingHero p{overflow-wrap:anywhere}
+  .settingHead{
+    display:grid!important;
+    grid-template-columns:42px minmax(0,1fr) auto!important;
+    gap:10px!important;align-items:center
+  }
+  .settingHead>div{min-width:0}
+  .settingHead b,.settingHead small{
+    min-width:0;max-width:100%;overflow-wrap:anywhere
+  }
+  .settingHead em{
+    margin-left:0!important;justify-self:end;max-width:94px;
+    white-space:normal;text-align:center;line-height:1.15
+  }
+
+  /* Bottom navigation: five equal, shrinkable cells with no spill. */
+  .phoneNav{
+    max-width:calc(100vw - 20px);overflow:hidden
+  }
+  .phoneNav nav{
+    width:100%;min-width:0;
+    grid-template-columns:repeat(5,minmax(0,1fr))!important;
+    gap:2px!important
+  }
+  .phoneNav nav button{
+    width:100%;min-width:0!important;max-width:100%;
+    overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+    padding-left:1px!important;padding-right:1px!important;
+    font-size:8.5px!important
+  }
+  .phoneNav nav button i{
+    width:22px!important;min-width:22px;margin:0 auto
+  }
+}
+
+@media(max-width:370px){
+  .phoneBody{
+    padding-left:max(9px,env(safe-area-inset-left));
+    padding-right:max(9px,env(safe-area-inset-right))
+  }
+  .phoneTop h1{font-size:22px!important}
+  .phoneIntentGrid{gap:7px!important}
+  .phoneIntentGrid button{padding:10px!important;grid-template-columns:32px minmax(0,1fr)!important}
+  .phoneIntentGrid button i{width:32px!important;height:32px!important}
+  .phoneIntentGrid button b{font-size:11px!important}
+  .phoneIntentGrid button small{font-size:8.5px!important}
+  .phoneNav{left:6px!important;right:6px!important;max-width:calc(100vw - 12px)}
+  .phoneNav nav button{font-size:8px!important}
+  .historyFilters button,.clientFilters button{font-size:9.5px!important}
+}

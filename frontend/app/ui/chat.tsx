@@ -16,7 +16,7 @@ export function SplitLayout({ left, middle, right, narrow, step, onBack }:
   if (narrow) {
     const pane = step === 2 ? right : step === 1 ? middle : left;
     return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <div className="boris-f3-fefbd9ff8ff5e8">
         {step ? (
           <button onClick={onBack} style={{
             display: "flex", alignItems: "center", gap: space.sm, cursor: "pointer",
@@ -27,16 +27,16 @@ export function SplitLayout({ left, middle, right, narrow, step, onBack }:
             Назад
           </button>
         ) : null}
-        <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>{pane}</div>
+        <div className="boris-f3-9b64da12e2b60b">{pane}</div>
       </div>
     );
   }
   return (
     <div style={{ display: "flex", gap: space.md, alignItems: "stretch",
                   height: "calc(100vh - 190px)", minHeight: 460 }}>
-      <div style={{ flex: "0 0 268px", minWidth: 0, display: "flex" }}>{left}</div>
-      <div style={{ flex: "0 0 340px", minWidth: 0, display: "flex" }}>{middle}</div>
-      <div style={{ flex: 1, minWidth: 0, display: "flex" }}>{right}</div>
+      <div className="boris-f3-ff0176601b4439">{left}</div>
+      <div className="boris-f3-b010be754620d1">{middle}</div>
+      <div className="boris-f3-e21296aa433ff9">{right}</div>
     </div>
   );
 }
@@ -80,7 +80,7 @@ export function ListItem({ title, subtitle, meta, count, active, danger, dot, on
         <span style={{ width: 8, height: 8, borderRadius: radius.pill,
                        background: dot, flex: "0 0 8px" }} />
       ) : null}
-      <span style={{ flex: 1, minWidth: 0 }}>
+      <span className="boris-f3-0070778df76ac3">
         <span style={{ ...font.bodyStrong, color: active ? color.blue : color.heading,
                        display: "block", overflow: "hidden",
                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>

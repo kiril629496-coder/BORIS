@@ -1,0 +1,78 @@
+.page{min-height:100vh;background:#f6f8fc;color:#10213a;padding:28px clamp(18px,3vw,46px) 60px;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.hero{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(260px,.7fr);gap:22px;align-items:stretch;margin:0 auto 18px;max-width:1700px}
+.hero>div,.safeCard,.metrics article,.toolbar,.createBox,.rail,.taskHero,.progressBox,.commandBox,.eventsBox,.activityBox,.emptyCard{background:#fff;border:1px solid #e3e9f2;border-radius:22px;box-shadow:0 12px 34px rgba(39,63,96,.06)}
+.hero>div{padding:30px}.hero h1{font-size:clamp(30px,4vw,52px);line-height:1.02;margin:8px 0 14px;letter-spacing:-.035em;max-width:1020px}.hero p{font-size:16px;line-height:1.55;color:#5f6f84;max-width:900px}
+.eyebrow,.sectionHead>span,.railHead span{font-size:12px;font-weight:800;letter-spacing:.12em;color:#2f6fff}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.chips span{padding:8px 11px;background:#eef4ff;border:1px solid #dbe7ff;border-radius:999px;font-size:12px;font-weight:700;color:#2455b8}
+.safeCard{padding:26px;display:flex;flex-direction:column;justify-content:center}.safeCard>span{font-size:34px}.safeCard strong{font-size:21px;margin-top:8px}.safeCard p{font-size:13px;color:#69788c}.topLinks{display:flex;gap:8px;flex-wrap:wrap}.topLinks a{padding:9px 12px;border-radius:11px;text-decoration:none;background:#0f2748;color:#fff;font-weight:800;font-size:12px}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;max-width:1700px;margin:0 auto 14px}.metrics article{padding:18px;display:flex;gap:13px;align-items:center}.metrics article>span{display:grid;place-items:center;width:42px;height:42px;border-radius:13px;background:#eef4ff;color:#2f6fff;font-weight:900}.metrics small{display:block;color:#69788c}.metrics strong{display:block;font-size:27px;line-height:1.1;margin:2px 0}.metrics p{margin:0;color:#8390a2;font-size:12px}
+.error{max-width:1700px;margin:0 auto 14px;padding:13px 16px;border:1px solid #ffd2d2;background:#fff4f4;color:#a31d1d;border-radius:14px;font-weight:700}
+.toolbar{max-width:1700px;margin:0 auto 14px;padding:12px;display:flex;justify-content:space-between;gap:12px}.filters{display:grid;grid-template-columns:minmax(260px,1fr) 160px 170px;gap:8px;flex:1}.filters input,.filters select,.createBox input,.createBox select,.createBox textarea,.commandBox textarea,.ownerNote input{border:1px solid #dce4ef;border-radius:12px;padding:11px 12px;font:inherit;background:#fbfcfe;outline:none}.filters input:focus,.filters select:focus,.createBox input:focus,.createBox textarea:focus,.commandBox textarea:focus,.ownerNote input:focus{border-color:#7da4ff;box-shadow:0 0 0 3px #edf3ff}.toolbarActions{display:flex;gap:8px}.toolbar button,.createBox button,.taskActions button,.ownerNote button,.actionRow button{border:0;background:#2f6fff;color:#fff;border-radius:11px;padding:10px 13px;font-weight:800;cursor:pointer;white-space:nowrap}.toolbar button:disabled,.actionRow button:disabled{opacity:.5;cursor:not-allowed}.toolbar .ghost,.taskActions .ghost{background:#eef3fb;color:#284464}
+.createBox{max-width:1700px;margin:0 auto 14px;padding:18px}.createBox h2{margin:4px 0 12px}.createGrid{display:grid;grid-template-columns:180px minmax(0,1fr);gap:8px}.createBox textarea{width:100%;box-sizing:border-box;margin-top:8px}
+.workspace{display:grid;grid-template-columns:420px minmax(0,1fr);gap:14px;max-width:1700px;margin:auto;align-items:start}.rail{padding:13px;position:sticky;top:16px;max-height:calc(100vh - 32px);display:flex;flex-direction:column;overflow:hidden}.railHead{display:flex;justify-content:space-between;align-items:center;padding:3px 3px 9px}.railHead h2{font-size:28px;margin:2px 0}.railHead small{color:#7b899b}.threadList{overflow:auto;display:grid;gap:7px;padding-right:2px}.threadList button{border:1px solid #e3e9f1;background:#fff;border-radius:14px;padding:11px;text-align:left;cursor:pointer;min-width:0}.threadList button:hover{border-color:#abc5ff;transform:translateY(-1px)}.threadList button.activeThread{border:2px solid #2f6fff;background:#f6f9ff}.threadTop{display:flex;justify-content:space-between;gap:9px;align-items:start}.threadTop strong{font-size:13px;line-height:1.35}.threadTop span{font-size:10px;font-weight:900;color:#56667c;white-space:nowrap}.threadList p{font-size:11px;color:#79879a;margin:5px 0}.threadList small{font-size:10px;color:#8a96a6}.progressLine{height:6px;background:#e8edf5;border-radius:999px;position:relative;overflow:visible;margin:8px 0 7px}.progressLine i{display:block;height:100%;background:#2f6fff;border-radius:999px}.progressLine span{position:absolute;right:0;top:-16px;font-size:9px;color:#7a8798}
+.detail{display:grid;gap:14px;min-width:0}.taskHero,.progressBox,.commandBox,.eventsBox{padding:20px}.taskHero{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.taskHero h2{font-size:28px;margin:5px 0 6px;line-height:1.12}.taskHero p{color:#65758a;margin:0 0 7px;line-height:1.45}.taskHero small{color:#8994a4;word-break:break-all}.taskActions{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}
+.sectionHead{margin-bottom:12px}.sectionHead h2{font-size:24px;margin:4px 0}.sectionHead p{margin:4px 0 0;color:#738297;font-size:13px;line-height:1.45}.bigProgress{height:10px;background:#e8edf5;border-radius:999px;overflow:hidden;margin:10px 0 14px}.bigProgress i{display:block;height:100%;background:#2f6fff;border-radius:999px}
+.stateGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.stateGrid article{border:1px solid #e4eaf2;border-radius:14px;padding:12px;background:#fbfcfe}.stateGrid small{display:block;color:#76859a;margin-bottom:4px}.stateGrid strong{font-size:13px;line-height:1.4;font-weight:750}.ownerNote{display:grid;grid-template-columns:150px minmax(0,1fr) auto;gap:8px;margin-top:10px}.ownerNote button{border:0;background:#0f2748;color:#fff;border-radius:11px;padding:10px 13px;font-weight:800;cursor:pointer}
+.commandBox textarea{width:100%;box-sizing:border-box}.actionRow{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:9px}.actionRow span{font-size:12px;color:#68778a}.events{display:grid;gap:7px;max-height:390px;overflow:auto}.events article,.activityGrid article{display:flex;justify-content:space-between;gap:10px;border:1px solid #e9edf3;border-radius:12px;padding:10px}.events article>div,.activityGrid article>div{display:grid;gap:3px;min-width:0}.events strong,.activityGrid strong{font-size:13px}.events small,.activityGrid small{font-size:11px;color:#758399}.events article>span,.activityGrid article>span{font-size:10px;color:#8c97a5;white-space:nowrap}.empty,.emptyCard{padding:26px;text-align:center;color:#7a8798}.emptyCard{min-height:180px;display:grid;place-items:center}
+.activityBox{max-width:1700px;margin:14px auto 0;padding:20px}.activityGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.activityGrid p{margin:2px 0 0;font-size:11px;color:#69788c}
+@media(max-width:1200px){.hero{grid-template-columns:1fr}.workspace{grid-template-columns:1fr}.rail{position:static;max-height:none}.threadList{max-height:520px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.activityGrid{grid-template-columns:1fr}}
+@media(max-width:780px){.page{padding:14px 12px 40px}.metrics{grid-template-columns:1fr}.toolbar{flex-direction:column}.filters{grid-template-columns:1fr}.toolbarActions button{flex:1}.taskHero{flex-direction:column}.taskActions{justify-content:flex-start}.stateGrid{grid-template-columns:1fr}.ownerNote{grid-template-columns:1fr}.actionRow{align-items:stretch;flex-direction:column}.actionRow button{width:100%}.hero>div,.safeCard,.taskHero,.progressBox,.commandBox,.eventsBox,.activityBox{padding:17px}}
+
+.liveTaskState{margin:8px 0 5px;padding:8px 9px;border:1px solid #e8edf4;border-radius:10px;background:#f8faff;display:grid;gap:3px}.liveTaskState span{font-size:9px;font-weight:900;letter-spacing:.1em;color:#2f6fff}.liveTaskState b{font-size:11px;line-height:1.35;color:#30435c}.liveTaskMeta{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:7px}.liveTaskMeta span{font-size:10px;color:#69788c;font-weight:700}
+
+.taskBlocker,.detailBlocker{margin:7px 0 8px;padding:8px 10px;border:1px solid #ead9a8;border-radius:10px;background:#fffaf0;display:grid;gap:3px}.taskBlocker b,.detailBlocker b{font-size:9px;letter-spacing:.1em;color:#8b6100}.taskBlocker span,.detailBlocker span{font-size:11px;line-height:1.35;color:#66552e;word-break:break-word}.detailBlocker{margin-top:10px}.taskActions button:disabled{opacity:.55;cursor:not-allowed;transform:none!important}
+
+
+/* OWNER_DEVELOPMENT_RU_PROGRESS_LARGE_TYPE_V1 */
+.progressUnknown{margin:8px 0 9px;padding:9px 11px;border:1px solid #dce6f7;border-radius:10px;background:#f7faff;color:#51657e;font-size:13px;line-height:1.4;font-weight:700}
+.progressNotice{margin:10px 0 14px;padding:13px 15px;border:1px solid #d9e5fb;border-radius:13px;background:#f6f9ff;color:#415a78;font-size:15px;line-height:1.45;font-weight:700}
+.page{font-size:16.5px}
+.hero p{font-size:18px}
+.eyebrow,.sectionHead>span,.railHead span{font-size:13.5px}
+.chips span{font-size:14px;padding:9px 13px}
+.safeCard strong{font-size:24px}
+.safeCard p{font-size:16px;line-height:1.5}
+.topLinks a{font-size:14px;padding:10px 14px}
+.metrics small{font-size:15px}
+.metrics strong{font-size:32px}
+.metrics p{font-size:14px}
+.filters input,.filters select,.createBox input,.createBox select,.createBox textarea,.commandBox textarea,.ownerNote input{font-size:15.5px}
+.toolbar button,.createBox button,.taskActions button,.ownerNote button,.actionRow button{font-size:15px}
+.railHead h2{font-size:32px}
+.railHead small{font-size:13px}
+.threadList button{padding:13px}
+.threadTop strong{font-size:16px;line-height:1.35}
+.threadTop span{font-size:12.5px}
+.threadList p{font-size:13px}
+.threadList small{font-size:12px;line-height:1.4}
+.liveTaskState{padding:10px 11px}
+.liveTaskState span{font-size:11px}
+.liveTaskState b{font-size:14px;line-height:1.45}
+.liveTaskMeta span{font-size:12.5px}
+.taskBlocker b,.detailBlocker b{font-size:11px}
+.taskBlocker span,.detailBlocker span{font-size:14px;line-height:1.45}
+.progressLine span{font-size:11px}
+.taskHero h2{font-size:32px}
+.taskHero p{font-size:17px;line-height:1.5}
+.taskHero small{font-size:13px}
+.sectionHead h2{font-size:28px}
+.sectionHead p{font-size:16px;line-height:1.5}
+.stateGrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.stateGrid article{padding:14px}
+.stateGrid small{font-size:14px}
+.stateGrid strong{font-size:15.5px;line-height:1.45}
+.ownerNote{grid-template-columns:minmax(0,1fr) auto}
+.actionRow span{font-size:14px}
+.events strong,.activityGrid strong{font-size:15px;line-height:1.4}
+.events small,.activityGrid small{font-size:12.5px}
+.events article>span,.activityGrid article>span{font-size:11.5px}
+.activityGrid p{font-size:13.5px;line-height:1.45}
+@media(max-width:780px){
+  .hero p{font-size:17px}
+  .threadTop strong{font-size:15px}
+  .stateGrid{grid-template-columns:1fr}
+  .ownerNote{grid-template-columns:1fr}
+  .taskHero h2{font-size:28px}
+  .sectionHead h2{font-size:25px}
+  .page small{font-size:13.5px!important}
+}

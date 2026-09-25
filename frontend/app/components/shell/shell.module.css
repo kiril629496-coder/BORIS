@@ -21,8 +21,9 @@
   line-height: 1.1; white-space: nowrap;
 }
 .brandSub {
-  font-size: 11px; color: var(--b-muted); margin-top: 2px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11px; color: var(--b-muted); margin-top: 3px;
+  line-height: 1.25; white-space: normal; overflow: visible; text-overflow: clip;
+  max-width: 172px;
 }
 .collapse {
   background: transparent; border: none; cursor: pointer;
@@ -53,7 +54,7 @@
 .nav { flex: 1; padding: var(--b-s-3) var(--b-s-2) var(--b-s-5); }
 .group { margin-bottom: var(--b-s-4); }
 .groupTitle {
-  font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+  font-size: 13.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
   color: var(--b-faint); padding: 0 var(--b-s-3) var(--b-s-2);
 }
 .item {
@@ -99,9 +100,10 @@
 }
 .ghost:hover { background: var(--b-blue-soft); }
 .iconBtn {
-  width: 36px; height: 36px; border-radius: var(--b-r-sm);
+  width: 44px; height: 44px; border-radius: 10px;
   background: transparent; border: 1px solid transparent; cursor: pointer;
   color: var(--b-muted); font-size: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .iconBtn:hover { background: var(--b-bg); color: var(--b-blue); }
 .user { display: flex; flex-direction: column; align-items: flex-end; padding-left: var(--b-s-3); border-left: 1px solid var(--b-line); }
@@ -147,14 +149,747 @@
 }
 @media (max-width: 900px) {
   .side { position: fixed; z-index: 60; transform: translateX(-100%); transition: transform var(--b-anim); box-shadow: var(--b-shadow-lift); }
+  .user { display: none; }
   .sideOpen { transform: translateX(0); }
   .burger { display: inline-block; }
   .body { padding: var(--b-s-4); }
   .top { padding: 0 var(--b-s-4); }
   .helloSub { display: none; }
+  .user { display: none; }
+  .topActions { min-width: 0; max-width: calc(100vw - 84px); }
 }
 @media (min-width: 901px) { .burger { display: none; } }
 @media (max-width: 640px) {
   .user, .ghost { display: none; }
   .modal { padding: var(--b-s-4); }
 }
+
+/* ==========================================================
+   BORIS CANONICAL SHELL — STAGE B
+   Overrides legacy shell styles without changing React logic.
+   ========================================================== */
+
+/* --- complete application frame --- */
+
+.shell,
+.app,
+.root {
+  min-height: 100vh;
+  background: var(--boris-bg, #f6f8fc) !important;
+  color: var(--boris-text, #15213b);
+}
+
+/* --- sidebar --- */
+
+.sidebar,
+.side {
+  width: var(--boris-sidebar-width, 286px) !important;
+  flex: 0 0 var(--boris-sidebar-width, 286px) !important;
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255,255,255,1) 0%,
+      rgba(251,252,255,1) 100%
+    ) !important;
+
+  border-right: 1px solid var(--boris-border, #dfe6f2) !important;
+  box-shadow: none !important;
+}
+
+/* logo / brand */
+
+.logo,
+.brand {
+  color: var(--boris-text, #15213b) !important;
+  letter-spacing: -.025em;
+}
+
+/* groups */
+
+.groupTitle,
+.sectionTitle,
+.navTitle {
+  color: #8995aa !important;
+  font-size: 11px !important;
+  line-height: 1.2 !important;
+  font-weight: 700 !important;
+  letter-spacing: .08em !important;
+  text-transform: uppercase !important;
+}
+
+/* navigation items */
+
+.navItem,
+.item,
+.link {
+  border-radius: 10px !important;
+  color: #25324b !important;
+  font-weight: 600;
+}
+
+.navItem:hover,
+.item:hover,
+.link:hover {
+  color: #15213b !important;
+  background: #f3f7ff !important;
+}
+
+.active,
+.navActive,
+.itemActive {
+  color: #2878ff !important;
+  background: #edf4ff !important;
+  box-shadow: none !important;
+}
+
+/* sidebar minimized */
+
+.sideMin {
+  width: var(--b-sidebar-min, 72px) !important;
+  flex-basis: var(--b-sidebar-min, 72px) !important;
+}
+
+/* --- topbar --- */
+
+.topbar,
+.topBar,
+.header {
+  height: var(--boris-topbar-height, 78px) !important;
+  min-height: var(--boris-topbar-height, 78px) !important;
+
+  background: rgba(255,255,255,.94) !important;
+  border-bottom: 1px solid var(--boris-border, #dfe6f2) !important;
+  box-shadow: none !important;
+
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.title {
+  color: #15213b !important;
+  font-weight: 750 !important;
+  letter-spacing: -.018em;
+}
+
+.subtitle {
+  color: var(--boris-text-2) !important;
+}
+
+/* --- central content --- */
+
+.main,
+.body {
+  min-width: 0;
+  background: #f6f8fc !important;
+}
+
+.content {
+  min-width: 0;
+  background: #f6f8fc;
+}
+
+/* --- right helper rail --- */
+
+.aside {
+  background: transparent !important;
+}
+
+/* --- common shell buttons --- */
+
+.switchButton,
+.iconButton,
+.burger,
+.collapseButton {
+  color: #53617a !important;
+  background: #ffffff !important;
+  border: 1px solid #dfe6f2 !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+
+.switchButton:hover,
+.iconButton:hover,
+.burger:hover,
+.collapseButton:hover {
+  color: #2878ff !important;
+  background: #f6f9ff !important;
+  border-color: #c9dcff !important;
+}
+
+/* --- interface switcher --- */
+
+.switcher,
+.switchPanel,
+.interfaceSwitcher {
+  background: #ffffff !important;
+  border: 1px solid #dfe6f2 !important;
+  border-radius: 14px !important;
+  box-shadow:
+    0 14px 42px rgba(25,45,82,.12) !important;
+}
+
+.switchOption,
+.switchItem {
+  border-radius: 10px !important;
+  border-color: #dfe6f2 !important;
+}
+
+.switchOption:hover,
+.switchItem:hover {
+  background: #f6f9ff !important;
+  border-color: #c9dcff !important;
+}
+
+.switchOptionActive,
+.switchItemActive {
+  background: #f2f7ff !important;
+  border-color: #8eb7ff !important;
+}
+
+/* --- mobile --- */
+
+@media (max-width: 900px) {
+  .sidebar,
+  .side {
+    box-shadow: 16px 0 44px rgba(20,35,65,.13) !important;
+  }
+
+  .topbar,
+  .topBar,
+  .header {
+    height: 64px !important;
+    min-height: 64px !important;
+  }
+}
+
+
+/* ==========================================================
+   BORIS UI — STAGE E3
+   MENU-DRIVEN APPSHELL SIDEBAR
+   ========================================================== */
+
+.sideOpen {
+  transform: translateX(0);
+}
+
+.mobileClose {
+  display: none;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 34px;
+
+  color: var(--boris-text-2);
+  background: var(--boris-surface);
+  border: 1px solid var(--boris-border);
+  border-radius: 9px;
+
+  font: inherit;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mobileBackdrop {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .side {
+    position: fixed !important;
+    z-index: 1001;
+    inset: 0 auto 0 0;
+
+    width: min(
+      var(--boris-sidebar-width, 286px),
+      calc(100vw - 54px)
+    ) !important;
+
+    transform: translateX(-105%);
+    transition: transform 180ms ease;
+
+    box-shadow:
+      18px 0 50px rgba(17, 31, 57, .15) !important;
+  }
+
+  .sideOpen {
+    transform: translateX(0);
+  }
+
+  .mobileClose {
+    display: inline-flex;
+  }
+
+  .mobileBackdrop {
+    position: fixed;
+    z-index: 1000;
+    inset: 0;
+
+    display: block;
+
+    padding: 0;
+    margin: 0;
+    border: 0;
+
+    background: rgba(15, 23, 42, .28);
+    cursor: default;
+  }
+}
+
+
+/* ==========================================================
+   BORIS UI — E4 V3 ACCOUNT SELECTOR
+   ========================================================== */
+
+.topExtra {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.accountControl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.accountLabel {
+  color: var(--b-muted);
+  font-size: var(--b-fs-xs);
+  font-weight: 600;
+}
+
+.accountSelect {
+  height: 36px;
+  min-width: 150px;
+  max-width: 240px;
+
+  padding: 0 32px 0 11px;
+
+  color: var(--b-ink);
+  background: var(--b-panel);
+
+  border: 1px solid var(--b-line);
+  border-radius: 9px;
+
+  font: inherit;
+  font-size: var(--b-fs-sm);
+  font-weight: 600;
+
+  cursor: pointer;
+}
+
+.accountSelect:hover {
+  border-color: var(--b-blue);
+}
+
+.accountSelect:focus {
+  outline: none;
+  border-color: var(--b-blue);
+  box-shadow: var(--b-focus);
+}
+
+@media (max-width: 760px) {
+  .accountLabel {
+    display: none;
+  }
+
+  .accountSelect {
+    min-width: 110px;
+    max-width: 145px;
+  }
+}
+
+
+/* ==========================================================
+   BORIS UI — E6 NAV BUTTON
+   Dashboard tab items use buttons, route items use links.
+   Both render identically.
+   ========================================================== */
+
+button.item {
+  width: 100%;
+  appearance: none;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+
+/* BORIS UI G3.1 HEADER ICON */
+
+.headerIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+
+
+/* ==========================================================
+   BORIS_F2C_VISIBLE_NORMALIZATION_V1
+   Visible canonical BORIS surface bridge.
+   ========================================================== */
+
+.switchPanel {
+  background: var(--boris-card-bg, #ffffff);
+  border: 1px solid var(--boris-card-border, var(--boris-border));
+  border-radius: var(--boris-card-radius, 16px);
+  box-shadow: var(--boris-card-shadow);
+}
+
+.select {
+  min-height: var(--boris-control-height, 40px);
+  color: var(--boris-text);
+  background: var(--boris-control-bg, #ffffff);
+  border: 1px solid var(--boris-border);
+  border-radius: var(--boris-control-radius, 10px);
+}
+
+/* BORIS_CANONICAL_SHELL_INTERACTIONS_V1_BEGIN */
+.item,
+.navItem,
+.link,
+.iconBtn,
+.collapse,
+.ghost {
+  transition: background-color var(--boris-transition-fast), color var(--boris-transition-fast), border-color var(--boris-transition-fast), transform var(--boris-transition-fast), box-shadow var(--boris-transition-fast);
+}
+.item:hover,
+.navItem:hover,
+.link:hover { background: var(--boris-blue-soft) !important; color: var(--boris-primary) !important; }
+.itemActive,
+.navActive,
+.active { background: var(--boris-blue-soft) !important; color: var(--boris-primary) !important; font-weight: 750 !important; box-shadow: inset 3px 0 0 var(--boris-primary) !important; }
+.item:hover .ico,
+.navItem:hover .ico,
+.link:hover .ico,
+.iconBtn:hover svg,
+.collapse:hover svg { transform: scale(1.1); }
+.ico,
+.iconBtn svg,
+.collapse svg { transition: transform var(--boris-transition-fast); }
+.item:focus-visible,
+.navItem:focus-visible,
+.link:focus-visible,
+.iconBtn:focus-visible,
+.collapse:focus-visible,
+.ghost:focus-visible { outline: 3px solid rgba(47,111,237,.16) !important; outline-offset: 2px; box-shadow: none; }
+.select:focus-visible { outline: none; border-color: var(--boris-primary); box-shadow: 0 0 0 3px rgba(47,111,237,.12); }
+@media (hover: none), (pointer: coarse) {
+  .item:hover .ico, .navItem:hover .ico, .link:hover .ico, .iconBtn:hover svg, .collapse:hover svg { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .item, .navItem, .link, .iconBtn, .collapse, .ghost, .ico, .iconBtn svg, .collapse svg { transition-duration: .01ms !important; }
+}
+/* BORIS_CANONICAL_SHELL_INTERACTIONS_V1_END */
+
+/* BORIS_MOBILE_TOPBAR_FIT_V1_BEGIN */
+@media (max-width: 640px) {
+  .top { gap: 8px !important; padding: 0 10px !important; }
+  .hello { flex: 1 1 auto; min-width: 0; }
+  .topActions { flex: 0 1 auto; min-width: 0; gap: 6px; }
+  .topExtra { display: none !important; }
+  .topActions > .iconBtn { display: none !important; }
+  .accountSelect { min-width: 92px !important; width: 108px !important; max-width: 108px !important; padding-left: 8px !important; padding-right: 22px !important; }
+}
+/* BORIS_MOBILE_TOPBAR_FIT_V1_END */
+
+/* ---------- global logout ---------- */
+.logoutBtn {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--boris-border, #dfe6f2);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--boris-text-2, #53617a);
+  font: inherit;
+  font-size: var(--b-fs-sm, 13px);
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform var(--b-anim, 160ms ease), box-shadow var(--b-anim, 160ms ease), border-color var(--b-anim, 160ms ease), color var(--b-anim, 160ms ease), background var(--b-anim, 160ms ease);
+}
+.logoutBtn:hover {
+  transform: scale(1.035);
+  box-shadow: 0 6px 18px rgba(25,45,82,.12);
+  border-color: #c9dcff;
+  color: var(--boris-blue, #2878ff);
+  background: #f8fbff;
+}
+.logoutBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--b-focus, 0 0 0 3px rgba(47,111,237,.24));
+  border-color: var(--boris-blue, #2878ff);
+}
+.logoutBtn:active { transform: scale(.98); }
+.logoutIcon {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: 0 0 17px;
+}
+@media (max-width: 640px) {
+  /* MOBILE_TOUCH_TARGETS_V2: top-bar controls must not shrink below a reliable
+     thumb target when the account selector and title compete for width. */
+  .accountSelect {
+    height: 44px !important;
+    min-height: 44px !important;
+  }
+  .burger,
+  .iconBtn {
+    width: 44px !important;
+    min-width: 44px !important;
+    height: 44px !important;
+    min-height: 44px !important;
+    flex: 0 0 44px !important;
+  }
+  .logoutBtn {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    flex: 0 0 44px;
+    padding: 0;
+  }
+  .logoutLabel { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .logoutBtn { transition: none; }
+  .logoutBtn:hover, .logoutBtn:active { transform: none; }
+}
+
+/* BORIS_REFERENCE_SIDEBAR_V1_BEGIN */
+.side {
+  background: linear-gradient(180deg,#fff 0%,#fbfdff 54%,#f7faff 100%) !important;
+  border-right: 1px solid #e5ebf5 !important;
+  box-shadow: 2px 0 18px rgba(24,55,105,.055) !important;
+  overflow: hidden !important;
+}
+.brand { min-height: 76px; padding: 14px 14px !important; border-bottom: 0 !important; }
+.brandMark { width:36px;height:36px;flex:0 0 36px;border-radius:10px;display:grid;place-items:center;color:#fff;font-size:22px;font-weight:800;background:linear-gradient(145deg,#2563eb,#3b82f6 55%,#5b5cf6);box-shadow:0 7px 18px rgba(37,99,235,.25); }
+.brandName { font-size:17px !important; font-weight:800 !important; letter-spacing:-.02em; }
+.brandName span { color:#2563eb; }
+.brandSub { font-size:11px !important; color:#70809a !important; }
+.collapse { width:44px;height:44px;display:grid;place-items:center;padding:0 !important;font-size:23px !important;transition:transform 200ms cubic-bezier(.4,0,.2,1),background 200ms,box-shadow 200ms !important; }
+.collapse:hover { transform:scale(1.06);box-shadow:0 5px 14px rgba(37,99,235,.10); }
+.nav { overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;padding:4px 10px 12px !important; }
+.group { margin-bottom:12px !important; }
+.groupTitle { font-size:11px !important;line-height:18px !important;letter-spacing:.09em !important;padding:3px 10px 5px !important;color:#8190aa !important; }
+.item { min-height:42px;padding:5px 9px !important;gap:10px !important;border-radius:11px !important;font-size:14px !important;font-weight:600 !important;transition:background 210ms cubic-bezier(.4,0,.2,1),color 210ms,transform 210ms,box-shadow 210ms !important; }
+.item:hover { transform:translateX(2px);background:#f2f7ff !important;color:#14213d !important; }
+.ico { --tone:#2563eb;--soft:#eff6ff;--glow:rgba(37,99,235,.16);width:30px !important;height:30px;flex:0 0 30px !important;display:grid;place-items:center;border-radius:9px;background:var(--soft);color:var(--tone);transition:transform 210ms cubic-bezier(.4,0,.2,1),box-shadow 210ms,background 210ms,color 210ms !important; }
+.ico > span, .ico svg { color:inherit !important; }
+.ico svg { stroke:currentColor !important; }
+.ico[data-tone="red"]{--tone:#ef476f;--soft:#fff0f3;--glow:rgba(239,71,111,.18)}
+.ico[data-tone="orange"]{--tone:#f59e0b;--soft:#fff7e8;--glow:rgba(245,158,11,.18)}
+.ico[data-tone="teal"]{--tone:#10a981;--soft:#eafaf5;--glow:rgba(16,169,129,.18)}
+.ico[data-tone="cyan"]{--tone:#06a6d4;--soft:#eaf9fd;--glow:rgba(6,166,212,.18)}
+.ico[data-tone="violet"]{--tone:#7c5cff;--soft:#f2efff;--glow:rgba(124,92,255,.18)}
+.ico[data-tone="pink"]{--tone:#ec4899;--soft:#fff0f7;--glow:rgba(236,72,153,.18)}
+.ico[data-tone="green"]{--tone:#10b981;--soft:#ecfdf5;--glow:rgba(16,185,129,.18)}
+.ico[data-tone="slate"]{--tone:#64748b;--soft:#f1f5f9;--glow:rgba(100,116,139,.18)}
+.item:hover .ico { transform:scale(1.09) !important;box-shadow:0 4px 14px var(--glow); }
+.itemActive,.itemActive:hover { background:rgba(37,99,235,.20) !important;color:#2563eb !important;font-weight:700 !important;box-shadow:0 4px 14px rgba(37,99,235,.08) !important;transform:none; }
+.itemActive .ico { color:#2563eb !important;background:rgba(37,99,235,.08) !important;box-shadow:none !important;transform:scale(1.04) !important; }
+.item:active { transform:scale(.98); }
+.accountFooter { flex:0 0 auto;margin:0 10px 12px;padding:10px;min-height:58px;display:flex;align-items:center;gap:10px;border:1px solid #e4eaf4;border-radius:12px;background:rgba(255,255,255,.86);box-shadow:0 4px 14px rgba(24,55,105,.04);transition:background 200ms,border-color 200ms,box-shadow 200ms; }
+.accountFooter:hover { background:#f7faff;border-color:#cfe0ff;box-shadow:0 6px 18px rgba(37,99,235,.08); }
+.accountAvatar { width:34px;height:34px;flex:0 0 34px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:800;background:linear-gradient(145deg,#2563eb,#4f6df5); }
+.accountMeta { min-width:0;display:flex;flex:1;flex-direction:column;line-height:1.25; }
+.accountMeta strong { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#17233d; }
+.accountMeta small { margin-top:3px;font-size:10px;color:#77869d; }
+.accountChevron { color:#2563eb;font-weight:800; }
+.sideMin .accountMeta,.sideMin .accountChevron { display:none; }
+.sideMin .accountFooter { justify-content:center;padding:8px 0; }
+.sideMin .brandMark { display:grid; }
+.sideMin .collapse { position:absolute;left:54px;top:16px;width:28px;height:28px;background:#fff;border:1px solid #e1e9f5;box-shadow:0 4px 12px rgba(24,55,105,.08); }
+.sideMin .brand { position:relative;padding-inline:12px !important; }
+@media (max-width:900px){ .side{width:min(310px,calc(100vw - 52px)) !important;flex-basis:auto !important}.collapse{display:none}.mobileClose{width:44px!important;height:44px!important;flex-basis:44px!important}.accountFooter{margin-bottom:10px}.sideMin{width:min(310px,calc(100vw - 52px)) !important}.sideMin .label,.sideMin .groupTitle,.sideMin .brandText,.sideMin .accountMeta,.sideMin .accountChevron{display:initial}.sideMin .accountMeta{display:flex}.sideMin .item{justify-content:flex-start;padding:5px 9px!important}.sideMin .accountFooter{justify-content:flex-start;padding:10px}.sideMin .collapse{display:none}}
+@media (hover:none),(pointer:coarse){.item:hover{transform:none}.item:hover .ico{transform:none!important;box-shadow:none}.item:active{background:#eaf2ff!important;transform:scale(.99)}}
+@media (prefers-reduced-motion:reduce){.item,.ico,.collapse,.accountFooter{transition:none!important}.item:hover,.item:active,.item:hover .ico{transform:none!important}}
+/* BORIS_REFERENCE_SIDEBAR_V1_END */
+/* BORIS_REFERENCE_SIDEBAR_ACCOUNT_V2_BEGIN */
+.accountArea { position:relative; flex:0 0 auto; }
+button.accountFooter { width:calc(100% - 20px); cursor:pointer; font:inherit; text-align:left; }
+.accountFooter:focus-visible { outline:3px solid rgba(47,111,237,.18); outline-offset:2px; }
+.accountChevron { transition:transform 180ms ease; }
+.accountChevronOpen { transform:rotate(180deg); }
+.accountMenu { position:absolute; left:10px; right:10px; bottom:calc(100% + 7px); z-index:80; padding:6px; border:1px solid #dfe7f3; border-radius:12px; background:#fff; box-shadow:0 14px 34px rgba(19,39,74,.14); max-height:260px; overflow:auto; }
+.accountMenuItem { width:100%; min-height:44px; display:flex; align-items:center; gap:9px; padding:6px 8px; border:0; border-radius:9px; background:transparent; color:#1a2741; font:inherit; font-size:12px; font-weight:650; text-align:left; cursor:pointer; }
+.accountMenuItem:hover { background:#f2f7ff; }
+.accountMenuItem:focus-visible { outline:3px solid rgba(47,111,237,.18); outline-offset:1px; }
+.accountMiniAvatar { width:28px;height:28px;flex:0 0 28px;display:grid;place-items:center;border-radius:50%;background:#edf4ff;color:#2563eb;font-weight:800; }
+.accountCheck { margin-left:auto; color:#2563eb; font-weight:800; }
+.sideMin .accountMenu { left:66px; right:auto; bottom:8px; width:240px; }
+@media (max-width:900px){ .sideMin .accountMenu{left:10px;right:10px;bottom:calc(100% + 7px);width:auto} }
+@media (prefers-reduced-motion:reduce){ .accountChevron{transition:none!important} }
+/* BORIS_REFERENCE_SIDEBAR_ACCOUNT_V2_END */
+/* BORIS_REFERENCE_SIDEBAR_REAL_BADGES_V1_BEGIN */
+.navBadge { margin-left:auto; min-width:20px; height:20px; padding:0 6px; display:inline-flex; align-items:center; justify-content:center; border-radius:999px; color:#fff; font-size:11px; line-height:1; font-weight:800; box-shadow:0 3px 9px rgba(20,40,80,.12); }
+.navBadge[data-badge-tone="critical"] { background:#ef476f; }
+.navBadge[data-badge-tone="attention"] { background:#f59e0b; }
+.navBadge[data-badge-tone="info"] { background:#2563eb; }
+.itemActive .navBadge { background:#fff !important; color:#2563eb !important; box-shadow:none; }
+.sideMin .navBadge { position:absolute; top:2px; right:2px; min-width:16px; height:16px; padding:0 4px; font-size:9px; }
+.sideMin .item { position:relative; }
+@media (prefers-reduced-motion:no-preference){ .navBadge { animation:borisBadgeIn 220ms ease-out both; } @keyframes borisBadgeIn { from{opacity:0;transform:scale(.9)} 70%{opacity:1;transform:scale(1.05)} to{opacity:1;transform:scale(1)} } }
+@media (prefers-reduced-motion:reduce){ .navBadge{animation:none!important} }
+/* BORIS_REFERENCE_SIDEBAR_REAL_BADGES_V1_END */
+
+/* BORIS GLOBAL FLUID WORKSPACE CONTRACT 2026-08-28 */
+.shell { width:100%; max-width:none; }
+.main { width:0; flex:1 1 auto; min-width:0; max-width:none; }
+.body { width:100%; max-width:none; min-width:0; box-sizing:border-box; }
+.content { width:100%; max-width:none !important; min-width:0; flex:1 1 auto; }
+.content > * { width:100%; max-width:none; min-width:0; box-sizing:border-box; }
+.sideMin + .main { min-width:0; }
+@media(min-width:901px){
+  .sideMin + .main .body { width:100%; }
+  .sideMin + .main .content { width:100%; max-width:none !important; }
+}
+/* BORIS GLOBAL FLUID WORKSPACE CONTRACT END */
+
+
+/* BORIS_SIDEBAR_FULL_BRAND_TEXT_V1_BEGIN */
+@media (min-width:901px) {
+  .side:not(.sideMin) { width:300px !important; flex-basis:300px !important; }
+  .side:not(.sideMin) .brand { min-height:82px; align-items:flex-start; gap:10px; padding:14px 12px !important; }
+  .side:not(.sideMin) .brandText { min-width:0; flex:1 1 auto; padding-top:1px; }
+  .side:not(.sideMin) .brandSub { display:block !important; max-width:none !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; line-height:1.25 !important; }
+  .side:not(.sideMin) .collapse { flex:0 0 36px; width:36px; height:44px; margin-left:0; }
+}
+/* BORIS_SIDEBAR_FULL_BRAND_TEXT_V1_END */
+
+/* BORIS_SIDEBAR_COLLAPSED_FLUID_V3_BEGIN */
+@media (min-width:901px) {
+  .side {
+    width:clamp(248px,18vw,286px) !important;
+    flex-basis:clamp(248px,18vw,286px) !important;
+    transition:width 220ms cubic-bezier(.4,0,.2,1),flex-basis 220ms cubic-bezier(.4,0,.2,1),box-shadow 180ms ease !important;
+  }
+  .sideMin {
+    width:68px !important;
+    flex-basis:68px !important;
+    overflow:visible !important;
+  }
+  .sideMin .brand {
+    min-height:72px;
+    justify-content:center;
+    padding:12px 10px !important;
+    overflow:visible;
+  }
+  .sideMin .brandMark { width:38px;height:38px;flex-basis:38px;border-radius:11px; }
+  .sideMin .collapse {
+    position:absolute;
+    z-index:5;
+    left:auto;
+    right:-13px;
+    top:23px;
+    width:26px;
+    height:26px;
+    border-radius:999px;
+    background:#fff !important;
+    border:1px solid #dbe5f4 !important;
+    box-shadow:0 5px 15px rgba(24,55,105,.12);
+    color:#2563eb;
+    font-size:19px !important;
+  }
+  .sideMin .nav { padding:5px 8px 10px !important; overflow-y:auto !important; overflow-x:visible !important; }
+  .sideMin .group { margin-bottom:8px !important; }
+  .sideMin .item {
+    width:44px;
+    min-height:44px;
+    height:44px;
+    margin:0 auto 4px;
+    padding:0 !important;
+    justify-content:center;
+    gap:0 !important;
+    border-radius:12px !important;
+  }
+  .sideMin .ico { width:34px !important;height:34px;flex-basis:34px !important;border-radius:10px; }
+  .sideMin .item:hover { transform:translateY(-1px) !important; }
+  .sideMin .itemActive,.sideMin .itemActive:hover { box-shadow:0 5px 15px rgba(37,99,235,.2) !important; }
+  .sideMin .accountArea { padding-bottom:8px; }
+  .sideMin .accountFooter {
+    width:46px;
+    min-height:46px;
+    height:46px;
+    margin:0 auto;
+    padding:0 !important;
+    justify-content:center;
+    border-radius:14px;
+  }
+  .sideMin .accountAvatar { width:34px;height:34px;flex-basis:34px; }
+  .sideMin .navBadge { top:-2px;right:-4px;min-width:18px;height:18px; }
+}
+@media (min-width:901px) and (max-width:1180px) {
+  .side:not(.sideMin) { width:240px !important;flex-basis:240px !important; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .side { transition:none !important; }
+  .sideMin .item:hover { transform:none !important; }
+}
+/* BORIS_SIDEBAR_COLLAPSED_FLUID_V3_END */
+
+/* BORIS MOBILE WEB APP — persistent thumb navigation */
+.mobileDock { display:none; }
+@media (max-width:900px) {
+  .main { padding-bottom:calc(72px + env(safe-area-inset-bottom, 0px)); }
+  .body { padding-bottom:20px !important; }
+  .mobileDock {
+    position:fixed; z-index:950; left:10px; right:10px;
+    bottom:max(8px, env(safe-area-inset-bottom, 0px));
+    display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); align-items:stretch;
+    min-height:62px; padding:6px;
+    border:1px solid rgba(207,218,236,.94); border-radius:20px;
+    background:rgba(255,255,255,.94); box-shadow:0 12px 36px rgba(21,42,82,.16);
+    backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px);
+  }
+  .mobileDockItem {
+    min-width:0; min-height:50px; padding:4px 2px; border:0; border-radius:14px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
+    background:transparent; color:#738096; text-decoration:none; font:inherit;
+    font-size:9.5px; line-height:1.05; font-weight:750; cursor:pointer; -webkit-tap-highlight-color:transparent;
+  }
+  .mobileDockIcon { width:28px; height:26px; display:grid; place-items:center; border-radius:9px; color:currentColor; font-size:18px; font-weight:900; letter-spacing:1px; }
+  .mobileDockItemActive { color:#2563eb; background:#f3f7ff; }
+  .mobileDockItemActive .mobileDockIcon { background:#e7f0ff; }
+  .mobileDockItem:active { transform:scale(.96); background:#eef4ff; }
+  .top { padding-top:env(safe-area-inset-top, 0px); min-height:calc(64px + env(safe-area-inset-top, 0px)) !important; }
+}
+@media (max-width:390px) {
+  .mobileDock { left:6px; right:6px; padding-inline:4px; }
+  .mobileDockItem { font-size:10.5px; line-height:1.1; }
+}
+@media (prefers-reduced-motion:reduce) { .mobileDockItem { transition:none; transform:none!important; } }
+
+
+/* BORIS_GLOBAL_LARGER_TYPE_V1 */
+.brandName{font-size:19px!important}
+.brandSub{font-size:13px!important}
+.groupTitle{font-size:12.5px!important;line-height:20px!important}
+.item{font-size:15.5px!important;min-height:44px}
+.accountMeta strong{font-size:14px}
+.accountMeta small{font-size:12px}
+.accountMenuItem{font-size:14px}
+.helloTitle{font-size:20px}
+.helloSub{font-size:13.5px}
+.userName{font-size:14.5px}
+.userRole{font-size:12.5px}
+.ghost{font-size:14px}
+.mobileDockItem{font-size:12px}

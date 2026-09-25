@@ -46,6 +46,11 @@ export function getRole(): string {
 
 export function logout() {
   if (typeof window === "undefined") return;
+  // Installed BORIS Phone must return to its workspace after an expired session.
+  // Store only our own fixed application route; never persist arbitrary external redirects.
+  if (window.location.pathname.startsWith("/phone-app")) {
+    localStorage.setItem("boris_post_login_return", "/phone-app");
+  }
   [LS_TOKEN, "boris_user_email", LS_ROLE, LS_ACCOUNT].forEach((k) =>
     localStorage.removeItem(k)
   );
@@ -91,7 +96,9 @@ export type OldMode = "director" | "advisor" | "wallet" | "requisites" | "analyt
    Пишем цель в boris_pendingNavigation, монолит читает её при монтировании,
    открывает вкладку, включает режим и чистит ключ. Ложных ссылок нет:
    пользователь попадает именно туда, куда нажал. */
-export function navigateToOld(tab: string, mode: OldMode | null = null) {
+export type ScenarioCtx = { scenario: number | string; step?: string | null } | null;
+
+export function navigateToOld(tab: string, mode: OldMode | null = null, ctx: ScenarioCtx = null) {
   if (typeof window === "undefined") return;
   try {
     localStorage.setItem(LS_PENDING, JSON.stringify({
@@ -100,18 +107,28 @@ export function navigateToOld(tab: string, mode: OldMode | null = null) {
     }));
   } catch {}
   localStorage.setItem(LS_TAB, tab);   // запасной путь, если мост ещё не подключён
-  window.location.href = "/dashboard";
+  window.location.href = ctx && ctx.scenario
+    ? "/dashboard?tab=" + encodeURIComponent(tab)
+      + "&scenario=" + encodeURIComponent(String(ctx.scenario))
+      + (ctx.step ? "&step=" + encodeURIComponent(String(ctx.step)) : "")
+    : "/dashboard";
 }
 
 // Штатный переход в старый кабинет: монолит сам поднимает вкладку из
 // localStorage при монтировании (page.tsx:1309). Query-параметр не нужен.
-export function openTab(tab: string) {
-  navigateToOld(tab, null);
+export function openTab(tab: string, ctx: ScenarioCtx = null) {
+  navigateToOld(tab, null, ctx);
 }
 
-export function openRoute(route: string) {
+export function openRoute(route: string, ctx: ScenarioCtx = null) {
   if (typeof window === "undefined") return;
-  window.location.href = route;
+  let url = route;
+  if (ctx && ctx.scenario) {
+    url += (route.indexOf("?") >= 0 ? "&" : "?")
+      + "scenario=" + encodeURIComponent(String(ctx.scenario))
+      + (ctx.step ? "&step=" + encodeURIComponent(String(ctx.step)) : "");
+  }
+  window.location.href = url;
 }
 
 export async function apiFetch(url: string, init: any = {}): Promise<Response> {
@@ -148,6 +165,19 @@ export async function apiGet(url: string): Promise<any> {
   }
 }
 
+/* Загрузка файлов. Content-Type НЕ выставляем руками: boundary ставит
+   браузер сам, иначе сервер не разберёт multipart. */
+export async function apiUpload(url: string, form: FormData): Promise<any> {
+  const r = await apiFetch(url, { method: 'POST', body: form });
+  try {
+    const data = await r.json();
+    if (!r.ok) return _normErr(r.status, data);
+    return data;
+  } catch {
+    return { status: 'error', message: 'Некорректный ответ сервера' };
+  }
+}
+
 export async function apiPost(url: string, body: any): Promise<any> {
   const r = await apiFetch(url, {
     method: "POST",
@@ -164,5 +194,17 @@ export async function apiPost(url: string, body: any): Promise<any> {
     return data;
   } catch {
     return { status: "error", message: "Некорректный ответ сервера" };
+  }
+}
+
+export async function apiSse(url:string, onEvent:(event:{id?:string,event?:string,data:any})=>void, signal?:AbortSignal):Promise<void>{
+  const r=await apiFetch(url,{headers:{Accept:'text/event-stream'},signal});
+  if(!r.ok||!r.body) throw new Error('sse_unavailable');
+  const reader=r.body.getReader(), decoder=new TextDecoder(); let buffer='';
+  while(true){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let cut;
+    while((cut=buffer.indexOf('\n\n'))>=0){const raw=buffer.slice(0,cut);buffer=buffer.slice(cut+2);if(!raw||raw.startsWith(':'))continue;let id='',event='message',data='';
+      for(const line of raw.split('\n')){if(line.startsWith('id:'))id=line.slice(3).trim();else if(line.startsWith('event:'))event=line.slice(6).trim();else if(line.startsWith('data:'))data+=(data?'\n':'')+line.slice(5).trim();}
+      if(data){let parsed:any=data;try{parsed=JSON.parse(data)}catch{}onEvent({id,event,data:parsed});}
+    }
   }
 }

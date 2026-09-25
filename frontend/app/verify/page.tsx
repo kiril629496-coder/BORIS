@@ -13,16 +13,17 @@ const CELLS = 6;
 const COOLDOWN_SEC = 180;
 
 const cardStyle: React.CSSProperties = {
-  background:"#FFFFFF", borderRadius:"16px", padding:"40px", width:"400px",
+  background:"#FFFFFF", borderRadius:"16px", padding:"clamp(22px, 7vw, 40px)",
+  width:"calc(100% - 32px)", maxWidth:"400px",
   boxSizing:"border-box", border:"1px solid #EEF2FA",
   boxShadow:"0 8px 24px rgba(16,24,40,0.08), 0 2px 6px rgba(16,24,40,0.04)",
 };
 const inputStyle: React.CSSProperties = {
-  width:"100%", background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px",
-  padding:"10px", color:"#1D2939", fontSize:"15px", boxSizing:"border-box",
+  width:"100%", background:"#FFFFFF", border:"1px solid var(--boris-border)", borderRadius:"8px",
+  padding:"10px", color:"var(--boris-text)", fontSize:"15px", boxSizing:"border-box",
 };
 const btnStyle = (disabled: boolean): React.CSSProperties => ({
-  width:"100%", background: disabled ? "#E3E7F0" : "#2F6FED", color:"#FFFFFF",
+  width:"100%", background: disabled ? "var(--boris-border)" : "var(--boris-blue)", color:"#FFFFFF",
   border:"none", borderRadius:"8px", padding:"12px", fontSize:"15px",
   fontWeight:"bold", cursor: disabled ? "default" : "pointer", marginBottom:"16px",
 });
@@ -121,7 +122,9 @@ export default function VerifyEmail() {
     }
     forgetVerification();
     persistSession(r.data, true);
-    router.push(await resolvePostAuthRoute(r.data.user));
+    const phoneReturn = localStorage.getItem("boris_post_login_return");
+    if (phoneReturn === "/phone-app") { localStorage.removeItem("boris_post_login_return"); router.push(phoneReturn); }
+    else router.push(await resolvePostAuthRoute(r.data.user));
   };
 
   const doResend = async () => {
@@ -168,25 +171,25 @@ export default function VerifyEmail() {
   };
 
   return (
-    <div style={{background:"linear-gradient(160deg, #F6F7FB 0%, #E7EFFE 100%)", minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"var(--font-inter), Arial, Helvetica, sans-serif"}}>
+    <div style={{background:"linear-gradient(160deg, var(--boris-bg) 0%, var(--boris-blue-soft) 100%)", minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"var(--font-inter), Arial, Helvetica, sans-serif"}}>
       <style>{`
         .boris-login-btn { transition: box-shadow 0.2s ease, transform 0.2s ease; }
         .boris-login-btn:hover:not(:disabled) { box-shadow: 0 4px 14px rgba(47,111,237,0.35); transform: translateY(-1px); }
-        .boris-code-cell:focus { outline: none; border-color: #2F6FED !important; box-shadow: 0 0 0 3px rgba(47,111,237,0.12); }
-        .boris-login-input:focus { outline: none; border-color: #2F6FED !important; box-shadow: 0 0 0 3px rgba(47,111,237,0.12); }
-        .boris-login-switch:hover { color: #2F6FED !important; }
+        .boris-code-cell:focus { outline: none; border-color: var(--boris-blue) !important; box-shadow: 0 0 0 3px rgba(47,111,237,0.12); }
+        .boris-login-input:focus { outline: none; border-color: var(--boris-blue) !important; box-shadow: 0 0 0 3px rgba(47,111,237,0.12); }
+        .boris-login-switch:hover { color: var(--boris-blue) !important; }
       `}</style>
 
       <div style={cardStyle}>
         <div style={{textAlign:"center", marginBottom:"24px"}}>
           <div style={{fontSize:"39px", marginBottom:"10px"}}>📬</div>
-          <h1 style={{color:"#1D2939", fontSize:"23px", margin:"0", fontWeight:800, fontFamily:"var(--font-manrope)"}}>Подтвердите почту</h1>
-          <p style={{color:"#667085", fontSize:"15px", margin:"8px 0 0"}}>
+          <h1 style={{color:"var(--boris-text)", fontSize:"23px", margin:"0", fontWeight:800, fontFamily:"var(--font-manrope)"}}>Подтвердите почту</h1>
+          <p style={{color:"var(--boris-text-2)", fontSize:"15px", margin:"8px 0 0"}}>
             Код отправлен на {masked || "указанный адрес"}
           </p>
         </div>
 
-        <div style={{display:"flex", gap:"8px", justifyContent:"space-between", marginBottom:"20px"}}>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(6, minmax(0, 1fr))", gap:"6px", marginBottom:"20px"}}>
           {digits.map((d, i) => (
             <input
               key={i}
@@ -199,7 +202,7 @@ export default function VerifyEmail() {
               onChange={e => onChange(i, e.target.value)}
               onKeyDown={e => onKeyDown(i, e)}
               onPaste={onPaste}
-              style={{width:"46px", height:"54px", textAlign:"center", fontSize:"22px", fontWeight:700, background:"#FFFFFF", border:"1px solid #E3E7F0", borderRadius:"8px", color:"#1D2939", boxSizing:"border-box"}}
+              style={{width:"100%", minWidth:0, height:"54px", textAlign:"center", fontSize:"clamp(18px, 6vw, 22px)", fontWeight:700, background:"#FFFFFF", border:"1px solid var(--boris-border)", borderRadius:"8px", color:"var(--boris-text)", boxSizing:"border-box"}}
             />
           ))}
         </div>
@@ -225,7 +228,7 @@ export default function VerifyEmail() {
 
         <div style={{borderTop:"1px solid #EEF2FA", paddingTop:"16px"}}>
           {seconds > 0 && !locked ? (
-            <p style={{color:"#667085", fontSize:"14px", textAlign:"center", margin:"0 0 8px"}}>
+            <p style={{color:"var(--boris-text-2)", fontSize:"14px", textAlign:"center", margin:"0 0 8px"}}>
               Запросить новый код можно через {seconds} с
             </p>
           ) : (
@@ -245,14 +248,14 @@ export default function VerifyEmail() {
             <button
               className="boris-login-switch"
               onClick={() => { setShowChange(!showChange); setError(""); setNotice(""); }}
-              style={{background:"none", border:"none", color:"#667085", fontSize:"15px", cursor:"pointer", textDecoration:"underline"}}>
+              style={{background:"none", border:"none", color:"var(--boris-text-2)", fontSize:"15px", cursor:"pointer", textDecoration:"underline"}}>
               {showChange ? "Отмена" : "Указан неверный адрес?"}
             </button>
           </div>
 
           {showChange && (
             <div style={{marginTop:"16px"}}>
-              <label style={{color:"#667085", fontSize:"15px", display:"block", marginBottom:"6px"}}>Новый email</label>
+              <label style={{color:"var(--boris-text-2)", fontSize:"15px", display:"block", marginBottom:"6px"}}>Новый email</label>
               <input
                 className="boris-login-input"
                 type="email"

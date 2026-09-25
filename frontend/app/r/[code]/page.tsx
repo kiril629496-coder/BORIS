@@ -18,7 +18,7 @@ export default function RefRedirect() {
 
   return (
     <div style={{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center",
-                  fontFamily: "system-ui, sans-serif", color: "#667085" }}>
+                  fontFamily: "system-ui, sans-serif", color: "var(--boris-text-2)" }}>
       Открываем БОРИСа…
     </div>
   );

@@ -18,7 +18,13 @@ export const LS_ACCOUNT = "boris_currentAccount";
 export interface AccountSummary {
   account_id: string;
   name: string;
+  role?: string;
   company_website?: string;
+  company_niche?: string;
+  company_description?: string;
+  company_advantages?: string;
+  company_client_description?: string;
+  company_tone?: string;
   client_goal?: string;
   client_goal_text?: string;
 }
@@ -55,6 +61,15 @@ function readToken(): string {
   if (typeof window === "undefined") return "";
   try {
     return localStorage.getItem("boris_token") || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function readRole(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return (localStorage.getItem("boris_user_role") || "").toLowerCase();
   } catch (e) {
     return "";
   }
@@ -101,7 +116,28 @@ export function AccountProvider(props: { children: React.ReactNode }) {
       .then(function (res) { return res.json(); })
       .then(function (data) {
         if (!alive) return;
-        const list: AccountSummary[] = (data && data.accounts) || [];
+        const rawList: AccountSummary[] = (data && data.accounts) || [];
+        const role = readRole();
+        // INTERNAL_ACCOUNT_FILTER_V2:
+        // QA/test/demo fixtures must never leak into the owner/admin product
+        // selector.  A dedicated QA client must still see its own workspace, so
+        // filtering is intentionally disabled for role=client.
+        const isInternalAccount = function (a: AccountSummary): boolean {
+          const id = String(a && a.account_id || "").trim().toLowerCase();
+          return /^(?:qa|test|demo|fixture|sandbox|mock)(?:[_-]|$)/i.test(id);
+        };
+        const visible = role === "client"
+          ? rawList
+          : rawList.filter(function (a: AccountSummary) { return !isInternalAccount(a); });
+        // Backend account_id is the canonical identity.  Defensively collapse
+        // duplicate rows so one account can never appear twice in shared selectors.
+        const seen = new Set<string>();
+        const list: AccountSummary[] = visible.filter(function (a: AccountSummary) {
+          const id = String(a && a.account_id || "").trim();
+          if (!id || seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
         setAccounts(list);
 
         // сохранённый аккаунт годится, только если он в списке доступных

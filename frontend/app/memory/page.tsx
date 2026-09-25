@@ -2,15 +2,17 @@
 
 import { useEffect, useState } from "react";
 import {
-  Page, PageHeader, Card, Button, Input, Badge, Alert, EmptyState, Kpi, KpiRow, Icon,
+  Page, Card, Button, Input, Badge, Alert, EmptyState, Kpi, KpiRow, Icon,
 } from "../ui";
-import { Shell } from "../ui/Sidebar";
 import { color, space, font, radius } from "../ui/tokens";
+import AppShell from "../components/shell/AppShell";
+import { useAccounts } from "../lib/AccountContext";
 
 type Fact = {
   id: number; stage: number; stage_label: string; usage: string; date: string;
   aliases: string[]; type: string; category: string; name: string; value: string;
   source: string; confidence: number; status: string; confirmed_by: string;
+  requires_confirmation?: boolean;
 };
 type Summary = {
   items: number; dialogs: number; facts: number; confirmed: number; usable: number;
@@ -24,6 +26,47 @@ type Snap = {
 type TopQ = { question: string; count: number; fact_id: number; answer: string; confirmed: boolean };
 
 const STAGES = ["Найдено", "Требует подтверждения", "Подтверждено", "Используется"];
+
+const CATEGORY_RU: Record<string, string> = {
+  campaign: "Кампания",
+  campaign_price_benchmark: "Цены и ориентиры",
+  campaign_reference: "Правила кампании",
+  company: "Компания",
+  rule: "Правила",
+  service: "Услуги",
+};
+
+const TYPE_RU: Record<string, string> = {
+  campaign: "Кампания",
+  photo_rule: "Правило для фото",
+  price_rule: "Правило цены",
+  attribute_rule: "Правило параметров",
+  campaign_price_benchmark: "Ценовой ориентир",
+  campaign_reference: "Правило кампании",
+  company: "Компания",
+  rule: "Правило",
+  service: "Услуга",
+};
+
+function categoryLabel(value: string) {
+  return CATEGORY_RU[value] || "Прочее";
+}
+function typeLabel(value: string) {
+  return TYPE_RU[value] || CATEGORY_RU[value] || "Знание";
+}
+const NAME_RU: Record<string, string> = {
+  attribute_rule: "Правила заполнения параметров",
+  directions: "Направления бизнеса",
+  matrix: "Матрица объявлений",
+  photo_rule: "Правила работы с фотографиями",
+  price_rule: "Правила указания цены",
+  bathroom: "Ванные и мебель для ванной", hallway: "Прихожие", kitchen: "Кухни", wardrobe: "Гардеробные",
+  example_configuration_policy: "Правила примерной комплектации",
+  brand: "Бренд", cities: "Города работы", experience: "Опыт", factories: "Производство", format: "Формат работы", order_segment: "Тип заказов", website: "Сайт",
+  availability: "Доступность", pickup: "Самовывоз", assembly: "Сборка", design: "Дизайн", hardware: "Фурнитура", hardware_blum_capability: "Фурнитура Blum",
+  material_ldsp_e1: "ЛДСП класса E1", materials: "Материалы", measurement: "Замер", production: "Производство", quality: "Качество", service_center: "Сервисный центр", support: "Поддержка",
+};
+function factNameLabel(value: string) { return NAME_RU[value] || (/^[a-z0-9_]+$/i.test(value || "") ? "Дополнительное правило" : value); }
 
 function api(path: string, init?: RequestInit) {
   const token =
@@ -39,6 +82,7 @@ function api(path: string, init?: RequestInit) {
 }
 
 export default function KnowledgePage() {
+  const { selectedAccountId } = useAccounts();
   const [acc, setAcc] = useState("");
   const [sum, setSum] = useState<Summary | null>(null);
   const [was, setWas] = useState<Snap | null>(null);
@@ -56,10 +100,10 @@ export default function KnowledgePage() {
   const [custom, setCustom] = useState("");
 
   useEffect(() => {
-    const a = localStorage.getItem("boris_currentAccount") || "";
+    const a = selectedAccountId || localStorage.getItem("boris_currentAccount") || "";
     setAcc(a);
-    if (a) load(a);
-  }, []);
+    if (a) void load(a);
+  }, [selectedAccountId]);
 
   async function load(a: string) {
     if (!a) return;
@@ -96,23 +140,24 @@ export default function KnowledgePage() {
   const grew = was && now ? now.covered_strong - was.covered_strong : 0;
 
   return (
-    <Shell activeKey="memory">
-    <Page>
-      <PageHeader
-        title="База знаний компании"
-        subtitle="Подтверждённые знания, которыми BORIS имеет право пользоваться в ответах клиентам."
-        actions={
-          <>
-            <Input value={acc} onChange={(e) => setAcc(e.target.value)}
-                   placeholder="account_id" style={{ width: 260 }} />
-            <Button kind="ghost" onClick={() => load(acc)} disabled={busy}>Показать</Button>
+    <AppShell
+      active="memory"
+      title="База знаний компании"
+      subtitle="Подтверждённые знания, которыми BORIS имеет право пользоваться в ответах клиентам."
+      headerExtra={<>
+            <Button kind="ghost" onClick={() => load(acc)} disabled={busy || !acc}>Обновить</Button>
             <Button kind="ghost" disabled={busy || !acc}
                     onClick={() => post("/api/memory/extract", { account_id: acc }, "Готово")}>
               Перечитать источники
             </Button>
-          </>
-        }
-      />
+          </>}
+    >
+    <Page className="boris-memory-reference-page">
+      <section className="boris-reference-page-head boris-memory-page-head">
+        <div className="boris-reference-kicker">БАЗА ЗНАНИЙ</div>
+        <h1>Что BORIS знает о компании</h1>
+        <p>Подтверждённые факты становятся единым источником правды для МОП, рекламы, аналитики и контента.</p>
+      </section>
 
       {note ? <Alert kind={err ? "danger" : "success"}>{note}</Alert> : null}
 
@@ -129,7 +174,7 @@ export default function KnowledgePage() {
           </KpiRow>
           {was && now ? (
             <Alert kind={grew > 0 ? "success" : "info"}>
-              <b>Было → стало.</b> Подтверждено {was.confirmed} → <b>{now.confirmed}</b>,
+              <b data-boris-g32b-page="memory">Было → стало.</b> Подтверждено {was.confirmed} → <b>{now.confirmed}</b>,
               надёжных фактов {was.usable} → <b>{now.usable}</b>, вопросов закрывается
               надёжно {was.covered_strong} → <b>{now.covered_strong}</b> из {now.questions}
               {grew > 0 ? <b> (+{grew})</b> : null}
@@ -147,7 +192,7 @@ export default function KnowledgePage() {
                                   padding: "11px 0",
                                   borderTop: i ? "1px solid " + color.line : "none" }}>
               <div style={{ minWidth: 44, ...font.bodyStrong, color: color.blue }}>×{q.count}</div>
-              <div style={{ flex: 1 }}>
+              <div className="boris-f3-6253876a649a63">
                 <div style={{ ...font.body, color: color.heading }}>{q.question}</div>
                 {q.answer ? (
                   <div style={{ ...font.small, marginTop: 3 }}>Ответ: {q.answer.slice(0, 140)}</div>
@@ -156,14 +201,25 @@ export default function KnowledgePage() {
                     Готового ответа нет — BORIS ответит «уточню и вернусь»
                   </div>
                 )}
+                {editId === q.fact_id && q.fact_id ? <div className="boris-memory-inline-edit">
+                  <Input value={editVal} onChange={(e) => setEditVal(e.target.value)} />
+                  <Button disabled={busy || !editVal.trim()} onClick={() => post("/api/memory/edit", { account_id: acc, fact_id: q.fact_id, value: editVal }, "Сохранено")}>Сохранить в память BORIS</Button>
+                  <Button kind="ghost" onClick={() => setEditId(null)}>Отмена</Button>
+                </div> : null}
               </div>
-              {q.fact_id && !q.confirmed ? (
-                <Button disabled={busy}
-                        onClick={() => post("/api/memory/confirm",
-                          { account_id: acc, fact_id: q.fact_id }, "Подтверждено")}>
-                  Верно
-                </Button>
-              ) : q.confirmed ? <Badge kind="success">подтверждён</Badge> : null}
+              <div className="boris-memory-question-actions">
+                {q.fact_id && !q.confirmed ? (
+                  <Button disabled={busy}
+                          onClick={() => post("/api/memory/confirm",
+                            { account_id: acc, fact_id: q.fact_id }, "Подтверждено")}>
+                    Верно
+                  </Button>
+                ) : q.confirmed ? <Badge kind="success">подтверждён</Badge> : null}
+                {q.fact_id ? <Button kind="ghost" disabled={busy}
+                  onClick={() => { setEditId(q.fact_id); setEditVal(q.answer || facts.find((f) => f.id === q.fact_id)?.value || ""); }}>
+                  Изменить ответ
+                </Button> : null}
+              </div>
             </div>
           ))}
         </Card>
@@ -183,10 +239,10 @@ export default function KnowledgePage() {
             </div>
           ) : null}
           {conf.map((f) => (
-            <div key={f.id} style={{ marginTop: space.md, padding: space.lg,
+            <div data-boris-g32b-card="1" key={f.id} style={{ marginTop: space.md, padding: space.lg,
                                      borderRadius: radius.md, background: color.redSoft }}>
               <div style={{ fontSize: 20, fontWeight: 700, color: color.heading }}>{f.value} ₽</div>
-              <div style={{ ...font.small, marginTop: 3 }}>{f.source} · {f.name}</div>
+              <div style={{ ...font.small, marginTop: 3 }}>{f.source} · {factNameLabel(f.name)}</div>
               <Button style={{ marginTop: space.md }} disabled={busy}
                       onClick={() => post("/api/memory/resolve",
                         { account_id: acc, fact_id: f.id, mode: "pick" }, "Готово")}>
@@ -217,7 +273,7 @@ export default function KnowledgePage() {
         </Button>
         {cats.map((c) => (
           <Button key={c} kind={filter === c ? "secondary" : "ghost"} onClick={() => setFilter(c)}>
-            {(facts.find((f) => f.category === c) || { type: c }).type}
+            {categoryLabel(c)}
           </Button>
         ))}
       </div>
@@ -225,7 +281,7 @@ export default function KnowledgePage() {
       {shown.map((f) => (
         <Card key={f.id} padding={space.lg} style={{ marginTop: space.md }}>
           <div style={{ display: "flex", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
-            <Badge>{f.type}</Badge>
+            <Badge>{typeLabel(f.type)}</Badge>
             <span style={font.small as React.CSSProperties}>достоверность {f.confidence}%</span>
             {f.date ? <span style={font.small as React.CSSProperties}>· {f.date}</span> : null}
           </div>
@@ -239,7 +295,7 @@ export default function KnowledgePage() {
             ))}
           </div>
 
-          <div style={{ ...font.small, marginTop: space.md }}>{f.name}</div>
+          <div style={{ ...font.small, marginTop: space.md }}>{factNameLabel(f.name)}</div>
           <div style={{ ...font.bodyStrong, fontSize: 15, marginTop: 4, whiteSpace: "pre-wrap" }}>
             {f.value}
           </div>
@@ -264,13 +320,13 @@ export default function KnowledgePage() {
             </div>
           ) : (
             <div style={{ display: "flex", gap: space.sm, marginTop: space.md, flexWrap: "wrap" }}>
-              {f.status !== "confirmed" ? (
-                <Button disabled={busy}
-                        onClick={() => post("/api/memory/confirm",
-                          { account_id: acc, fact_id: f.id }, "Подтверждено")}>
-                  Верно
-                </Button>
-              ) : null}
+              <Button disabled={busy}
+                      kind={(f.requires_confirmation ?? (f.status !== "confirmed")) ? undefined : "ghost"}
+                      style={{ minHeight: 44 }}
+                      onClick={() => post("/api/memory/confirm",
+                        { account_id: acc, fact_id: f.id }, "Подтверждено и сохранено в память BORIS")}>
+                Подтверждаю
+              </Button>
               <Button kind="ghost" disabled={busy}
                       onClick={() => { setEditId(f.id); setEditVal(f.value); }}>
                 Изменить
@@ -296,6 +352,6 @@ export default function KnowledgePage() {
         </div>
       ) : null}
     </Page>
-    </Shell>
+    </AppShell>
   );
 }

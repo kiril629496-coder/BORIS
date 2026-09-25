@@ -1,0 +1,59 @@
+.page{max-width:1280px;margin:0 auto;padding:30px;color:var(--boris-text)}
+.header{display:flex;justify-content:space-between;gap:24px;margin-bottom:24px}
+.header h1{margin:5px 0 7px;font-size:34px;letter-spacing:-.03em}
+.header p{margin:0;color:var(--boris-text-2);max-width:700px;line-height:1.6}
+.kicker{color:var(--boris-blue);font-size:11px;font-weight:800;letter-spacing:.13em}
+.controls{display:flex;gap:9px}
+.controls select,.controls button{height:42px;border-radius:10px;padding:0 14px;font-weight:700}
+.controls select{background:#fff;border:1px solid var(--boris-border)}
+.controls button{background:var(--boris-blue);border:1px solid var(--boris-blue);color:#fff;cursor:pointer}
+.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}
+.metric,.block{background:#fff;border:1px solid var(--boris-border);border-radius:16px}
+.metric{padding:22px}
+.metric span,.metric strong,.metric small{display:block}
+.metric span{color:var(--boris-text-2);font-size:13px;font-weight:700;margin-bottom:11px}
+.metric strong{font-size:28px;margin-bottom:7px;letter-spacing:-.03em}
+.metric small{color:var(--boris-text-3)}
+.block{overflow:hidden;margin-bottom:18px}
+.block>header{padding:18px 21px 13px;border-bottom:1px solid var(--boris-border-soft)}
+.block h2{margin:0;font-size:17px}
+.table{overflow-x:auto}
+.table table{width:100%;border-collapse:collapse;font-size:13px}
+.table th{padding:11px 14px;text-align:left;background:var(--boris-surface-soft);color:var(--boris-text-2);white-space:nowrap}
+.table td{padding:12px 14px;border-top:1px solid #F0F2F5;white-space:nowrap}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.guards,.alerts{padding:14px}
+.guard{padding:12px 4px;border-bottom:1px solid var(--boris-border-soft)}
+.guardTop{display:flex;justify-content:space-between;gap:10px}
+.guardTop b{color:var(--boris-blue)}
+.bar{height:7px;background:#EEF2F8;border-radius:20px;overflow:hidden;margin:8px 0}
+.bar div{height:100%;background:var(--boris-blue);border-radius:20px}
+.alert{display:flex;justify-content:space-between;gap:20px;padding:12px 14px;margin-bottom:8px;background:#FFF6ED;border-radius:12px}
+.alert strong,.alert span{display:block}
+.alert span{color:var(--boris-text-2);font-size:11px}
+.empty{padding:28px;text-align:center;color:var(--boris-text-3)}
+.loading{position:fixed;right:24px;bottom:24px;background:var(--boris-text);color:#fff;padding:10px 14px;border-radius:10px}
+@media(max-width:980px){.metrics{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}}
+@media(max-width:680px){.page{padding:20px 15px}.header{flex-direction:column}.metrics{grid-template-columns:1fr}.controls{width:100%}.controls>*{flex:1}}
+
+
+/* ==========================================================
+   BORIS_F2C_VISIBLE_NORMALIZATION_V1
+   Visible canonical BORIS surface bridge.
+   ========================================================== */
+
+.metric {
+  background: var(--boris-card-bg, #ffffff);
+  border: 1px solid var(--boris-card-border, var(--boris-border));
+  border-radius: var(--boris-card-radius, 16px);
+  box-shadow: var(--boris-card-shadow);
+}
+
+.table {
+  width: 100%;
+  background: var(--boris-card-bg, #ffffff);
+  border: 1px solid var(--boris-border);
+  border-radius: 14px;
+  border-collapse: separate;
+  border-spacing: 0;
+}

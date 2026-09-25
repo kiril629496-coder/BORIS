@@ -1,0 +1,13 @@
+[Unit]
+Description=BORIS mobile + campaign runtime watch (detect/self-heal/verify)
+After=network-online.target boris-backend.service boris-frontend.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/BORIS/frontend
+ExecStart=/root/BORIS/frontend/scripts/boris-mobile-campaign-runtime-watch.sh
+TimeoutStartSec=240
+Nice=10
+IOSchedulingClass=idle

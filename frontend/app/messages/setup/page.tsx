@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import {
-  Page, PageHeader, Card, Button, Input, Field, Badge, Alert, EmptyState, Icon, IconChip,
+  Page, PageHeader, Card, Button, Input, Field, Badge, Alert, EmptyState, IconChip,
 } from "../../ui";
 import { color, space, font, radius } from "../../ui/tokens";
 
@@ -43,29 +43,37 @@ export default function SlotsSetupPage() {
   const [addOne, setAddOne] = useState(0);
   const [openId, setOpenId] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [note, setNote] = useState("");
   const [err, setErr] = useState(false);
   const [form, setForm] = useState({ cid: "", secret: "", phone: "" });
-  const [role, setRole] = useState("");
-  const [grant, setGrant] = useState({ user: "", count: "1", days: "30", pay: "" });
 
   useEffect(() => {
-    setRole(localStorage.getItem("boris_user_role") || "");
     load();
   }, []);
 
   async function load() {
+    setLoading(true);
     try {
       const [s, p] = await Promise.all([
         api("/api/inbox/slots"), api("/api/inbox/pricing"),
       ]);
-      if (s.ok) setSlots((await s.json()).slots || []);
-      if (p.ok) {
-        const d = await p.json();
-        setTable(d.table || []); setOwned(d.owned || 0);
-        setTotalNow(d.total_now || 0); setAddOne(d.add_one || 0);
+      if (!s.ok || !p.ok) {
+        throw new Error(s.status === 401 || p.status === 401 ? "Нужна авторизация BORIS" : "Не удалось загрузить подключение аккаунтов");
       }
-    } catch { setErr(true); setNote("Не удалось загрузить слоты"); }
+      const slotsData = await s.json();
+      const priceData = await p.json();
+      setSlots(slotsData.slots || []);
+      setTable(priceData.table || []); setOwned(priceData.owned || 0);
+      setTotalNow(priceData.total_now || 0); setAddOne(priceData.add_one || 0);
+      setErr(false);
+    } catch (e) {
+      setSlots([]);
+      setErr(true);
+      setNote(e instanceof Error ? e.message : "Не удалось загрузить слоты");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function post(path: string, body: unknown, ok: string) {
@@ -73,7 +81,7 @@ export default function SlotsSetupPage() {
     try {
       const r = await api(path, { method: "POST", body: JSON.stringify(body) });
       const d = await r.json().catch(() => ({}));
-      setErr(!r.ok || d.status !== "ok");
+      setErr(!r.ok);
       setNote(d.message || d.detail || ok);
       if (r.ok && d.status === "ok") { setOpenId(null); setForm({ cid: "", secret: "", phone: "" }); }
       await load();
@@ -93,21 +101,23 @@ export default function SlotsSetupPage() {
       {note ? <Alert kind={err ? "danger" : "success"}>{note}</Alert> : null}
 
       <div style={{ display: "flex", gap: space.lg, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <div style={{ flex: "1 1 620px" }}>
-          {!slots.length ? (
+        <div className="boris-f3-5cbe99176a5b07">
+          {loading ? (
+            <Card><div style={font.body as React.CSSProperties}>Загружаем подключённые аккаунты…</div></Card>
+          ) : !err && !slots.length ? (
             <EmptyState title="Оплаченных слотов пока нет"
                         hint="После подтверждения оплаты слоты появятся здесь автоматически." />
           ) : null}
 
           {slots.map((s) => {
-            const st = STATUS[s.status] || STATUS.paid_empty;
+            const st = STATUS[s.status] || { label: "Неизвестный статус", kind: "neutral" as const };
             const open = openId === s.id;
             return (
               <Card key={s.id} padding={space.lg} style={{ marginBottom: space.md }}>
                 <div style={{ display: "flex", alignItems: "center", gap: space.md }}>
                   <IconChip name={s.status === "connected" ? "check" : "plug"}
                             kind={st.kind === "neutral" ? "neutral" : st.kind} size={38} />
-                  <div style={{ flex: 1 }}>
+                  <div className="boris-f3-6253876a649a63">
                     <div style={font.bodyStrong as React.CSSProperties}>
                       {s.account_name || "Слот " + s.slot_no}
                     </div>
@@ -157,7 +167,11 @@ export default function SlotsSetupPage() {
                   ) : null}
                   {s.account_id ? (
                     <Button kind="danger" disabled={busy}
-                            onClick={() => post("/api/inbox/slots/release", { slot_id: s.id }, "Слот освобождён")}>
+                            onClick={() => {
+                              if (window.confirm("Освободить этот слот? Аккаунт будет отключён от Единого центра сообщений.")) {
+                                void post("/api/inbox/slots/release", { slot_id: s.id }, "Слот освобождён");
+                              }
+                            }}>
                       Освободить слот
                     </Button>
                   ) : null}
@@ -206,67 +220,27 @@ export default function SlotsSetupPage() {
           })}
         </div>
 
-        <div style={{ flex: "0 1 340px" }}>
+        <div className="boris-f3-66930e0ce6763e">
           <Card>
-            <div style={font.h3 as React.CSSProperties}>Стоимость</div>
+            <div style={font.h3 as React.CSSProperties}>Подключение</div>
             <div style={{ ...font.kpi, color: color.blue, marginTop: space.md }}>
               {totalNow.toLocaleString("ru-RU")} ₽
             </div>
             <div style={font.small as React.CSSProperties}>
               за {owned} {owned === 1 ? "слот" : "слотов"} в месяц
             </div>
-            <div style={{ ...font.small, marginTop: 6 }}>
-              следующий слот: +{addOne.toLocaleString("ru-RU")} ₽
+            <div style={{ ...font.small, marginTop: space.sm }}>
+              Следующий слот: +{addOne.toLocaleString("ru-RU")} ₽ / мес
             </div>
-            <div style={{ height: 1, background: color.line, margin: `${space.lg}px 0` }} />
-            {table.map((r) => (
-              <div key={r.slots} style={{ display: "flex", justifyContent: "space-between",
-                                          padding: "5px 0", ...font.body,
-                                          color: r.slots === owned ? color.heading : color.text,
-                                          fontWeight: r.slots === owned ? 700 : 400 }}>
-                <span>{r.slots} · {r.per_slot.toLocaleString("ru-RU")} ₽</span>
-                <span>{r.total.toLocaleString("ru-RU")} ₽</span>
-              </div>
-            ))}
           </Card>
 
-          {role === "owner" ? (
-            <Card style={{ marginTop: space.md }}>
-              <div style={{ display: "flex", alignItems: "center", gap: space.sm }}>
-                <Icon name="lock" tone="accent" size={18} />
-                <div style={font.h3 as React.CSSProperties}>Выдать слоты после оплаты</div>
-              </div>
-              <div style={{ marginTop: space.md }}>
-                <Field label="ID пользователя">
-                  <Input value={grant.user}
-                         onChange={(e) => setGrant({ ...grant, user: e.target.value })} />
-                </Field>
-                <Field label="Сколько слотов">
-                  <Input value={grant.count}
-                         onChange={(e) => setGrant({ ...grant, count: e.target.value })} />
-                </Field>
-                <Field label="Дней оплачено">
-                  <Input value={grant.days}
-                         onChange={(e) => setGrant({ ...grant, days: e.target.value })} />
-                </Field>
-                <Field label="ID платежа" hint="необязательно">
-                  <Input value={grant.pay}
-                         onChange={(e) => setGrant({ ...grant, pay: e.target.value })} />
-                </Field>
-              </div>
-              <Button style={{ width: "100%" }} disabled={busy || !grant.user}
-                      onClick={() => post("/api/inbox/slots/grant", {
-                        owner_user_id: parseInt(grant.user || "0", 10),
-                        count: parseInt(grant.count || "1", 10),
-                        days: parseInt(grant.days || "30", 10),
-                        payment_id: grant.pay,
-                      }, "Слоты созданы")}>
-                Создать слоты
-              </Button>
-            </Card>
-          ) : null}
+          <div style={{ ...font.small, marginTop: space.md, color: color.muted }}>
+            Слоты выдаются автоматически после подтверждённой оплаты.
+          </div>
         </div>
       </div>
     </Page>
   );
 }
+
+// BORIS_HIDE_CLIENT_INBOX_PRICES_V1

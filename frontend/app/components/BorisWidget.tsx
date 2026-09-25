@@ -40,7 +40,12 @@ export default function BorisWidget() {
   // первого запуска, ни на экране анализа он висеть не должен —
   // человек принимает синий кружок за диалог и получает конструктор.
   // Остаётся только на своей странице до переосмысления.
-  const allowed = pathname.startsWith("/ai");
+  // 07.08: возвращён в клиентские разделы по требованию Кирилла — трое
+  // сотрудников клиента начинают работу, им нужна точка «спросить и написать
+  // в поддержку». Скрыт там, где мешает знакомству с продуктом: лендинг,
+  // логин, мастер первого запуска, экран анализа, оферта и политика.
+  const blocked = ["/", "/login", "/verify", "/onboarding", "/oferta", "/privacy"];
+  const allowed = !blocked.some((b) => b === "/" ? pathname === "/" : pathname.startsWith(b));
   if (!allowed) return null;
 
   const ask = async () => {
@@ -72,47 +77,50 @@ export default function BorisWidget() {
   return (
     <>
       {step !== "off" && (
-        <div style={{position:"fixed", inset:0, background:"rgba(16,24,40,0.45)", zIndex:1200, display:"flex", alignItems:"center", justifyContent:"center", padding:"20px"}} onClick={()=>setStep("off")}>
-          <div onClick={e=>e.stopPropagation()} style={{background:"#fff", borderRadius:"16px", width:"640px", maxWidth:"100%", maxHeight:"85vh", overflowY:"auto", padding:"24px", boxShadow:"0 20px 60px rgba(16,24,40,0.3)"}}>
-            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"14px"}}>
-              <div style={{fontSize:"18px", fontWeight:700, color:"#1D2939"}}>✨ Помощь в написании промта</div>
-              <button onClick={()=>setStep("off")} style={{background:"none", border:"none", fontSize:"22px", color:"#98A2B3", cursor:"pointer"}}>×</button>
+        <div onClick={()=>setStep("off")} className="boris-f3-a80617f28b24c8">
+          <div onClick={e=>e.stopPropagation()} className="boris-f3-5efe614a48ca73">
+            <div className="boris-f3-ff0342ec9a5e5a">
+              <div>
+                <div className="boris-f3-551736d55f4166">✨ Помощь в написании промта</div>
+                <a href="/support" className="boris-f3-a33c196bdfb33e">Нужен живой ответ — написать в поддержку →</a>
+              </div>
+              <button onClick={()=>setStep("off")} className="boris-f3-a2c984b050be8e">×</button>
             </div>
             {step === "task" && (
-              <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
-                <div style={{fontSize:"15px", color:"#667085", marginBottom:"6px"}}>Для какой задачи нужен промт?</div>
+              <div className="boris-f3-a28c8d3bc812e9">
+                <div className="boris-f3-e1beaa7b24e9ef">Для какой задачи нужен промт?</div>
                 {PW_TASKS.map((t:any)=>(
-                  <button key={t.id} onClick={()=>{setTask(t); setAnswers(new Array(t.qs.length).fill("")); setStep("questions");}} style={{textAlign:"left", background:"#fff", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"14px 16px", cursor:"pointer", fontSize:"15px", fontWeight:600, color:"#1D2939"}}>{t.name}</button>
+                  <button key={t.id} onClick={()=>{setTask(t); setAnswers(new Array(t.qs.length).fill("")); setStep("questions");}} className="boris-f3-194678b0644811">{t.name}</button>
                 ))}
               </div>
             )}
             {step === "questions" && task && (
               <div>
-                <div style={{fontSize:"15px", color:"#667085", marginBottom:"14px"}}>{task.name} — ответьте на вопросы</div>
-                <div style={{display:"flex", flexDirection:"column", gap:"12px"}}>
+                <div className="boris-f3-1734b5238b36ac">{task.name} — ответьте на вопросы</div>
+                <div className="boris-f3-85e7427e7ff5bd">
                   {task.qs.map((q:string,i:number)=>(
                     <div key={i}>
-                      <div style={{fontSize:"15px", color:"#1D2939", marginBottom:"5px"}}>{i+1}. {q}</div>
-                      <textarea value={answers[i]||""} onChange={e=>{const a=[...answers]; a[i]=e.target.value; setAnswers(a);}} rows={2} style={{width:"100%", padding:"10px 12px", borderRadius:"10px", border:"1.5px solid #E3E7F0", fontSize:"15px", fontFamily:"inherit"}} />
+                      <div className="boris-f3-7bd5bf25c18042">{i+1}. {q}</div>
+                      <textarea value={answers[i]||""} onChange={e=>{const a=[...answers]; a[i]=e.target.value; setAnswers(a);}} rows={2}  className="boris-f3-be31bafcd56f32"/>
                     </div>
                   ))}
                 </div>
-                <div style={{display:"flex", gap:"10px", marginTop:"16px"}}>
-                  <button onClick={()=>setStep("task")} style={{background:"#fff", color:"#475467", border:"1.5px solid #E3E7F0", borderRadius:"10px", padding:"11px 18px", fontWeight:600, cursor:"pointer", fontSize:"15px"}}>Назад</button>
-                  <button onClick={generate} style={{flex:1, background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"11px 18px", fontWeight:700, cursor:"pointer", fontSize:"15px"}}>Собрать промт →</button>
+                <div className="boris-f3-6292ed69c3d191">
+                  <button onClick={()=>setStep("task")} className="boris-f3-6127f98b55232e">Назад</button>
+                  <button onClick={generate} className="boris-f3-62836065476bec">Собрать промт →</button>
                 </div>
               </div>
             )}
             {step === "result" && (
               <div>
-                {gen && <div style={{fontSize:"15px", color:"#667085", padding:"20px 0"}}>Борис пишет промт…</div>}
+                {gen && <div className="boris-f3-c3b79877ad807f">Борис пишет промт…</div>}
                 {!gen && (
                   <div>
-                    <div style={{background:"#F9FAFB", border:"1px solid #E3E7F0", borderRadius:"12px", padding:"16px", fontSize:"15px", color:"#1D2939", whiteSpace:"pre-wrap", lineHeight:1.55, marginBottom:"14px"}}>{result}</div>
-                    <div style={{background:"#EEF4FF", border:"1px solid #D0DEFF", borderRadius:"10px", padding:"12px 14px", fontSize:"14px", color:"#344054", marginBottom:"14px"}}>Скопируйте текст и вставьте в <b>{task ? task.where : ""}</b>, затем нажмите «Сохранить». После сохранения Борис изучит инструкцию и станет применять её в работе.</div>
-                    <div style={{display:"flex", gap:"10px"}}>
-                      <button onClick={()=>{navigator.clipboard.writeText(result); alert("Промт скопирован");}} style={{flex:1, background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"11px 18px", fontWeight:700, cursor:"pointer", fontSize:"15px"}}>Скопировать</button>
-                      <button onClick={()=>setStep("questions")} style={{background:"#fff", color:"#475467", border:"1.5px solid #E3E7F0", borderRadius:"10px", padding:"11px 18px", fontWeight:600, cursor:"pointer", fontSize:"15px"}}>Изменить ответы</button>
+                    <div className="boris-f3-e60fa87e373ab9">{result}</div>
+                    <div className="boris-f3-3d681faf9b8e51">Скопируйте текст и вставьте в <b>{task ? task.where : ""}</b>, затем нажмите «Сохранить». После сохранения Борис изучит инструкцию и станет применять её в работе.</div>
+                    <div className="boris-f3-4a5cec13ef324a">
+                      <button onClick={()=>{navigator.clipboard.writeText(result); alert("Промт скопирован");}} className="boris-f3-62836065476bec">Скопировать</button>
+                      <button onClick={()=>setStep("questions")} className="boris-f3-6127f98b55232e">Изменить ответы</button>
                     </div>
                   </div>
                 )}
@@ -123,31 +131,31 @@ export default function BorisWidget() {
       )}
 
       {open && (
-        <div style={{position:"fixed", bottom:"90px", right:"24px", width:"420px", maxWidth:"calc(100vw - 48px)", height:"560px", background:"#F6F7FB", border:"1px solid #2F6FED", borderRadius:"16px", display:"flex", flexDirection:"column", boxShadow:"0 8px 32px rgba(16,24,40,0.25)", zIndex:1000}}>
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"16px", borderBottom:"1px solid #EEF2FA"}}>
-            <span style={{fontWeight:"bold", color:"#2F6FED"}}>Борис — помощник</span>
-            <button onClick={()=>setOpen(false)} style={{background:"none", border:"none", color:"#2F6FED", fontSize:"18px", cursor:"pointer"}}>×</button>
+        <div className="boris-f3-51b85d7bffde60">
+          <div className="boris-f3-ed0ec35f6e1464">
+            <span className="boris-f3-d03b870265f931">Борис — помощник</span>
+            <button onClick={()=>setOpen(false)} className="boris-f3-36d5df214b4182">×</button>
           </div>
-          <div style={{flex:1, overflowY:"auto", padding:"14px"}}>
-            <button onClick={()=>setStep("task")} style={{width:"100%", background:"#F4F3FF", color:"#5925DC", border:"1px solid #D9D6FE", borderRadius:"10px", padding:"9px", fontWeight:"bold", cursor:"pointer", fontSize:"14px", marginBottom:"10px"}}>✨ Помоги написать промт</button>
-            <button onClick={()=>{window.location.href="/support";}} style={{width:"100%", background:"#EEF4FF", color:"#2456D8", border:"1px solid #D0DEFF", borderRadius:"10px", padding:"9px", fontWeight:"bold", cursor:"pointer", fontSize:"14px", marginBottom:"10px"}}>💬 Задать вопрос в поддержку</button>
-            {history.length === 0 && <div style={{fontSize:"16px", color:"#667085"}}>Привет! Я Борис 👋 Спросите меня о чём угодно: как пользоваться сервисом, куда нажать, что делать.</div>}
+          <div className="boris-f3-1b6c7aac788446">
+            <button onClick={()=>setStep("task")} className="boris-f3-6a39c4addb982d">✨ Помоги написать промт</button>
+            <button onClick={()=>{window.location.href="/support";}} className="boris-f3-16473738c63b78">💬 Задать вопрос в поддержку</button>
+            {history.length === 0 && <div className="boris-f3-f1da49e8f0b0b9">Привет! Я Борис 👋 Спросите меня о чём угодно: как пользоваться сервисом, куда нажать, что делать.</div>}
             {history.map((m:any,i:number)=>(
               <div key={i} style={{marginBottom:"10px", textAlign: m.role==="user" ? "right" : "left"}}>
-                <div style={{display:"inline-block", maxWidth:"85%", background: m.role==="user" ? "#2F6FED" : "#fff", color: m.role==="user" ? "#fff" : "#1D2939", border: m.role==="user" ? "none" : "1px solid #E3E7F0", borderRadius:"12px", padding:"9px 12px", fontSize:"16px", whiteSpace:"pre-wrap", textAlign:"left"}}>{m.content}</div>
+                <div style={{display:"inline-block", maxWidth:"85%", background: m.role==="user" ? "var(--boris-blue)" : "#fff", color: m.role==="user" ? "#fff" : "var(--boris-text)", border: m.role==="user" ? "none" : "1px solid var(--boris-border)", borderRadius:"12px", padding:"9px 12px", fontSize:"16px", whiteSpace:"pre-wrap", textAlign:"left"}}>{m.content}</div>
               </div>
             ))}
-            {loading && <div style={{fontSize:"16px", color:"#667085"}}>Борис думает…</div>}
+            {loading && <div className="boris-f3-f1da49e8f0b0b9">Борис думает…</div>}
           </div>
-          <div style={{display:"flex", gap:"8px", padding:"12px", borderTop:"1px solid #EEF2FA"}}>
-            <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") ask(); }} placeholder="Спроси Бориса…" style={{flex:1, padding:"10px 12px", borderRadius:"10px", border:"1.5px solid #E3E7F0", fontSize:"16px"}} />
-            <button onClick={ask} style={{background:"#2F6FED", color:"#fff", border:"none", borderRadius:"10px", padding:"10px 14px", cursor:"pointer", fontWeight:700}}>➤</button>
+          <div className="boris-f3-687b757d84fa93">
+            <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") ask(); }} placeholder="Спроси Бориса…"  className="boris-f3-aec219189bbf8f"/>
+            <button onClick={ask} className="boris-f3-cc02fc3bffee20">➤</button>
           </div>
         </div>
       )}
 
-      <button onClick={()=>setOpen(!open)} style={{position:"fixed", bottom:"24px", right:"24px", width:"68px", height:"68px", borderRadius:"50%", background:"linear-gradient(135deg, #4C8DFF, #2F6FED)", border:"none", cursor:"pointer", boxShadow:"0 6px 20px rgba(47,111,237,0.45)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", fontSize:"30px"}}>
-        {open ? <span style={{color:"#fff", fontSize:"26px"}}>×</span> : <Mascot size={44} interactive={true} />}
+      <button onClick={()=>setOpen(!open)} className="boris-f3-f0921ff20004fe">
+        {open ? <span className="boris-f3-7bd1aa87bad624">×</span> : <Mascot size={44} interactive={true} />}
       </button>
     </>
   );

@@ -1,10 +1,16 @@
 "use client";
+import { humanizeBusinessText } from "@/app/lib/humanizeBusinessText";
+import { Alert as BorisAlert } from "@/app/ui";
+
+import { Button } from "@/app/ui";
+
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams } from "next/navigation";
-import HomeShell from "../../../components/HomeShell";
+import { useParams, useSearchParams } from "next/navigation";
 import styles from "../scenarios.module.css";
 import { apiGet, apiPost, getAccount, openTab, openRoute } from "../../../lib/api";
+import { useAccounts } from "../../../lib/AccountContext";
+import ScenarioGuide from "../../../components/ScenarioGuide";
 
 // Реестр действий экрана «Категория пока не подключена».
 // Кнопки рисуются циклом по этому массиву. Условие показа — ТОЛЬКО по
@@ -55,10 +61,14 @@ const ACTION_LABEL: any = {
   to_drafts: "Создать черновики",
   rewrite_draft: "Сделать тексты уникальными",
   feed_check: "Проверить файл у Avito",
+  city_research: "Подготовить анализ рынка",
 };
 
 export default function ScenarioPage() {
+  const { selectedAccountId } = useAccounts();
   const params = useParams();
+  const searchParams = useSearchParams();
+  const explicitAccount = String(searchParams.get("account_id") || "").trim();
   const rawId = (params as any)?.id;
   const id = Array.isArray(rawId) ? rawId[0] : rawId;
 
@@ -113,7 +123,12 @@ export default function ScenarioPage() {
 
   const MAX_BATCH = 10;
 
-  useEffect(() => { setAccountState(getAccount()); }, []);
+  useEffect(() => {
+    // Explicit account in a deep link wins. Backend still enforces access, so
+    // this prevents a multi-account owner (and browser QA) from silently
+    // opening the same scenario id under another currently selected account.
+    setAccountState(explicitAccount || selectedAccountId || getAccount());
+  }, [explicitAccount, selectedAccountId]);
 
   const load = useCallback((acc: string) => {
     if (!acc || !id) { setLoading(false); return; }
@@ -250,18 +265,43 @@ export default function ScenarioPage() {
     else setErr((r && r.message) || "Не удалось изменить статус");
   };
 
-  const go = (st: any) => { if (st.route) openRoute(st.route); else if (st.tab) openTab(st.tab); };
+  const go = (st: any) => {
+    const ctx = { scenario: Number(id), step: st.key };
+    if (st.route) openRoute(st.route, ctx);
+    else if (st.tab) openTab(st.tab, ctx);
+  };
+
+  // GUIDE_ACTION_TARGET_V1:
+  // «Сделать сейчас» не должен быть пустой кнопкой. Если у шага есть
+  // отдельный экран — открываем его. Если действие находится прямо в карточке
+  // шага, прокручиваем к нему и ставим фокус на первую безопасную кнопку,
+  // но НЕ запускаем действие автоматически: пороги/подтверждения/публикации
+  // остаются явным решением человека.
+  const guideDoNow = (st: any) => {
+    if (!st) { load(account); return; }
+    if (st.route || st.tab) { go(st); return; }
+    const key = String(st.key || "");
+    const safeKey = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(key) : key.replace(/["\\]/g, "");
+    const target = document.querySelector(
+      '[data-scenario-step-key="' + safeKey + '"]'
+    ) as HTMLElement | null;
+    if (!target) { load(account); return; }
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    const action = target.querySelector(
+      '[data-guide-step-action]:not([disabled])'
+    ) as HTMLElement | null;
+    action?.focus();
+  };
 
   const p = scen && scen.progress;
   const allDone = p && p.done >= p.total;
+  const currentStep = p?.steps?.find((x: any) => x.status === "current")
+    || p?.steps?.find((x: any) => x.status === "attention")
+    || p?.steps?.find((x: any) => !["completed", "skipped", "later"].includes(String(x.status || "")))
+    || null;
 
   return (
-    <HomeShell active="scenarios" account={account} onAccountChange={setAccountState}>
-      <div data-testid="scenario-root">
-        <button className={styles.back} onClick={() => openRoute("/dashboard/home")}>
-          ← На рабочий стол
-        </button>
-
+    <div data-testid="scenario-root">
         {loading && <div className={styles.text}>Загружаю сценарий…</div>}
         {err && (
           <div className={styles.doneBox} data-testid="scenario-error">
@@ -271,12 +311,12 @@ export default function ScenarioPage() {
               видны на рабочем столе и в каталоге.
             </div>
             <div className={styles.finish}>
-              <button className={styles.btnFill} onClick={() => openRoute("/dashboard/scenarios")}>
+              <Button className={styles.btnFill} onClick={() => openRoute("/dashboard/scenarios")}>
                 Выбрать сценарий
-              </button>
-              <button className={styles.btn} onClick={() => openRoute("/dashboard/home")}>
+              </Button>
+              <Button className={styles.btn} onClick={() => openRoute("/dashboard/home")}>
                 На рабочий стол
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -298,7 +338,39 @@ export default function ScenarioPage() {
               <div className={styles.barText}>Выполнено {p.done} из {p.total} шагов — {p.percent}%</div>
             </div>
 
-            {allDone && (() => {
+            <ScenarioGuide
+              scenarioId={scen.id}
+              scenarioType={scen.scenario_type}
+              step={currentStep}
+              workflow={scen.workflow}
+              allDone={!!allDone}
+              onRefresh={() => load(account)}
+              onDoNow={() => guideDoNow(currentStep)}
+            />
+
+            {scen.workflow && (
+              <div className={styles.doneBox} data-testid="scenario-business-workflow">
+                <div className={styles.doneTitle}>Цель</div>
+                <p className={styles.verdict}>{scen.workflow.goal}</p>
+                <div className={styles.doneSub}>Что происходит сейчас</div>
+                <p className={styles.verdict}>{humanizeBusinessText(scen.workflow.current_state, "Состояние уточняется")}</p>
+                <div className={styles.doneSub}>Почему это важно</div>
+                <ul className={styles.doneList}>{(scen.workflow.diagnosis || []).map((x: string) => <li key={x}>{x}</li>)}</ul>
+                <div className={styles.doneSub}>План BORIS</div>
+                <ol className={styles.doneList}>{(scen.workflow.plan || []).map((x: string) => <li key={x}>{x}</li>)}</ol>
+                <div className={styles.doneSub}>BORIS сейчас делает</div>
+                <p className={styles.verdict}><b>{humanizeBusinessText(scen.workflow.current_work, "BORIS выполняет следующий шаг")}</b></p>
+                <div className={styles.doneSub}>Что требуется от владельца</div>
+                <p className={styles.verdict}>{humanizeBusinessText(scen.workflow.owner_required, "От владельца ничего не требуется")}</p>
+                <div className={styles.doneSub}>Текущий результат</div>
+                <p className={styles.verdict}>{humanizeBusinessText(scen.workflow.result, "Результат измеряется")}</p>
+                <p className={styles.verdictNext}><b>Следующий шаг:</b> {humanizeBusinessText(scen.workflow.next_action, "Продолжить сценарий")}</p>
+                <div className={styles.doneSub}>Что BORIS уже сделал</div>
+                {(scen.history || []).length ? <ul className={styles.doneList}>{scen.history.map((x:any,idx:number)=><li key={`${x.text}-${idx}`}>{x.text}</li>)}</ul> : <p className={styles.verdict}>Работа только началась — выполненных действий пока нет.</p>}
+              </div>
+            )}
+
+            {allDone && !scen.workflow && (() => {
               const N = scen.numbers || {};
               const byKey: any = {};
               p.steps.forEach((s: any) => { if (s.result) byKey[s.key] = s.result; });
@@ -369,11 +441,11 @@ export default function ScenarioPage() {
                   </ul>
 
                   <div className={styles.finish}>
-                    <button className={styles.btnFill} onClick={() => openTab("listings")}>
+                    <Button className={styles.btnFill} onClick={() => openTab("listings")}>
                       Открыть объявления
-                    </button>
-                    <button className={styles.btn} disabled={!!busy}
-                            onClick={() => finish("complete")}>Завершить сценарий</button>
+                    </Button>
+                    <Button className={styles.btn} disabled={!!busy}
+                            onClick={() => finish("complete")}>Завершить сценарий</Button>
                   </div>
                 </div>
               );
@@ -387,7 +459,8 @@ export default function ScenarioPage() {
               const working = busy.startsWith(st.key);
               return (
                 <div className={styles.step + " " + (isCurrent ? styles.stepCurrent : "") + " " + (isOff ? styles.stepOff : "")}
-                     key={st.key} data-testid="scenario-step">
+                     key={st.key} data-testid="scenario-step"
+                     data-scenario-step-key={String(st.key || "")}>
                   <span className={styles.mark}>{MARK[st.status] || "•"}</span>
                   <div className={styles.stepBody}>
                     <div className={styles.stepTitle + " " + (isDone ? styles.stepTitleDone : "")}>{st.title}</div>
@@ -406,15 +479,15 @@ export default function ScenarioPage() {
                         {(res.items || []).length > 0 && (
                           <ul className={styles.resList}>
                             {res.items.slice(0, 6).map((it: any, i: number) => (
-                              <li key={i}>{it.title} — <span className={styles.resDim}>{it.reason}</span></li>
+                              <li key={i}>{it.title} — <span className={styles.resDim}>{humanizeBusinessText(it.reason, "По правилам сценария")}</span></li>
                             ))}
                             {res.items.length > 6 && <li className={styles.resDim}>…и ещё {res.items.length - 6}</li>}
                           </ul>
                         )}
                         {res.needs_mode && (
-                          <button className={styles.small} onClick={() => openTab("settings")}>
+                          <Button className={styles.small} onClick={() => openTab("settings")}>
                             Открыть режим работы
-                          </button>
+                          </Button>
                         )}
                         {res.settings && (
                           <div className={styles.resDim}>
@@ -478,16 +551,16 @@ export default function ScenarioPage() {
                                         </span>
                                       )}
                                       {!st.open && acts.map((a: any) => (
-                                        <button
+                                        <Button
                                           key={a.key}
                                           onClick={() => setCatReq((s: any) => ({
                                             ...s, [rid]: { ...(s[rid] || {}), open: true } }))}
-                                          style={{ background: "#fff", color: "#1D2939",
-                                                   border: "1.5px solid #E3E7F0", borderRadius: "10px",
+                                          style={{ background: "#fff", color: "var(--boris-text)",
+                                                   border: "1.5px solid var(--boris-border)", borderRadius: "10px",
                                                    padding: "8px 14px", marginRight: "8px", fontWeight: 600,
                                                    cursor: "pointer", fontSize: "14px" }}>
                                           {a.label}
-                                        </button>
+                                        </Button>
                                       ))}
                                       {st.open && (
                                         <span style={{ display: "block" }}>
@@ -501,28 +574,28 @@ export default function ScenarioPage() {
                                             }}
                                             style={{ width: "100%", maxWidth: "520px", minHeight: "70px",
                                                      padding: "8px", borderRadius: "8px",
-                                                     border: "1px solid #E3E7F0", fontSize: "14px",
-                                                     color: "#1D2939", background: "#FFFFFF" }} />
+                                                     border: "1px solid var(--boris-border)", fontSize: "14px",
+                                                     color: "var(--boris-text)", background: "#FFFFFF" }} />
                                           <span style={{ display: "block", marginTop: "6px" }}>
-                                            <button
+                                            <Button
                                               disabled={!!st.busy}
                                               onClick={() => submitCatRequest(c)}
-                                              style={{ background: "#2F6FED", color: "#fff", border: "none",
+                                              style={{ background: "var(--boris-blue)", color: "#fff", border: "none",
                                                        borderRadius: "10px", padding: "9px 16px",
                                                        marginRight: "8px", fontWeight: 600,
                                                        cursor: st.busy ? "default" : "pointer",
                                                        fontSize: "14px" }}>
                                               {st.busy ? "Отправляю…" : "Отправить заявку"}
-                                            </button>
-                                            <button
+                                            </Button>
+                                            <Button
                                               onClick={() => setCatReq((s: any) => ({
                                                 ...s, [rid]: { ...(s[rid] || {}), open: false } }))}
-                                              style={{ background: "#fff", color: "#475467",
-                                                       border: "1.5px solid #E3E7F0", borderRadius: "10px",
+                                              style={{ background: "#fff", color: "var(--boris-text-2)",
+                                                       border: "1.5px solid var(--boris-border)", borderRadius: "10px",
                                                        padding: "9px 16px", fontWeight: 600,
                                                        cursor: "pointer", fontSize: "14px" }}>
                                               Отмена
-                                            </button>
+                                            </Button>
                                           </span>
                                           {st.err && (
                                             <span style={{ display: "block", marginTop: "6px",
@@ -558,8 +631,8 @@ export default function ScenarioPage() {
                                       onChange={e => setCardAns({ ...cardAns, [q.tag]: e.target.value })}
                                       style={{marginTop:"6px", width:"100%", maxWidth:"420px",
                                               padding:"8px", borderRadius:"8px",
-                                              border:"1px solid #E3E7F0", fontSize:"15px",
-                                              color:"#1D2939", background:"#FFFFFF"}}>
+                                              border:"1px solid var(--boris-border)", fontSize:"15px",
+                                              color:"var(--boris-text)", background:"#FFFFFF"}}>
                                       <option value="">— пропустить —</option>
                                       {(q.options || []).map((o: string) => (
                                         <option key={o} value={o}>{o}</option>
@@ -568,12 +641,12 @@ export default function ScenarioPage() {
                                   </span>
                                 </label>
                               ))}
-                              <button className={styles.smallFill} disabled={!!busy}
+                              <Button className={styles.smallFill} disabled={!!busy}
                                       data-testid="cards-save"
                                       onClick={() => saveCardAnswers(cardAns)}>
                                 {busy === "fields" ? "БОРИС работает…"
                                   : "Применить ко всем (" + Object.keys(cardAns).filter(k => cardAns[k]).length + ")"}
-                              </button>
+                              </Button>
                             </div>
                           )}
                         </div>
@@ -606,8 +679,8 @@ export default function ScenarioPage() {
                                   onChange={e => setSeller({ ...seller, [q.tag]: e.target.value })}
                                   style={{marginTop:"6px", width:"100%", maxWidth:"420px",
                                           padding:"8px", borderRadius:"8px",
-                                          border:"1px solid #E3E7F0", fontSize:"15px",
-                                          color:"#1D2939", background:"#FFFFFF"}}>
+                                          border:"1px solid var(--boris-border)", fontSize:"15px",
+                                          color:"var(--boris-text)", background:"#FFFFFF"}}>
                                   <option value="">— выберите —</option>
                                   {q.options.map((o: string) => (
                                     <option key={o} value={o}>{o}</option>
@@ -616,7 +689,7 @@ export default function ScenarioPage() {
                               </span>
                             </label>
                           ))}
-                          <button className={styles.smallFill} disabled={!!busy}
+                          <Button className={styles.smallFill} disabled={!!busy}
                                   data-testid="seller-save"
                                   onClick={() => {
                                     const v: any = {};
@@ -628,7 +701,7 @@ export default function ScenarioPage() {
                                   }}>
                             {busy === "seller" ? "БОРИС работает…"
                               : "Запомнить настройки (" + filled + " из " + qs.length + ")"}
-                          </button>
+                          </Button>
                         </div>
                       );
                     })()}
@@ -667,26 +740,26 @@ export default function ScenarioPage() {
                             );
                           })}
                           {!draftConfirm && (
-                            <button className={styles.smallFill} disabled={!sel.length || !!busy}
+                            <Button className={styles.smallFill} disabled={!sel.length || !!busy}
                                     onClick={() => askDrafts(sel.map((i: any) => i.index))}
                                     data-testid="products-create">
                               {busy === "review" ? "БОРИС работает…"
                                 : sel.length ? "Создать черновики (" + sel.length + ")"
                                 : "Отметьте товары"}
-                            </button>
+                            </Button>
                           )}
                           {draftConfirm && (
                             <div className={styles.pickBox} data-testid="products-confirm">
                               <div className={styles.resDim}>{draftConfirm.summary}</div>
-                              <button className={styles.smallFill} disabled={!!busy}
+                              <Button className={styles.smallFill} disabled={!!busy}
                                       onClick={() => doDrafts(draftConfirm.indices)}
                                       data-testid="products-confirm-yes">
                                 {busy === "review" ? "БОРИС работает…" : "Да, создать"}
-                              </button>
-                              <button className={styles.small} disabled={!!busy}
+                              </Button>
+                              <Button className={styles.small} disabled={!!busy}
                                       onClick={() => setDraftConfirm(null)}>
                                 Отмена
-                              </button>
+                              </Button>
                             </div>
                           )}
                         </div>
@@ -732,7 +805,7 @@ export default function ScenarioPage() {
                                     {it.address ? " · " + it.address : null}
                                     {it.is_variant ? " · вариант " + it.variant_no : null}
                                   </span>
-                                  <span className={styles.pickReason}>{it.reason}</span>
+                                  <span className={styles.pickReason}>{humanizeBusinessText(it.reason, "По правилам сценария")}</span>
                                   {it.first_of_group && (
                                     <span className={styles.pickHint}>
                                       ℹ Ниже {it.group_size} варианта одного предложения — отличаются только текстом
@@ -742,13 +815,13 @@ export default function ScenarioPage() {
                               </label>
                             );
                           })}
-                          <button className={styles.smallFill} disabled={!sel.length || !!busy}
+                          <Button className={styles.smallFill} disabled={!sel.length || !!busy}
                                   onClick={() => askRemove(sel.map((i: any) => i.id))}
                                   data-testid="apply-remove">
                             {busy === "apply" ? "БОРИС работает…"
                               : sel.length ? "Снять выбранные (" + sel.length + ")"
                               : "Отметьте объявления"}
-                          </button>
+                          </Button>
                         </div>
                       );
                     })()}
@@ -756,11 +829,11 @@ export default function ScenarioPage() {
                     {st.action === "set_republish_settings" && isCurrent && (
                       <div className={styles.thr}>
                         <label className={styles.thrLbl}>Просмотров без обращений
-                          <input className={styles.thrInp} type="number" value={thr.views}
+                          <input className={styles.thrInp} type="number" value={Number(thr.views) === 0 ? "" : thr.views}
                                  onChange={(e: any) => setThr({ ...thr, views: e.target.value })} />
                         </label>
                         <label className={styles.thrLbl}>Дней без просмотров
-                          <input className={styles.thrInp} type="number" value={thr.days}
+                          <input className={styles.thrInp} type="number" value={Number(thr.days) === 0 ? "" : thr.days}
                                  onChange={(e: any) => setThr({ ...thr, days: e.target.value })} />
                         </label>
                       </div>
@@ -769,34 +842,41 @@ export default function ScenarioPage() {
                     {!isDone && (
                       <div className={styles.stepFoot}>
                         {st.action && (
-                          <button className={styles.smallFill} disabled={!!busy}
+                          <Button className={styles.smallFill} disabled={!!busy}
+                                  data-guide-step-action="primary"
                                   onClick={() => run(st.key, st.action,
                                     st.action === "set_republish_settings"
                                       ? { min_views_no_contact: Number(thr.views) || 10,
                                           zero_views_days: Number(thr.days) || 7, enabled: true }
                                       : {})}>
                             {working ? "БОРИС работает…" : (ACTION_LABEL[st.action] || "Выполнить")}
-                          </button>
+                          </Button>
                         )}
                         {st.action === "auto_duplicate_run" && res && res.dry_run && (
-                          <button className={styles.smallFill} disabled={!!busy}
+                          <Button className={styles.smallFill} disabled={!!busy}
                                   onClick={() => run(st.key, st.action, {}, true)}>
                             Создать дубли
-                          </button>
+                          </Button>
+                        )}
+                        {st.action === "city_research" && res && res.need_confirm && (
+                          <Button className={styles.smallFill} disabled={!!busy}
+                                  onClick={() => run(st.key, st.action, {}, true)}>
+                            Подтвердить анализ рынка
+                          </Button>
                         )}
                         {(st.tab || st.route) && (
-                          <button className={styles.small} onClick={() => go(st)}>Открыть</button>
+                          <Button className={styles.small} onClick={() => go(st)}>Открыть</Button>
                         )}
                         {isCurrent && !st.auto && (
-                          <button className={styles.small} disabled={!!busy}
-                                  onClick={() => mark(st.key, "done")}>Готово</button>
+                          <Button className={styles.small} disabled={!!busy}
+                                  onClick={() => mark(st.key, "done")}>Готово</Button>
                         )}
                         {isCurrent && (
                           <>
-                            <button className={styles.link} disabled={!!busy}
-                                    onClick={() => mark(st.key, "later")}>Позже</button>
-                            <button className={styles.link} disabled={!!busy}
-                                    onClick={() => mark(st.key, "skip")}>Пропустить</button>
+                            <Button className={styles.link} disabled={!!busy}
+                                    onClick={() => mark(st.key, "later")}>Позже</Button>
+                            <Button className={styles.link} disabled={!!busy}
+                                    onClick={() => mark(st.key, "skip")}>Пропустить</Button>
                           </>
                         )}
                       </div>
@@ -804,8 +884,8 @@ export default function ScenarioPage() {
 
                     {isOff && (
                       <div className={styles.stepFoot}>
-                        <button className={styles.link} disabled={!!busy}
-                                onClick={() => mark(st.key, "reset")}>Вернуть в план</button>
+                        <Button className={styles.link} disabled={!!busy}
+                                onClick={() => mark(st.key, "reset")}>Вернуть в план</Button>
                       </div>
                     )}
                   </div>
@@ -815,12 +895,16 @@ export default function ScenarioPage() {
 
             {scen.status === "active" && !allDone && (
               <div className={styles.finish}>
-                <button className={styles.btnFill} disabled={!!busy} onClick={() => finish("complete")}>
-                  Завершить сценарий
-                </button>
-                <button className={styles.danger} disabled={!!busy} onClick={() => finish("cancel")}>
-                  Отменить
-                </button>
+                <Button className={styles.danger} disabled={!!busy} onClick={() => finish("cancel")}>
+                  Остановить сценарий
+                </Button>
+              </div>
+            )}
+            {scen.status === "active" && allDone && scen.workflow && (
+              <div className={styles.finish}>
+                <Button className={styles.btnFill} disabled={!!busy} onClick={() => finish("complete")}>
+                  Зафиксировать результат
+                </Button>
               </div>
             )}
           </>
@@ -833,7 +917,7 @@ export default function ScenarioPage() {
               {/* Предупреждение ВЫШЕ всего: последствия человек должен понять
                   раньше, чем начнёт разглядывать список. */}
               {confirmData.autopilot_warning && (
-                <div className={styles.warnBox}>{confirmData.autopilot_warning}</div>
+                <BorisAlert className={styles.warnBox}>{confirmData.autopilot_warning}</BorisAlert>
               )}
               <p className={styles.modalLead}>
                 Эти объявления уйдут с Avito штатным способом, вместо них я поставлю новые
@@ -854,17 +938,16 @@ export default function ScenarioPage() {
                 })()}
               </ul>
               <div className={styles.modalFoot}>
-                <button className={styles.btnFill} disabled={!!busy} onClick={doRemove}
+                <Button className={styles.btnFill} disabled={!!busy} onClick={doRemove}
                         data-testid="confirm-yes">
                   {busy ? "Снимаю…" : "Снять эти " + confirmData.ids.length}
-                </button>
-                <button className={styles.btn} disabled={!!busy}
-                        onClick={() => setConfirmData(null)}>Отмена</button>
+                </Button>
+                <Button className={styles.btn} disabled={!!busy}
+                        onClick={() => setConfirmData(null)}>Отмена</Button>
               </div>
             </div>
           </div>
         )}
-      </div>
-    </HomeShell>
+    </div>
   );
 }

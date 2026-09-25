@@ -7,22 +7,22 @@ import React from 'react';
 import { Mascot } from '../components/Mascot';
 import { ArrowLeft, BookOpen, Clock, FileText } from 'lucide-react';
 
-export const OfertaPage: React.FC = () => {
+const OfertaPage: React.FC = () => {
   return (
-    <div className="font-sans antialiased min-h-screen text-[#14161A] bg-[#FFFFFF] flex flex-col">
+    <div className="font-sans antialiased min-h-screen text-[var(--boris-text)] bg-[#FFFFFF] flex flex-col">
       {/* HEADER */}
       <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-md border-b border-[#E5E7EB] h-[72px] flex items-center px-4 sm:px-6 md:px-10">
         <div className="max-w-7xl mx-auto w-full flex items-center justify-between">
           <div className="flex items-center gap-[12px] cursor-pointer">
             <Mascot size={32} interactive={true} />
-            <span className="font-extrabold text-[22px] tracking-[-0.5px] text-[#14161A] font-display">
+            <span className="font-extrabold text-[22px] tracking-[-0.5px] text-[var(--boris-text)] font-display">
               БОРИС
             </span>
           </div>
 
           <a 
             href="/"
-            className="inline-flex items-center gap-2 bg-[#F5FAFF] border border-[#EAF4FF] text-[#2F6FED] hover:bg-[#EAF4FF] px-4 py-2.5 rounded-[8px] text-[14px] font-semibold transition-colors"
+            className="inline-flex items-center gap-2 bg-[#F5FAFF] border border-[#EAF4FF] text-[var(--boris-blue)] hover:bg-[#EAF4FF] px-4 py-2.5 rounded-[8px] text-[14px] font-semibold transition-colors"
           >
             <ArrowLeft size={16} />
             Назад на главную
@@ -35,10 +35,10 @@ export const OfertaPage: React.FC = () => {
         {/* Banner Card */}
         <div className="bg-[#F5FAFF] border border-[#EAF4FF] p-6 sm:p-8 rounded-[24px] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div className="space-y-1">
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#EAF4FF] text-[#2F6FED] text-[10px] font-extrabold uppercase tracking-wider">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#EAF4FF] text-[var(--boris-blue)] text-[10px] font-extrabold uppercase tracking-wider">
               Юридический документ
             </span>
-            <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[#14161A]">
+            <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--boris-text)]">
               Публичная оферта
             </h1>
             <p className="text-xs text-[#5B6472] flex items-center gap-1.5">
@@ -46,7 +46,7 @@ export const OfertaPage: React.FC = () => {
               Действует до замены новой редакцией
             </p>
           </div>
-          <FileText size={48} className="text-[#2F6FED] shrink-0 opacity-80 hidden sm:block" />
+          <FileText size={48} className="text-[var(--boris-blue)] shrink-0 opacity-80 hidden sm:block" />
         </div>
 
         {/* Text Container with Elegant Typography */}
@@ -172,7 +172,7 @@ export const OfertaPage: React.FC = () => {
         <div className="flex justify-center pt-4">
           <a 
             href="/"
-            className="inline-flex items-center gap-2 bg-[#2F6FED] hover:bg-[#2058D0] text-white px-6 py-3 rounded-[8px] text-[14px] font-semibold transition-colors shadow-sm"
+            className="inline-flex items-center gap-2 bg-[var(--boris-blue)] hover:bg-[#2058D0] text-white px-6 py-3 rounded-[8px] text-[14px] font-semibold transition-colors shadow-sm"
           >
             <ArrowLeft size={16} />
             Назад на главную страницу

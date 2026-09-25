@@ -1,7 +1,7 @@
 .hero {
-  background: linear-gradient(135deg, #2F6FED, #1E4FD8);
+  background: linear-gradient(135deg, var(--boris-blue), var(--b-blue-dark));
   border-radius: 16px; padding: 28px 32px; margin-bottom: 20px;
-  color: #FFFFFF; position: relative; overflow: hidden;
+  color: var(--boris-surface); position: relative; overflow: hidden;
 }
 .heroTitle { font-size: 26px; font-weight: 800; margin: 0 0 6px; }
 .heroLead { font-size: 15px; opacity: .92; margin: 0 0 18px; max-width: 640px; }
@@ -14,83 +14,85 @@
 }
 
 .primary {
-  background: #FFFFFF; color: #2F6FED; border: none; border-radius: 10px;
+  background: var(--boris-surface); color: var(--boris-blue); border: none; border-radius: 10px;
   padding: 13px 26px; font-size: 16px; font-weight: 700; cursor: pointer;
 }
-.primary:hover { background: #EEF3FF; }
+.primary:hover { background: var(--boris-blue-soft); }
 .onHero {
-  background: rgba(255,255,255,.14); color: #FFFFFF;
+  background: rgba(255,255,255,.14); color: var(--boris-surface);
   border: 1.5px solid rgba(255,255,255,.5); border-radius: 10px;
   padding: 12px 22px; font-size: 15px; font-weight: 600; cursor: pointer;
 }
 .onHero:hover { background: rgba(255,255,255,.24); }
 
 .section { margin-bottom: 28px; }
-.h { font-size: 18px; color: #1D2939; margin: 0 0 14px; font-weight: 700; }
+.h { font-size: 18px; color: var(--boris-text); margin: 0 0 14px; font-weight: 700; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 
 .card {
-  background: #FFFFFF; border: 1px solid #E3E7F0; border-radius: 16px;
+  background: var(--boris-surface); border: 1px solid var(--boris-border); border-radius: 16px;
   padding: 20px; display: flex; flex-direction: column; height: 100%;
+  box-shadow: var(--boris-card-shadow);
+  transition: box-shadow 160ms ease, transform 160ms ease, border-color 160ms ease;
 }
-.cardTitle { font-weight: 700; font-size: 16px; color: #1D2939; margin-bottom: 8px; }
-.cardText { color: #667085; font-size: 14px; line-height: 1.5; flex: 1; }
+.cardTitle { font-weight: 700; font-size: 16px; color: var(--boris-text); margin-bottom: 8px; }
+.cardText { color: var(--boris-text-2); font-size: 14px; line-height: 1.5; flex: 1; }
 .cardFoot { margin-top: 14px; }
 
 .btn {
-  background: #FFFFFF; color: #2F6FED; border: 1.5px solid #2F6FED;
+  background: var(--boris-surface); color: var(--boris-blue); border: 1.5px solid var(--boris-blue);
   border-radius: 10px; padding: 9px 18px; font-size: 14px; font-weight: 600;
   cursor: pointer;
 }
-.btn:hover { background: #F1F5FF; }
+.btn:hover { background: var(--boris-blue-soft); }
 .btnFill {
-  background: #2F6FED; color: #FFFFFF; border: 1.5px solid #2F6FED;
+  background: var(--boris-blue); color: var(--boris-surface); border: 1.5px solid var(--boris-blue);
   border-radius: 10px; padding: 9px 18px; font-size: 14px; font-weight: 700;
   cursor: pointer;
 }
-.btnFill:hover { background: #1E4FD8; }
+.btnFill:hover { background: var(--b-blue-dark); }
 
 .tag {
   display: inline-block; border-radius: 20px; padding: 3px 12px;
   font-size: 12px; font-weight: 700; margin-bottom: 10px;
 }
-.critical { background: #FEE4E2; color: #B42318; }
-.important { background: #FEF0C7; color: #B54708; }
-.opportunity { background: #D1FADF; color: #027A48; }
-.info { background: #E7EFFE; color: #2F6FED; }
+.critical { background: var(--b-danger-bg); color: var(--b-danger-text); }
+.important { background: var(--b-warn-bg); color: var(--b-warn); }
+.opportunity { background: var(--b-ok-bg); color: var(--b-ok); }
+.info { background: var(--boris-blue-soft); color: var(--boris-blue); }
 
 .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 .stat {
-  background: #FFFFFF; border: 1px solid #E3E7F0; border-radius: 16px;
+  background: var(--boris-surface); border: 1px solid var(--boris-border); border-radius: 16px;
   padding: 18px 20px;
 }
-.statNum { font-size: 26px; font-weight: 800; color: #1D2939; letter-spacing: -.02em; }
-.statLabel { font-size: 13px; color: #667085; margin-top: 4px; }
+.statNum { font-size: 26px; font-weight: 800; color: var(--boris-text); letter-spacing: -.02em; }
+.statLabel { font-size: 13px; color: var(--boris-text-2); margin-top: 4px; }
 
-.log { background: #FFFFFF; border: 1px solid #E3E7F0; border-radius: 16px; padding: 8px 20px; }
+.log { background: var(--boris-surface); border: 1px solid var(--boris-border); border-radius: 16px; padding: 8px 20px; }
 .logRow {
-  display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid #F1F3F9;
-  font-size: 14px; color: #1D2939; align-items: baseline;
+  display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--b-line-soft);
+  font-size: 14px; color: var(--boris-text); align-items: baseline;
 }
 .logRow:last-child { border-bottom: none; }
-.logTime { color: #667085; font-size: 13px; white-space: nowrap; min-width: 116px; }
+.logTime { color: var(--boris-text-2); font-size: 13px; white-space: nowrap; min-width: 116px; }
 
 .empty {
-  background: #FFFFFF; border: 1px dashed #C7DDFF; border-radius: 16px;
+  background: var(--boris-surface); border: 1px dashed #C7DDFF; border-radius: 16px;
   padding: 26px; text-align: center;
 }
-.emptyTitle { font-weight: 700; font-size: 16px; color: #1D2939; margin-bottom: 6px; }
-.emptyText { color: #667085; font-size: 14px; margin-bottom: 16px; }
+.emptyTitle { font-weight: 700; font-size: 16px; color: var(--boris-text); margin-bottom: 6px; }
+.emptyText { color: var(--boris-text-2); font-size: 14px; margin-bottom: 16px; }
 
 .bar { height: 10px; background: #EEF2F8; border-radius: 20px; overflow: hidden; margin: 10px 0 6px; }
-.barFill { height: 100%; background: linear-gradient(90deg, #2F6FED, #1E4FD8); }
-.barText { font-size: 13px; color: #667085; }
+.barFill { height: 100%; background: linear-gradient(90deg, var(--boris-blue), var(--b-blue-dark)); }
+.barText { font-size: 13px; color: var(--boris-text-2); }
 
 .stepList { margin: 12px 0 0; padding: 0; list-style: none; }
-.stepRow { display: flex; gap: 10px; padding: 7px 0; font-size: 14px; color: #1D2939; }
-.stepDone { color: #667085; text-decoration: line-through; }
+.stepRow { display: flex; gap: 10px; padding: 7px 0; font-size: 14px; color: var(--boris-text); }
+.stepDone { color: var(--boris-text-2); text-decoration: line-through; }
 
 @media (max-width: 720px) {
   .hero { padding: 22px 18px; }
@@ -108,25 +110,216 @@
   display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 60;
 }
 .modal {
-  background: #FFFFFF; border-radius: 16px; width: 100%; max-width: 520px;
+  background: var(--boris-surface); border-radius: 16px; width: 100%; max-width: 520px;
   max-height: 90vh; overflow-y: auto; padding: 28px;
 }
-.modalTitle { font-size: 20px; font-weight: 800; color: #1D2939; margin: 0 0 4px; }
-.modalLead { font-size: 14px; color: #667085; margin: 0 0 18px; }
+.modalTitle { font-size: 20px; font-weight: 800; color: var(--boris-text); margin: 0 0 4px; }
+.modalLead { font-size: 14px; color: var(--boris-text-2); margin: 0 0 18px; }
 .tip {
-  background: #F0F6FF; border: 1px solid #D5E4FB; border-radius: 12px;
-  padding: 14px 16px; font-size: 14px; color: #475467; line-height: 1.7; margin-bottom: 18px;
+  background: #F0F6FF; border: 1px solid var(--b-blue-line); border-radius: 12px;
+  padding: 14px 16px; font-size: 14px; color: var(--boris-text-2); line-height: 1.7; margin-bottom: 18px;
 }
-.tip b { color: #1D2939; display: block; margin-bottom: 4px; }
+.tip b { color: var(--boris-text); display: block; margin-bottom: 4px; }
 .errBox {
-  background: #FEE4E2; color: #B42318; border-radius: 10px;
+  background: var(--b-danger-bg); color: var(--b-danger-text); border-radius: 10px;
   padding: 10px 14px; font-size: 14px; margin-bottom: 14px;
 }
 .field { margin-bottom: 14px; }
-.label { display: block; font-size: 15px; color: #1D2939; margin-bottom: 6px; font-weight: 600; }
+.label { display: block; font-size: 15px; color: var(--boris-text); margin-bottom: 6px; font-weight: 600; }
 .input {
-  width: 100%; height: 46px; border: 1.5px solid #E3E7F0; border-radius: 10px;
-  padding: 0 14px; font-size: 15px; color: #1D2939; box-sizing: border-box;
+  width: 100%; height: 46px; border: 1.5px solid var(--boris-border); border-radius: 10px;
+  padding: 0 14px; font-size: 15px; color: var(--boris-text); box-sizing: border-box;
 }
-.input:focus { outline: none; border-color: #2F6FED; box-shadow: 0 0 0 3px rgba(47,111,237,.14); }
+.input:focus { outline: none; border-color: var(--boris-blue); box-shadow: 0 0 0 3px rgba(47,111,237,.14); }
 .modalFoot { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+
+/* ==========================================================
+   BORIS HOME — STAGE C
+   Reference-screen visual convergence
+   ========================================================== */
+
+.page,
+.home,
+.root,
+.wrapper {
+  color: #15213b;
+}
+
+/* primary page content */
+.content,
+.main,
+.body {
+  background: transparent !important;
+}
+
+/* headings */
+.title,
+.heading,
+.heroTitle {
+  color: #15213b !important;
+  font-weight: 760 !important;
+  letter-spacing: -.025em !important;
+}
+
+.subtitle,
+.description,
+.heroText {
+  color: var(--boris-text-2) !important;
+}
+
+/* cards */
+.card,
+.actionCard,
+.moduleCard,
+.itemCard,
+.accountCard,
+.taskCard {
+  overflow: hidden;
+  background: #fff !important;
+  border: 1px solid #dfe6f2 !important;
+  border-radius: 14px !important;
+  box-shadow:
+    0 1px 2px rgba(15,31,61,.018),
+    0 4px 16px rgba(15,31,61,.035) !important;
+}
+
+/* interactive cards */
+.actionCard,
+.moduleCard,
+.itemCard,
+.taskCard {
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease !important;
+}
+
+.actionCard:hover,
+.moduleCard:hover,
+.itemCard:hover,
+.taskCard:hover {
+  transform: translateY(-2px);
+  border-color: #bfd3f4 !important;
+  box-shadow:
+    0 12px 30px rgba(25,50,90,.075) !important;
+}
+
+/* icons */
+.icon,
+.cardIcon,
+.moduleIcon {
+  border-radius: 50% !important;
+}
+
+/* blue main CTA */
+.primary,
+.primaryButton,
+.cta {
+  color: #fff !important;
+  background: #2878ff !important;
+  border-color: #2878ff !important;
+  border-radius: 10px !important;
+  box-shadow:
+    0 5px 14px rgba(40,120,255,.16) !important;
+}
+
+.primary:hover,
+.primaryButton:hover,
+.cta:hover {
+  background: #1767ed !important;
+}
+
+/* secondary */
+.secondary,
+.secondaryButton {
+  color: #2878ff !important;
+  background: #fff !important;
+  border-color: #cfe0ff !important;
+  border-radius: 10px !important;
+}
+
+/* helper */
+.helper,
+.boris,
+.assistant,
+.tip {
+  background:
+    linear-gradient(
+      135deg,
+      var(--boris-surface) 0%,
+      #f6f9ff 100%
+    ) !important;
+
+  border: 1px solid #d5e2f7 !important;
+  border-radius: 14px !important;
+}
+
+/* account selector */
+.account,
+.accountSelect,
+.accountPicker {
+  border-radius: 10px !important;
+  border-color: #dfe6f2 !important;
+}
+
+/* mobile */
+@media (max-width: 760px) {
+  .card,
+  .actionCard,
+  .moduleCard,
+  .itemCard,
+  .accountCard,
+  .taskCard {
+    border-radius: 13px !important;
+  }
+}
+
+
+/* BORIS_F2B_SAFE_HOVER */
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--boris-card-shadow-hover);
+}
+
+
+/* ==========================================================
+   BORIS_F2C_VISIBLE_NORMALIZATION_V1
+   Visible canonical BORIS surface bridge.
+   ========================================================== */
+
+.accountCard,
+.actionCard,
+.card,
+.itemCard,
+.moduleCard,
+.stat,
+.taskCard {
+  background: var(--boris-card-bg, #ffffff);
+  border: 1px solid var(--boris-card-border, var(--boris-border));
+  border-radius: var(--boris-card-radius, 16px);
+  box-shadow: var(--boris-card-shadow);
+}
+
+.card,
+.taskCard {
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease;
+}
+
+.card:hover,
+.taskCard:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--boris-card-shadow-hover);
+  border-color: rgba(47, 111, 237, 0.20);
+}
+
+.input {
+  min-height: var(--boris-control-height, 40px);
+  color: var(--boris-text);
+  background: var(--boris-control-bg, #ffffff);
+  border: 1px solid var(--boris-border);
+  border-radius: var(--boris-control-radius, 10px);
+}
