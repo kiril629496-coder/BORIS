@@ -154,3 +154,27 @@ _backups/
 backend/boris.db
 backend/ext_api.db
 backend/secrets/
+
+# --- production sync 2026-09-25: verified transient/runtime data ---
+_qa_sales_ai_v2_*/
+backend/quarantine/
+backend/storage/
+backend/generated/
+backend/run/
+boris_ops/run/
+boris_ops/*.jsonl
+boris_ops/.fileops-smoke/
+boris_ops/.leastpriv-smoke
+boris_ops/.patch-smoke.txt
+deploy/state/
+/data/
+/models/
+/tmp/
+
+# --- local sensitive operational overlays; commit only sanitized .example files ---
+backend/scripts/owner_email_db_guard.sh
+backend/scripts/owner_email_queue_runner.sh
+backend/scripts/phone-mcn-company-card-send.py
+backend/scripts/phone-mcn-tariff-import.py
+backend/tools/live_guest_batch.py
+backend/tools/run_nerud_outreach_test.py
