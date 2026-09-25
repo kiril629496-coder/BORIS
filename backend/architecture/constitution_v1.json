@@ -1,0 +1,40 @@
+{
+  "constitution_version": 1,
+  "effective_from": "2026-09-11",
+  "purpose": "Stable architectural invariants. Business thresholds live in versioned rules, not here.",
+  "operation_states": [
+    "OK",
+    "BLOCKED_POLICY",
+    "WAIT_EXTERNAL",
+    "RETRY",
+    "DEGRADED",
+    "FAILED_INTERNAL"
+  ],
+  "invariants": [
+    {"id": "CONST-01", "text": "One entity has one source of truth."},
+    {"id": "CONST-02", "text": "One external action has one canonical writer."},
+    {"id": "CONST-03", "text": "A business-action error may not disappear silently."},
+    {"id": "CONST-04", "text": "Repeating an operation must not create a duplicate effect."},
+    {"id": "CONST-05", "text": "A change for one client must not mutate another client."},
+    {"id": "CONST-06", "text": "A new rule version supersedes the old version explicitly; history is retained."},
+    {"id": "CONST-07", "text": "A task is not complete without evidence of the resulting state."},
+    {"id": "CONST-08", "text": "Production source mutations are globally serialized; two independent writers may not edit live source concurrently."},
+    {"id": "CONST-09", "text": "Guardian may repair runtime state but may not autonomously rewrite production source."},
+    {"id": "CONST-10", "text": "Every fixed production bug receives a permanent regression test."}
+  ],
+  "silent_exception_ceiling": {
+    "app/api/avito.py": 0,
+    "app/api/messenger.py": 0,
+    "app/api/calltracking.py": 0,
+    "app/services/category_resolver.py": 0,
+    "app/api/campaigns.py": 0,
+    "app/services/telephony_core.py": 0,
+    "app/services/sales_ai_router.py": 0,
+    "app/api/cpx_advisor.py": 0,
+    "app/api/mass_editor.py": 0
+  },
+  "policy": {
+    "silent_exception_ceiling": "The listed counts are debt ceilings, not targets. Any increase fails the architecture contract; reductions are always allowed.",
+    "duplicate_top_level_functions": "Zero in backend/app Python modules."
+  }
+}

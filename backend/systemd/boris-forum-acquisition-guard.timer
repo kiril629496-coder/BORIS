@@ -1,0 +1,12 @@
+[Unit]
+Description=BORIS free forum acquisition guardian timer
+
+[Timer]
+OnCalendar=*-*-* *:05,15,25,35,45,55:00
+AccuracySec=30s
+RandomizedDelaySec=30s
+Persistent=true
+Unit=boris-forum-acquisition-guard.service
+
+[Install]
+WantedBy=timers.target

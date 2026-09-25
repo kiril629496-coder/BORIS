@@ -1,0 +1,12 @@
+[Unit]
+Description=BORIS Crowd SEO production certificate timer
+
+[Timer]
+OnCalendar=*-*-* *:50:00
+AccuracySec=30s
+RandomizedDelaySec=20s
+Persistent=true
+Unit=boris-crowd-seo-certifier.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=BORIS platform onboarding checkpoint worker
+After=network-online.target boris-backend.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/BORIS/backend
+ExecStart=/root/BORIS/backend/venv/bin/python /root/BORIS/backend/tools/platform_onboarding_worker.py
+TimeoutStartSec=600
+Nice=10

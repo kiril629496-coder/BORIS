@@ -1,0 +1,1316 @@
+{
+  "coordination_runtime_model_config": {
+    "canonical_gemini_fallback_model": "gemini-2.5-flash",
+    "owner": "workstream_coordination",
+    "purpose": "one writer for free coding-provider runtime model selection and systemd model fallback"
+  },
+  "editorial_scope_upgrade": {
+    "base_sha": "9b2b44b2bae1d91d020e93496cae639f2e9ebb815fcea1f199ee9e42c11fcb01",
+    "base_version": 22,
+    "purpose": "remove cross-chat Social editorial/runtime writer overlap"
+  },
+  "parent_sha": "c20d40cdb4f62687e1839f10f19d69b1fc191cce5975edf19820ee34d394dcca",
+  "parent_version": 49,
+  "policy": "single_writer_by_workstream",
+  "promotion_protocol": {
+    "concurrency_result": "one_winner_one_stale_rejected_under_global_flock",
+    "concurrency_verified": true,
+    "last_coordination_fix": "complete exact active-scope single-writer coverage for frontend Photo Factory notebook artifact",
+    "lock": "/var/lock/boris-workstream-scope-promotion.lock",
+    "mode": "single_locked_lineage_cas",
+    "production_concurrency_canary": {
+      "created_at": "2026-09-05T16:15:59.609898+00:00",
+      "kind": "two_simultaneous_real_promotions",
+      "marker": "alpha",
+      "parent_sha": "a28f820ae9eee57e228e54dc59af5642ae3cf81a6acc060580da9ca65926030f",
+      "parent_version": 28
+    },
+    "promoter": ".boris_ops/chat_coordination/promote_registry.py",
+    "rules": [
+      "exact_next_version",
+      "parent_sha_must_match_accepted",
+      "validate_before_pointer",
+      "immutable_canonical_object",
+      "guard_projects_active",
+      "reject_stale_parent"
+    ]
+  },
+  "rules": {
+    "adjacent_chat_scopes_must_be_disjoint_or_explicitly_delegated": true,
+    "analysis_only_workstreams_must_delegate_shared_code_edits": true,
+    "canonical_registry_promotion": "Only .boris_ops/chat_coordination/promote_registry.py may promote v24+; every version must be exactly parent_version+1 and parent_sha must equal current accepted sha. Direct active writes are forbidden.",
+    "client_specific_workstreams_may_read_shared_core_but_must_not_edit_it": true,
+    "content_review_workstreams_do_not_own_shared_backend_code": true,
+    "dynamic_dev_without_file_scope_is_quarantined": true,
+    "email_shared_runtime_has_one_writer": true,
+    "emergency_p0_override_requires_recorded_reason": true,
+    "production_watch_may_observe_all_scopes_but_must_delegate_module_specific_edits": true,
+    "scheduler_and_repo_ownership_policy_have_one_writer": true,
+    "shared_code_has_one_workstream_owner": true
+  },
+  "version": 50,
+  "workstreams": {
+    "autonomous_dev_execution": {
+      "chat_scope": "Автономная разработка BORIS — execution lifecycle без scheduler ownership policy",
+      "must_not_own": [
+        "app/ext_api/dev.py scheduler ownership policy",
+        "app/ext_api/repo.py apply ownership gates",
+        "product modules",
+        "client content"
+      ],
+      "purpose": "A2A order lifecycle, executor, lead/review, recovery and one-action server-owned execution. Scheduler admission/locks and repo ownership policy принадлежат workstream_coordination.",
+      "read_only_shared_paths": [
+        "app/ext_api/dev.py",
+        "app/ext_api/repo.py",
+        "config/workstream_scope_registry.json"
+      ],
+      "status": "execution_core_only",
+      "writable_paths": [
+        "app/ext_api/a2a.py",
+        "app/ext_api/executor.py",
+        "app/ext_api/lead.py",
+        "app/ext_api/recover.py",
+        "app/ext_api/devflow.py",
+        "tests/test_a2a*",
+        "tests/test_executor*",
+        "tests/test_lead*",
+        "tests/test_recover*",
+        "tests/test_autonomous_dev_policy.py",
+        "dev/v8_autonomous_canary.txt",
+        "app/ext_api/aiprov.py",
+        "app/ext_api/ddl.sql",
+        "app/ext_api/mcp_server.py",
+        "app/ext_api/router.py",
+        "app/ext_api/schema.py",
+        "app/ext_api/selftest.py",
+        "tests/test_aiprov_auth_classification.py"
+      ]
+    },
+    "avito_category_pipeline": {
+      "chat_scope": "avito category pipeline",
+      "purpose": "Один последовательный writer category resolver и feed param normalization для dev_981..984.",
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/services/category_resolver.py",
+        "app/services/feed_param_normalizer.py"
+      ]
+    },
+    "avito_integration_core": {
+      "chat_scope": "Avito shared provider integration / API adapter / throttle",
+      "must_not_own": [
+        "CPX optimization policy / money learning",
+        "content generation / feed strategy / title-image decisions",
+        "CRM/reactivation/telephony/social"
+      ],
+      "purpose": "Neutral shared Avito provider adapter used by money and content workstreams. Owns shared API transport/state primitives only; does not own business decisions for bids or content.",
+      "writable_paths": [
+        "app/api/avito.py",
+        "app/services/avito_account_throttle.py",
+        "daily_stats_collector.py"
+      ]
+    },
+    "avito_marketing_core": {
+      "chat_scope": "Avito content / Feed Factory / publications",
+      "must_not_own": [
+        "CPX bids / daily budgets / CPL / money learning",
+        "TG/VK Social scheduler",
+        "shared Avito throttle ledger",
+        "shared app/api/avito.py provider adapter"
+      ],
+      "purpose": "Content/publication only: categories, position/content quality, visual composition, feed/publication repair coordination. Shared Avito API is owned by avito_integration_core; no money ownership.",
+      "writable_paths": [
+        "app/api/avito_categories.py",
+        "app/models/avito_category.py",
+        "app/services/avito_position_monitor.py",
+        "app/services/avito_premium_compositor.py",
+        "portfolio_bootstrap_runner.py",
+        "app/services/initial_portfolio.py"
+      ]
+    },
+    "avito_money_core": {
+      "chat_scope": "AI-авитолог деньги / ставки / KPI / CPL / budget brake",
+      "must_not_own": [
+        "titles/descriptions/images/XML/feed/publication lifecycle",
+        "messages/CRM/reactivation/telephony",
+        "frontend/mobile/social/email outreach"
+      ],
+      "purpose": "Avito money control only: CPX bids, daily budget, CPL/KPI guards, measurement, winner/loser learning, hard-cap/brake/resume and bounded rollout.",
+      "writable_paths": [
+        "ai_marketer_hourly.sh",
+        "app/api/cpx_advisor.py",
+        "cpx_advisor_runner.py",
+        "cpx_budget_brake.py",
+        "cpx_budget_resume.py",
+        "cpx_cap_reconciler.py",
+        "effect_check.py",
+        "late_day_spend_controller.py",
+        "marketer_rollout_runner.py",
+        "kpi_goal_runner.py",
+        "app/services/marketing_experiment_journal.py",
+        "app/services/marketing_money_policy.py",
+        "qa_marketer_reach_safety.py",
+        "qa_marketer_rollout.py",
+        "app/services/marketing_signal_guard.py",
+        "app/services/marketing_clock.py",
+        "app/services/kpi_lead_quality.py",
+        "tests/test_kpi_lead_quality.py"
+      ]
+    },
+    "banner_media_core": {
+      "chat_scope": "Баннеры/медиа — shared renderer, media storage and visual QA core",
+      "must_not_own": [
+        "email prospect banner/copy",
+        "Social usage accounting",
+        "frontend editor shell",
+        "Avito bids/API",
+        "client-specific copy"
+      ],
+      "purpose": "Единственный writer общего banner/media runtime. Клиентские тексты/страницы и платная генерация живут в своих контурах; frontend editor меняет frontend_mobile_ui.",
+      "read_only_shared_paths": [
+        "banner_generator.py",
+        "app/services/prospect_banner.py",
+        "../frontend/**"
+      ],
+      "status": "media_core_only",
+      "writable_paths": [
+        "app/ext_api/banner.py",
+        "app/services/media_service.py",
+        "app/services/media_storage.py",
+        "app/services/photo_studio.py",
+        "app/services/image_service.py",
+        "app/services/banner_design_v4.py",
+        "tests/test_banner*",
+        "tests/test_media*",
+        "tests/test_photo_studio*",
+        "app/api/media.py",
+        "app/services/media_semantic_validator.py"
+      ]
+    },
+    "billing_payments_core": {
+      "chat_scope": "Billing / payments production backend — один writer платежей и выдачи оплаченных прав",
+      "must_not_own": [
+        "frontend cabinet UI",
+        "general billing tariff engine",
+        "client campaign UI"
+      ],
+      "purpose": "Единственный writer app/api/payments.py: payment status/history, Robokassa grant lifecycle и автоматическая выдача оплаченного inbox slot. Не владеет frontend и app/api/billing.py.",
+      "read_only_shared_paths": [
+        "app/api/billing.py",
+        "app/models/account_slot.py",
+        "app/inbox_pricing.py"
+      ],
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/api/payments.py",
+        "billing_entitlement_reconciler.py",
+        "tests/test_billing_inbox_slot_reconcile.py",
+        "/etc/systemd/system/boris-billing-entitlement-reconciler.service",
+        "/etc/systemd/system/boris-billing-entitlement-reconciler.timer"
+      ]
+    },
+    "brain_control_plane_surface": {
+      "chat_scope": "Мозг BORIS — owner control-plane surface, review/delegation only",
+      "delegates_edits_to": [
+        "frontend_mobile_ui",
+        "workstream_coordination",
+        "control_plane_core"
+      ],
+      "purpose": "Определяет требования и проверяет owner control-plane. Общий frontend пишет frontend_mobile_ui; scheduler/repo policy пишет workstream_coordination.",
+      "read_only_shared_paths": [
+        "../frontend/app/dashboard/control-plane/**",
+        "../frontend/app/dashboard/command-center/**",
+        "app/ext_api/dev.py",
+        "app/ext_api/repo.py",
+        "app/api/control_plane.py",
+        "app/services/control_plane.py",
+        "app/services/control_plane_adapters.py",
+        "app/services/control_plane_adapters_ext.py",
+        "app/services/client_supervisor.py",
+        "app/services/brain_world_state.py",
+        "app/services/brain_acceptance.py",
+        "app/models/control_plane.py",
+        "app/ext_api/workspace_sync.py"
+      ],
+      "status": "surface_review_only",
+      "writable_paths": []
+    },
+    "client_config_core": {
+      "chat_scope": "client config core",
+      "purpose": "Canonical client configuration hierarchy and admin configuration API.",
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/config.py",
+        "app/api/admin_clients.py"
+      ]
+    },
+    "client_launch_core": {
+      "chat_scope": "client launch core",
+      "purpose": "Zero-touch client launch orchestration only.",
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/api/client_launch_control.py",
+        "app/services/onboarding_factory_sync.py"
+      ]
+    },
+    "clients_control_surface": {
+      "chat_scope": "Управление клиентами — отдельное owner-окно, review/delegation only",
+      "delegates_edits_to": [
+        "frontend_mobile_ui",
+        "control_plane_core"
+      ],
+      "purpose": "Определяет и проверяет owner UX управления клиентами без второго frontend writer.",
+      "read_only_shared_paths": [
+        "../frontend/app/dashboard/clients-control/**",
+        "../frontend/app/dashboard/client-success/**",
+        "../frontend/app/dashboard/launch-status/**",
+        "app/api/control_plane.py",
+        "app/services/control_plane.py",
+        "app/services/control_plane_adapters.py",
+        "app/services/control_plane_adapters_ext.py",
+        "app/services/client_supervisor.py",
+        "app/services/brain_world_state.py",
+        "app/services/brain_acceptance.py",
+        "app/models/control_plane.py",
+        "app/ext_api/workspace_sync.py"
+      ],
+      "status": "surface_review_only",
+      "writable_paths": []
+    },
+    "command_center_core": {
+      "chat_scope": "command center core",
+      "purpose": "Canonical command lifecycle: flow, executor, policy, audit, store.",
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/services/command_flow.py",
+        "app/services/command_executor.py",
+        "app/services/command_policy.py",
+        "app/services/command_audit.py",
+        "app/services/command_store.py"
+      ]
+    },
+    "content_engine_core": {
+      "chat_scope": "content engine core",
+      "purpose": "Text/content generation orchestration. Media runtime используется read-only и остаётся у banner_media_core.",
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/services/jobs.py",
+        "app/services/campaign_service.py"
+      ]
+    },
+    "control_plane_core": {
+      "chat_scope": "Central BORIS Control Plane / Workspace backend core — single writer",
+      "must_not_own": [
+        "frontend owner surfaces",
+        "A2A/autonomous executor lifecycle",
+        "Avito/Social/Email/Telephony module runtime",
+        "client-specific content"
+      ],
+      "purpose": "Единственный backend-writer Центрального Мозга, durable Workspace и Client Supervisor. Не владеет frontend, модульным бизнес-runtime или A2A executor.",
+      "status": "control_plane_runtime_only",
+      "writable_paths": [
+        "app/api/control_plane.py",
+        "app/services/control_plane.py",
+        "app/services/control_plane_adapters.py",
+        "app/services/control_plane_adapters_ext.py",
+        "app/services/client_supervisor.py",
+        "app/services/brain_world_state.py",
+        "app/services/brain_acceptance.py",
+        "app/models/control_plane.py",
+        "app/ext_api/workspace_sync.py",
+        "app/ext_api/clients.py",
+        "app/ext_api/report.py",
+        "tests/test_client_business_truth.py",
+        "app/ext_api/watchdog.py",
+        "tests/test_owner_notification_contract.py"
+      ]
+    },
+    "crm_integration_core": {
+      "chat_scope": "crm integration core",
+      "purpose": "Canonical CRM integration service/API writer.",
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/services/crm_service.py",
+        "app/api/crm.py"
+      ]
+    },
+    "development_control_surface": {
+      "chat_scope": "Разработка и задачи — отдельное owner-окно, review/delegation only",
+      "delegates_edits_to": [
+        "frontend_mobile_ui",
+        "autonomous_dev_execution",
+        "workstream_coordination",
+        "control_plane_core"
+      ],
+      "purpose": "Определяет и проверяет owner UX разработки/задач; execution core и frontend остаются у своих single writers.",
+      "read_only_shared_paths": [
+        "../frontend/app/dashboard/development/**",
+        "app/ext_api/**",
+        "app/api/control_plane.py",
+        "app/services/control_plane.py",
+        "app/services/control_plane_adapters.py",
+        "app/services/control_plane_adapters_ext.py",
+        "app/services/client_supervisor.py",
+        "app/services/brain_world_state.py",
+        "app/services/brain_acceptance.py",
+        "app/models/control_plane.py",
+        "app/ext_api/workspace_sync.py"
+      ],
+      "status": "surface_review_only",
+      "writable_paths": []
+    },
+    "email_copy_review": {
+      "chat_scope": "Исправление текста письма / Исправление темы рассылки — content review only",
+      "data_write_contract": "Изменения утверждённого текста/темы выполняются через canonical Email Outreach API/данные; shared backend code меняет только email_outreach_core.",
+      "delegates_edits_to_module_owner": true,
+      "must_not_own": [
+        "canonical email_queue",
+        "SMTP/IMAP",
+        "tracking implementation",
+        "prospecting crawler",
+        "email economics",
+        "frontend UI"
+      ],
+      "purpose": "Выбор и проверка текста/тем/A-B гипотез без создания параллельного backend-контура.",
+      "read_only_shared_paths": [
+        "app/services/prospect_campaigns.py",
+        "app/api/prospecting_scale.py",
+        "app/services/email_tracking.py"
+      ],
+      "status": "review_only",
+      "writable_paths": []
+    },
+    "email_outreach_core": {
+      "chat_scope": "Email Outreach production backend — единственный shared-code writer",
+      "must_not_own": [
+        "поиск/краулинг компаний",
+        "open-tracking analytics implementation",
+        "себестоимость/финансовый анализ",
+        "shared app/usage.py и ai_budget.py",
+        "frontend promo/UI",
+        "Social TG/VK delivery"
+      ],
+      "purpose": "Единственный production runtime email: campaign orchestration, canonical email_queue, SMTP/IMAP, mailboxes, pacing, ответы, delivery и CRM lifecycle. Остальные email-чаты не создают второй runtime.",
+      "read_only_shared_paths": [
+        "app/services/prospect_discovery.py",
+        "app/services/prospecting.py",
+        "app/services/prospect_replenisher.py",
+        "app/services/email_tracking.py",
+        "app/usage.py",
+        "app/services/ai_budget.py",
+        "../frontend/**"
+      ],
+      "writable_paths": [
+        "email_queue_runner.py",
+        "app/services/contact_outreach.py",
+        "app/services/email_queue.py",
+        "app/services/email_queue_ref.py",
+        "app/services/email_service.py",
+        "app/services/email_worker_guard.py",
+        "app/services/client_mailboxes.py",
+        "app/services/prospect_campaigns.py",
+        "app/services/prospect_banner.py",
+        "app/services/prospect_bootstrap.py",
+        "app/services/prospect_reporting.py",
+        "app/services/owner_outreach_policy.py",
+        "app/services/owner_outreach_volume_safety.py",
+        "app/api/prospecting_scale.py",
+        "tests/test_email_worker_guard_systemd.py",
+        "tests/test_mailbox_sent_copy_state.py",
+        "tests/test_owner_outreach_policy_root.py",
+        "tests/test_prospect_copy_decision.py",
+        "tests/test_prospect_owner_outreach_contract.py",
+        "tests/test_prospect_reply_lifecycle.py",
+        "tests/test_prospecting_owner_outreach.py",
+        "/etc/systemd/system/boris-email-queue.service",
+        "/etc/systemd/system/boris-email-queue.timer",
+        "scripts/install_owner_outreach_db_safety_v3.py",
+        "scripts/qa_owner_outreach_volume_safety.py",
+        "scripts/qa_sales_outreach_safety.py"
+      ]
+    },
+    "email_outreach_economics": {
+      "chat_scope": "Себестоимость 5–10 клиентов — economics only",
+      "must_not_own": [
+        "SMTP/IMAP и очередь отправки",
+        "темы/тексты писем",
+        "tracking implementation",
+        "prospecting crawler",
+        "frontend UI",
+        "shared app/usage.py и ai_budget.py"
+      ],
+      "purpose": "Read-only экономика Email Outreach: фактическая себестоимость, capacity, AI/image spend, проекция 5–10 клиентов и контроль отсутствия скрытых платных путей.",
+      "read_only_shared_paths": [
+        "app/usage.py",
+        "app/services/ai_budget.py",
+        "app/services/prospect_banner.py",
+        "app/services/prospect_campaigns.py",
+        "app/services/email_queue.py",
+        "email_queue_runner.py",
+        "app/services/email_tracking.py",
+        "/etc/systemd/system/boris-email-queue.service",
+        "/etc/systemd/system/boris-email-queue.timer"
+      ],
+      "status": "analysis_only",
+      "writable_paths": [
+        "app/services/email_outreach_cost_policy.py",
+        "tests/test_email_outreach_cost_policy.py"
+      ]
+    },
+    "email_tracking_analytics": {
+      "chat_scope": "Статистика открытий/ответов email — analytics only",
+      "must_not_own": [
+        "темы и тексты писем",
+        "лимиты/pacing отправки",
+        "SMTP/IMAP lifecycle",
+        "campaign delivery runtime",
+        "email economics",
+        "frontend promo/UI",
+        "Social TG/VK delivery"
+      ],
+      "purpose": "First-party tracking pixel и аналитика open/reply. Не владеет SMTP/IMAP, pacing, копирайтом, экономикой или UI.",
+      "read_only_shared_paths": [
+        "app/services/email_queue.py",
+        "app/services/prospect_campaigns.py",
+        "app/services/client_mailboxes.py",
+        "app/api/prospecting_scale.py",
+        "../frontend/app/dashboard/prospecting/manage/page.tsx",
+        "../frontend/app/email-outreach/page.tsx"
+      ],
+      "status": "analytics_only",
+      "writable_paths": [
+        "app/services/email_tracking.py",
+        "migrations/040_email_open_tracking.sql",
+        "tests/test_email_open_tracking_contract.py",
+        "app/services/owner_outreach_metrics.py",
+        "scripts/qa_owner_outreach_metrics.py"
+      ]
+    },
+    "frontend_mobile_ui": {
+      "chat_scope": "Проверка мобильных правок",
+      "must_not_own": [
+        "backend Social reliability",
+        "native BORIS Phone iOS/Android",
+        "backend PBX/SIP/telephony runtime"
+      ],
+      "neighbor_chat_aliases": [
+        {
+          "chat": "Статистика открытий/ответов email / dashboard prospecting UI",
+          "reason": "Email analytics может формулировать требования к UI, но общий frontend код меняет только frontend_mobile_ui.",
+          "status": "delegated_frontend_only"
+        },
+        {
+          "chat": "Виртуальная АТС / BORIS Phone",
+          "reason": "Общий web responsive UI остаётся здесь; native BORIS Phone и backend телефонии принадлежат telephony_core.",
+          "status": "web_shell_only"
+        }
+      ],
+      "purpose": "Общий мобильный/desktop UI BORIS вне специализированного телефонного native/runtime контура.",
+      "status": "frontend_only",
+      "writable_paths": [
+        "../frontend/**"
+      ]
+    },
+    "ocean_social_client": {
+      "chat_scope": "Проверка VK Океан",
+      "delegates_shared_runtime_to": "social_reliability_core",
+      "delegates_to": "social_editorial_client_config",
+      "must_not_own": [
+        "Ocean/Dushi/Manicure client editorial values after dedupe",
+        "общий Social scheduler/rescue/transport/Guardian"
+      ],
+      "purpose": "Исторический чат «Проверка VK Океан». После дедупликации отдельного writer нет: client-editorial значения делегированы social_editorial_client_config, общий runtime — social_reliability_core.",
+      "read_only_shared_paths": [
+        "posting_runner.py",
+        "app/services/social_*"
+      ],
+      "status": "read_only_alias",
+      "writable_paths": []
+    },
+    "photo_factory_core": {
+      "chat_scope": "Photo Factory / FREE T4 worker backend",
+      "must_not_own": [
+        "общий frontend UI",
+        "banner/media renderer",
+        "Social/Email/Avito/telephony"
+      ],
+      "purpose": "Единственный writer backend Photo Factory claim/heartbeat/result/quality runtime. Общий frontend и notebook-файл делегируются frontend_mobile_ui.",
+      "read_only_shared_paths": [
+        "../frontend/public/downloads/boris_photo_factory_free_worker.ipynb",
+        "../frontend/**"
+      ],
+      "status": "photo_factory_only",
+      "writable_paths": [
+        "app/api/photo_factory.py",
+        "app/api/photo_factory_v3.py",
+        "app/api/photo_factory_v31.py",
+        "app/api/photo_factory_v32.py",
+        "app/api/photo_factory_v33.py",
+        "tests/test_photo_factory*"
+      ]
+    },
+    "planb_client_operations": {
+      "chat_scope": "Проверка автопостинга бытовок / Починка бытовок и аккаунтов",
+      "delegates_shared_social_runtime_to": "social_reliability_core",
+      "must_not_own": [
+        "общий Social scheduler/rescue/transport/Guardian"
+      ],
+      "purpose": "Конкретный клиент Бытовки План Б: клиентские настройки, контент, Avito/inbox и фактический клиентский контур.",
+      "read_only_shared_paths": [
+        "posting_runner.py",
+        "app/services/social_*",
+        "app/api/avito*",
+        "app/services/avito*"
+      ],
+      "status": "client_specific_only",
+      "writable_paths": [
+        "client-data/u42/**"
+      ]
+    },
+    "production_watch_global": {
+      "chat_scope": "BORIS Production Watch / Production Buildout",
+      "delegates_edits_to_module_owner": true,
+      "delegates_shared_social_runtime_to": "social_reliability_core",
+      "purpose": "Общий наблюдатель production без дублирования модульных правок.",
+      "read_only_paths": [
+        "**"
+      ],
+      "status": "observer_only",
+      "writable_paths": []
+    },
+    "prospecting_discovery_core": {
+      "chat_scope": "Поиск клиентов / prospecting discovery — отдельный от отправки",
+      "must_not_own": [
+        "SMTP/IMAP и email delivery",
+        "темы/тексты писем",
+        "open tracking",
+        "email economics",
+        "frontend UI"
+      ],
+      "purpose": "Поиск компаний, обход публичных сайтов, извлечение и нормализация контактов, пополнение базы. Не отправляет письма.",
+      "status": "discovery_only",
+      "writable_paths": [
+        "app/services/contact_prospector.py",
+        "app/services/prospect_discovery.py",
+        "app/services/prospecting.py",
+        "app/services/prospect_replenisher.py",
+        "app/api/prospecting.py",
+        "app/api/prospecting_discovery.py",
+        "tests/test_prospect_company_dedupe.py",
+        "tests/test_prospect_email_normalization.py"
+      ]
+    },
+    "reactivation_core": {
+      "chat_scope": "reactivation core",
+      "purpose": "Canonical single writer for Reactivation settings, state machine, scheduler/runtime, safe Avito reactivation orchestration and focused regression tests. Shared Messenger transport, CRM and Control Plane remain read-only dependencies.",
+      "read_only_paths": [
+        "app/api/messenger.py",
+        "app/services/control_plane_adapters.py",
+        "app/services/client_supervisor.py"
+      ],
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/reactivation_core.py",
+        "app/reactivation_runtime.py",
+        "app/reactivation_scan.py",
+        "app/reactivation_draft.py",
+        "app/reactivation_avito_health.py",
+        "app/reactivation_outgoing.py",
+        "app/api/reactivation.py",
+        "reactivation_worker.py",
+        "tests/test_reactivation_avito_transport.py",
+        "tests/test_reactivation_control_plane_ambiguous.py",
+        "tests/test_reactivation_external_incidents.py",
+        "tests/test_reactivation_inbox_capability.py",
+        "tests/test_reactivation_paid_path_safety.py",
+        "tests/test_reactivation_ready_transport_block.py",
+        "tests/test_reactivation_stale_ready.py",
+        "tests/test_reactivation_auto_rearm.py"
+      ]
+    },
+    "sales_conversation_pipeline": {
+      "chat_scope": "sales conversation pipeline",
+      "purpose": "Один writer общей цепочки owner report → Messages → MOP → ROP; общие messenger/inbox файлы не пишутся параллельно.",
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/api/inbox_daily.py",
+        "daily_inbox_report.py",
+        "app/api/messenger.py",
+        "app/models/messenger_message.py",
+        "app/mop_core.py",
+        "app/api/mop_training.py",
+        "app/api/mop_combat_training.py",
+        "rop_auto.py",
+        "rop_digest.py",
+        "rop_batch.py",
+        "client_report.py",
+        "tests/test_client_report_delivery_receipt.py",
+        "tests/test_rop_digest_truth.py",
+        "app/services/sales_ai_router.py",
+        "tests/test_sales_ai_router.py",
+        "app/services/realtime_ai_guard.py",
+        "tests/test_mop_waiting_external_recovery.py"
+      ]
+    },
+    "social_cost_accounting": {
+      "chat_scope": "Отдельный cost/usage-контур; НЕ старый общий autopost chat",
+      "must_not_own": [
+        "Social delivery scheduler",
+        "VK replacement",
+        "клиентские тексты"
+      ],
+      "purpose": "Стоимость AI/API, usage ledger и защита от повторных платных генераций как финансовый учет.",
+      "status": "cost_only",
+      "writable_paths": [
+        "app/usage.py",
+        "app/services/ai_budget.py",
+        "banner_generator.py",
+        "tests/test_*usage*",
+        "tests/test_*budget*",
+        "app/services/ai_cost_alerts.py",
+        "app/services/ai_guard_audit.py"
+      ]
+    },
+    "social_editorial_client_config": {
+      "chat_scope": "Соцсети · правила постов · Океан / От Души / Маникюр — единственный owner client-editorial contract для u2",
+      "delegates_shared_runtime_to": "social_reliability_core",
+      "must_not_own": [
+        "posting_runner/scheduler/queues/due-rescue",
+        "Telegram/VK transport/retry/CAPTCHA",
+        "shared Social policy implementation or immutable Social authority",
+        "banner/media generation and persistence",
+        "historical published-post repair/repost/edit",
+        "Avito feed/bids/KPI"
+      ],
+      "owns_client_config_fields": [
+        "posting_projects.text_prompt",
+        "posting_projects.themes",
+        "posting_projects.footer_signature",
+        "posting_projects.contact_tg",
+        "posting_projects.contact_vk",
+        "posting_projects.hashtags_policy",
+        "posting_projects.video_policy",
+        "posting_projects.editorial_contract"
+      ],
+      "purpose": "Клиентские редакционные значения Ocean/От Души/Маникюр: prompts, themes, signature/contact/hashtags/video/holiday rules, machine editorial_contract, client-only self-heal и QA. Общий Social runtime не меняет.",
+      "read_only_shared_paths": [
+        "posting_runner.py",
+        "boris_background_worker.py",
+        "app/api/posting.py",
+        "app/services/social_*",
+        "/usr/local/share/boris-social-owner-policy-v3.canonical",
+        "/usr/local/sbin/boris-social-owner-preflight.py",
+        "/opt/boris-social-hardguard/hardguard.py"
+      ],
+      "status": "client_editorial_only",
+      "writable_paths": [
+        "client-data/u2/social-editorial/**",
+        "/usr/local/share/boris-editorial-client-v3.json",
+        "/usr/local/sbin/boris-editorial-client-guard.py",
+        "/etc/systemd/system/boris-editorial-client-guard.service",
+        "/etc/systemd/system/boris-editorial-client-guard.timer"
+      ]
+    },
+    "social_legacy_autopost_chat": {
+      "chat_scope": "Обновление автопостинга BORIS",
+      "delegates_to": "social_reliability_core",
+      "purpose": "Исторический чат общего автопостинга; после дедупликации не владеет кодом.",
+      "read_only_shared_paths": [
+        "posting_runner.py",
+        "boris_background_worker.py",
+        "app/services/social_*",
+        "run/social_*",
+        "/etc/systemd/system/boris-social-*"
+      ],
+      "status": "read_only_alias",
+      "writable_paths": []
+    },
+    "social_reliability_core": {
+      "authority_contract": {
+        "authority_guard_service": "/etc/systemd/system/boris-social-authority-guard.service",
+        "authority_guard_sha": "b0f5ab30e13f82a3887fbfedbbdc117d13d3a0ccd534246874f37fe51bafe34c",
+        "authority_guard_source": "run/social_authority_guard.py",
+        "editorial_client_only_deploy_sha": "88c171323dce212c747824649f8501b785632182dfae80dbda1c175911d029b6",
+        "hardguard_sha": "5e201d73fc5b3f86bd75b6ab6e0aeca4c6f653f8922abee35dc20ce01c785d1c",
+        "integrity_lock_sha": "5338a44ef04bc5adf6aa0f3c1c3311f0d1ec4a89776658b7e3784e74d4b8d949",
+        "legacy_ocean_client_only_sha": "1a943993c5d9dff643d52c0a14d8c6382428db627d40fafabb1b237dcacffdbd",
+        "policy_sha": "c6283d0c706bea08dd81e024b9fa9a5c37b861bca4995c44d2d21830168c1d82",
+        "preflight_sha": "563c5971f6b022f6bcee7519a7ce367703160f50e229c9aa8c3bb3e345d93b9d",
+        "scope_fence_sha": "28c0a3a1531e58bc3480e35513e3239aae4608a0e69d227d27d8306fd936291b",
+        "source_of_truth": "boris-social-authority-contract",
+        "version_binding": "delegated_to_social_immutable_pointer"
+      },
+      "authority_contract_ref": {
+        "name": "boris-social-authority-contract",
+        "ownership": "social_reliability_core",
+        "path": "/usr/local/share/boris-social-authority-contract.json",
+        "pointer_path": "/usr/local/share/boris-social-authority-contract.sha",
+        "sha256": "960fa4f5766b6c5b0fee8c840d33060dfd9808acb88b75245d29f317f097e5da"
+      },
+      "chat_scope": "Автопостинг BORIS — единственный writer общего Social runtime/transport/reliability",
+      "must_not_own": [
+        "конкретные рекламные тексты клиента",
+        "контент-план конкретного клиента",
+        "Avito feed/bids/KPI",
+        "email outreach",
+        "телефония",
+        "мобильный UI",
+        "значения editorial_contract/text_prompt/themes/footer_signature/contact/hashtags/video/holiday rules для Ocean/Dushi/Manicure",
+        "client-only editorial authority /usr/local/share/boris-editorial-client-v3.json"
+      ],
+      "neighbor_chat_aliases": [
+        {
+          "chat": "Обновление автопостинга BORIS",
+          "reason": "Исторически правил posting_runner/scheduler/due-rescue/transport/VK-TG reliability; теперь этот код принадлежит social_reliability_core.",
+          "status": "delegated_read_only"
+        },
+        {
+          "chat": "Проверка VK Океан",
+          "client_config_write": "allowed",
+          "delegates_shared_runtime_to": "social_reliability_core",
+          "reason": "Только Ocean/От Души контент и фактические публикации; общий runtime read-only.",
+          "shared_authority_write": "forbidden",
+          "status": "client_only"
+        },
+        {
+          "chat": "Проверка автопостинга бытовок",
+          "reason": "Только Бытовки как клиент/Avito/feed/onboarding; общий Social runtime read-only.",
+          "status": "client_or_avito_only"
+        },
+        {
+          "chat": "BORIS Production Watch / Production Buildout",
+          "reason": "Глобальный monitoring/эскалация без модульных Social-правок.",
+          "status": "observer_only"
+        }
+      ],
+      "owns_runtime": [
+        "social scheduler",
+        "generation lifecycle/idempotency",
+        "due-rescue",
+        "transport readiness",
+        "Guardian",
+        "published_at/SLA",
+        "VK replacement/terminal reconciliation",
+        "Social incidents and self-heal",
+        "public-copy enforcement mechanism reads client editorial_contract but does not own client values"
+      ],
+      "purpose": "Общая надежность Social/autoposting BORIS для всех активных клиентов.",
+      "read_only_shared_paths": [
+        "client-data/u2/social-editorial/handoff/**",
+        "client-data/u2/social-editorial/authority/**"
+      ],
+      "writable_paths": [
+        "posting_runner.py",
+        "boris_background_worker.py",
+        "app/services/social_*",
+        "app/services/incident_reconciler.py",
+        "tests/test_social*",
+        "run/social_*",
+        "/etc/systemd/system/boris-social-*",
+        "/var/lib/boris-integrity/social-*",
+        "/usr/local/share/boris-social-owner-policy-v3.canonical",
+        "/usr/local/sbin/boris-social-owner-preflight.py",
+        "/opt/boris-social-hardguard/hardguard.py",
+        "/etc/systemd/system/boris-integrity-lock01.service",
+        "run/deploy_social_owner_oceanfooter_20260905.py",
+        "app/api/posting.py",
+        "posting_stats.py",
+        "tests/test_ocean_autopost_contract.py"
+      ]
+    },
+    "telegram_command_core": {
+      "chat_scope": "telegram command core",
+      "purpose": "Единственный writer Telegram command/inbox bridge; Social posting transport сюда не входит.",
+      "status": "runtime_only",
+      "writable_paths": [
+        "app/telegram_bot.py"
+      ]
+    },
+    "telephony_core": {
+      "chat_scope": "Виртуальная АТС + BORIS Phone native + настройки телефонии — telephony only",
+      "must_not_own": [
+        "общий frontend/mobile layout вне телефонного продукта",
+        "Social scheduler",
+        "Avito/email/marketing контуры"
+      ],
+      "neighbor_chat_aliases": [
+        {
+          "chat": "Продолжить задачу звонилки",
+          "reason": "Исторический телефонный чат; общий phone/PBX/native runtime теперь имеет одного writer — telephony_core.",
+          "status": "delegated_read_only"
+        },
+        {
+          "chat": "Проверка мобильных правок",
+          "reason": "Может менять общий responsive/frontend UI, но не native BORIS Phone и не backend телефонии.",
+          "status": "frontend_only"
+        },
+        {
+          "chat": "BORIS Production Watch / Production Buildout",
+          "reason": "Может наблюдать health и эскалировать, но не менять телефонный core.",
+          "status": "observer_only"
+        }
+      ],
+      "purpose": "Единый phone/telephony core BORIS: PBX, MCN/Telphin, SIP/Asterisk/ARI, WebRTC/TURN media, call runtime, native iOS/Android, push/CallKit/Telecom, запись/расшифровка/AI phone pipeline, телефонные настройки и self-heal.",
+      "read_only_shared_paths": [
+        "../frontend/app/phone-app/**",
+        "../frontend/app/dashboard/phone/**"
+      ],
+      "status": "telephony_only",
+      "writable_paths": [
+        "app/services/telephony*",
+        "app/api/telephony*",
+        "telephony_runtime_runner.py",
+        "telephony_guardian_runner.py",
+        "tests/test_telephony*",
+        "app/services/asterisk_gateway.py",
+        "app/services/phone_media_gateway.py",
+        "app/services/telphin_sip_trunk.py",
+        "app/api/mcn_phone.py",
+        "asterisk_bridge_runner.py",
+        "tests/test_phone*",
+        "tests/test_telphin*",
+        "tests/run_asterisk_*.py",
+        "tests/run_media_webrtc_rtp_bind_qa.py",
+        "tests/run_mcn_webrtc_rtp_activation_qa.py",
+        "scripts/phone-*.py",
+        "../clients/boris-phone/**",
+        "/etc/systemd/system/boris-telephony-*",
+        "/etc/systemd/system/boris-asterisk-*",
+        "/etc/systemd/system/coturn.service.d/boris-phone.conf",
+        "/etc/asterisk-boris/**",
+        "/run/boris-turn/**",
+        "app/api/calltracking.py",
+        "tests/test_mcn*",
+        "app/services/mcn_core.py",
+        "app/services/mcn_network_guard.py",
+        "tests/test_calltracking_paid_safety.py"
+      ]
+    },
+    "workstream_coordination": {
+      "chat_scope": "Текущий чат — workstream coordination / без продуктовых правок",
+      "must_not_own": [
+        "product module implementation",
+        "client content",
+        "A2A executor/reviewer lifecycle",
+        "banner/media rendering",
+        "Photo Factory runtime"
+      ],
+      "neighbor_chat_map": [
+        {
+          "chat": "Текущий чат — пересечения задач",
+          "mode": "coordination_only",
+          "owner": "workstream_coordination"
+        },
+        {
+          "chat": "EMAIL_OUTREACH — Почтовые касания",
+          "mode": "runtime_only",
+          "owner": "email_outreach_core"
+        },
+        {
+          "chat": "PROSPECTING — Поиск клиентов",
+          "mode": "discovery_only",
+          "owner": "prospecting_discovery_core"
+        },
+        {
+          "chat": "Автономная разработка / control-plane execution",
+          "mode": "execution_only",
+          "owner": "autonomous_dev_execution"
+        },
+        {
+          "chat": "Выгрузить объявления Авито",
+          "mode": "avito_content_only",
+          "owner": "avito_marketing_core"
+        },
+        {
+          "chat": "Дашборд BORIS AI для рассылок / промо рассылок",
+          "mode": "frontend_only",
+          "owner": "frontend_mobile_ui"
+        },
+        {
+          "chat": "Доработка виртуальной АТС",
+          "mode": "telephony_only",
+          "owner": "telephony_core"
+        },
+        {
+          "chat": "Исправление текста письма",
+          "mode": "review_only",
+          "owner": "email_copy_review"
+        },
+        {
+          "chat": "Исправление темы рассылки",
+          "mode": "review_only",
+          "owner": "email_copy_review"
+        },
+        {
+          "chat": "Обновление валидации Avito",
+          "mode": "avito_content_only",
+          "owner": "avito_marketing_core"
+        },
+        {
+          "chat": "Проверка мобильных правок",
+          "mode": "frontend_only",
+          "owner": "frontend_mobile_ui"
+        },
+        {
+          "chat": "Проверка объявлений PLANETA",
+          "mode": "avito_content_only",
+          "owner": "avito_marketing_core"
+        },
+        {
+          "chat": "Проверка страниц управления",
+          "mode": "frontend_only",
+          "owner": "frontend_mobile_ui"
+        },
+        {
+          "chat": "Продающий текст клиентам",
+          "mode": "client_media_only",
+          "owner": "banner_media_core"
+        },
+        {
+          "chat": "Продвижение объявлений при низком KPI",
+          "mode": "avito_money_only",
+          "owner": "avito_money_core"
+        },
+        {
+          "chat": "Продолжить задачу звонилки",
+          "mode": "telephony_only",
+          "owner": "telephony_core"
+        },
+        {
+          "chat": "Разработка Photo Factory продолжается",
+          "mode": "photo_factory_only",
+          "owner": "photo_factory_core"
+        },
+        {
+          "chat": "Себестоимость 5–10 клиентов",
+          "mode": "economics_only",
+          "owner": "email_outreach_economics"
+        },
+        {
+          "chat": "Статистика открытий/ответов email",
+          "mode": "analytics_only",
+          "owner": "email_tracking_analytics"
+        },
+        {
+          "chat": "ТЗ по UI и тестам",
+          "mode": "frontend_only",
+          "owner": "frontend_mobile_ui"
+        },
+        {
+          "chat": "Мозг BORIS — один видит, управляет и контролирует всё",
+          "mode": "surface_review_only",
+          "owner": "brain_control_plane_surface"
+        },
+        {
+          "chat": "Управление клиентами — отдельное owner-окно",
+          "mode": "surface_review_only",
+          "owner": "clients_control_surface"
+        },
+        {
+          "chat": "Разработка и задачи — отдельное owner-окно",
+          "mode": "surface_review_only",
+          "owner": "development_control_surface"
+        },
+        {
+          "chat": "Соцсети · правила постов · Океан / От Души / Маникюр",
+          "mode": "client_editorial_only",
+          "owner": "social_editorial_client_config"
+        },
+        {
+          "chat": "Публикации без видео",
+          "mode": "client_editorial_only",
+          "owner": "social_editorial_client_config"
+        },
+        {
+          "chat": "Проверка VK Океан",
+          "mode": "client_editorial_only",
+          "owner": "social_editorial_client_config"
+        },
+        {
+          "chat": "Автопостинг BORIS",
+          "mode": "social_runtime_only",
+          "owner": "social_reliability_core"
+        },
+        {
+          "chat": "Обновление автопостинга BORIS",
+          "mode": "read_only_alias",
+          "owner": "social_legacy_autopost_chat"
+        },
+        {
+          "chat": "BORIS Production Watch / Production Buildout",
+          "mode": "observer_only",
+          "owner": "production_watch_global"
+        },
+        {
+          "chat": "Проверка автопостинга бытовок",
+          "mode": "client_operations_only",
+          "owner": "planb_client_operations"
+        },
+        {
+          "chat": "Social/Banners lifecycle",
+          "mode": "client_media_only",
+          "owner": "banner_media_core"
+        }
+      ],
+      "neighbor_chat_owner_modes": {
+        "autonomous_dev_execution": "execution_only",
+        "avito_marketing_core": "avito_content_only",
+        "avito_money_core": "avito_money_only",
+        "banner_media_core": "client_media_only",
+        "brain_control_plane_surface": "surface_review_only",
+        "clients_control_surface": "surface_review_only",
+        "development_control_surface": "surface_review_only",
+        "email_copy_review": "review_only",
+        "email_outreach_core": "runtime_only",
+        "email_outreach_economics": "economics_only",
+        "email_tracking_analytics": "analytics_only",
+        "frontend_mobile_ui": "frontend_only",
+        "ocean_social_client": "client_social_only",
+        "photo_factory_core": "photo_factory_only",
+        "planb_client_operations": "client_operations_only",
+        "production_watch_global": "observer_only",
+        "prospecting_discovery_core": "discovery_only",
+        "social_editorial_client_config": "client_editorial_only",
+        "social_legacy_autopost_chat": "read_only_alias",
+        "social_reliability_core": "social_runtime_only",
+        "telephony_core": "telephony_only",
+        "workstream_coordination": "coordination_only"
+      },
+      "purpose": "Единый реестр границ workstream + scheduler admission/locks/repo ownership gates. Не реализует продуктовые модули и execution engine.",
+      "required_single_writers": {
+        "../frontend/app/email-outreach/page.tsx": "frontend_mobile_ui",
+        "../frontend/public/downloads/boris_photo_factory_free_worker.ipynb": "frontend_mobile_ui",
+        ".boris_ops/chat_coordination/promote_registry.py": "workstream_coordination",
+        ".boris_ops/chat_coordination/scope_guard_failure_notify.py": "workstream_coordination",
+        "/etc/systemd/system/boris-billing-entitlement-reconciler.service": "billing_payments_core",
+        "/etc/systemd/system/boris-billing-entitlement-reconciler.timer": "billing_payments_core",
+        "/etc/systemd/system/boris-dispatcher.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-editorial-client-guard.service": "social_editorial_client_config",
+        "/etc/systemd/system/boris-editorial-client-guard.timer": "social_editorial_client_config",
+        "/etc/systemd/system/boris-executor-2.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-executor-3.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-executor-4.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-executor-5.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-executor-6.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-executor-7.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-executor-8.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-executor.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-lead.service.d/70-gemini-model-fallback.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-workstream-scope-guard-alert.service": "workstream_coordination",
+        "/etc/systemd/system/boris-workstream-scope-guard.service.d/10-email-single-writer.conf": "workstream_coordination",
+        "/etc/systemd/system/boris-workstream-scope-guard.service.d/20-onfailure.conf": "workstream_coordination",
+        "/usr/local/lib/boris-dev-cli/gemini": "workstream_coordination",
+        "/usr/local/sbin/boris-editorial-client-guard.py": "social_editorial_client_config",
+        "/usr/local/share/boris-editorial-client-v3.json": "social_editorial_client_config",
+        "/var/lib/boris-integrity/workstream-scopes/accepted_registry.json": "workstream_coordination",
+        "/var/lib/boris-integrity/workstream-scopes/failure_alerts.jsonl": "workstream_coordination",
+        "/var/lib/boris-integrity/workstream-scopes/last_failure_alert.json": "workstream_coordination",
+        "/var/lock/boris-workstream-scope-promotion.lock": "workstream_coordination",
+        "ai_marketer_hourly.sh": "avito_money_core",
+        "app/api/admin_clients.py": "client_config_core",
+        "app/api/avito.py": "avito_integration_core",
+        "app/api/avito_categories.py": "avito_marketing_core",
+        "app/api/calltracking.py": "telephony_core",
+        "app/api/client_launch_control.py": "client_launch_core",
+        "app/api/control_plane.py": "control_plane_core",
+        "app/api/cpx_advisor.py": "avito_money_core",
+        "app/api/crm.py": "crm_integration_core",
+        "app/api/inbox_daily.py": "sales_conversation_pipeline",
+        "app/api/media.py": "banner_media_core",
+        "app/api/messenger.py": "sales_conversation_pipeline",
+        "app/api/mop_combat_training.py": "sales_conversation_pipeline",
+        "app/api/mop_training.py": "sales_conversation_pipeline",
+        "app/api/payments.py": "billing_payments_core",
+        "app/api/photo_factory.py": "photo_factory_core",
+        "app/api/photo_factory_v3.py": "photo_factory_core",
+        "app/api/photo_factory_v31.py": "photo_factory_core",
+        "app/api/photo_factory_v32.py": "photo_factory_core",
+        "app/api/photo_factory_v33.py": "photo_factory_core",
+        "app/api/posting.py": "social_reliability_core",
+        "app/api/prospecting.py": "prospecting_discovery_core",
+        "app/api/prospecting_scale.py": "email_outreach_core",
+        "app/config.py": "client_config_core",
+        "app/ext_api/a2a.py": "autonomous_dev_execution",
+        "app/ext_api/aiprov.py": "autonomous_dev_execution",
+        "app/ext_api/banner.py": "banner_media_core",
+        "app/ext_api/clients.py": "control_plane_core",
+        "app/ext_api/ddl.sql": "autonomous_dev_execution",
+        "app/ext_api/deploy.py": "workstream_coordination",
+        "app/ext_api/dev.py": "workstream_coordination",
+        "app/ext_api/devflow.py": "autonomous_dev_execution",
+        "app/ext_api/executor.py": "autonomous_dev_execution",
+        "app/ext_api/lead.py": "autonomous_dev_execution",
+        "app/ext_api/master.py": "workstream_coordination",
+        "app/ext_api/mcp_server.py": "autonomous_dev_execution",
+        "app/ext_api/recover.py": "autonomous_dev_execution",
+        "app/ext_api/repo.py": "workstream_coordination",
+        "app/ext_api/report.py": "control_plane_core",
+        "app/ext_api/router.py": "autonomous_dev_execution",
+        "app/ext_api/sched.py": "workstream_coordination",
+        "app/ext_api/schema.py": "autonomous_dev_execution",
+        "app/ext_api/selftest.py": "autonomous_dev_execution",
+        "app/ext_api/watchdog.py": "control_plane_core",
+        "app/ext_api/workspace_sync.py": "control_plane_core",
+        "app/models/avito_category.py": "avito_marketing_core",
+        "app/models/control_plane.py": "control_plane_core",
+        "app/models/messenger_message.py": "sales_conversation_pipeline",
+        "app/mop_core.py": "sales_conversation_pipeline",
+        "app/services/ai_budget.py": "social_cost_accounting",
+        "app/services/ai_cost_alerts.py": "social_cost_accounting",
+        "app/services/ai_guard_audit.py": "social_cost_accounting",
+        "app/services/avito_account_throttle.py": "avito_integration_core",
+        "app/services/avito_position_monitor.py": "avito_marketing_core",
+        "app/services/avito_premium_compositor.py": "avito_marketing_core",
+        "app/services/banner_design_v4.py": "banner_media_core",
+        "app/services/brain_acceptance.py": "control_plane_core",
+        "app/services/brain_world_state.py": "control_plane_core",
+        "app/services/campaign_service.py": "content_engine_core",
+        "app/services/category_resolver.py": "avito_category_pipeline",
+        "app/services/client_mailboxes.py": "email_outreach_core",
+        "app/services/client_supervisor.py": "control_plane_core",
+        "app/services/command_audit.py": "command_center_core",
+        "app/services/command_executor.py": "command_center_core",
+        "app/services/command_flow.py": "command_center_core",
+        "app/services/command_policy.py": "command_center_core",
+        "app/services/command_store.py": "command_center_core",
+        "app/services/contact_outreach.py": "email_outreach_core",
+        "app/services/contact_prospector.py": "prospecting_discovery_core",
+        "app/services/control_plane.py": "control_plane_core",
+        "app/services/control_plane_adapters.py": "control_plane_core",
+        "app/services/control_plane_adapters_ext.py": "control_plane_core",
+        "app/services/crm_service.py": "crm_integration_core",
+        "app/services/email_outreach_cost_policy.py": "email_outreach_economics",
+        "app/services/email_queue.py": "email_outreach_core",
+        "app/services/email_service.py": "email_outreach_core",
+        "app/services/email_tracking.py": "email_tracking_analytics",
+        "app/services/feed_param_normalizer.py": "avito_category_pipeline",
+        "app/services/image_service.py": "banner_media_core",
+        "app/services/incident_reconciler.py": "social_reliability_core",
+        "app/services/initial_portfolio.py": "avito_marketing_core",
+        "app/services/jobs.py": "content_engine_core",
+        "app/services/kpi_lead_quality.py": "avito_money_core",
+        "app/services/marketing_clock.py": "avito_money_core",
+        "app/services/marketing_experiment_journal.py": "avito_money_core",
+        "app/services/marketing_money_policy.py": "avito_money_core",
+        "app/services/marketing_signal_guard.py": "avito_money_core",
+        "app/services/mcn_core.py": "telephony_core",
+        "app/services/mcn_network_guard.py": "telephony_core",
+        "app/services/media_semantic_validator.py": "banner_media_core",
+        "app/services/media_service.py": "banner_media_core",
+        "app/services/media_storage.py": "banner_media_core",
+        "app/services/onboarding_factory_sync.py": "client_launch_core",
+        "app/services/owner_outreach_metrics.py": "email_tracking_analytics",
+        "app/services/owner_outreach_policy.py": "email_outreach_core",
+        "app/services/owner_outreach_volume_safety.py": "email_outreach_core",
+        "app/services/photo_studio.py": "banner_media_core",
+        "app/services/prospect_campaigns.py": "email_outreach_core",
+        "app/services/prospect_discovery.py": "prospecting_discovery_core",
+        "app/services/prospect_replenisher.py": "prospecting_discovery_core",
+        "app/services/prospect_reporting.py": "email_outreach_core",
+        "app/services/prospecting.py": "prospecting_discovery_core",
+        "app/services/realtime_ai_guard.py": "sales_conversation_pipeline",
+        "app/services/sales_ai_router.py": "sales_conversation_pipeline",
+        "app/services/social_owner_policy_v3.py": "social_reliability_core",
+        "app/services/telephony_core.py": "telephony_core",
+        "app/telegram_bot.py": "telegram_command_core",
+        "app/usage.py": "social_cost_accounting",
+        "billing_entitlement_reconciler.py": "billing_payments_core",
+        "boris_background_worker.py": "social_reliability_core",
+        "boris_guardian.py": "workstream_coordination",
+        "client-data/u2/social-editorial/authority/editorial_client_v3.json": "social_editorial_client_config",
+        "client-data/u2/social-editorial/tools/editorial_client_guard.py": "social_editorial_client_config",
+        "client_report.py": "sales_conversation_pipeline",
+        "cpx_advisor_runner.py": "avito_money_core",
+        "cpx_budget_brake.py": "avito_money_core",
+        "cpx_budget_resume.py": "avito_money_core",
+        "cpx_cap_reconciler.py": "avito_money_core",
+        "daily_inbox_report.py": "sales_conversation_pipeline",
+        "daily_stats_collector.py": "avito_integration_core",
+        "dev/v8_autonomous_canary.txt": "autonomous_dev_execution",
+        "effect_check.py": "avito_money_core",
+        "email_queue_runner.py": "email_outreach_core",
+        "global_production_acceptance.py": "workstream_coordination",
+        "kpi_goal_runner.py": "avito_money_core",
+        "late_day_spend_controller.py": "avito_money_core",
+        "marketer_rollout_runner.py": "avito_money_core",
+        "portfolio_bootstrap_runner.py": "avito_marketing_core",
+        "posting_runner.py": "social_reliability_core",
+        "production_contract_runner.py": "workstream_coordination",
+        "qa_marketer_reach_safety.py": "avito_money_core",
+        "qa_marketer_rollout.py": "avito_money_core",
+        "requirements.txt": "workstream_coordination",
+        "rop_auto.py": "sales_conversation_pipeline",
+        "rop_batch.py": "sales_conversation_pipeline",
+        "rop_digest.py": "sales_conversation_pipeline",
+        "run/workstream_scope_guard.py": "workstream_coordination",
+        "scripts/install_owner_outreach_db_safety_v3.py": "email_outreach_core",
+        "scripts/qa_owner_outreach_metrics.py": "email_tracking_analytics",
+        "scripts/qa_owner_outreach_volume_safety.py": "email_outreach_core",
+        "scripts/qa_sales_outreach_safety.py": "email_outreach_core",
+        "tests/test_aiprov_auth_classification.py": "autonomous_dev_execution",
+        "tests/test_billing_inbox_slot_reconcile.py": "billing_payments_core",
+        "tests/test_calltracking_paid_safety.py": "telephony_core",
+        "tests/test_client_business_truth.py": "control_plane_core",
+        "tests/test_client_report_delivery_receipt.py": "sales_conversation_pipeline",
+        "tests/test_client_report_guardian.py": "workstream_coordination",
+        "tests/test_executor_checkpoint_acceptance.py": "autonomous_dev_execution",
+        "tests/test_executor_recovery.py": "autonomous_dev_execution",
+        "tests/test_global_production_acceptance.py": "workstream_coordination",
+        "tests/test_kpi_lead_quality.py": "avito_money_core",
+        "tests/test_lead_reconcile_server_owned.py": "autonomous_dev_execution",
+        "tests/test_mcn_api_onboarding.py": "telephony_core",
+        "tests/test_mcn_calltracking_own_runtime.py": "telephony_core",
+        "tests/test_mcn_cdr_autonomy.py": "telephony_core",
+        "tests/test_mcn_crm_self_heal.py": "telephony_core",
+        "tests/test_mcn_deferred_asterisk_recovery.py": "telephony_core",
+        "tests/test_mcn_network_autodiscovery.py": "telephony_core",
+        "tests/test_mcn_phone_truth.py": "telephony_core",
+        "tests/test_mcn_pjsip_auth_mode.py": "telephony_core",
+        "tests/test_mcn_terminal_cleanup.py": "telephony_core",
+        "tests/test_mop_waiting_external_recovery.py": "sales_conversation_pipeline",
+        "tests/test_openai_audio_guard.py": "workstream_coordination",
+        "tests/test_owner_notification_contract.py": "control_plane_core",
+        "tests/test_rop_digest_truth.py": "sales_conversation_pipeline",
+        "tests/test_sales_ai_router.py": "sales_conversation_pipeline"
+      },
+      "status": "coordination_only",
+      "writable_paths": [
+        ".boris_ops/chat_coordination/**",
+        "/etc/systemd/system/boris-dispatcher.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-executor-2.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-executor-3.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-executor-4.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-executor-5.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-executor-6.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-executor-7.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-executor-8.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-executor.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-lead.service.d/70-gemini-model-fallback.conf",
+        "/etc/systemd/system/boris-workstream-scope-guard-alert.service",
+        "/etc/systemd/system/boris-workstream-scope-guard.service",
+        "/etc/systemd/system/boris-workstream-scope-guard.service.d/**",
+        "/etc/systemd/system/boris-workstream-scope-guard.timer",
+        "/usr/local/lib/boris-dev-cli/gemini",
+        "/usr/local/share/boris-workstream-scope.sha",
+        "/var/lib/boris-integrity/workstream-scopes/**",
+        "/var/lock/boris-workstream-scope-promotion.lock",
+        "app/ext_api/deploy.py",
+        "app/ext_api/dev.py",
+        "app/ext_api/master.py",
+        "app/ext_api/repo.py",
+        "app/ext_api/sched.py",
+        "app/services/workstream_scope.py",
+        "boris_guardian.py",
+        "config/workstream_scope_registry.json",
+        "global_production_acceptance.py",
+        "production_contract_runner.py",
+        "requirements.txt",
+        "run/workstream_scope_guard.py",
+        "tests/test_client_report_guardian.py",
+        "tests/test_dev_hierarchical_locks.py",
+        "tests/test_global_production_acceptance.py",
+        "tests/test_openai_audio_guard.py",
+        "tests/test_workstream_scope_registry.py"
+      ]
+    }
+  }
+}

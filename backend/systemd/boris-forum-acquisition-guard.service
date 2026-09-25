@@ -1,0 +1,14 @@
+[Unit]
+Description=BORIS free forum acquisition rule/self-heal guardian
+After=network-online.target boris-backend.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/BORIS/backend
+ExecStart=/root/BORIS/backend/venv/bin/python /root/BORIS/backend/tools/forum_acquisition_guard.py
+TimeoutStartSec=900
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

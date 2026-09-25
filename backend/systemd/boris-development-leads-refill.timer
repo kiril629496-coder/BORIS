@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep BORIS development outreach reserve above 30 verified recipients
+
+[Timer]
+OnCalendar=*-*-* *:12:00 UTC
+Persistent=true
+RandomizedDelaySec=90
+Unit=boris-development-leads-refill.service
+
+[Install]
+WantedBy=timers.target
