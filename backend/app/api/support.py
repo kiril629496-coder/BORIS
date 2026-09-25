@@ -8,6 +8,7 @@ from app.telegram_bot import send_telegram_message
 from app.db.session import SessionLocal
 from app.models.storage import Storage
 from app.api.auth import get_current_user
+from app.services.exception_observability import observe_suppressed
 
 router = APIRouter(prefix="/api/support", tags=["support"])
 
@@ -47,41 +48,27 @@ class StatusMsg(BaseModel):
     status: str
 
 
-def _send_email(subject, body):
+def _send_email(subject, body, tenant_scope):
     """Письмо на служебный ящик поддержки. Отправка — через единый EmailService."""
     from app.services import email_service as _es
     to = os.environ.get("SUPPORT_EMAIL") or os.environ.get("SMTP_USER")
     if not to:
         return
-    _es.send_email(to, subject, body)
+    _es.send_email(to, subject, body, tenant_scope=tenant_scope)
 
 
 def _notify_client(db, account_id: str, text_msg: str):
-    """Ответ поддержки — в кабинет клиента и в его Telegram, если подключён."""
+    """Ответ поддержки — атомарно в кабинет клиента и в Telegram, если подключён."""
     if not account_id:
         return
-    row = db.query(Storage).filter(Storage.account_id == account_id,
-                                   Storage.key == "notifications").first()
-    items = []
-    if row and row.value:
-        try:
-            items = json.loads(row.value)
-        except Exception:
-            items = []
-    items.append({"ts": datetime.utcnow().replace(microsecond=0).isoformat(),
-                  "text": text_msg, "related_results": [], "read": False})
-    val = json.dumps(items[-50:], ensure_ascii=False)
-    if row:
-        row.value = val
-    else:
-        db.add(Storage(account_id=account_id, key="notifications", value=val))
+    from app.services.notification_store import append_notification
+    append_notification(db,account_id,{"ts":datetime.utcnow().replace(microsecond=0).isoformat(),"text":text_msg,"related_results":[],"read":False},commit=True)
     try:
-        chat = db.execute(text("SELECT telegram_chat_id FROM accounts WHERE account_id=:a"),
-                          {"a": account_id}).fetchone()
+        chat=db.execute(text("SELECT telegram_chat_id FROM accounts WHERE account_id=:a"),{"a":account_id}).fetchone()
         if chat and chat[0]:
-            send_telegram_message(chat[0], text_msg)
+            send_telegram_message(chat[0],text_msg)
     except Exception as e:
-        print("support client notify err", e)
+        print("support client notify err",e)
 
 
 @router.post("/message")
@@ -116,7 +103,7 @@ def support_message(m: SupportMsg):
         except Exception as e:
             print("support tg err", e)
     try:
-        _send_email(f"Поддержка Борис — обращение №{tid}", body)
+        _send_email(f"Поддержка Борис — обращение №{tid}", body, tenant_scope=f"support:{m.account_id or tid}")
     except Exception as e:
         print("support mail err", e)
     if _work_now():
@@ -223,8 +210,8 @@ def support_reply(m: ReplyMsg, current=Depends(get_current_user)):
             if chat:
                 try:
                     send_telegram_message(chat, f"\U0001F4AC Клиент дописал по обращению №{m.ticket_id}:\n\n{m.text}")
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=212)
         db.commit()
         return {"status": "ok"}
     finally:

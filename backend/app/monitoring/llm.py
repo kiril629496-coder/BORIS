@@ -271,6 +271,59 @@ def call_llm(user_prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str:
     return _extract_text(fn(f"{system_prompt}\n\n{user_prompt}"))
 
 
+def _paid_intent_claim(intent_key: str) -> tuple[str, str | None]:
+    """Atomically claim one monitoring LLM economic intent before provider I/O.
+
+    Returns (owner|cached|ambiguous, raw_text). A surviving `claimed` row is an
+    intentional fail-closed tombstone: after a process/network ambiguity the same
+    external message is never automatically purchased again.
+    """
+    key=str(intent_key or '').strip()
+    if not key:
+        return 'owner', None
+    from . import store
+    state_key='monitor_llm_paid:v1:'+key[:160]
+    conn=store.connect()
+    try:
+        with conn.cursor() as cur:
+            store.ensure_runtime_state(cur)
+            claimed=json.dumps({'state':'claimed'},ensure_ascii=False,separators=(',',':'))
+            cur.execute("""INSERT INTO monitor_runtime_state(key,value_text,updated_at)
+                           VALUES(%s,%s,NOW()) ON CONFLICT(key) DO NOTHING RETURNING key""",
+                        (state_key,claimed))
+            owner=cur.fetchone() is not None
+            if owner:
+                conn.commit(); return 'owner', None
+            cur.execute("SELECT value_text FROM monitor_runtime_state WHERE key=%s",(state_key,))
+            row=cur.fetchone(); conn.commit()
+        try: obj=json.loads((row or [None])[0] or '{}')
+        except Exception: obj={}
+        raw=str(obj.get('raw') or '') if isinstance(obj,dict) else ''
+        if isinstance(obj,dict) and obj.get('state')=='result' and raw:
+            return 'cached', raw
+        return 'ambiguous', None
+    finally:
+        conn.close()
+
+
+def _paid_intent_store_result(intent_key: str, raw: str) -> None:
+    key=str(intent_key or '').strip()
+    if not key:
+        return
+    from . import store
+    state_key='monitor_llm_paid:v1:'+key[:160]
+    payload=json.dumps({'state':'result','raw':str(raw or '')},ensure_ascii=False,separators=(',',':'))
+    conn=store.connect()
+    try:
+        with conn.cursor() as cur:
+            store.ensure_runtime_state(cur)
+            cur.execute("""UPDATE monitor_runtime_state SET value_text=%s,updated_at=NOW()
+                           WHERE key=%s""",(payload,state_key))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------- разбор JSON
 
 def _parse_json(raw: str) -> dict[str, Any]:
@@ -325,23 +378,34 @@ def rule_based(text: str, terms: list[str], breakdown: dict[str, int],
 # ------------------------------------------------------------- точка входа
 
 def analyze(text: str, terms: list[str], breakdown: dict[str, int],
-            bucket_label: str, source_title: str = "") -> dict[str, Any]:
+            bucket_label: str, source_title: str = "", paid_intent_key: str = "") -> dict[str, Any]:
     """
     Возвращает словарь для monitor_messages.ai + summary + suggested_reply.
     Исключение наружу не выпускает НИКОГДА: ошибка модели не должна съесть лид.
     """
     snippet = (text or "")[:MAX_TEXT_CHARS]
     try:
-        raw = call_llm(USER_TEMPLATE.format(
+        from_cache=False
+        claim_state,cached_raw=_paid_intent_claim(paid_intent_key)
+        if claim_state == 'cached':
+            from_cache=True
+            raw=str(cached_raw or '')
+        elif claim_state == 'ambiguous':
+            raise RuntimeError('MONITOR_LLM_INTENT_ALREADY_CLAIMED')
+        else:
+            raw = call_llm(USER_TEMPLATE.format(
             source=source_title or "неизвестен",
             text=snippet,
-            terms=", ".join(terms) or "—",
-        ))
+                terms=", ".join(terms) or "—",
+            ))
+            if not raw:
+                raise ValueError("модель вернула пустой ответ")
+            _paid_intent_store_result(paid_intent_key,raw)
         data = _parse_json(raw)
         if not data.get("summary"):
             raise ValueError("модель не вернула summary")
         # само-учёт ТОЛЬКО если пул не залогировал сам (иначе двойной счёт)
-        if not _LAST_IO.get("pool_logs_usage"):
+        if not from_cache and not _LAST_IO.get("pool_logs_usage"):
             _log_usage(os.getenv("MONITOR_LLM_MODEL", "gigachat"),
                        len(snippet) + len(SYSTEM_PROMPT), len(raw or ""))
     except Exception as e:  # noqa: BLE001

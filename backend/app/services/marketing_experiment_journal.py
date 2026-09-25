@@ -15,6 +15,7 @@ from sqlalchemy import text
 from app.db.session import SessionLocal
 from app.services.control_plane_adapters_ext import marketing_service_entitlement
 from app.services.kpi_lead_quality import apply_business_lead_filter
+from app.services.exception_observability import observe_suppressed
 
 # DAILY_EXPERIMENT_JOURNAL_DYNAMIC_SCOPE_V1: canonical marketer discovery is
 # the base scope. Explicit owner-priority accounts are an OBSERVATION overlay,
@@ -229,7 +230,7 @@ def build(account_id, report_day=None):
                 _cur['promotion_active']=bool(_cur.get('promotion_active') or _it.get('promotion_active'))
                 if _it.get('bid_rub') is not None:
                     try: _cur['bid_rub']=float(_it.get('bid_rub'))
-                    except Exception: pass
+                    except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=232)
                 _paid_state[_iid]=_cur
         from app.services.marketing_money_policy import effective_hard_bid_cap
         try: _hard_cap=float(effective_hard_bid_cap(db,account_id))

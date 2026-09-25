@@ -1,11 +1,12 @@
 """Кошелёк БОРИСа: реквизиты для счетов, баланс на user:<id>, счета юрлицам, ручное зачисление.
 Баланс в рублях 1:1 (без кредитов/курса). Робокасса — для физлиц, кошелёк — для юрлиц/ИП."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import json
 from datetime import datetime
 from app.api.auth import get_current_user
+from app.services.exception_observability import observe_suppressed
 
 router = APIRouter(prefix="/api/wallet", tags=["wallet"])
 
@@ -147,12 +148,20 @@ def create_invoice(req: CreateInvoiceRequest, user=Depends(get_current_user)):
         amount = float(req.topup_amount)
         title = "Пополнение кошелька БОРИС"
     else:
-        from app.api.payments import PACKAGES, _price
-        if req.pack not in PACKAGES:
-            return {"status": "error", "message": "укажите сумму пополнения"}
-        pkg = PACKAGES[req.pack]
-        amount = _price(pkg, req.account_id)
-        title = pkg.get("title", req.pack)
+        from app.api.payments import _package_catalog, _price, _tariff_products
+        catalog = _package_catalog()
+        if req.pack in ("tariff_1", "tariff_2"):
+            pkg = _tariff_products(req.account_id).get(req.pack)
+            if not pkg:
+                return {"status": "error", "message": "неизвестный тариф"}
+            amount = pkg["sum"]
+            title = pkg.get("title", req.pack)
+        else:
+            if req.pack not in catalog:
+                return {"status": "error", "message": "укажите сумму пополнения"}
+            pkg = catalog[req.pack]
+            amount = _price(pkg, req.account_id)
+            title = pkg.get("title", req.pack)
 
     req_snapshot = _load_requisites()
     items = _load_invoices()
@@ -200,12 +209,13 @@ def list_invoices(user=Depends(get_current_user)):
 def invoice_pdf(number: str, user=Depends(get_current_user)):
     """PDF счёта на оплату (Без НДС). Реквизиты — снимок на момент выставления."""
     role = getattr(user, "role", None) or (user.get("role") if isinstance(user, dict) else None)
-    if role != "owner":
-        return {"status": "error", "message": "доступно только владельцу"}
+    uid = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
     items = _load_invoices()
     inv = next((it for it in items if it.get("number") == number), None)
     if not inv:
         return {"status": "error", "message": "счёт не найден"}
+    if role != "owner" and str(inv.get("user_id") or "") != str(uid or ""):
+        return {"status": "error", "message": "счёт принадлежит другому пользователю"}
     r = inv.get("requisites_snapshot") or {}
 
     def _row(label, val):
@@ -276,26 +286,47 @@ def _wallet_key(user):
     return f"user:{uid}"
 
 
-def _load_wallet(user):
+def _wallet_key_for_account(account_id: str, user) -> str:
+    from app.db.session import SessionLocal
+    from app.models.account import Account
+    from app.services.command_policy import account_visible
+    db = SessionLocal()
+    try:
+        if not account_visible(db, user, account_id):
+            raise HTTPException(status_code=403, detail="forbidden_account")
+        owner_id = db.query(Account.owner_user_id).filter(Account.account_id == account_id).scalar()
+    finally:
+        db.close()
+    if not owner_id:
+        raise HTTPException(status_code=409, detail="account_wallet_owner_missing")
+    return f"user:{int(owner_id)}"
+
+
+def _load_wallet_key(wallet_key: str):
     from app.db.session import SessionLocal
     from app.models.storage import Storage
     db = SessionLocal()
     try:
-        row = db.query(Storage).filter(Storage.account_id == _wallet_key(user), Storage.key == "wallet").first()
+        row = db.query(Storage).filter(Storage.account_id == wallet_key, Storage.key == "wallet").first()
         if row:
             try:
                 return json.loads(row.value)
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=313)
         return {"balance": 0, "history": []}
     finally:
         db.close()
 
 
+def _load_wallet(user):
+    return _load_wallet_key(_wallet_key(user))
+
+
 @router.get("/balance")
-def get_balance(user=Depends(get_current_user)):
-    """Баланс кошелька текущего пользователя + история операций (новые сверху)."""
-    w = _load_wallet(user)
+def get_balance(account_id: str = "", user=Depends(get_current_user)):
+    """Баланс текущего пользователя либо владельца выбранного доступного аккаунта."""
+    wallet_key = _wallet_key_for_account(account_id, user) if account_id else _wallet_key(user)
+    w = _load_wallet_key(wallet_key)
     hist = w.get("history", [])
     return {"status": "ok", "balance": w.get("balance", 0), "history": list(reversed(hist))[:50]}
 
@@ -339,8 +370,8 @@ def mark_paid(req: MarkPaidRequest, user=Depends(get_current_user)):
         if wrow:
             try:
                 wdata = json.loads(wrow.value)
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=372)
         wdata["balance"] = float(wdata.get("balance", 0)) + amount
         wdata.setdefault("history", []).append({
             "ts": _dt.utcnow().isoformat(), "type": "deposit", "amount": amount,
@@ -362,5 +393,177 @@ def mark_paid(req: MarkPaidRequest, user=Depends(get_current_user)):
     finally:
         db.close()
 
-    # кошелёк ОБЩИЙ: деньги зачислены на баланс, услугу клиент покупает отдельно через /purchase
-    return {"status": "ok", "invoice_status": inv["status"], "credited": amount, "wallet": wallet_acc}
+    activation = None
+    if full and str(inv.get("pack") or "").strip():
+        activation = _purchase_pack_from_wallet(
+            str(inv.get("account_id") or ""),
+            str(inv.get("pack") or ""),
+            "invoice:" + str(inv.get("number") or req.number),
+            user,
+        )
+    return {
+        "status": "ok",
+        "invoice_status": inv["status"],
+        "credited": amount,
+        "wallet": wallet_acc,
+        "service_activation": activation,
+    }
+
+
+class PurchaseRequest(BaseModel):
+    account_id: str
+    pack: str
+    purchase_id: str
+
+
+def _purchase_pack_from_wallet(account_id: str, pack: str, purchase_id: str, user):
+    """Account-scoped, idempotent wallet purchase through the common grant path."""
+    import re
+    from app.api.payments import _package_catalog, _price, grant_package
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    from sqlalchemy import text as _text
+
+    aid = str(account_id or "").strip()
+    code = str(pack or "").strip()
+    pid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(purchase_id or "").strip())[:120]
+    catalog = _package_catalog()
+    if not aid or code not in catalog:
+        return {"status": "error", "message": "неизвестная услуга"}
+    if len(pid) < 8:
+        return {"status": "error", "message": "purchase_id_required"}
+
+    wallet_key = _wallet_key_for_account(aid, user)
+    pkg = catalog[code]
+    price = float(_price(pkg, aid))
+    if price <= 0:
+        return {"status": "error", "message": "цена услуги не настроена"}
+
+    db = SessionLocal()
+    debited = False
+    try:
+        db.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": "wallet|" + wallet_key})
+        existing = db.execute(_text("""
+            SELECT id,status FROM payments
+            WHERE source='wallet' AND inv_id=:i
+            LIMIT 1
+        """), {"i": pid}).mappings().first()
+        if existing:
+            db.rollback()
+            return {
+                "status": "duplicate",
+                "purchase_id": pid,
+                "payment_status": str(existing.get("status") or ""),
+                "charged": 0,
+            }
+
+        wrow = db.query(Storage).filter(
+            Storage.account_id == wallet_key,
+            Storage.key == "wallet",
+        ).with_for_update().first()
+        if not wrow:
+            db.rollback()
+            return {"status": "error", "message": "недостаточно средств", "balance": 0, "price": price}
+        try:
+            wdata = json.loads(wrow.value) or {}
+        except Exception:
+            wdata = {}
+        balance = float(wdata.get("balance", 0) or 0)
+        if balance < price:
+            db.rollback()
+            return {
+                "status": "error",
+                "message": "недостаточно средств",
+                "balance": balance,
+                "price": price,
+                "need": price - balance,
+            }
+
+        wdata["balance"] = balance - price
+        wdata.setdefault("history", []).append({
+            "ts": datetime.utcnow().isoformat(),
+            "type": "purchase",
+            "amount": -price,
+            "pack": code,
+            "account_id": aid,
+            "purchase_id": pid,
+            "note": f"Покупка: {pkg.get('title', code)}",
+        })
+        wrow.value = json.dumps(wdata, ensure_ascii=False)
+        debited = True
+
+        grant = grant_package(
+            aid,
+            code,
+            pkg,
+            db,
+            amount=price,
+            source="wallet",
+            inv_id=pid,
+        )
+        if isinstance(grant, dict) and grant.get("status") == "duplicate_payment":
+            raise RuntimeError("wallet_payment_duplicate_after_precheck")
+        return {
+            "status": "ok",
+            "purchase_id": pid,
+            "purchased": pkg.get("title", code),
+            "charged": price,
+            "balance_left": wdata["balance"],
+        }
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=515)
+        if debited:
+            repair = SessionLocal()
+            try:
+                repair.execute(_text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": "wallet|" + wallet_key})
+                row = repair.query(Storage).filter(
+                    Storage.account_id == wallet_key,
+                    Storage.key == "wallet",
+                ).with_for_update().first()
+                if row:
+                    try:
+                        data = json.loads(row.value) or {}
+                    except Exception:
+                        data = {}
+                    history = list(data.get("history") or [])
+                    already_refunded = any(
+                        str(x.get("purchase_id") or "") == pid and x.get("type") == "refund"
+                        for x in history if isinstance(x, dict)
+                    )
+                    if not already_refunded:
+                        data["balance"] = float(data.get("balance", 0) or 0) + price
+                        history.append({
+                            "ts": datetime.utcnow().isoformat(),
+                            "type": "refund",
+                            "amount": price,
+                            "pack": code,
+                            "account_id": aid,
+                            "purchase_id": pid,
+                            "note": "Автовозврат: услуга не активировалась",
+                        })
+                        data["history"] = history
+                        row.value = json.dumps(data, ensure_ascii=False)
+                repair.execute(_text("""
+                    UPDATE payments
+                    SET status='refunded_activation_failed',
+                        comment=COALESCE(comment,'') || ' | activation failed; wallet refunded'
+                    WHERE source='wallet' AND inv_id=:i
+                """), {"i": pid})
+                repair.commit()
+            finally:
+                repair.close()
+        return {
+            "status": "error",
+            "message": "услуга не активировалась; списание автоматически возвращено",
+            "error_type": type(exc).__name__,
+        }
+    finally:
+        db.close()
+
+
+@router.post("/purchase")
+def purchase_from_balance(req: PurchaseRequest, user=Depends(get_current_user)):
+    return _purchase_pack_from_wallet(req.account_id, req.pack, req.purchase_id, user)

@@ -65,6 +65,7 @@ class SourceRef:
     topic_id: int | None = None
     topic_title: str | None = None
     last_seen_external_id: int | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
     is_active: bool = True
 
     @classmethod
@@ -79,6 +80,7 @@ class SourceRef:
             topic_id=row.get("topic_id"),
             topic_title=row.get("topic_title"),
             last_seen_external_id=row.get("last_seen_external_id"),
+            payload=row.get("payload") if isinstance(row.get("payload"),dict) else {},
             is_active=bool(row.get("is_active", True)),
         )
 

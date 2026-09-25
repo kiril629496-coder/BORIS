@@ -1,17 +1,34 @@
 """CRUD для кастомных промптов ИИ-менеджера продаж (на конкретный товар/услугу или общие).
 Лимит: 3 бесплатных активных промпта на аккаунт, сверх лимита — платно (биллинг ещё не реализован,
 пока просто считаем и блокируем создание 4-го без явного флага is_paid_slot)."""
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 import json as _json
 
 from app.db.session import SessionLocal
 from app.models.messenger_prompt import MessengerPrompt, MessengerPromptSource
+from app.api.auth import get_current_user
+from sqlalchemy import text
 
 router = APIRouter(prefix="/api/messenger_prompts", tags=["messenger_prompts"])
 
 FREE_PROMPT_LIMIT = 3
+
+
+def _assert_account_access(db, user, account_id: str):
+    """Keep prompt/settings mutations inside the same canonical tenant scope."""
+    if getattr(user, "role", "") == "owner":
+        return
+    uid = getattr(user, "id", 0)
+    own = db.execute(text(
+        "SELECT 1 FROM accounts WHERE account_id=:a AND owner_user_id=:u"
+    ), {"a": account_id, "u": uid}).fetchone()
+    access = db.execute(text(
+        "SELECT 1 FROM user_account_access WHERE account_id=:a AND user_id=:u AND can_view=TRUE"
+    ), {"a": account_id, "u": uid}).fetchone()
+    if not own and not access:
+        raise HTTPException(status_code=403, detail="Аккаунт недоступен")
 
 
 class CreatePromptRequest(BaseModel):
@@ -28,9 +45,10 @@ class UpdatePromptRequest(BaseModel):
 
 
 @router.post("/create")
-def create_prompt(req: CreatePromptRequest):
+def create_prompt(req: CreatePromptRequest, user=Depends(get_current_user)):
     db = SessionLocal()
     try:
+        _assert_account_access(db, user, req.account_id)
         active_count = db.query(MessengerPrompt).filter(
             MessengerPrompt.account_id == req.account_id,
             MessengerPrompt.is_active == True,
@@ -59,9 +77,10 @@ def create_prompt(req: CreatePromptRequest):
 
 
 @router.get("/list")
-def list_prompts(account_id: str):
+def list_prompts(account_id: str, user=Depends(get_current_user)):
     db = SessionLocal()
     try:
+        _assert_account_access(db, user, account_id)
         prompts = db.query(MessengerPrompt).filter(MessengerPrompt.account_id == account_id).all()
         result = []
         for p in prompts:
@@ -85,12 +104,13 @@ def list_prompts(account_id: str):
 
 
 @router.post("/{prompt_id}/update")
-def update_prompt(prompt_id: int, req: UpdatePromptRequest):
+def update_prompt(prompt_id: int, req: UpdatePromptRequest, user=Depends(get_current_user)):
     db = SessionLocal()
     try:
         prompt = db.query(MessengerPrompt).filter(MessengerPrompt.id == prompt_id).first()
         if not prompt:
             return {"status": "error", "message": "Промпт не найден"}
+        _assert_account_access(db, user, prompt.account_id)
         if req.label is not None:
             prompt.label = req.label
         if req.item_ids is not None:
@@ -104,13 +124,14 @@ def update_prompt(prompt_id: int, req: UpdatePromptRequest):
 
 
 @router.post("/{prompt_id}/toggle")
-def toggle_prompt(prompt_id: int):
+def toggle_prompt(prompt_id: int, user=Depends(get_current_user)):
     """Включить/выключить промпт временно (не удаляя) — если включаем, проверяем лимит."""
     db = SessionLocal()
     try:
         prompt = db.query(MessengerPrompt).filter(MessengerPrompt.id == prompt_id).first()
         if not prompt:
             return {"status": "error", "message": "Промпт не найден"}
+        _assert_account_access(db, user, prompt.account_id)
         if not prompt.is_active:
             active_count = db.query(MessengerPrompt).filter(
                 MessengerPrompt.account_id == prompt.account_id,
@@ -129,9 +150,13 @@ def toggle_prompt(prompt_id: int):
 
 
 @router.delete("/{prompt_id}")
-def delete_prompt(prompt_id: int):
+def delete_prompt(prompt_id: int, user=Depends(get_current_user)):
     db = SessionLocal()
     try:
+        prompt = db.query(MessengerPrompt).filter(MessengerPrompt.id == prompt_id).first()
+        if not prompt:
+            return {"status": "error", "message": "Промпт не найден"}
+        _assert_account_access(db, user, prompt.account_id)
         db.query(MessengerPromptSource).filter(MessengerPromptSource.prompt_id == prompt_id).delete()
         db.query(MessengerPrompt).filter(MessengerPrompt.id == prompt_id).delete()
         db.commit()

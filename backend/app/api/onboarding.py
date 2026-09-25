@@ -373,7 +373,12 @@ def _step_impl(body: StepBody, user) -> dict:
     db = SessionLocal()
     try:
         row = _ensure(db, user)
-        _guard_finished(row)
+
+        # Повторный PATCH от старой вкладки после уже успешного завершения
+        # должен быть идемпотентным. Иначе пользователь видит «мастер уже
+        # завершён» и остаётся на старом экране вместо нормального редиректа.
+        if row["status"] in FINISHED:
+            return _public(row)
 
         # нельзя перескочить экран: шаг N доступен, когда достигнут N-1
         if body.step - 1 > row["current_step"]:

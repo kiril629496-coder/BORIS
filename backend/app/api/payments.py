@@ -1,14 +1,37 @@
+# SECURITY NOTE: customer-facing payment reads/links are tenant-scoped; only the
+# signed Robokassa callback remains intentionally public.
 """
 Напоминания об оплате клиентов — ТОЛЬКО для владельца (панель Директора).
 Хранит по каждому аккаунту: дату оплаты, сумму, период (дней). Считает остаток и цвет.
 Клиенты этого НЕ видят — данные отдаются только в director_overview.
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
+from app.api.auth import get_current_user, require_owner
 from pydantic import BaseModel
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from app.services.exception_observability import observe_suppressed
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
+
+
+def _require_account_view(account_id: str, user):
+    from app.db.session import SessionLocal
+    from app.services.command_policy import account_visible
+    db = SessionLocal()
+    try:
+        if not account_visible(db, user, account_id):
+            raise HTTPException(status_code=403, detail="forbidden_account")
+    finally:
+        db.close()
+
+
+def _require_private_platform_owner(user=Depends(get_current_user)):
+    from app.services.platform_roles import is_private_platform_owner
+    if not is_private_platform_owner(user):
+        raise HTTPException(status_code=403, detail="private_platform_owner_required")
+    return user
+
 
 # Пороги напоминаний (дней до конца оплаты)
 WARN_YELLOW = 10   # 10..5 дней — жёлтый
@@ -56,7 +79,8 @@ class SetPaymentBody(BaseModel):
 
 
 @router.get("/status")
-def get_status(account_id: str):
+def get_status(account_id: str, user=Depends(get_current_user)):
+    _require_account_view(account_id, user)
     from app.db.session import SessionLocal
     db = SessionLocal()
     try:
@@ -66,7 +90,7 @@ def get_status(account_id: str):
 
 
 @router.post("/set")
-def set_payment(body: SetPaymentBody):
+def set_payment(body: SetPaymentBody, _owner=Depends(require_owner)):
     """Отметить оплату клиента (только владелец вызывает из панели Директора)."""
     from app.db.session import SessionLocal
     from app.models.storage import Storage
@@ -135,21 +159,197 @@ PACKAGES = {
 }
 
 
-def _is_agency(account_id: str) -> bool:
-    """Агентство или маркетолог — если заявлено больше одного аккаунта."""
+_PHONE_PRICE_STORAGE_ACCOUNT = "__platform_pricing__"
+_PHONE_PRICE_STORAGE_KEY = "phone_monthly"
+
+
+def _stored_phone_monthly_setting():
+    """Durable platform-owner override. Any stored row wins over environment fallback."""
     from app.db.session import SessionLocal
-    from sqlalchemy import text as _t
+    from sqlalchemy import text as _phone_price_text
     db = SessionLocal()
     try:
-        r = db.execute(_t("""SELECT planned_accounts FROM users
-                             WHERE account_id=:a
-                                OR id = (SELECT owner_user_id FROM accounts WHERE account_id=:a)
-                             LIMIT 1"""), {"a": account_id}).fetchone()
-        return str((r[0] if r else "") or "").strip() not in ("", "1")
+        raw = db.execute(_phone_price_text("""
+            SELECT value FROM storage
+            WHERE account_id=:a AND key=:k
+            ORDER BY id DESC LIMIT 1
+        """), {"a": _PHONE_PRICE_STORAGE_ACCOUNT, "k": _PHONE_PRICE_STORAGE_KEY}).scalar()
     except Exception:
-        return False
+        # Commercial pricing fails closed if the settings store is unavailable.
+        return None
     finally:
         db.close()
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except Exception:
+        return {"enabled": False, "invalid": True}
+    return data if isinstance(data, dict) else {"enabled": False, "invalid": True}
+
+
+def _configured_phone_monthly_package():
+    """Expose BORIS Phone only when a real positive commercial price is configured."""
+    stored = _stored_phone_monthly_setting()
+    if stored is not None:
+        if not bool(stored.get("enabled")):
+            return None
+        raw = stored.get("price_rub")
+    else:
+        raw = str(os.getenv("BORIS_PHONE_MONTHLY_PRICE_RUB", "") or "").strip()
+    try:
+        price = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if price <= 0:
+        return None
+    return {
+        "sum": price,
+        "unit": "phone_subscription",
+        "days": 30,
+        "title": "BORIS Phone",
+        "desc": "Телефония BORIS на 30 дней. Минуты оператора оплачиваются отдельно по тарифу связи.",
+    }
+
+
+def _package_catalog() -> dict:
+    """Single live catalog for UI, Robokassa and wallet; no import-time Phone price cache."""
+    out = dict(PACKAGES)
+    phone = _configured_phone_monthly_package()
+    if phone:
+        out["phone_monthly"] = phone
+    else:
+        out.pop("phone_monthly", None)
+    return out
+
+
+def _phone_commercial_settings_status() -> dict:
+    stored = _stored_phone_monthly_setting()
+    package = _configured_phone_monthly_package()
+    env_present = bool(str(os.getenv("BORIS_PHONE_MONTHLY_PRICE_RUB", "") or "").strip())
+    source = "platform_storage" if stored is not None else ("environment" if env_present else "not_configured")
+    return {
+        "status": "ok",
+        "enabled": bool(package),
+        "price_rub": int(package["sum"]) if package else None,
+        "source": source,
+        "stored_override_present": stored is not None,
+        "environment_fallback_present": env_present,
+        "truth": "Phone is saleable only when one positive real commercial price is configured.",
+    }
+
+
+class PhoneCommercialSettingsBody(BaseModel):
+    enabled: bool
+    price_rub: int | None = None
+    confirm: bool = False
+
+
+@router.get("/phone-commercial-settings")
+def phone_commercial_settings(_owner=Depends(_require_private_platform_owner)):
+    """Private platform-owner view. Never invents a price."""
+    _require_private_platform_owner(_owner)
+    return _phone_commercial_settings_status()
+
+
+@router.post("/phone-commercial-settings")
+def set_phone_commercial_settings(
+    body: PhoneCommercialSettingsBody,
+    _owner=Depends(_require_private_platform_owner),
+):
+    """Persist the one global BORIS Phone monthly sale price without editing .env."""
+    _require_private_platform_owner(_owner)
+    if not body.confirm:
+        raise HTTPException(status_code=409, detail="explicit_confirmation_required")
+    if body.enabled:
+        try:
+            price = int(body.price_rub)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="positive_price_required")
+        if price <= 0 or price > 10_000_000:
+            raise HTTPException(status_code=400, detail="positive_price_required")
+    else:
+        price = None
+
+    from app.db.session import SessionLocal
+    from sqlalchemy import text as _phone_price_text
+    payload = json.dumps({
+        "enabled": bool(body.enabled),
+        "price_rub": price,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }, ensure_ascii=False)
+    db = SessionLocal()
+    try:
+        db.execute(_phone_price_text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {
+            "k": "platform|phone_monthly_price"
+        })
+        rows = db.execute(_phone_price_text("""
+            SELECT id FROM storage
+            WHERE account_id=:a AND key=:k
+            ORDER BY id DESC
+            FOR UPDATE
+        """), {"a": _PHONE_PRICE_STORAGE_ACCOUNT, "k": _PHONE_PRICE_STORAGE_KEY}).fetchall()
+        if rows:
+            keep_id = int(rows[0][0])
+            db.execute(_phone_price_text("UPDATE storage SET value=:v WHERE id=:i"), {
+                "v": payload, "i": keep_id
+            })
+            if len(rows) > 1:
+                db.execute(_phone_price_text("""
+                    DELETE FROM storage
+                    WHERE account_id=:a AND key=:k AND id<>:i
+                """), {
+                    "a": _PHONE_PRICE_STORAGE_ACCOUNT,
+                    "k": _PHONE_PRICE_STORAGE_KEY,
+                    "i": keep_id,
+                })
+        else:
+            db.execute(_phone_price_text("""
+                INSERT INTO storage(account_id,key,value)
+                VALUES(:a,:k,:v)
+            """), {
+                "a": _PHONE_PRICE_STORAGE_ACCOUNT,
+                "k": _PHONE_PRICE_STORAGE_KEY,
+                "v": payload,
+            })
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    return _phone_commercial_settings_status()
+
+
+# Single authoritative tariff catalog for cabinet/payment UI.  Product packs
+# above remain the source for add-ons; tariff prices/limits come from billing.
+def _tariff_products(account_id: str) -> dict:
+    from app.api.billing import TARIFFS
+    from app.pricing import period_total
+    n = _n_accounts(account_id)
+    out = {}
+    for code in ("tariff_1", "tariff_2"):
+        t = TARIFFS[code]
+        total = period_total(n, code) if n > 1 else int(t["price_rub"])
+        per_account = int(total / n) if n else total
+        out[code] = {
+            "sum": total,
+            "title": t["name"],
+            "desc": (f"{n} аккаунт(а/ов) · {per_account:,} ₽ за аккаунт · 30 дней".replace(",", " ")
+                     if n > 1 else "Основной тариф BORIS · 30 дней"),
+            "days": 30,
+            "addon": False,
+            "unit": "tariff",
+            "accounts": n,
+            "price_per_account": per_account,
+            "limits": t["limits"],
+        }
+    return out
+
+
+def _is_agency(account_id: str) -> bool:
+    """Agency pricing applies to a real multi-account client, not a stale form field."""
+    return _n_accounts(account_id) > 1
 
 
 # Личные клиенты Кирилла — ведутся вручную, в расчёт по числу аккаунтов не входят
@@ -167,7 +367,11 @@ def _n_accounts(account_id: str) -> int:
                          {"a": account_id}).fetchone()
         if not own or not own[0] or int(own[0]) == OWNER_MANUAL_USER_ID:
             return 1
-        r = db.execute(_t("SELECT COUNT(*) FROM accounts WHERE owner_user_id=:o"),
+        r = db.execute(_t("""SELECT COUNT(*) FROM accounts
+                             WHERE owner_user_id=:o
+                               AND account_id NOT LIKE 'qa_%'
+                               AND account_id NOT LIKE 'test%'
+                               AND COALESCE(billing_mode,'') <> 'test'"""),
                        {"o": own[0]}).fetchone()
         return int(r[0] or 1) if r else 1
     except Exception:
@@ -199,22 +403,38 @@ def _shp_tail(acc: str, pack: str) -> list:
 
 
 @router.get("/prices")
-def prices(account_id: str):
+def prices(account_id: str, user=Depends(get_current_user)):
+    _require_account_view(account_id, user)
     """Цены под конкретного клиента: частник или агентство — решает planned_accounts."""
-    ag = _is_agency(account_id)
+    ag = _is_agency(account_id) or _n_accounts(account_id) > 1
     out = {}
-    for code, pack in PACKAGES.items():
-        out[code] = {"sum": _price(pack, account_id), "title": pack.get("title")}
+    for code, pack in _package_catalog().items():
+        out[code] = {
+            "sum": _price(pack, account_id),
+            "title": pack.get("title"),
+            "desc": pack.get("desc"),
+            "days": pack.get("days"),
+            "addon": bool(pack.get("addon")),
+            "unit": pack.get("unit"),
+        }
+    out.update(_tariff_products(account_id))
     return {"status": "ok", "сегмент": "агентство" if ag else "частник", "цены": out}
 
 
 @router.get("/robokassa/link")
-def robokassa_link(account_id: str, pack: str):
+def robokassa_link(account_id: str, pack: str, user=Depends(get_current_user)):
+    _require_account_view(account_id, user)
     """Ссылка на оплату с зашитым аккаунтом — начисление пойдёт автоматически."""
     if not RK_LOGIN or not RK_PASS1:
         return {"status": "error", "message": "Робокасса не настроена"}
 
-    if pack == "acc_upgrade":
+    if pack in ("tariff_1", "tariff_2"):
+        tp = _tariff_products(account_id).get(pack)
+        if not tp:
+            return {"status": "error", "message": f"Неизвестный тариф: {pack}"}
+        p = tp
+        out_sum = int(tp["sum"])
+    elif pack == "acc_upgrade":
         # доплата за подключённый аккаунт: сумму считаем ТОЛЬКО на сервере
         import json as _j
         from datetime import datetime as _dt
@@ -239,8 +459,8 @@ def robokassa_link(account_id: str, pack: str):
                     if d.get("period_start"):
                         passed = (_dt.utcnow() - _dt.fromisoformat(d["period_start"])).days
                         days_left = max(0, 30 - passed)
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=461)
             arow = db.query(_St).filter(_St.account_id == account_id, _St.key == "billing").first()
             due = 0
             if arow:
@@ -256,11 +476,13 @@ def robokassa_link(account_id: str, pack: str):
         finally:
             db.close()
     else:
-        if pack not in PACKAGES:
+        catalog = _package_catalog()
+        if pack not in catalog:
             return {"status": "error", "message": f"Неизвестный пакет: {pack}"}
-        p = PACKAGES[pack]
+        p = catalog[pack]
 
-    out_sum = f'{_price(p, account_id)}.00'
+    final_sum = int(p["sum"]) if pack in ("tariff_1", "tariff_2", "acc_upgrade") else _price(p, account_id)
+    out_sum = f'{final_sum}.00'
     sign = _rk_sign([RK_LOGIN, out_sum, 0, RK_PASS1] + _shp_tail(account_id, pack))
     url = ("https://auth.robokassa.ru/Merchant/Index.aspx"
            f"?MerchantLogin={RK_LOGIN}&OutSum={out_sum}&InvId=0"
@@ -284,13 +506,18 @@ async def robokassa_result(request: Request):
     expect = _rk_sign([out_sum, inv_id, RK_PASS2] + _shp_tail(acc, pack))
     if got != expect:
         return "bad sign"
-    if pack not in PACKAGES and pack != "acc_upgrade":
+    catalog = _package_catalog()
+    if pack not in catalog and pack not in ("acc_upgrade", "tariff_1", "tariff_2"):
         return "bad pack"
 
     from app.db.session import SessionLocal
     from app.models.storage import Storage
     from app.api.avito import _audit_log
-    p = PACKAGES.get(pack) or {"title": "Подключение аккаунта", "sum": float(out_sum or 0), "is_account": True}
+    if pack in ("tariff_1", "tariff_2"):
+        p = _tariff_products(acc).get(pack) or {"title": pack, "sum": float(out_sum or 0), "tier": pack}
+        p = {**p, "tier": pack}
+    else:
+        p = catalog.get(pack) or {"title": "Подключение аккаунта", "sum": float(out_sum or 0), "is_account": True}
     db = SessionLocal()
     try:
         grant_package(acc, pack, p, db, amount=out_sum, source="robokassa", inv_id=inv_id)
@@ -363,17 +590,68 @@ async def robokassa_result(request: Request):
 
 
 @router.get("/history")
-def payments_history(account_id: str):
+def payments_history(account_id: str, user=Depends(get_current_user)):
+    _require_account_view(account_id, user)
+    """Unified real payment history: current SQL ledger + legacy Storage rows."""
     from app.db.session import SessionLocal
     from app.models.storage import Storage
+    from sqlalchemy import text as _ht
     db = SessionLocal()
     try:
         row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "payments_history").first()
-        hist = json.loads(row.value) if row else []
-        return {"status": "ok", "history": hist, "total_rub": sum(h.get("amount_rub", 0) for h in hist)}
+        legacy = json.loads(row.value) if row else []
+        sql_rows = db.execute(_ht("""SELECT paid_at, created_at, pack, amount_rub, inv_id, comment, source
+                                   FROM payments WHERE account_id=:a AND status='paid'
+                                   ORDER BY COALESCE(paid_at, created_at) DESC"""), {"a": account_id}).fetchall()
+        hist = [{"at": (r[0] or r[1]).isoformat() if (r[0] or r[1]) else None,
+                 "pack": r[2] or "", "amount_rub": float(r[3] or 0),
+                 "inv_id": r[4], "title": r[5] or "Оплата BORIS", "source": r[6]}
+                for r in sql_rows]
+        seen = {(str(h.get("inv_id") or ""), str(h.get("pack") or ""), float(h.get("amount_rub") or 0)) for h in hist}
+        for h in legacy:
+            key = (str(h.get("inv_id") or ""), str(h.get("pack") or ""), float(h.get("amount_rub") or 0))
+            if key not in seen:
+                hist.append(h); seen.add(key)
+        hist.sort(key=lambda h: str(h.get("at") or ""), reverse=True)
+        return {"status": "ok", "history": hist, "total_rub": sum(float(h.get("amount_rub", 0) or 0) for h in hist)}
     finally:
         db.close()
 
+
+
+def _grant_phone_subscription_from_payment_ledger(acc, p, db, source, payment_ref):
+    """Idempotently materialize Phone from an already-recorded real payment."""
+    if not payment_ref:
+        return {"status": "phone_payment_reference_required", "active": False}
+    from sqlalchemy import text as _phone_text
+    row = db.execute(_phone_text("""
+        SELECT amount_rub, paid_at
+        FROM payments
+        WHERE account_id=:a AND source=:s AND inv_id=:i
+        ORDER BY id DESC LIMIT 1
+    """), {"a": acc, "s": source, "i": str(payment_ref)}).mappings().first()
+    if not row:
+        return {"status": "phone_payment_ledger_missing", "active": False}
+    paid_at = row.get("paid_at") or datetime.utcnow()
+    days = max(1, int(p.get("days", 30) or 30))
+    paid_until = paid_at + timedelta(days=days)
+    commercial_ref = f"payment:{source}:{payment_ref}"
+    from app.services.telephony_core import provision_paid_phone_entitlement
+    result = provision_paid_phone_entitlement(
+        acc,
+        paid_until,
+        commercial_ref,
+        actor_user_id=None,
+        price_rub=int(round(float(row.get("amount_rub") or 0))),
+        source=f"payment:{source}",
+    )
+    if bool(result.get("active")):
+        try:
+            import telephony_guardian_runner as _phone_guardian
+            _phone_guardian.mcn_mailbox_autoonboard_once()
+        except Exception as _guardian_e:
+            print("[payments] phone guardian refresh skipped:", type(_guardian_e).__name__)
+    return result
 
 
 def grant_package(acc, pack, p, db, amount=None, source="robokassa", inv_id=None):
@@ -385,21 +663,40 @@ def grant_package(acc, pack, p, db, amount=None, source="robokassa", inv_id=None
         _amt = float(amount if amount not in (None, "") else (p.get("sum") or 0))
     except Exception:
         _amt = 0.0
+    payment_ref = str(inv_id) if inv_id not in (None, "", "0") else None
+    ledger_inserted = True
     try:
         from sqlalchemy import text as _pt
-        db.execute(_pt(
+        ledger_row = db.execute(_pt(
             "insert into payments (account_id, source, pack, amount_rub, inv_id, comment) "
-            "values (:a, :s, :k, :m, :i, :c) on conflict do nothing"),
+            "values (:a, :s, :k, :m, :i, :c) on conflict do nothing returning id"),
             {"a": acc, "s": source, "k": pack, "m": _amt,
-             "i": (str(inv_id) if inv_id not in (None, "", "0") else None),
-             "c": p.get("title") or ""})
+             "i": payment_ref,
+             "c": p.get("title") or ""}).first()
         db.commit()
+        ledger_inserted = ledger_row is not None
     except Exception as _e:
         try:
             db.rollback()
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=680)
+        if payment_ref:
+            raise
         print("[payments] platezh ne zapisan:", _e)
+    if payment_ref and not ledger_inserted:
+        recovery = None
+        if p.get("unit") == "phone_subscription":
+            recovery = _grant_phone_subscription_from_payment_ledger(
+                acc, p, db, source, payment_ref
+            )
+        return {
+            "status": "duplicate_payment",
+            "account_id": acc,
+            "pack": pack,
+            "source": source,
+            "grant_skipped": p.get("unit") != "phone_subscription",
+            "phone_recovery": recovery,
+        }
     if "tier" in p:
         from app.api.billing import set_tier
         set_tier(acc, p["tier"], keep_extra=True)
@@ -409,6 +706,53 @@ def grant_package(acc, pack, p, db, amount=None, source="robokassa", inv_id=None
             row.value = json.dumps(data, ensure_ascii=False)
         else:
             db.add(Storage(account_id=acc, key="payment_status", value=json.dumps(data, ensure_ascii=False)))
+
+        # Автоматическая выдача оплаченного слота для «Единого центра сообщений».
+        # Без этого клиент после оплаты упирается в 402 /api/inbox/slots/connect
+        # и зависит от ручного действия owner через /api/inbox/slots/grant.
+        try:
+            from app.models.account import Account as _Account
+            from app.models.account_slot import AccountSlot as _AccountSlot
+            from app import inbox_pricing as _inbox_pricing
+            owner_id = db.query(_Account.owner_user_id).filter(_Account.account_id == acc).scalar()
+            if owner_id:
+                now = datetime.utcnow()
+                active_slot = db.query(_AccountSlot).filter(
+                    _AccountSlot.owner_user_id == owner_id,
+                    _AccountSlot.product == _inbox_pricing.PRODUCT,
+                    _AccountSlot.status.in_(("paid_empty", "connecting", "connected")),
+                    _AccountSlot.paid_until.isnot(None),
+                    _AccountSlot.paid_until > now,
+                ).first()
+                if active_slot is None:
+                    existing = db.query(_AccountSlot).filter(
+                        _AccountSlot.owner_user_id == owner_id,
+                        _AccountSlot.product == _inbox_pricing.PRODUCT,
+                    ).count()
+                    start = now
+                    until = now + timedelta(days=30)
+                    price = _inbox_pricing.add_slots_price(existing, 1)
+                    db.add(_AccountSlot(
+                        owner_user_id=owner_id,
+                        product=_inbox_pricing.PRODUCT,
+                        slot_no=existing + 1,
+                        status="paid_empty",
+                        period_start=start,
+                        paid_until=until,
+                        price_rub=int(price),
+                        payment_id=str(inv_id or "") or None,
+                    ))
+                    db.flush()
+        except Exception as _slot_e:
+            print("[payments] auto-slot grant skipped:", _slot_e)
+    elif p.get("unit") == "phone_subscription":
+        phone_result = _grant_phone_subscription_from_payment_ledger(
+            acc, p, db, source, payment_ref
+        )
+        if not bool(phone_result.get("active")):
+            raise RuntimeError(
+                "phone_entitlement_not_activated:" + str(phone_result.get("status") or "unknown")
+            )
     elif p.get("unit") == "messages":
         # пакет сообщений менеджера — начисляем купленный объём
         from app.api.messenger import add_manager_package
@@ -460,15 +804,19 @@ def grant_package(acc, pack, p, db, amount=None, source="robokassa", inv_id=None
             from app.api.billing import add_extra
             add_extra(acc, p["unit"], p["qty"])
 
-    # единый сервис лимитов продукта: период не создаёт, читает уже выставленный
+    # Единый сервис дополнительных продуктовых лимитов относится только к
+    # пакетам, которые явно описаны в PRODUCT_LIMITS. Phone и другие независимые
+    # продукты не должны проходить через reactivation-контур и создавать ложный
+    # warning "неизвестный пакет" после успешной оплаты.
     try:
         import logging as _lg
-        from app.product_limits import grant_product_limits
-        _pl = grant_product_limits(db, acc, pack)
-        if _pl.get("status") not in ("granted", "no_reactivation_limit"):
-            _lg.getLogger(__name__).warning(
-                "реактивация: лимит не начислен (%s), пакет=%s аккаунт=%s",
-                _pl.get("status"), pack, acc)
+        from app.product_limits import PRODUCT_LIMITS, grant_product_limits
+        if pack in PRODUCT_LIMITS:
+            _pl = grant_product_limits(db, acc, pack)
+            if _pl.get("status") not in ("granted", "no_reactivation_limit"):
+                _lg.getLogger(__name__).warning(
+                    "реактивация: лимит не начислен (%s), пакет=%s аккаунт=%s",
+                    _pl.get("status"), pack, acc)
     except Exception as _e:
         import logging as _lg
         _lg.getLogger(__name__).error(

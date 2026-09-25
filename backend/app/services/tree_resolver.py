@@ -11,6 +11,7 @@
 """
 import json
 import re
+from app.services.exception_observability import observe_suppressed
 
 SEP = " > "
 MAX_DEPTH = 8
@@ -315,8 +316,8 @@ def resolve_by_tree(user_text, account_id=None, answers=None, use_cache=True, db
                 if use_cache and account_id:
                     try:
                         _cache_put(db, account_id, ckey, dict(out))
-                    except Exception:
-                        pass
+                    except Exception as _suppressed_exc:
+                        observe_suppressed(__name__, _suppressed_exc, line=318)
                 return out
             # шаблона нет — не сдаёмся, идём обычным спуском
             out["status"] = "not_found"
@@ -422,8 +423,8 @@ def resolve_by_tree(user_text, account_id=None, answers=None, use_cache=True, db
         if use_cache and account_id and out["status"] == "ok":
             try:
                 _cache_put(db, account_id, ckey, dict(out))
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=425)
         return out
     finally:
         if own:

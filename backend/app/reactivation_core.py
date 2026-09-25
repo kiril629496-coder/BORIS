@@ -16,9 +16,11 @@ CAND_ACTIVE = ("candidate", "needs_review", "approved", "scheduled",
 
 CAND_TRANSITIONS = {
     "candidate":        ("needs_review", "approved", "not_eligible", "excluded",
-                         "do_not_contact", "expired", "cancelled"),
-    "needs_review":     ("approved", "not_eligible", "excluded", "do_not_contact", "cancelled"),
-    "approved":         ("scheduled", "cancelled", "excluded", "do_not_contact"),
+                         "do_not_contact", "expired", "cancelled", "replied", "manager_taken_over"),
+    "needs_review":     ("approved", "not_eligible", "excluded", "do_not_contact", "cancelled",
+                         "replied", "manager_taken_over"),
+    "approved":         ("scheduled", "cancelled", "excluded", "do_not_contact", "replied",
+                         "manager_taken_over"),
     "scheduled":        ("sending", "cancelled", "replied", "manager_taken_over"),
     "sending":          ("sent", "delivery_unknown", "failed_final", "cancelled"),
     "sent":             ("replied", "converted", "cooldown", "manager_taken_over",
@@ -39,10 +41,11 @@ CAND_TRANSITIONS = {
 
 MSG_TRANSITIONS = {
     "draft":            ("ready", "cancelled"),
-    "ready":            ("scheduled", "cancelled"),
+    "ready":            ("scheduled", "blocked", "cancelled"),
     "scheduled":        ("sending", "cancelled"),
     "sending":          ("sent", "failed", "delivery_unknown"),
-    "failed":           ("scheduled", "cancelled"),
+    "failed":           ("scheduled", "blocked", "cancelled"),
+    "blocked":          ("ready", "cancelled"),
     "delivery_unknown": ("sent", "cancelled"),
     "sent":             (),
     "cancelled":        (),
@@ -51,7 +54,7 @@ MSG_TRANSITIONS = {
 EVENTS = (
     "candidate_created", "analyzed", "analysis_failed", "not_eligible", "needs_review",
     "approved", "message_generated", "message_edited", "scheduled", "dry_run_pass",
-    "message_ready", "send_started", "sent", "send_failed", "delivery_unclear",
+    "message_ready", "send_started", "sent", "send_failed", "transport_blocked", "transport_restored", "delivery_unclear",
     "delivery_resolved",
     "client_replied", "manager_takeover", "converted", "cancelled", "excluded",
     "do_not_contact", "cooldown_started", "expired", "sync_failed", "limit_blocked",
@@ -93,7 +96,7 @@ def _now():
 # ------------------------------------------------------------------- журнал
 
 def log_event(db, candidate_id, event, message_id=None, from_status=None,
-              to_status=None, actor_type="system", actor_id=None, channel=None,
+              to_status=None, actor_type="system", actor_id=None, channel="avito_messenger",
               payload=None, meta=None):
     """Пишет строку в append-only журнал. Коммит делает вызывающий."""
     db.execute(text(
@@ -276,7 +279,8 @@ def mark_sent(db, message_id, avito_message_id=None, sent_at=None):
         "UPDATE reactivation_candidates SET status='sent', attempts=attempts+1,"
         " watch_since=:ts, updated_at=now() WHERE id=:c AND status IN ('sending','delivery_unknown')"),
         {"ts": ts, "c": row[0]})
-    log_event(db, row[0], "sent", message_id=message_id, from_status=row[2],
+    event = "delivery_resolved" if row[2] == "delivery_unknown" else "sent"
+    log_event(db, row[0], event, message_id=message_id, from_status=row[2],
               to_status="sent", meta={"attempt": row[1], "avito_message_id": avito_message_id})
     return True
 
@@ -380,17 +384,25 @@ def settings_for(db, account_id):
     row = db.execute(text(
         "SELECT enabled, mode, reasons_enabled, daily_limit, min_interval_minutes,"
         " max_interval_minutes, max_attempts_per_dialog, attempts_window_days, cooldown_days,"
-        " allowed_hours_from, allowed_hours_to, timezone, disabled_reason"
+        " allowed_hours_from, allowed_hours_to, timezone, disabled_reason, updated_at"
         " FROM reactivation_settings WHERE account_id=:a"), {"a": account_id}).fetchone()
     if not row:
         return None
     keys = ("enabled", "mode", "reasons_enabled", "daily_limit", "min_interval_minutes",
             "max_interval_minutes", "max_attempts_per_dialog", "attempts_window_days",
             "cooldown_days", "allowed_hours_from", "allowed_hours_to", "timezone",
-            "disabled_reason")
+            "disabled_reason", "updated_at")
     return dict(zip(keys, row))
 
 
 def enabled_accounts(db):
-    return [r[0] for r in db.execute(text(
-        "SELECT account_id FROM reactivation_settings WHERE enabled = true ORDER BY account_id"))]
+    return [r[0] for r in db.execute(text("""
+        SELECT s.account_id FROM reactivation_settings s
+         WHERE s.enabled=true
+           AND NOT EXISTS (
+               SELECT 1 FROM reliability_kill_switches r
+                WHERE r.account_id=s.account_id AND r.blocked=true
+                  AND r.module IN ('actions','background','messages','reactivation')
+           )
+         ORDER BY s.account_id
+    """))]

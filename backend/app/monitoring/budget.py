@@ -33,7 +33,10 @@ DEFAULT_ACCOUNT = os.getenv("MONITOR_LLM_ACCOUNT", "boris_monitoring")
 # ------------------------------------------------------------ настройки
 
 def usd_rub() -> float:
-    return float(os.getenv("MONITOR_USD_RUB", "100"))
+    from app.usage import USD_TO_RUB
+    # свой литерал 100 убран: дефолт берётся из единого источника,
+    # а явная MONITOR_USD_RUB по-прежнему имеет приоритет
+    return float(os.getenv("MONITOR_USD_RUB", str(USD_TO_RUB)))
 
 
 def budget_usd(account_id: str = DEFAULT_ACCOUNT) -> float:
@@ -196,11 +199,18 @@ def notify_key(account_id: str = DEFAULT_ACCOUNT,
     return f"budget_alert:{account_id}:{now.year}-{now.month:02d}"
 
 
+def _key16(key: str) -> str:
+    """monitor_runs.mode — varchar(16), полный ключ туда не влезает.
+    Пишем устойчивый отпечаток; период уже внутри key, месяцы не схлопнутся."""
+    import hashlib
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+
 def already_notified(cur, key: str) -> bool:
     """Проверяет по monitor_runs-маркеру, слали ли уже уведомление в этом периоде."""
     cur.execute(
         "SELECT 1 FROM monitor_runs WHERE mode = %s AND status = 'budget_alert' LIMIT 1",
-        (key,))
+        (_key16(key),))
     return cur.fetchone() is not None
 
 
@@ -209,4 +219,4 @@ def mark_notified(cur, key: str) -> None:
     cur.execute(
         "INSERT INTO monitor_runs (id, platform, mode, status, started_at) "
         "VALUES (%s, %s, %s, 'budget_alert', %s)",
-        (store._uuid(), "budget", key, store._now()))
+        (store._uuid(), "budget", _key16(key), store._now()))

@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from sqlalchemy import text
 from app.db.session import SessionLocal
+from app.services.exception_observability import observe_suppressed
 
 STAGES = [
     (1, "Зарегистрирован", "Аккаунт создан, дальше нужно подключить Avito"),
@@ -20,6 +21,11 @@ def stage_of(account_id: str, db=None) -> dict:
     try:
         a = db.execute(text("""SELECT avito_client_id, company_description, company_niche, created_at
                                FROM accounts WHERE account_id=:a"""), {"a": account_id}).fetchone()
+        if a is not None and not str(a[2] or "").strip():  # NICHE_RESOLVER_V1
+            from app.services.niche_resolver import business_niche as _bn
+            _rn = _bn(account_id, db=db)
+            if _rn:
+                a = (a[0], a[1], _rn, a[3])
         if not a:
             return {"status": "error", "message": "аккаунт не найден"}
 
@@ -91,11 +97,48 @@ def track(account_id: str, db=None) -> dict:
             db.close()
 
 
+def read_stage(account_id: str, db=None) -> dict:
+    """READ_STAGE_V1: стадия и часы БЕЗ побочных эффектов.
+
+    track() фиксирует переход и поэтому пишет в onboarding_progress.
+    Диагностика и отчёты обязаны ходить сюда: чтение не создаёт строку
+    и не обнуляет reached_at.
+    """
+    own = db is None
+    db = db or SessionLocal()
+    try:
+        st = stage_of(account_id, db)
+        if st.get("status") != "ok":
+            return st
+        row = db.execute(text("SELECT stage, reached_at, nudged_at, nudge_count"
+                              " FROM onboarding_progress WHERE account_id=:a"),
+                         {"a": account_id}).fetchone()
+        now = datetime.utcnow()
+        if not row:
+            st["часов_на_стадии"] = None
+            st["замер"] = False
+            st["напоминаний_послано"] = 0
+            st["последнее_напоминание"] = None
+            st["прогресс_не_зафиксирован"] = True
+            return st
+        stored_stage, reached, nudged, ncount = row[0], row[1], row[2], row[3] or 0
+        hours = round((now - reached).total_seconds() / 3600, 1) if reached else None
+        st["часов_на_стадии"] = hours
+        st["замер"] = bool(st["стадия"] < 6 and hours is not None and hours >= 24)
+        st["напоминаний_послано"] = ncount
+        st["последнее_напоминание"] = nudged.isoformat() if nudged else None
+        st["стадия_в_прогрессе"] = stored_stage
+        return st
+    finally:
+        if own:
+            db.close()
+
+
 def stuck_accounts(min_hours: int = 24) -> list:
     """Кто замер: стадия ниже 6 и стоит на ней дольше min_hours."""
     db = SessionLocal()
     try:
-        ids = [r[0] for r in db.execute(text("SELECT account_id FROM accounts WHERE billing_mode='auto' OR billing_mode IS NULL")).fetchall()]
+        ids = [r[0] for r in db.execute(text("SELECT account_id FROM accounts  -- DO_FOR_ALL_BILLING_V1")).fetchall()]
         out = []
         for a in ids:
             r = track(a, db)
@@ -129,9 +172,26 @@ MAX_NUDGES_PER_STAGE = 3
 NUDGE_COOLDOWN_HOURS = 24
 
 
+
+def _nudge_billing_ok(account_id: str) -> bool:  # NUDGE_BILLING_GATE_V1
+    """Подсказки клиентам остаются в прежнем круге billing_mode. fail-closed."""
+    db = SessionLocal()
+    try:
+        bm = db.execute(text("SELECT billing_mode FROM accounts WHERE account_id=:a"),
+                        {"a": account_id}).scalar()
+        return bm is None or bm == "auto"
+    except Exception:
+        return False
+    finally:
+        db.close()
+
+
 def nudge(account_id: str, force: bool = False, db=None) -> dict:
     """Подсказать клиенту, что делать дальше. Не чаще раза в сутки и не больше 3 раз на стадию —
     навязчивость злит сильнее, чем молчание."""
+    # NUDGE_BILLING_GATE_V1 — расширение do_for не расширяет круг видимых клиенту действий
+    if not _nudge_billing_ok(account_id):
+        return {"status": "skip", "reason": "подсказки отключены для billing_mode"}
     import json as _json
     own = db is None
     db = db or SessionLocal()
@@ -158,24 +218,10 @@ def nudge(account_id: str, force: bool = False, db=None) -> dict:
         if not title:
             return {"status": "skip", "reason": "нет текста для стадии %s" % stage}
 
-        # 1) уведомление в кабинет
-        srow = db.execute(text("SELECT value FROM storage WHERE account_id=:a AND key='notifications'"),
-                          {"a": account_id}).fetchone()
-        items = []
-        if srow and srow[0]:
-            try:
-                items = _json.loads(srow[0])
-            except Exception:
-                items = []
-        items.append({"ts": datetime.utcnow().replace(microsecond=0).isoformat(),
-                      "text": "💡 %s — %s" % (title, body), "related_results": [], "read": False})
-        val = _json.dumps(items[-50:], ensure_ascii=False)
-        if srow:
-            db.execute(text("UPDATE storage SET value=:v WHERE account_id=:a AND key='notifications'"),
-                       {"v": val, "a": account_id})
-        else:
-            db.execute(text("INSERT INTO storage (account_id, key, value) VALUES (:a,'notifications',:v)"),
-                       {"a": account_id, "v": val})
+        # 1) уведомление в кабинет — атомарно, без потери параллельных сообщений.
+        from app.services.notification_store import append_notification as _append_notification
+        _append_notification(db, account_id, {"ts": datetime.utcnow().replace(microsecond=0).isoformat(),
+                      "text": "💡 %s — %s" % (title, body), "related_results": [], "read": False}, commit=True)
 
         # 2) дублируем в Telegram, если клиент его подключил
         tg = "не отправляли"
@@ -241,6 +287,9 @@ def do_for(account_id: str, force: bool = False, db=None) -> dict:
         acc = db.execute(text("""SELECT company_niche, company_description, company_website
                                  FROM accounts WHERE account_id=:a"""), {"a": account_id}).fetchone()
         niche = (acc[0] or "").strip() if acc else ""
+        if not niche:  # NICHE_RESOLVER_V1
+            from app.services.niche_resolver import ensure_profile_niche as _epn
+            niche = (_epn(account_id, db=db) or {}).get("niche") or ""
         site = _clean_url(acc[2] if acc else "")
         done = []
 
@@ -293,23 +342,9 @@ def do_for(account_id: str, force: bool = False, db=None) -> dict:
         txt = ("Пока вы были заняты, я сделал часть работы за вас: " + ", ".join(done) +
                ". Загляните в кабинет — проверьте и, если всё нравится, отправляйте на Avito. "
                "Публиковать сам я не стал: последнее слово за вами.")
-        srow = db.execute(text("SELECT value FROM storage WHERE account_id=:a AND key='notifications'"),
-                          {"a": account_id}).fetchone()
-        items = []
-        if srow and srow[0]:
-            try:
-                items = _json.loads(srow[0])
-            except Exception:
-                items = []
-        items.append({"ts": datetime.utcnow().replace(microsecond=0).isoformat(),
-                      "text": "\U0001F916 " + txt, "related_results": [], "read": False})
-        val = _json.dumps(items[-50:], ensure_ascii=False)
-        if srow:
-            db.execute(text("UPDATE storage SET value=:v WHERE account_id=:a AND key='notifications'"),
-                       {"v": val, "a": account_id})
-        else:
-            db.execute(text("INSERT INTO storage (account_id, key, value) VALUES (:a,'notifications',:v)"),
-                       {"a": account_id, "v": val})
+        from app.services.notification_store import append_notification as _append_notification
+        _append_notification(db, account_id, {"ts": datetime.utcnow().replace(microsecond=0).isoformat(),
+                      "text": "\U0001F916 " + txt, "related_results": [], "read": False}, commit=True)
 
         chat = db.execute(text("SELECT telegram_chat_id FROM accounts WHERE account_id=:a"),
                           {"a": account_id}).fetchone()
@@ -317,8 +352,8 @@ def do_for(account_id: str, force: bool = False, db=None) -> dict:
             try:
                 from app.telegram_bot import send_telegram_message
                 send_telegram_message(chat[0], txt)
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=354)
         db.commit()
         return {"status": "ok", "стадия": stage, "сделано": done}
     finally:

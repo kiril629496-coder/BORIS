@@ -1,4 +1,5 @@
 from app.services.marketing_clock import marketing_today, marketing_today_iso
+from app.services.exception_observability import observe_suppressed
 """
 Борис-Советник по ставкам (CPX). Читает ставки + статистику + целевой CPL,
 считает по формуле и складывает РЕКОМЕНДАЦИИ в Storage (ключ cpx_advice).
@@ -59,6 +60,27 @@ def _owner_manual_bid_override(db, account_id: str, item_id: int):
     entry = (items or {}).get(str(int(item_id))) if isinstance(items, dict) else None
     if not isinstance(entry, dict) or not entry.get("active", True):
         return None
+    # OWNER_OVERRIDE_UNTIL_BUDGET_AUTH_V1: a manual owner rescue after a
+    # marketer incident protects the exact live bid from every autonomous
+    # raise/lower/rollback while there is no newly authorized positive daily
+    # budget. Once the owner explicitly authorizes a positive budget through
+    # the authenticated KPI settings flow, normal autopilot control resumes.
+    if str(entry.get("scope") or "") == "until_positive_daily_budget":
+        kpi = _load_json(db, account_id, "kpi_settings") or {}
+        try:
+            daily = float(kpi.get("daily_budget_limit_rub") or 0)
+        except Exception:
+            daily = 0.0
+        auth = kpi.get("daily_budget_authorization") if isinstance(kpi.get("daily_budget_authorization"), dict) else {}
+        budget_proven = bool(
+            daily > 0
+            and str(auth.get("policy_version") or "") == "MONEY_BUDGET_OWNER_PROVENANCE_V1"
+            and int(auth.get("authorized_by_user_id") or 0) > 0
+            and float(auth.get("daily_budget_limit_rub") or -1) == daily
+            and str(auth.get("source") or "") == "authenticated_set_kpi_settings"
+        )
+        if budget_proven:
+            return None
     return entry
 
 
@@ -413,7 +435,25 @@ def run_advisor(account_id: str = "otdushi"):
             except Exception:
                 _sp_ok = False
         spent = _sp_val if _sp_ok else None
-        acct_cpl = round(spent / total_contacts, 2) if (spent is not None and spent > 0 and total_contacts > 0) else None
+        # CPX_ADVISOR_CPL_AD_SPEND_ONLY_V1:
+        # `spent` remains the complete provider spend used for the owner's daily
+        # budget guard. CPL, however, must divide contacts by advertising spend
+        # only; unrelated `rest` charges must not make a 500-ruble lead look like
+        # 600 rubles. Fail closed to the total spend unless the same fresh stats
+        # sample proves an exact ad_spend_rub value with the same provider stamp.
+        cpl_spent = spent
+        try:
+            _stats_spending = (stats or {}).get("spending") if isinstance(stats, dict) else None
+            _stats_sp_ts = float((_stats_spending or {}).get("timestamp") or 0) if isinstance(_stats_spending, dict) else 0.0
+            _stats_ad_sp = float((_stats_spending or {}).get("ad_spend_rub")) if isinstance(_stats_spending, dict) and (_stats_spending or {}).get("ad_spend_rub") is not None else None
+            if (_sp_ok and _stats_money_fresh and isinstance(_stats_spending, dict)
+                    and _stats_spending.get("status") == "ok"
+                    and _stats_ad_sp is not None and _stats_ad_sp >= 0
+                    and abs(_stats_sp_ts - _sp_ts) <= 1e-6):
+                cpl_spent = _stats_ad_sp
+        except Exception:
+            cpl_spent = spent
+        acct_cpl = round(cpl_spent / total_contacts, 2) if (cpl_spent is not None and cpl_spent > 0 and total_contacts > 0) else None
 
         limit_pct = None
         # Recommendation layer is fail-closed too. Actual mutation has a second
@@ -490,9 +530,21 @@ def run_advisor(account_id: str = "otdushi"):
             # Older builds could open one feed20 measurement every hour. Compact
             # that historical overflow locally before normal measurement sweep.
             # No Avito mutation and no winner/loser verdict is created.
+            # ACCOUNT_RAISE_MEASUREMENT_PRESSURE_RELIEF_V1:
+            # Exactly-full evidence debt must not freeze an under-performing
+            # account indefinitely. Close only local excess measurement rows as
+            # inconclusive; this stage never writes a bid to Avito.
+            _pre_compaction_summary = _active_raise_measurement_summary(db, account_id)
+            _pre_compaction_count = int(_pre_compaction_summary.get("active_count") or 0)
+            _pressure_relief_cap = MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT
+            if _pre_compaction_count >= MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT:
+                _pressure_relief_cap = max(2, MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT // 2)
             measurement_compaction = _compact_raise_measurement_backlog(
-                db, account_id, MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT
+                db, account_id, _pressure_relief_cap
             )
+            if _pressure_relief_cap < MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT:
+                measurement_compaction["pressure_relief"] = True
+                measurement_compaction["normal_cap"] = MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT
             from app.models.storage import Storage as _MeasureStorage
             measure_rows = (
                 db.query(_MeasureStorage)
@@ -776,6 +828,23 @@ def run_advisor(account_id: str = "otdushi"):
                 watching.append(entry)
                 continue
 
+            # RED_CPL_LOWER_MEASURE_LOCK_FILTER_V1:
+            # Never emit another lower recommendation for an item whose previous
+            # lower is still being measured. The final apply guard already blocks
+            # this, but filtering here prevents a stale/self-contradictory plan
+            # from repeatedly selecting the same item and starving the next
+            # eligible spend-reducing candidate. Raise measurements remain a
+            # separate action key and do not block a safety lower by themselves.
+            if (
+                str(entry.get("boris_measure_status") or "") == "waiting_measurement"
+                and str(last_action or "") == "lower"
+            ):
+                entry["reason_code"] = "measure_locked"
+                entry["why"] = "Предыдущее снижение ставки этого объявления ещё измеряется; повторное снижение до завершения замера запрещено."
+                entry["suggest"] = "дождаться завершения текущего lower-замера; BORIS автоматически рассмотрит следующий свободный waste-кандидат"
+                watching.append(entry)
+                continue
+
             # RED_CPL_CURRENT_DAY_PAID_WASTE_V1:
             # Historical converters are not immune to a bad current day. Once
             # the account has already met today's lead target, confirmed account
@@ -825,7 +894,12 @@ def run_advisor(account_id: str = "otdushi"):
                 entry["reason_code"] = "few_views"
                 entry["why"] = f"{v7} просмотров, 0 обращений — пока рано делать вывод"
                 watching.append(entry)
-            elif _is_archived(db, account_id, iid):
+            # CPX_ARCHIVE_PROVIDER_TRUTH_OVERRIDES_STALE_FLAG_V1:
+            # cpx_archived:* is only a historical idempotency hint. Fresh Avito
+            # promotion truth is authoritative: if the provider confirms that
+            # the exact item is paid right now, an old local archive flag must
+            # not hide it from red-CPL lower recovery.
+            elif _is_archived(db, account_id, iid) and not bool(entry.get("promotion_active")):
                 entry["reason_code"] = "already_off"
                 entry["why"] = f"{v7} просмотров, 0 обращений — продвижение уже отключено"
                 watching.append(entry)
@@ -1150,13 +1224,53 @@ MEASURE_MIN_DAYS = 1         # DAILY_BID_LEARNING_V1: ежедневный feedb
 MEASURE_NO_SIGNAL_MAX_DAYS = 7  # MEASURE_NO_SIGNAL_TIMEOUT_V1: never lock an item forever
 MEASURE_COOLDOWN_DAYS = 1    # DAILY_BID_LEARNING_V1: после суточного verdict следующий шаг не раньше следующего дня
 # ACCOUNT_RAISE_MEASUREMENT_BACKLOG_CAP_V1:
-# Keep at most two unresolved autonomous raise hypotheses per account. This is
-# an evidence/causality ceiling, not a spend quota. Safety lower/reset actions
-# remain available even while raise experiments are waiting.
+# Keep at most two top-10 portfolios (20 items) of unresolved autonomous raise
+# hypotheses per account. Each item still has one hypothesis at a time, every
+# write keeps the <=10% step, hard bid cap and daily-budget/CPL guards. This
+# prevents a two-item evidence bottleneck from defeating the daily KPI while
+# retaining a bounded account-level evidence-debt ceiling.
 MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT = 2
 DEFAULT_MIN_BID_RUB = 3      # минимальная ставка при снижении, ₽
 NEW_ITEM_NO_PROMO_MIN_BID_MARKUP_PCT = GLOBAL_MAX_BID_DELTA_PCT  # NEW_FEED_FIRST_BID_GLOBAL_STEP_V1: first activation shares the same <=10% global money step
 ARCHIVE_MIN_VIEWS = 50       # архивировать только при >= стольких показов без контактов
+
+
+def _provider_set_manual_bid(*, account_id: str, token: str, item_id: int, action_type_id: int, bid_penny: int, timeout: int = 20):
+    """Canonical low-level owner of the Avito CPX setManual side effect.
+
+    Callers may implement their own policy/receipt/readback flow, but no other
+    module may POST to cpxpromo/setManual directly. Tenant scope is mandatory.
+    """
+    tenant = str(account_id or "").strip()
+    if not tenant:
+        raise ValueError("tenant_scope_required:AVITO_BID_WRITE")
+    if not str(token or "").strip():
+        raise ValueError("provider_token_required:AVITO_BID_WRITE")
+    if int(item_id) <= 0 or int(action_type_id) <= 0 or int(bid_penny) < 0:
+        raise ValueError("invalid_provider_write_payload:AVITO_BID_WRITE")
+    return httpx.post(
+        "https://api.avito.ru/cpxpromo/1/setManual",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"actionTypeID": int(action_type_id), "bidPenny": int(bid_penny), "itemID": int(item_id)},
+        timeout=int(timeout),
+    )
+
+
+def _provider_remove_promotion(*, account_id: str, token: str, item_id: int, timeout: int = 20):
+    """Canonical low-level owner of the Avito CPX remove side effect."""
+    tenant = str(account_id or "").strip()
+    if not tenant:
+        raise ValueError("tenant_scope_required:AVITO_PROMOTION_WRITE")
+    if not str(token or "").strip():
+        raise ValueError("provider_token_required:AVITO_PROMOTION_WRITE")
+    if int(item_id) <= 0:
+        raise ValueError("invalid_provider_write_payload:AVITO_PROMOTION_WRITE")
+    return httpx.post(
+        "https://api.avito.ru/cpxpromo/1/remove",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"itemID": int(item_id)},
+        timeout=int(timeout),
+    )
 
 
 class ApplyOneBody(BaseModel):
@@ -1205,11 +1319,14 @@ def _native_provider_probe_first_bid_preflight(db, body):
     paid-tariff mandate, money guards, receipt and hard cap still run later in
     apply_one before setManual.
     """
+    _fb_source = str(getattr(body, "source", "") or "")
+    _fb_trigger = str(getattr(body, "trigger", "") or "")
+    _lowviews_first_bid_lane = (_fb_source == "account_low_views_ramp" and _fb_trigger == "daily_views_below_30")
+    _pacing_first_bid_lane = (_fb_source == "daily_budget_pacing_first_bid" and _fb_trigger == "daily_budget_underpace")
     if not (
         str(getattr(body, "action", "") or "") == "raise"
         and str(getattr(body, "actor_type", "") or "").lower() in {"boris_auto", "autopilot", "system"}
-        and str(getattr(body, "source", "") or "") == "account_low_views_ramp"
-        and str(getattr(body, "trigger", "") or "") == "daily_views_below_30"
+        and (_lowviews_first_bid_lane or _pacing_first_bid_lane)
     ):
         return {"eligible": False, "reason_code": "not_native_first_bid_lane"}
 
@@ -1220,7 +1337,7 @@ def _native_provider_probe_first_bid_preflight(db, body):
         _cgroup = _Path_native_fb("/proc/self/cgroup").read_text(errors="ignore")
     except Exception:
         _cgroup = ""
-    if "boris-ai-marketer.service" not in _cgroup:
+    if not any(_svc in _cgroup for _svc in {"boris-ai-marketer.service", "boris-daily-budget-pacing.service"}):
         return {"eligible": False, "blocked": True,
                 "reason_code": "untrusted_native_first_bid_caller"}
 
@@ -1246,7 +1363,7 @@ def _native_provider_probe_first_bid_preflight(db, body):
             _old_native = _new_native = 0
         if (
             _ms.get("status") == "waiting_measurement"
-            and str(_ms.get("source") or "") == "account_low_views_ramp"
+            and str(_ms.get("source") or "") in {"account_low_views_ramp", "daily_budget_pacing_first_bid"}
             and str(_ms.get("money_identity_proof") or "") == "cpx_execution_receipt"
             and _old_native <= 0 < _new_native
         ):
@@ -1281,27 +1398,42 @@ def _native_provider_probe_first_bid_preflight(db, body):
             advice_fresh = False
 
     candidate = None
-    raises = ((advice.get("recommendations") or {}).get("raise") or [])
-    for rec in raises if isinstance(raises, list) else []:
-        if not isinstance(rec, dict):
-            continue
-        try:
-            rid = int(rec.get("id") or rec.get("item_id") or 0)
-        except Exception:
-            rid = 0
-        if rid == int(body.item_id):
-            candidate = rec
+    _recs = advice.get("recommendations") or {}
+    _groups = ("raise", "watching") if _pacing_first_bid_lane else ("raise",)
+    for _group in _groups:
+        _rows = _recs.get(_group) or []
+        for rec in _rows if isinstance(_rows, list) else []:
+            if not isinstance(rec, dict):
+                continue
+            try:
+                rid = int(rec.get("id") or rec.get("item_id") or 0)
+            except Exception:
+                rid = 0
+            if rid == int(body.item_id):
+                candidate = rec
+                break
+        if candidate is not None:
             break
 
-    proven = bool(
-        advice_fresh
-        and isinstance(candidate, dict)
-        and str(candidate.get("write_capability") or "") == "provider_probe_money"
-        and str(candidate.get("reason_code") or "") == "has_contacts"
-        and int(candidate.get("contacts_7d") or 0) > 0
-        and not bool(candidate.get("promotion_active"))
-        and str(candidate.get("boris_measure_status") or "") != "waiting_measurement"
-    )
+    if _pacing_first_bid_lane:
+        proven = bool(
+            advice_fresh
+            and isinstance(candidate, dict)
+            and str(candidate.get("write_capability") or "") in {"provider_probe_money", "canonical"}
+            and (int(candidate.get("contacts_7d") or 0) > 0 or int(candidate.get("views_7d") or 0) >= 5)
+            and not bool(candidate.get("promotion_active"))
+            and str(candidate.get("boris_measure_status") or "") != "waiting_measurement"
+        )
+    else:
+        proven = bool(
+            advice_fresh
+            and isinstance(candidate, dict)
+            and str(candidate.get("write_capability") or "") == "provider_probe_money"
+            and str(candidate.get("reason_code") or "") == "has_contacts"
+            and int(candidate.get("contacts_7d") or 0) > 0
+            and not bool(candidate.get("promotion_active"))
+            and str(candidate.get("boris_measure_status") or "") != "waiting_measurement"
+        )
     if not proven:
         return {"eligible": False, "reason_code": "native_first_bid_advice_not_proven",
                 "advice_generated_at": generated_at or None,
@@ -1322,7 +1454,7 @@ def _native_provider_probe_first_bid_preflight(db, body):
           FROM cpx_execution_receipts
          WHERE account_id=:a
            AND action='raise'
-           AND source='account_low_views_ramp'
+           AND source IN ('account_low_views_ramp','daily_budget_pacing_first_bid')
            AND old_bid_penny=0
            AND (created_at AT TIME ZONE 'Europe/Moscow')::date
                = (now() AT TIME ZONE 'Europe/Moscow')::date
@@ -1348,8 +1480,10 @@ def _native_provider_probe_first_bid_preflight(db, body):
         "reason_code": "native_provider_probe_first_bid_proven",
         "advice_generated_at": generated_at,
         "advice_age_sec": round(advice_age_sec, 1) if advice_age_sec is not None else None,
-        "write_capability": "provider_probe_money",
+        "write_capability": str(candidate.get("write_capability") or "provider_probe_money"),
         "contacts_7d": int(candidate.get("contacts_7d") or 0),
+        "views_7d": int(candidate.get("views_7d") or 0),
+        "pacing_first_bid": bool(_pacing_first_bid_lane),
     }
 
 
@@ -1795,8 +1929,8 @@ def _finalize_measure_state(
             trigger="daily_measurement_complete",
             request_id=f"cpx_measure_result:{account_id}:{item_id}:{action}:{started_at_raw}",
         )
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1821)
 
     return {
         "status": "measured",
@@ -1961,8 +2095,8 @@ def run_negative_raise_rollback_cycle():
                     "status": "error", "candidate_count": 0, "result": rec,
                     "checked_at": _dt_neg.now(_tz_neg.utc).isoformat(),
                 })
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=1987)
             continue
         finally:
             d.close()
@@ -2030,8 +2164,8 @@ def run_negative_raise_rollback_cycle():
                     "candidate": candidate, "result": rec,
                     "checked_at": _dt_neg.now(_tz_neg.utc).isoformat(),
                 })
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=2056)
     return summary
 
 
@@ -2620,6 +2754,7 @@ def apply_one(body: ApplyOneBody):
         # economic-emergency threshold used by the main KPI orchestrator.
         _actor_auto = str(body.actor_type or "").strip().lower() in {"boris_auto", "autopilot", "system"}
         _source = str(body.source or "").strip()
+        _daily_budget_pacing = (_source in {"late_day_spend_catchup", "daily_budget_pacing_first_bid"})
         # AUTONOMOUS_RAISE_FINAL_MODE_FENCE_V1: the last provider-write entry
         # point must independently honor BOTH owner switches. A stale mandate or
         # an unusual internal caller must never keep automatic spend alive after
@@ -2684,22 +2819,23 @@ def apply_one(body: ApplyOneBody):
                 _max_cpl_today = 0.0
             _sp = _today_stats.get("spending") if isinstance(_today_stats, dict) else {}
             try:
-                _spent_today = float((_sp or {}).get("all_spend_rub") or 0) if isinstance(_sp, dict) else 0.0
+                _spent_today = float((_sp or {}).get("ad_spend_rub") or 0) if isinstance(_sp, dict) else 0.0
             except Exception:
                 _spent_today = 0.0
             _actual_cpl_today = (_spent_today / _contacts_today) if _contacts_today > 0 else None
             if (_target_today > 0 and _contacts_today >= _target_today
-                    and _source != "profitable_day_push"):
+                    and _source != "profitable_day_push" and not _daily_budget_pacing):
                 return {"status":"blocked","action":body.action,"item_id":body.item_id,
                         "blocked_by":"daily_kpi_already_met",
                         "reason":f"Дневной KPI уже выполнен: {_contacts_today}/{_target_today:g}. Обычный разгон остановлен; прибыльный дневной дожим работает отдельным guarded-контуром.",
                         "changed_avito":False}
-            if _actual_cpl_today is not None and _max_cpl_today > 0 and _actual_cpl_today > _max_cpl_today:
+            if (not _daily_budget_pacing and _actual_cpl_today is not None
+                    and _max_cpl_today > 0 and _actual_cpl_today > _max_cpl_today):
                 return {"status":"blocked","action":body.action,"item_id":body.item_id,
                         "blocked_by":"daily_cpl_above_limit",
                         "reason":f"Фактический CPL {_actual_cpl_today:.2f} ₽ выше лимита {_max_cpl_today:.2f} ₽; повышение ставки запрещено.",
                         "changed_avito":False}
-            if (_contacts_today <= 0 and _max_cpl_today > 0
+            if (not _daily_budget_pacing and _contacts_today <= 0 and _max_cpl_today > 0
                     and _spent_today >= 1.10 * _max_cpl_today):
                 return {"status":"blocked","action":body.action,"item_id":body.item_id,
                         "blocked_by":"zero_lead_economic_emergency",
@@ -2855,7 +2991,10 @@ def apply_one(body: ApplyOneBody):
         # test one bounded step, not permission to stack +10% every hour. The
         # first activation has no prior hypothesis; all later feed raises use
         # the normal causal measurement lock before another money mutation.
-        _fast_measure_mode = (_new_feed_first_bid or _late_day_reset_lane)
+        # DAILY_BUDGET_PACING_SEPARATE_LEARNING_V1: temporary pacing is learned
+        # by late_day_spend_learning at day close, not by stacking standard
+        # multi-day experiment locks on every <=10% delivery step.
+        _fast_measure_mode = (_new_feed_first_bid or _late_day_reset_lane or _late_day_catchup)
         measure_key = _cpx_measure_key(
             body.item_id,
             body.action,
@@ -2930,8 +3069,8 @@ def apply_one(body: ApplyOneBody):
                                 "measure_state": measure_data,
                                 "changed_avito": False,
                             }
-                    except Exception:
-                        pass
+                    except Exception as _suppressed_exc:
+                        observe_suppressed(__name__, _suppressed_exc, line=2956)
             if not _fast_measure_mode and measure_data.get("status") == "waiting_measurement":
                 return {
                     "status": "blocked",
@@ -2952,7 +3091,7 @@ def apply_one(body: ApplyOneBody):
         # rechecked at the final DB boundary to close races between feed20,
         # lowviews, staged rollout and late-day workers. Lower/reset safety lanes
         # are intentionally unaffected.
-        if body.action == "raise" and _actor_auto:
+        if body.action == "raise" and _actor_auto and not _late_day_catchup:
             _raise_backlog = _active_raise_measurement_summary(db, body.account_id)
             if int(_raise_backlog.get("active_count") or 0) >= MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT:
                 return {
@@ -3004,8 +3143,27 @@ def apply_one(body: ApplyOneBody):
         # read is the final identity proof for bid-only operations, including
         # native Avito items without CampaignItem/content mapping. HTTP 200 is
         # required before setManual can ever be reached.
-        r = _httpx.get(f"https://api.avito.ru/cpxpromo/1/getBids/{body.item_id}",
-                       headers={"Authorization": f"Bearer {tok}"}, timeout=20)
+        try:
+            r = _httpx.get(f"https://api.avito.ru/cpxpromo/1/getBids/{body.item_id}",
+                           headers={"Authorization": f"Bearer {tok}"}, timeout=20)
+        except _httpx.RequestError as exc:
+            # CPX_PROVIDER_TRANSPORT_WAIT_V1: proxy/network refusal is an
+            # external dependency wait, not a failed marketer cycle. Never
+            # persist credential-bearing exception text and never replay money.
+            return {
+                "status": "blocked",
+                "reason_code": "avito_provider_transport_wait",
+                "blocked_by": "provider_transport",
+                "dependency_state": "waiting_external",
+                "retryable_external": True,
+                "retry_after_seconds": 60,
+                "owner_action_required": False,
+                "provider_error_type": type(exc).__name__,
+                "message": "Сетевой маршрут Avito временно недоступен; BORIS повторит безопасно в следующем цикле",
+                "action": body.action,
+                "item_id": body.item_id,
+                "changed_avito": False,
+            }
         if r.status_code == 429:
             # CPX_GETBIDS_RETRY_AFTER_FAIL_CLOSED_V1: a confirmed Avito throttle
             # is an account-level stop signal for this money cycle. Do not sleep
@@ -3050,8 +3208,8 @@ def apply_one(body: ApplyOneBody):
                     "items": _items, "ttl_hours": 24,
                     "updated_at": _dt_cap.now(_tz_cap.utc).isoformat(),
                 })
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=3076)
             return {"status": "blocked", "code": 403,
                     "reason_code": "cpx_promotion_unavailable",
                     "blocked_by": "avito_cpx_item_capability",
@@ -3110,19 +3268,88 @@ def apply_one(body: ApplyOneBody):
                     effective_min_bid = max(int(min_bid), min(effective))
             except Exception:
                 effective_min_bid = int(min_bid)
+            # OWNER_WORKING_FIRST_BID_FLOOR_V1: an explicit account working
+            # floor applies to every trusted first-activation lane, including
+            # feed20. Previously only the native provider-probe lane used it,
+            # so feed20 could still create 0->8 RUB experiments after the owner
+            # had established 38 RUB as the account working baseline.
+            _configured_working_floor_penny = None
+            try:
+                _kpi_first_floor_cfg = _load_json(db, body.account_id, "kpi_settings") or {}
+                _working_floor_rub = float(_kpi_first_floor_cfg.get("working_bid_floor_rub") or 0)
+                if _working_floor_rub >= 10.0:
+                    _configured_working_floor_penny = int(
+                        _math_new_item_bid.ceil(_working_floor_rub) * 100
+                    )
+            except (TypeError, ValueError):
+                _configured_working_floor_penny = None
+
             if _native_provider_probe_first_bid:
-                # Native first activation buys the minimum provider-proven reach
-                # only. Round UP to the next whole ruble because setManual rejects
-                # fractional-ruble bids; never add an arbitrary launch markup.
-                new_item_floor_bid = int(_math_new_item_bid.ceil(
+                # ACCOUNT_PROVEN_FIRST_BID_BASELINE_V1:
+                # A zero->minimum probe can deadlock low-ruble accounts forever:
+                # e.g. 8 RUB +10% = 8.8 RUB, while Avito accepts only whole rubles
+                # and the strict raise serializer rounds down to 8 RUB. When the
+                # same account already has a fresh, repeated live working bid above
+                # that dead zone, use that provider-observed account baseline for
+                # the first activation instead of restarting every listing at the
+                # technical minimum. This is evidence, not a hardcoded bid: require
+                # >=5 live promoted items at the same whole-ruble level in the
+                # latest advisor snapshot. Final daily-budget, balance, provider
+                # maxBid and account hard-cap guards still run after this choice.
+                _provider_floor = int(_math_new_item_bid.ceil(
                     float(effective_min_bid) / 100.0
                 ) * 100)
+                _account_floor = _configured_working_floor_penny
+                try:
+                    # Explicit account working floor is owner policy. When it is
+                    # absent, fall back to repeated fresh live-bid evidence from
+                    # the advisor snapshot rather than inventing a launch price.
+                    from collections import Counter as _BidCounter
+                    from datetime import datetime as _dt_floor, timezone as _tz_floor
+                    _adv = _load_json(db, body.account_id, "cpx_advice") or {}
+                    _gen = str(_adv.get("generated_at") or "").strip()
+                    _fresh = False
+                    if _gen:
+                        _gdt = _dt_floor.fromisoformat(_gen.replace("Z", "+00:00"))
+                        if _gdt.tzinfo is None:
+                            _gdt = _gdt.replace(tzinfo=_tz_floor.utc)
+                        _fresh = (_dt_floor.now(_tz_floor.utc) - _gdt.astimezone(_tz_floor.utc)).total_seconds() <= 7200
+                    _whole_bids = []
+                    if _fresh:
+                        _recs = _adv.get("recommendations") if isinstance(_adv.get("recommendations"), dict) else {}
+                        for _bucket in _recs.values():
+                            if not isinstance(_bucket, list):
+                                continue
+                            for _entry in _bucket:
+                                if not isinstance(_entry, dict) or not bool(_entry.get("promotion_active")):
+                                    continue
+                                try:
+                                    _br = float(_entry.get("bid_rub"))
+                                except (TypeError, ValueError):
+                                    continue
+                                # Ignore the known <=9 RUB dead-zone probes. A
+                                # repeated >=10 RUB live bid is meaningful working
+                                # account evidence and can seed new activations.
+                                if _br >= 10.0:
+                                    _whole_bids.append(int(round(_br)))
+                    if len(_whole_bids) >= 5:
+                        _bid_value, _bid_count = _BidCounter(_whole_bids).most_common(1)[0]
+                        if int(_bid_count) >= 5:
+                            _account_floor = int(_bid_value) * 100
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=3260)
+                new_item_floor_bid = max(_provider_floor, int(_account_floor or 0))
             elif str(body.source or "") == "reach_rescue":
                 new_item_floor_bid = effective_min_bid
             else:
                 new_item_floor_bid = max(effective_min_bid, int(_math_new_item_bid.ceil(
                     float(min_bid) * (100 + NEW_ITEM_NO_PROMO_MIN_BID_MARKUP_PCT) / 100.0
                 )))
+                if (str(body.source or "") == "feed20"
+                        and _configured_working_floor_penny is not None):
+                    new_item_floor_bid = max(
+                        int(new_item_floor_bid), int(_configured_working_floor_penny)
+                    )
 
         if body.action == "archive":
             from app.services.autonomy import can_execute_live_action, log_guard_block
@@ -3166,9 +3393,12 @@ def apply_one(body: ApplyOneBody):
                         "retry_after_seconds":int(_archive_retry),"request_key":request_key,"changed_avito":False}
             # снять продвижение (в архив продвижения — вернуть на прайс-лист)
             try:
-                rr = _httpx.post("https://api.avito.ru/cpxpromo/1/remove",
-                                 headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
-                                 json={"itemID": body.item_id}, timeout=20)
+                rr = _provider_remove_promotion(
+                    account_id=body.account_id,
+                    token=tok,
+                    item_id=body.item_id,
+                    timeout=20,
+                )
             except Exception as exc:
                 _cpx_receipt_mark(body.account_id, request_key, "delivery_unknown", error=repr(exc))
                 return {"status":"blocked","code":"delivery_unknown","message":"Avito transport outcome unknown; blind retry forbidden","request_key":request_key,"changed_avito":False}
@@ -3231,8 +3461,8 @@ def apply_one(body: ApplyOneBody):
                            request_id=(body.request_id or None),
                            balance_status="UNKNOWN",
                            guard_reason=_g.get("reason_code"))
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=3257)
             return {"status": "ok", "action": "archive", "item_id": body.item_id}
 
         # raise / lower — считаем новую ставку с шагом и потолками.
@@ -3398,18 +3628,33 @@ def apply_one(body: ApplyOneBody):
             return {"status": "error", "message": f"неизвестное действие {body.action}"}
 
         # Avito принимает только суммы, кратные рублю: 154,4 ₽ отвергается
-
         # с ошибкой «Сумма в строке bidPenny должна быть кратна рублю».
-
-        # Округляем В СТОРОНУ МЕНЬШЕГО ИЗМЕНЕНИЯ ставки: округление вниз
-        # добавляет к шагу и выбивает за лимит мандата (21 ₽ при 15% даёт
-        # 17,85 — вниз это 17 ₽ и дельта 19% вместо 15%).
+        # LOW_BID_WHOLE_RUBLE_PROGRESS_V1: below 10 RUB a mathematically valid
+        # +10% target (8->8.8, 9->9.9) becomes a permanent no-op if rounded down.
+        # The final autonomy guard already contains an exact exception for this
+        # Avito whole-ruble artifact: only the next whole ruble produced by a
+        # <=10% requested target is allowed. Enable that path only for trusted
+        # autonomous marketing sources; owner hard cap and daily budget remain
+        # authoritative immediately before the provider write.
+        _trusted_low_bid_rounding_sources = {
+            "boris_kpi_autopilot", "account_low_views_ramp", "reach_rescue",
+            "cpl_headroom_push", "kpi_behind_push", "new_feed_hourly_ramp",
+            "profitable_day_push", "late_day_spend_catchup", "kpi_gap_boost",
+        }
+        _low_bid_whole_ruble_rounding = bool(
+            body.action == "raise"
+            and 0 < int(cur_bid or 0) < 1000
+            and str(body.actor_type or "").strip().lower() in {"boris_auto", "autopilot", "system"}
+            and str(body.source or "") in _trusted_low_bid_rounding_sources
+            and 0 < int(_step_pct or 0) <= int(MAX_BID_STEP_PCT)
+        )
         if body.action == "lower":
             new_bid = ((int(new_bid) + 99) // 100) * 100
+        elif _low_bid_whole_ruble_rounding:
+            new_bid = ((int(new_bid) + 99) // 100) * 100
         else:
-            # MARKETER_STRICT_STEP_ROUNDING_V1: Avito accepts whole-ruble bids.
-            # For raises we round DOWN, never up, so serialization itself cannot
-            # turn a <=10% target into an 11-25% real money mutation on low bids.
+            # MARKETER_STRICT_STEP_ROUNDING_V1: ordinary raises round DOWN so
+            # serialization cannot silently expand the authorized percentage.
             new_bid = (int(new_bid) // 100) * 100
 
         # LOWER_MINBID_MONOTONIC_FAIL_CLOSED_V1: a lower-only safety lane
@@ -3448,8 +3693,8 @@ def apply_one(body: ApplyOneBody):
                 _avito_min_rub=float(min_bid or 0)/100.0
                 if _launch_cap_rub>0 and _launch_cap_rub>=_avito_min_rub:
                     new_bid=min(int(new_bid), int(_launch_cap_rub*100))
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=3474)
 
         # NATIVE_PROVIDER_EFFECTIVE_MIN_FINAL_FENCE_V1: provider max/hard-cap
         # clamps must never turn a native first activation into a bid below the
@@ -3489,14 +3734,14 @@ def apply_one(body: ApplyOneBody):
                          "new_item_floor_bid_rub": (new_item_floor_bid / 100.0) if new_item_floor_bid is not None else None,
                          "native_provider_probe_first_bid": bool(_native_provider_probe_first_bid),
                          "native_advice_generated_at": _native_first_bid_preflight.get("advice_generated_at"),
-                         # AUTONOMY_ROUNDING_BYPASS_DISABLED_AT_CALLER_V1:
-                         # short measurement windows may change cadence only.
-                         # They are never evidence for exceeding the realized
-                         # <=10% bid delta at the final autonomy guard.
-                         "hourly_feed_ramp": False,
-                         "hourly_feed_ramp_target_pct": None,
-                         "fast_raise_rounding": False,
-                         "fast_raise_target_pct": None,
+                         # LOW_BID_WHOLE_RUBLE_PROGRESS_V1: the autonomy layer
+                         # verifies that any >10% realized delta is exactly the
+                         # unavoidable next-whole-ruble representation of this
+                         # <=10% requested target. No arbitrary bypass is granted.
+                         "hourly_feed_ramp": bool(_low_bid_whole_ruble_rounding),
+                         "hourly_feed_ramp_target_pct": (int(_step_pct) if _low_bid_whole_ruble_rounding else None),
+                         "fast_raise_rounding": bool(_low_bid_whole_ruble_rounding),
+                         "fast_raise_target_pct": (int(_step_pct) if _low_bid_whole_ruble_rounding else None),
                          "late_day_reset": bool(_late_day_reset),
                          "late_day_reset_baseline_rub": _late_day_reset_baseline},
             balance={"status": "UNKNOWN", "value": None})
@@ -3591,9 +3836,14 @@ def apply_one(body: ApplyOneBody):
                     "request_key":request_key,"changed_avito":False}
         _cpx_receipt_mark(body.account_id, request_key, "attempting")
         try:
-            wr = _httpx.post("https://api.avito.ru/cpxpromo/1/setManual",
-                             headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
-                             json=payload, timeout=20)
+            wr = _provider_set_manual_bid(
+                account_id=body.account_id,
+                token=tok,
+                item_id=body.item_id,
+                action_type_id=int(payload["actionTypeID"]),
+                bid_penny=int(payload["bidPenny"]),
+                timeout=20,
+            )
         except Exception as exc:
             _cpx_receipt_mark(body.account_id, request_key, "delivery_unknown", error=repr(exc))
             return {"status":"blocked","code":"delivery_unknown","message":"Avito transport outcome unknown; blind retry forbidden","request_key":request_key,"changed_avito":False}
@@ -3633,17 +3883,26 @@ def apply_one(body: ApplyOneBody):
         # измерения. Повторное изменение до завершения измерения
         # должно быть запрещено.
         # ---------------------------------------------------------
-        measure_state = _save_measure_state(
-            db=db,
-            account_id=body.account_id,
-            item_id=body.item_id,
-            action=body.action,
-            old_bid_rub=cur_bid / 100,
-            new_bid_rub=new_bid / 100,
-            source=body.source,
-            request_key=request_key,
-            provider_receipt_proven=bool(_native_provider_probe_first_bid),
-        )
+        if _late_day_catchup:
+            measure_state = {
+                "status":"daily_budget_pacing_learning",
+                "source":"late_day_spend_catchup",
+                "item_id":int(body.item_id),
+                "old_bid_rub":cur_bid/100,"new_bid_rub":new_bid/100,
+                "learning_contract":"late_day_spend_effect_learning_v1",
+            }
+        else:
+            measure_state = _save_measure_state(
+                db=db,
+                account_id=body.account_id,
+                item_id=body.item_id,
+                action=body.action,
+                old_bid_rub=cur_bid / 100,
+                new_bid_rub=new_bid / 100,
+                source=body.source,
+                request_key=request_key,
+                provider_receipt_proven=bool(_native_provider_probe_first_bid),
+            )
 
         try:
             from app.services.action_log import log_action, ACTOR_USER
@@ -3661,8 +3920,8 @@ def apply_one(body: ApplyOneBody):
                        request_id=(body.request_id or None),
                        balance_status="UNKNOWN",
                        guard_reason=_g.get("reason_code"))
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=3687)
         return {"status": "ok", "action": body.action, "item_id": body.item_id,
                 "old_bid_rub": cur_bid/100, "new_bid_rub": new_bid/100,
                 "native_first_activation": bool(_native_provider_probe_first_bid),
@@ -3827,7 +4086,7 @@ def _ctx_valid(ctx, account_id):
     return 0 <= age <= BALANCE_CTX_MAX_AGE_SEC
 
 
-def check_raise_allowed(account_id, balance_ctx=None):
+def check_raise_allowed(account_id, balance_ctx=None, source=None):
     """Денежный предохранитель авто-raise. Только решает, ничего не меняет."""
     bal = balance_ctx if _ctx_valid(balance_ctx, account_id) else _fetch_live_balance(account_id)
     if bal.get("status") != BALANCE_KNOWN:
@@ -3845,6 +4104,10 @@ def check_raise_allowed(account_id, balance_ctx=None):
             _db.close()
         limit = float(_kpi.get("daily_budget_limit_rub") or 0)
         red_cpl = float(_kpi.get("max_cost_per_lead_rub") or 0)
+        # DAILY_BUDGET_PACING_MONEY_GUARD_V1: owner budget pacing may continue
+        # above red CPL; CPL controls allocation/learning, while the explicit
+        # daily budget remains the hard monetary ceiling.
+        _daily_budget_pacing_guard = (str(source or "") in {"late_day_spend_catchup", "daily_budget_pacing_first_bid"})
         # FINAL_RAISE_OWNER_PROVENANCE_V1: the final provider-write guard must
         # independently prove the exact authenticated owner budget. Mandate
         # creation already enforces this, but a stale historical mandate must
@@ -3893,6 +4156,7 @@ def check_raise_allowed(account_id, balance_ctx=None):
     # Once Avito stats/v2 says the configured daily limit is reached, any
     # further automatic bid raise is fail-closed for the rest of the day.
     spent_today = None
+    cpl_spend_today = None  # ad spend only; total spend remains the hard daily-budget guard
     business_contacts_today = None
     spend_signal = {"status": "unknown", "reason": "spending_unavailable"}
     _presence_pressure = {"blocked": False, "reason": "not_checked"}
@@ -3923,6 +4187,16 @@ def check_raise_allowed(account_id, balance_ctx=None):
             try:
                 import datetime as _mut_dt
                 _stats = _load_json(_db_spend, account_id, "daily_stats:" + marketing_today_iso()) or {}
+                # FINAL_RAISE_CPL_AD_SPEND_ONLY_V1: CPL is advertising spend / business leads.
+                # Other Avito charges (rest, subscriptions, etc.) still count toward the owner's
+                # hard daily budget via spent_today, but must not inflate CPL and freeze growth.
+                _stats_spending = _stats.get("spending") if isinstance(_stats.get("spending"), dict) else {}
+                try:
+                    _ad_spend_candidate = float(_stats_spending.get("ad_spend_rub"))
+                    if _stats_spending.get("status") == "ok" and _ad_spend_candidate >= 0:
+                        cpl_spend_today = _ad_spend_candidate
+                except Exception:
+                    cpl_spend_today = None
                 _collected = _mut_dt.datetime.fromisoformat(str(_stats.get("collected_at") or "").replace("Z", "+00:00"))
                 if _collected.tzinfo is None:
                     _collected = _collected.replace(tzinfo=_mut_dt.timezone.utc)
@@ -3967,8 +4241,12 @@ def check_raise_allowed(account_id, balance_ctx=None):
     # same account-level economics guard. A confirmed current-day business CPL
     # above the owner's red line forbids further bid increases; lower/repair
     # lanes remain available and are the correct recovery path.
-    if red_cpl > 0 and business_contacts_today is not None and business_contacts_today > 0:
-        _actual_cpl_today = float(spent_today) / float(business_contacts_today)
+    if (not _daily_budget_pacing_guard and red_cpl > 0
+            and business_contacts_today is not None and business_contacts_today > 0):
+        # Prefer provider-confirmed advertising spend for CPL. If an old/provider
+        # snapshot has no split, fail conservatively back to total spend.
+        _cpl_spend = float(cpl_spend_today if cpl_spend_today is not None else spent_today)
+        _actual_cpl_today = _cpl_spend / float(business_contacts_today)
         if _actual_cpl_today > float(red_cpl) + 1e-9:
             c = "blocked_cpl_above_redline"
             return {"allowed": False, "reason_code": c,
@@ -3999,16 +4277,25 @@ def check_raise_allowed(account_id, balance_ctx=None):
     # budget brake so no raise can race ahead of the next control cycle.
     try:
         from app.db.session import SessionLocal as _SL_budget_policy
-        from app.services.marketing_money_policy import adaptive_budget_brake_policy as _adaptive_budget_policy
+        from app.services.marketing_money_policy import (
+            adaptive_budget_brake_policy as _adaptive_budget_policy,
+            pacing_budget_brake_policy as _pacing_budget_policy,
+        )
         _db_budget_policy = _SL_budget_policy()
         try:
-            _budget_policy = _adaptive_budget_policy(_db_budget_policy, account_id, limit, spent_today)
+            _budget_policy = (
+                _pacing_budget_policy(_db_budget_policy, account_id, limit, spent_today)
+                if _daily_budget_pacing_guard
+                else _adaptive_budget_policy(_db_budget_policy, account_id, limit, spent_today)
+            )
         finally:
             _db_budget_policy.close()
-        _budget_cutoff = float(_budget_policy.get("cutoff_ratio") or 0.90)
+        _default_cutoff = 0.95 if _daily_budget_pacing_guard else 0.90
+        _budget_cutoff = float(_budget_policy.get("cutoff_ratio") or _default_cutoff)
     except Exception:
-        _budget_policy = {"cutoff_ratio": 0.90, "reason": "adaptive_policy_unavailable_fallback"}
-        _budget_cutoff = 0.90
+        _fallback = 0.95 if _daily_budget_pacing_guard else 0.90
+        _budget_policy = {"cutoff_ratio": _fallback, "reason": "budget_policy_unavailable_fallback"}
+        _budget_cutoff = _fallback
     if spent_today >= limit * _budget_cutoff:
         return {"allowed": False, "reason_code": "blocked_daily_budget_near_limit",
                 "human_reason": "расход уже %.2f ₽ из %.0f ₽; защитный порог %.1f%%" % (spent_today, limit, _budget_cutoff*100.0),
@@ -4634,8 +4921,8 @@ def bootstrap_new_no_promo(account_id: str, max_items: int = 1):
                     _iid, _action, *_rest = str(_k).split(":")
                     if _action == "raise" and str(_iid).isdigit():
                         ever_raised.add(int(_iid))
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=4660)
         feed_ids = sorted(i for i in feed_ids_set if i not in ever_raised)
         already_activated = sorted(i for i in feed_ids_set if i in ever_raised)
         if not feed_ids:
@@ -4779,16 +5066,31 @@ def bootstrap_new_no_promo(account_id: str, max_items: int = 1):
         from datetime import datetime as _dt_feed20_run, timezone as _tz_feed20_run
         _run_prefix = "f20v3_" + _dt_feed20_run.now(_tz_feed20_run.utc).strftime("%Y%m%dT%H%M%S%f")
         for iid in eligible_unpromoted[:limit]:
-            result = apply_one(ApplyOneBody(
-                account_id=account_id,
-                item_id=iid,
-                action="raise",
-                max_bid_delta_pct=NEW_ITEM_NO_PROMO_MIN_BID_MARKUP_PCT,
-                actor_type="boris_auto",
-                source="feed20",
-                trigger="feed",
-                request_id=f"{_run_prefix}:{iid}",
-            )) or {}
+            # FIRST_BID_ATOMIC_CAP_POLICY_BLOCK_V1: the DB trigger is the final
+            # cross-source hourly capacity fence. Hitting that expected policy
+            # limit must stop this item cleanly, not crash the whole marketer
+            # rollout and starve the remaining accounts/non-money stages.
+            try:
+                result = apply_one(ApplyOneBody(
+                    account_id=account_id,
+                    item_id=iid,
+                    action="raise",
+                    max_bid_delta_pct=NEW_ITEM_NO_PROMO_MIN_BID_MARKUP_PCT,
+                    actor_type="boris_auto",
+                    source="feed20",
+                    trigger="feed",
+                    request_id=f"{_run_prefix}:{iid}",
+                )) or {}
+            except Exception as _first_bid_exc:
+                _first_bid_err = str(_first_bid_exc or "")
+                if "blocked_first_bid_cross_source_hourly_atomic" in _first_bid_err:
+                    blocked.append({
+                        "item_id": iid,
+                        "status": "blocked",
+                        "reason": "first_bid_cross_source_hourly_limit",
+                    })
+                    break
+                raise
             # CPX_FIRST_BID_THROTTLE_NO_RETRY_V1: provider 429 is authoritative
             # for the account in this cycle. Do not retry the same first-bid
             # activation before Retry-After; the next trusted hourly run owns it.
@@ -5189,8 +5491,8 @@ def hourly_account_low_views_ramp(account_id: str, max_items: int = 3):
                     _ts=_ts.replace(tzinfo=_tz_alv.utc)
                 if _last_account_apply is None or _ts>_last_account_apply:
                     _last_account_apply=_ts
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=5230)
         _account_measure_minutes=1440  # DAILY_LOW_VIEWS_ACCOUNT_EVIDENCE_V1
         if (_account_views_today <= 2 and _account_contacts_today == 0 and
                 _last_account_apply is not None):
@@ -5219,8 +5521,8 @@ def hourly_account_low_views_ramp(account_id: str, max_items: int = 3):
                     if _ts.tzinfo is None: _ts=_ts.replace(tzinfo=_tz_alv.utc)
                     if (now-_ts).total_seconds() < 24*3600:
                         capability_unavailable.add(str(_iid))
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=5260)
         except Exception:
             capability_unavailable=set()
 
@@ -5241,8 +5543,8 @@ def hourly_account_low_views_ramp(account_id: str, max_items: int = 3):
                     retry_minutes=max(1440,int(prev.get("retry_after_minutes") or 1440))
                     if now-last < _td_alv(minutes=retry_minutes):
                         too_soon.append(iid); continue
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=5282)
             # Every low-view band may receive at most one +10% guarded step
             # per full daily learning cycle. Bands remain in evidence so reporting
             # can explain whether BORIS is rescuing <10, building 10->20 or 20->30.
@@ -5284,12 +5586,20 @@ def hourly_account_low_views_ramp(account_id: str, max_items: int = 3):
         applied=[]; blocked=[]; failed=[]
         for target in due[:max(1,int(max_items or 1))]:
             iid=target["item_id"]
-            result=apply_one(ApplyOneBody(
-                account_id=account_id,item_id=iid,action="raise",
-                max_bid_delta_pct=10,actor_type="boris_auto",
-                source="account_low_views_ramp",trigger="daily_views_below_30",
-                request_id=f"lv30_{account_id}_{now.strftime('%Y%m%d')}_daily:{iid}",
-            )) or {}
+            # LOWVIEWS_ATOMIC_CAP_POLICY_BLOCK_V1: the database cross-source
+            # first-bid/hourly cap is an authoritative safety refusal, not a
+            # marketer runtime failure. Keep it blocked and continue safely.
+            try:
+                result=apply_one(ApplyOneBody(
+                    account_id=account_id,item_id=iid,action="raise",
+                    max_bid_delta_pct=10,actor_type="boris_auto",
+                    source="account_low_views_ramp",trigger="daily_views_below_30",
+                    request_id=f"lv30_{account_id}_{now.strftime('%Y%m%d')}_daily:{iid}",
+                )) or {}
+            except Exception as exc:
+                if "blocked_first_bid_cross_source_hourly_atomic" not in str(exc):
+                    raise
+                result={"status":"blocked","reason_code":"first_bid_cross_source_hourly_limit"}
             if int(result.get("code") or 0) == 429:
                 blocked.append({**target,"result_status":result.get("status"),
                                 "reason":result.get("reason_code") or "avito_account_throttled",
@@ -5431,7 +5741,7 @@ def profitable_day_push(account_id: str, max_items: int = 2):
         # Never scale today's spend from yesterday's lagged contact counters.
         _item_signal_current = str(ds.get("stats_date") or "") == day
         contacts=sum(int(x.get("contacts") or 0) for x in items) if _item_signal_current else 0
-        sp=ds.get("spending") or {}; spent=float(sp.get("all_spend_rub") or 0) if sp.get("status")=="ok" else -1
+        sp=ds.get("spending") or {}; spent=float(sp.get("ad_spend_rub") or 0) if sp.get("status")=="ok" else -1
         if not _item_signal_current:
             return {"status":"blocked","reason":"item_stats_day_lagged","stats_date":ds.get("stats_date"),"marketing_day":day,"changed_avito":False}
         if contacts<=0 or spent<0: return {"status":"blocked","reason":"no_profitable_lead_signal","changed_avito":False}
@@ -5497,7 +5807,7 @@ def profitable_day_push(account_id: str, max_items: int = 2):
                 try:
                     ld=_dt.fromisoformat(last.replace("Z","+00:00")); ld=ld if ld.tzinfo else ld.replace(tzinfo=_tz.utc)
                     if (now-ld.astimezone(_tz.utc)).total_seconds()<3300: continue
-                except Exception: pass
+                except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=5546)
             candidates.append((iid,leads,int(x.get("views") or 0),steps))
         # PROFITABLE_DAY_WINNER_MEMORY_PRIORITY_V1: within the already-profitable
         # current-lead cohort, prefer items whose last completed raise improved.

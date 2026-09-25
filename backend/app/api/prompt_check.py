@@ -36,15 +36,6 @@ def check_prompt(body: CheckBody):
     if len(text) < 10:
         return {"status": "empty", "message": "Промт пустой или слишком короткий — напишите хотя бы пару предложений."}
     kind = KINDS.get(body.kind, KINDS["other"])
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return {"status": "error", "message": "нет ключа OpenAI"}
-    try:
-        from proxy_pool import get_intl_requests_proxies
-        proxies = get_intl_requests_proxies()
-    except Exception:
-        proxies = None
-
     sys_prompt = (
         "Ты — опытный редактор промтов. Разбираешь " + kind + ", который написал владелец бизнеса.\n\n"
         + LIMITS +
@@ -56,29 +47,29 @@ def check_prompt(body: CheckBody):
         '"issues":[{"problem":"что не так","fix":"как исправить"}],'
         '"improved":"полностью переписанный промт, готовый к вставке"}'
     )
+    full_prompt = sys_prompt + "\n\nПРОМТ КЛИЕНТА:\n" + text
     try:
-        resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-            json={"model": "gpt-5.4",
-                  "messages": [{"role": "user", "content": sys_prompt + "\n\nПРОМТ КЛИЕНТА:\n" + text}],
-                  "max_completion_tokens": 2000},
-            proxies=proxies, timeout=180)
-        data = resp.json()
-        try:  # учёт расхода: прямой вызов идёт мимо пула
-            from app.usage import log_usage as _lu
-            _u = data.get("usage") or {}
-            _lu(None, "openai", data.get("model") or "gpt-5.4", "system:prompt_check",
-                int(_u.get("prompt_tokens") or 0), int(_u.get("completion_tokens") or 0))
-        except Exception as _e:
-            print("[usage]", str(_e)[:100], flush=True)
+        import hashlib
+        from app.api.campaigns import _ff_guarded_openai_response
+        account_id = str(body.account_id or "system")
+        intent = "prompt-check:" + hashlib.sha256(
+            (account_id + "\n" + str(body.kind or "other") + "\n" + full_prompt).encode("utf-8", "ignore")
+        ).hexdigest()
+        paid = _ff_guarded_openai_response(
+            account_id=account_id,
+            operation="system:prompt_check",
+            model="gpt-5.4",
+            input_payload=[{"role": "user", "content": full_prompt}],
+            max_output_tokens=2000,
+            idempotency_key=intent,
+            timeout=180,
+        )
+        raw = str((paid or {}).get("text") or "").strip()
+        if not raw:
+            return {"status": "error", "message": "Проверка промта не вернула результат"}
     except Exception as e:
         return {"status": "error", "message": str(e)[:200]}
 
-    try:
-        raw = data["choices"][0]["message"]["content"].strip()
-    except Exception:
-        return {"status": "error", "message": str(data)[:300]}
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -87,14 +78,6 @@ def check_prompt(body: CheckBody):
         parsed = json.loads(raw)
     except Exception:
         return {"status": "ok", "verdict": "", "issues": [], "improved": raw}
-
-    try:
-        from app.api.calltracking import _lc
-        u = data.get("usage", {})
-        _lc(body.account_id or "system", "openai", "gpt-5.4", "проверка промта",
-            u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
-    except Exception:
-        pass
 
     return {"status": "ok",
             "verdict": parsed.get("verdict", ""),

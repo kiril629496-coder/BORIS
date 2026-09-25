@@ -15,6 +15,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from app.services.exception_observability import observe_suppressed
 
 PLACEHOLDER = "%s"
 
@@ -72,9 +73,40 @@ def finish_run(cur, run_id: str, stats: dict[str, int],
 
 # ----------------------------------------------------------------- ИСТОЧНИКИ
 
+def ensure_source_scan_stats_schema(cur) -> None:
+    cur.execute("SELECT to_regclass('public.telegram_source_scan_stats')")
+    if cur.fetchone()[0] is not None:
+        return
+    cur.execute('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */')
+
+
+def bump_source_scan_stats(cur, source_id: str, *, raw_messages: int = 0,
+                           processed_messages: int = 0, matched_messages: int = 0,
+                           new_messages: int = 0, error: str | None = None) -> None:
+    cur.execute('''INSERT INTO telegram_source_scan_stats(
+        source_id,scans,raw_messages,processed_messages,matched_messages,new_messages,errors,
+        last_scan_at,last_match_at,last_error,updated_at)
+      VALUES(%s,1,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+      ON CONFLICT(source_id) DO UPDATE SET
+        scans=telegram_source_scan_stats.scans+1,
+        raw_messages=telegram_source_scan_stats.raw_messages+EXCLUDED.raw_messages,
+        processed_messages=telegram_source_scan_stats.processed_messages+EXCLUDED.processed_messages,
+        matched_messages=telegram_source_scan_stats.matched_messages+EXCLUDED.matched_messages,
+        new_messages=telegram_source_scan_stats.new_messages+EXCLUDED.new_messages,
+        errors=telegram_source_scan_stats.errors+EXCLUDED.errors,
+        last_scan_at=EXCLUDED.last_scan_at,
+        last_match_at=COALESCE(EXCLUDED.last_match_at,telegram_source_scan_stats.last_match_at),
+        last_error=EXCLUDED.last_error,
+        updated_at=EXCLUDED.updated_at''',(
+        source_id,max(0,int(raw_messages or 0)),max(0,int(processed_messages or 0)),
+        max(0,int(matched_messages or 0)),max(0,int(new_messages or 0)),1 if error else 0,
+        _now(),_now() if int(matched_messages or 0)>0 else None,(str(error)[:2000] if error else None),_now(),
+    ))
+
+
 def load_sources(cur, platform: str | None = None) -> list[dict[str, Any]]:
     sql = ("SELECT id, account_id, platform, source_kind, external_id, username, "
-           "title, topic_id, topic_title, last_seen_external_id, is_active, weight "
+           "title, topic_id, topic_title, last_seen_external_id, is_active, weight, payload "
            "FROM monitor_sources WHERE is_active = TRUE")
     args: list[Any] = []
     if platform:
@@ -83,7 +115,7 @@ def load_sources(cur, platform: str | None = None) -> list[dict[str, Any]]:
     sql += " ORDER BY created_at"
     cur.execute(sql, tuple(args))
     cols = ["id", "account_id", "platform", "source_kind", "external_id", "username",
-            "title", "topic_id", "topic_title", "last_seen_external_id", "is_active", "weight"]
+            "title", "topic_id", "topic_title", "last_seen_external_id", "is_active", "weight", "payload"]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
@@ -535,24 +567,43 @@ def try_lock_run(cur, key: int = 815127) -> bool:
 
 
 def claim_sources(cur, platform: str | None = None) -> list[dict[str, Any]]:
+    """Claim active sources, with a safe adaptive cadence for low-activity Telegram sources.
+
+    Sources with at least 5 telemetry scans, <=2 raw messages total, no matches/new leads,
+    and weight <17 are scanned at most once per configured cadence (default 30 min).
+    High-weight or historically productive sources stay on every sales cycle. If the
+    telemetry join is unavailable for any reason, fail open to the legacy all-source list.
     """
-    Забирает источники под обработку с пропуском занятых другим воркером.
-    Аналог приёма, уже используемого в очереди задач БОРИСа.
-    """
-    sql = ("SELECT id, account_id, platform, source_kind, external_id, username, "
-           "title, topic_id, topic_title, last_seen_external_id, is_active, weight "
-           "FROM monitor_sources WHERE is_active = TRUE")
+    cadence_min=max(15,int(os.getenv("TG_SOURCE_LOW_ACTIVITY_CADENCE_MIN","30") or 30))
     args: list[Any] = []
-    if platform:
-        sql += " AND platform = %s"
-        args.append(platform)
-    sql += " ORDER BY created_at FOR UPDATE SKIP LOCKED"
+    if platform == 'telegram':
+        sql = ("SELECT ms.id, ms.account_id, ms.platform, ms.source_kind, ms.external_id, ms.username, "
+               "ms.title, ms.topic_id, ms.topic_title, ms.last_seen_external_id, ms.is_active, ms.weight, ms.payload "
+               "FROM monitor_sources ms LEFT JOIN telegram_source_scan_stats t ON t.source_id=ms.id "
+               "WHERE ms.is_active=TRUE AND ms.platform=%s AND ("
+               "t.source_id IS NULL OR COALESCE(t.scans,0)<5 OR COALESCE(t.raw_messages,0)>2 "
+               "OR COALESCE(t.matched_messages,0)>0 OR COALESCE(t.new_messages,0)>0 "
+               "OR COALESCE(ms.weight,10)>=17 OR ms.last_scanned_at IS NULL "
+               "OR ms.last_scanned_at <= NOW()-(%s * interval '1 minute'))")
+        args=[platform,cadence_min]
+        sql += " ORDER BY CASE WHEN lower(coalesce(ms.title,'')) SIMILAR TO '%%(авито|avito|авитолог)%%' THEN 0 ELSE 1 END, ms.weight DESC, ms.created_at FOR UPDATE OF ms SKIP LOCKED"
+    else:
+        sql = ("SELECT id, account_id, platform, source_kind, external_id, username, "
+               "title, topic_id, topic_title, last_seen_external_id, is_active, weight, payload "
+               "FROM monitor_sources WHERE is_active = TRUE")
+        if platform:
+            sql += " AND platform = %s"; args.append(platform)
+        sql += " ORDER BY CASE WHEN lower(coalesce(title,'')) SIMILAR TO '%%(авито|avito|авитолог)%%' THEN 0 ELSE 1 END, weight DESC, created_at FOR UPDATE SKIP LOCKED"
     try:
         cur.execute(sql, tuple(args))
-    except Exception:  # noqa: BLE001
-        return load_sources(cur, platform)   # двойник без FOR UPDATE
+    except Exception:  # fail open: never lose monitoring because cadence telemetry broke
+        try:
+            cur.connection.rollback()
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=613)
+        return load_sources(cur, platform)
     cols = ["id", "account_id", "platform", "source_kind", "external_id", "username",
-            "title", "topic_id", "topic_title", "last_seen_external_id", "is_active", "weight"]
+            "title", "topic_id", "topic_title", "last_seen_external_id", "is_active", "weight", "payload"]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
@@ -602,7 +653,16 @@ def list_findings(cur, status: str | None = None, min_score: int | None = None,
                   hide_repeats: bool = True, limit: int = 50,
                   offset: int = 0) -> dict[str, Any]:
     """Список находок для экрана «Поиск клиентов». Возвращает {items, total}."""
-    where, args = ["1=1"], []
+    # MONITOR_PRODUCTION_QUEUE_V4
+    # Основная выдача экрана:
+    # - только прошедшие quality gate;
+    # - только из активных production-источников.
+    # Исторические сообщения физически не удаляются.
+    where, args = [
+        "COALESCE((m.payload->'quality_gate'->>'qualified')::boolean, TRUE) = TRUE",
+        "EXISTS (SELECT 1 FROM monitor_sources ms "
+        "WHERE ms.id = m.source_id AND ms.is_active = TRUE)",
+    ], []
     if status:
         where.append("m.status = %s")
         args.append(status)
@@ -629,7 +689,10 @@ def list_findings(cur, status: str | None = None, min_score: int | None = None,
 
     cur.execute(
         _FINDING_SELECT + " WHERE " + cond +
-        " ORDER BY m.score_total DESC, m.posted_at DESC LIMIT %s OFFSET %s",
+        # MONITOR_SALE_ORDER_V1
+        " ORDER BY "
+        "COALESCE(NULLIF(m.payload->'sale_score'->>'score','')::int, m.score_total) DESC, "
+        "m.score_total DESC, m.posted_at DESC LIMIT %s OFFSET %s",
         tuple(args) + (int(limit), int(offset)),
     )
     return {"items": [_finding_row(r) for r in cur.fetchall()], "total": total}
@@ -737,3 +800,28 @@ def dashboard_stats(cur, days: int = 7) -> dict[str, Any]:
             "unhandled": fresh, "leads": leads,
             "today_total": t_total, "today_hot": t_hot, "today_warm": t_warm,
             "by_source": by_source, "by_rule": by_rule, "last_run": last_run}
+
+
+# ----------------------------------------------------------- RUNTIME STATE
+
+def ensure_runtime_state(cur) -> None:
+    cur.execute('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */')
+
+
+def get_runtime_state(cur, key: str) -> str | None:
+    ensure_runtime_state(cur)
+    cur.execute("SELECT value_text FROM monitor_runtime_state WHERE key=%s", (key,))
+    row=cur.fetchone()
+    return row[0] if row else None
+
+
+def set_runtime_state(cur, key: str, value: str | None) -> None:
+    ensure_runtime_state(cur)
+    if value is None:
+        cur.execute("DELETE FROM monitor_runtime_state WHERE key=%s", (key,))
+        return
+    cur.execute("""
+        INSERT INTO monitor_runtime_state(key,value_text,updated_at)
+        VALUES(%s,%s,NOW())
+        ON CONFLICT(key) DO UPDATE SET value_text=EXCLUDED.value_text,updated_at=NOW()
+    """, (key,value))

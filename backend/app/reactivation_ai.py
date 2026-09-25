@@ -185,7 +185,7 @@ def decide(data):
     return "candidate", "подходит"
 
 
-def analyze(db, account_id, avito_chat_id, item_title=None, model=None):
+def analyze(db, account_id, avito_chat_id, item_title=None, model=None, request_id=None):
     ctx, ids = build_context(db, account_id, avito_chat_id, item_title)
     if not ids:
         return {"ok": False, "error": "в диалоге нет сообщений"}
@@ -199,10 +199,15 @@ def analyze(db, account_id, avito_chat_id, item_title=None, model=None):
         [Messages(role=sys_role, content=SYSTEM),
          Messages(role=MessagesRole.USER, content=ctx)],
         temperature=0, max_completion_tokens=800,
-        account_id=account_id, operation=OPERATION)
+        account_id=account_id, operation=OPERATION, request_id=request_id)
+    # Ниже этой строки провайдер УЖЕ ответил и деньги потрачены. Признак paid
+    # нужен вызывающему: по одному ok отличить «не платили» от «заплатили,
+    # но разбор упал» невозможно, а бюджет обязан зафиксировать факт.
     data, err = parse_verdict(resp, set(ids))
     if err:
         log.warning("реактивация: разбор ответа не удался (%s), чат %s", err, avito_chat_id)
-        return {"ok": False, "error": err, "raw": _extract_text(resp)[:400]}
+        return {"ok": False, "error": err, "raw": _extract_text(resp)[:400],
+                "paid": True, "request_id": request_id}
     verdict, why = decide(data)
-    return {"ok": True, "verdict": verdict, "why": why, "data": data, "context_ids": ids}
+    return {"ok": True, "verdict": verdict, "why": why, "data": data,
+            "context_ids": ids, "paid": True, "request_id": request_id}

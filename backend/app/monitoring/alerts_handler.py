@@ -19,6 +19,7 @@ import html
 import logging
 
 from app.monitoring import alerts, store
+from app.services.exception_observability import observe_suppressed
 
 log = logging.getLogger("monitor.alerts_handler")
 
@@ -47,8 +48,8 @@ def _answer(bot, callback_id: str, text: str = "") -> None:
             f"https://api.telegram.org/bot{token}/answerCallbackQuery",
             json={"callback_query_id": callback_id, "text": text[:190]},
             proxies=proxies, timeout=10)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as _suppressed_exc:  # noqa: BLE001
+        observe_suppressed(__name__, _suppressed_exc, line=50)
 
 
 def handle(data: str, callback_query: dict) -> None:

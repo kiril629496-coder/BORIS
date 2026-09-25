@@ -18,6 +18,7 @@ from sqlalchemy import text
 
 from app.db.session import SessionLocal
 from app.api.auth import require_owner
+from app.services.exception_observability import observe_suppressed
 
 router = APIRouter(prefix="/api/admin/clients")
 
@@ -108,6 +109,9 @@ class ProvisionBody(BaseModel):
     paid_at: Optional[str] = None
     payment_id: str = ""
     comment: str = ""
+    mop: bool = False                   # начислить пакет МОП всем аккаунтам клиента
+    mop_messages: int = 1000
+    mop_days: int = 30
     rop: bool = False                   # начислить пакет РОП всем аккаунтам клиента
     rop_minutes: int = 1500
     rop_chats: int = 450
@@ -115,7 +119,68 @@ class ProvisionBody(BaseModel):
     rop_rep_chats: int = 30
     rop_days: int = 30
     rop_renew: bool = False             # явное продление: перезапишет период и обнулит счётчики
+    ecs: bool = False                   # начислить пакет ЕЦС всем аккаунтам клиента
+    ecs_days: int = 30
+    ecs_renew: bool = False             # явное продление: перезапишет активный срок ЕЦС
+    autopilot: bool = False             # включить Автопилот всем аккаунтам клиента
+    autopilot_mode: str = "always_auto"  # always_ask | always_auto | dates
     dry_run: bool = True                # по умолчанию НИЧЕГО не меняет
+
+
+
+def _mop_period(account_id: str) -> dict:
+    """Канонический entitlement МОП; дата без купленного лимита не считается пакетом."""
+    from app.client_config.entitlements import has_entitlement
+
+    db = SessionLocal()
+    try:
+        ent = has_entitlement(db, account_id, "mop") or {}
+    finally:
+        db.close()
+    evidence = ent.get("evidence") or {}
+    return {
+        "active": bool(ent.get("allowed")),
+        "until": evidence.get("manager_paid_until"),
+        "reason": ent.get("reason"),
+    }
+
+
+def _module_provision_targets(db, before: dict) -> tuple[list[dict], list[str]]:
+    """Не выдавать модули повторно техническому alias того же Avito-аккаунта.
+
+    Многoаккаунтный клиент остаётся многoаккаунтным: исключается только manual
+    alias, который делит один и тот же avito_user_id с auto-аккаунтом владельца.
+    При отсутствии такого доказательства ничего не угадываем и оставляем аккаунт.
+    """
+    accounts = list(before.get("accounts") or [])
+    uid = int((before.get("user") or {}).get("id") or 0)
+    if uid <= 0 or len(accounts) <= 1:
+        return accounts, []
+
+    rows = db.execute(text(
+        "select account_id, coalesce(billing_mode,'manual') as billing_mode, "
+        "nullif(avito_user_id,'') as avito_user_id "
+        "from accounts where owner_user_id=:u"
+    ), {"u": uid}).mappings().all()
+
+    by_avito = {}
+    for row in rows:
+        external_id = str(row.get("avito_user_id") or "").strip()
+        if external_id:
+            by_avito.setdefault(external_id, []).append(row)
+
+    excluded = set()
+    for group in by_avito.values():
+        if len(group) < 2:
+            continue
+        if not any(str(x.get("billing_mode") or "manual") == "auto" for x in group):
+            continue
+        for row in group:
+            if str(row.get("billing_mode") or "manual") == "manual":
+                excluded.add(str(row.get("account_id") or ""))
+
+    targets = [a for a in accounts if str(a.get("account_id") or "") not in excluded]
+    return targets or accounts, sorted(x for x in excluded if x)
 
 
 @router.post("/provision")
@@ -126,6 +191,7 @@ def provision(body: ProvisionBody, user=Depends(require_owner)):
         before = _card(db, body.user_id)
         if not before:
             raise HTTPException(status_code=404, detail="Клиент не найден")
+        module_accounts, excluded_legacy_accounts = _module_provision_targets(db, before)
         acc_id = body.tier_account_id or before["user"]["account_id"]
         if not acc_id and before["accounts"]:
             acc_id = before["accounts"][0]["account_id"]
@@ -139,6 +205,11 @@ def provision(body: ProvisionBody, user=Depends(require_owner)):
     need_slots = max(0, int(body.slots or 0) - have_slots)
 
     plan = []
+    if excluded_legacy_accounts and (body.mop or body.rop or body.ecs or body.autopilot):
+        plan.append(
+            "legacy Avito alias не меняются автоматически: %s"
+            % ", ".join(excluded_legacy_accounts)
+        )
     if body.tier:
         plan.append("тариф %s на аккаунт %s" % (body.tier, acc_id))
     if body.slots:
@@ -157,12 +228,31 @@ def provision(body: ProvisionBody, user=Depends(require_owner)):
                     % (body.amount_rub, body.period_days))
     if body.comment:
         plan.append("комментарий в журнал: %s" % body.comment[:120])
+    # МОП: по одному пакету на каждый аккаунт клиента.
+    # Активный период повторно НЕ начисляется (аналогично РОП).
+    mop_plan = []
+    if body.mop:
+        for a in module_accounts:
+            aid = a["account_id"]
+            per = _mop_period(aid)
+            until = str(per.get("until") or "")[:10]
+            if per.get("active"):
+                mop_plan.append((aid, False,
+                                 "МОП %s: уже активен до %s, повторно не начисляется"
+                                 % (aid, until)))
+            else:
+                mop_plan.append((aid, True,
+                                 "МОП %s: %d сообщений, %d дней"
+                                 % (aid, body.mop_messages, body.mop_days)))
+        for _a, _do, _line in mop_plan:
+            plan.append(_line)
+
     # РОП: по одному пакету на каждый аккаунт клиента.
     # Активный период повторно НЕ начисляется — только по явному флажку rop_renew.
     rop_plan = []
     if body.rop:
         from app.api.calltracking import _rop_period
-        for a in (before.get("accounts") or []):
+        for a in module_accounts:
             aid = a["account_id"]
             per = _rop_period(aid)
             until = str(per.get("until") or "")[:10]
@@ -184,6 +274,59 @@ def provision(body: ProvisionBody, user=Depends(require_owner)):
         if any(x[1] for x in rop_plan):
             plan.append("ВНИМАНИЕ: каждый аккаунт получает ОТДЕЛЬНЫЙ лимит, "
                         "лимиты между аккаунтами НЕ делятся")
+
+    ecs_plan = []
+    if body.ecs:
+        from app.api.billing import _load_billing as _load_billing_ecs
+        from datetime import datetime as _dt_ecs
+        for a in module_accounts:
+            aid = a["account_id"]
+            b = _load_billing_ecs(aid) or {}
+            until_raw = b.get("ecs_paid_until")
+            active = False
+            if until_raw:
+                try:
+                    active = _dt_ecs.fromisoformat(str(until_raw)) > _dt_ecs.utcnow()
+                except Exception:
+                    active = False
+            if active and not body.ecs_renew:
+                ecs_plan.append((aid, False,
+                                 "ЕЦС %s: уже активен до %s, повторно не начисляется"
+                                 % (aid, str(until_raw)[:10])))
+            else:
+                ecs_plan.append((aid, True,
+                                 "ЕЦС %s: %d дней" % (aid, body.ecs_days)))
+        for _a, _do, _line in ecs_plan:
+            plan.append(_line)
+
+    autopilot_plan = []
+    if body.autopilot:
+        from app.db.session import SessionLocal as _SL_ap
+        for a in module_accounts:
+            aid = a["account_id"]
+            _db = _SL_ap()
+            try:
+                row = _db.execute(text("select value from storage where account_id=:a and key='autopilot_settings'"),
+                                  {"a": aid}).fetchone()
+            finally:
+                _db.close()
+            import json as _json_ap
+            cur_mode = None
+            if row and row[0]:
+                try:
+                    cur_mode = _json_ap.loads(row[0]).get("mode")
+                except Exception:
+                    cur_mode = None
+            if cur_mode == body.autopilot_mode:
+                autopilot_plan.append((aid, False,
+                                       "Автопилот %s: уже режим %s, не меняется"
+                                       % (aid, body.autopilot_mode)))
+            else:
+                autopilot_plan.append((aid, True,
+                                       "Автопилот %s: режим %s -> %s"
+                                       % (aid, cur_mode or "нет настроек", body.autopilot_mode)))
+        for _a, _do, _line in autopilot_plan:
+            plan.append(_line)
 
     if not plan:
         return {"status": "error", "message": "Нечего применять"}
@@ -226,6 +369,17 @@ def provision(body: ProvisionBody, user=Depends(require_owner)):
         except Exception as e:
             errors.append("оплата: %s" % str(e)[:150])
 
+    for _aid, _do, _line in mop_plan:
+        if not _do:
+            done.append(_line)
+            continue
+        try:
+            from app.api.messenger import add_manager_package
+            add_manager_package(_aid, amount=body.mop_messages, days=body.mop_days)
+            done.append("МОП начислен: %s" % _aid)
+        except Exception as e:
+            errors.append("МОП %s: %s" % (_aid, str(e)[:120]))
+
     for _aid, _do, _line in rop_plan:
         if not _do:
             done.append(_line)
@@ -241,10 +395,32 @@ def provision(body: ProvisionBody, user=Depends(require_owner)):
                 _al(_aid, "rop_package",
                     "Пакет РОП начислен. Одна коммерческая продажа на %d аккаунт(ов); "
                     "технически у каждого свой лимит." % len(rop_plan), "director")
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=397)
         except Exception as e:
             errors.append("РОП %s: %s" % (_aid, str(e)[:120]))
+
+    for _aid, _do, _line in ecs_plan:
+        if not _do:
+            done.append(_line)
+            continue
+        try:
+            from app.api.billing import add_ecs_package
+            add_ecs_package(_aid, days=body.ecs_days)
+            done.append("ЕЦС начислен: %s" % _aid)
+        except Exception as e:
+            errors.append("ЕЦС %s: %s" % (_aid, str(e)[:120]))
+
+    for _aid, _do, _line in autopilot_plan:
+        if not _do:
+            done.append(_line)
+            continue
+        try:
+            from app.api.avito import _apply_autopilot_settings
+            _apply_autopilot_settings(_aid, body.autopilot_mode, actor="director")
+            done.append("Автопилот включён: %s (%s)" % (_aid, body.autopilot_mode))
+        except Exception as e:
+            errors.append("Автопилот %s: %s" % (_aid, str(e)[:120]))
 
     if body.comment and acc_id:
         try:
@@ -416,7 +592,190 @@ def create_client(body: CreateClientBody, user=Depends(require_owner)):
                "Создан администратором без публичного email-подтверждения. "
                "user_id=%s, email=%s, account_id=%s, name=%s" % (uid, email, acc_id, name),
                getattr(user, "email", "owner"))
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=594)
     return {"status": "ok", "created": True, "user_id": uid,
             "account_id": acc_id, "email": email}
+
+# ------------------------------------------------------------------ PlusVibe secret setup
+class PlusVibeKeyBody(BaseModel):
+    key: str
+
+
+_PLUSVIBE_ENV_PATH = "/root/BORIS/backend/.env"
+_PLUSVIBE_CONFIG = {
+    "BORIS_SALES_DEEPSEEK_ENABLED": "1",
+    "BORIS_SALES_OPENAI_ENABLED": "0",
+    "BORIS_DEEPSEEK_BASE_URL": "https://plusvibeapi.ru/v1",
+    "BORIS_MOP_DEEPSEEK_MODEL": "deepseek-v4-flash-0731:free",
+    "BORIS_ROP_DEEPSEEK_MODEL": "deepseek-v4-flash-0731:free",
+    "BORIS_SALES_DEEPSEEK_MODEL": "deepseek-v4-flash-0731:free",
+    "BORIS_DEEPSEEK_REASONING_EFFORT": "high",
+}
+
+
+def _plusvibe_persist(key: str) -> None:
+    import fcntl
+    import os
+    from pathlib import Path
+
+    path = Path(_PLUSVIBE_ENV_PATH)
+    lock_path = path.with_name(path.name + ".plusvibe.lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        values = {"PLUSVIBE_API_KEY": key, **_PLUSVIBE_CONFIG}
+        seen = set()
+        out = []
+        for line in current.splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                name = line.split("=", 1)[0].strip()
+                if name in values:
+                    if name not in seen:
+                        out.append(name + "=" + values[name])
+                        seen.add(name)
+                    continue
+            out.append(line)
+        for name, value in values.items():
+            if name not in seen:
+                out.append(name + "=" + value)
+        tmp = path.with_name(path.name + ".plusvibe.tmp")
+        tmp.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    os.environ["PLUSVIBE_API_KEY"] = key
+    for name, value in _PLUSVIBE_CONFIG.items():
+        os.environ[name] = value
+
+
+def _plusvibe_live_test(key: str) -> tuple[bool, int, str]:
+    import time
+    import requests
+
+    last_status = 0
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                "https://plusvibeapi.ru/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer " + key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "minimax-m2.7:free",
+                    "messages": [{"role": "user", "content": "Ответь одним словом: ГОТОВО"}],
+                    "max_tokens": 16000,
+                    "temperature": 0,
+                    "stream": False,
+                },
+                timeout=30,
+            )
+        except Exception:
+            if attempt < 2:
+                time.sleep(1)
+                continue
+            return False, 0, "PlusVibe сейчас недоступен по сети"
+
+        status = int(resp.status_code or 0)
+        last_status = status
+        if 200 <= status < 300:
+            try:
+                data = resp.json()
+                choice = (data.get("choices") or [{}])[0]
+                message = choice.get("message") or {}
+                text = str(message.get("content") or "").strip()
+                finish_reason = str(choice.get("finish_reason") or "").strip()
+            except Exception:
+                text = ""
+                finish_reason = ""
+
+            if text:
+                return True, status, "Живой запрос MiniMax прошёл"
+            if attempt < 2:
+                time.sleep(1)
+                continue
+            if finish_reason == "length":
+                return False, status, "MiniMax отвечает, но лимит ответа закончился до финального текста"
+            return False, status, "PlusVibe ответил HTTP 200, но после 3 попыток финальный текст пустой"
+
+        # Auth/billing errors should not be retried.
+        if status == 401:
+            return False, status, "Ключ отклонён PlusVibe"
+        if status == 403:
+            return False, status, "Ключ принят, но бесплатная модель ещё не активирована/не разрешена"
+        if status == 402:
+            return False, status, "Для этого маршрута требуется баланс или активация бесплатной модели"
+        if status == 429:
+            return False, status, "Достигнут лимит PlusVibe, попробуйте позже"
+        if status >= 500 and attempt < 2:
+            time.sleep(1)
+            continue
+        return False, status, "PlusVibe вернул ошибку HTTP " + str(status)
+
+    return False, last_status, "Живой тест PlusVibe не завершён"
+
+
+@router.get("/plusvibe/status")
+def plusvibe_status(user=Depends(require_owner)):
+    import os
+    key = str(os.environ.get("PLUSVIBE_API_KEY") or "").strip()
+    if not key:
+        try:
+            from pathlib import Path
+            for line in Path(_PLUSVIBE_ENV_PATH).read_text(encoding="utf-8").splitlines():
+                if line.startswith("PLUSVIBE_API_KEY="):
+                    key = line.split("=", 1)[1].strip()
+                    break
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=731)
+    return {
+        "status": "ok",
+        "configured": bool(key),
+        "provider": "PlusVibe",
+        "base_url": _PLUSVIBE_CONFIG["BORIS_DEEPSEEK_BASE_URL"],
+        "model": _PLUSVIBE_CONFIG["BORIS_MOP_DEEPSEEK_MODEL"],
+        "sales_openai_enabled": False,
+    }
+
+
+@router.post("/plusvibe/key")
+def plusvibe_set_key(body: PlusVibeKeyBody, user=Depends(require_owner)):
+    key = str(body.key or "").strip()
+    if not key.startswith("sk-pv-") or not (20 <= len(key) <= 256):
+        raise HTTPException(status_code=400, detail="Неверный формат ключа PlusVibe")
+
+    live_ok, http_status, message = _plusvibe_live_test(key)
+    if http_status == 401:
+        raise HTTPException(status_code=400, detail=message)
+
+    # Persist valid-format keys even when the promo model needs activation.
+    # This lets the owner activate the promo in PlusVibe and re-test without re-entering the key.
+    _plusvibe_persist(key)
+    return {
+        "status": "ok",
+        "configured": True,
+        "live_test": "pass" if live_ok else "waiting",
+        "provider_http_status": http_status,
+        "message": message,
+        "model": _PLUSVIBE_CONFIG["BORIS_MOP_DEEPSEEK_MODEL"],
+    }
+
+
+@router.post("/plusvibe/test")
+def plusvibe_test(user=Depends(require_owner)):
+    import os
+    key = str(os.environ.get("PLUSVIBE_API_KEY") or "").strip()
+    if not key:
+        raise HTTPException(status_code=409, detail="Ключ PlusVibe ещё не сохранён")
+    live_ok, http_status, message = _plusvibe_live_test(key)
+    return {
+        "status": "ok",
+        "configured": True,
+        "live_test": "pass" if live_ok else "waiting",
+        "provider_http_status": http_status,
+        "message": message,
+        "model": _PLUSVIBE_CONFIG["BORIS_MOP_DEEPSEEK_MODEL"],
+    }

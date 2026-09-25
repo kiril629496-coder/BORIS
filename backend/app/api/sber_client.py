@@ -1,5 +1,6 @@
 """Клиент Sber API (набор «Компаниям») — ТОЛЬКО чтение выписки."""
 import os, json, datetime, requests, uuid
+from app.services.exception_observability import observe_suppressed
 
 _BASE = os.environ.get("SBER_BASE_URL", "https://fintech-test.sberbank.ru:9443").rstrip("/")
 _CID = os.environ.get("SBER_CLIENT_ID", "")
@@ -31,8 +32,8 @@ def _load_tokens():
         if row:
             try:
                 return json.loads(row.value)
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=34)
     finally:
         db.close()
     return {"access_token": os.environ.get("SBER_ACCESS_TOKEN", ""),

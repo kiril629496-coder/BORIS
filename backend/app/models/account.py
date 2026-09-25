@@ -24,4 +24,5 @@ class Account(Base):
     company_tone = Column(String, nullable=True)
     company_description = Column(String, nullable=True)
     company_advantages = Column(String, nullable=True)
+    company_client_description = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())

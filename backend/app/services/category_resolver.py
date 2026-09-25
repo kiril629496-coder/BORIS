@@ -3,10 +3,190 @@
 Источник истины: официальная документация /autoload/documentation/templates/{id}
 Кэш: Storage(account_id='_global', key='category_knowledge_base')
 """
+from app.services.realtime_ai_guard import realtime_guarded_post as _rt_guarded_post
 import asyncio
 import html
 import json
 import re
+from app.services.exception_observability import observe_suppressed
+
+
+def _category_paid_json(account_id: str, operation: str, prompt: str, max_tokens: int, timeout: int):
+    """Exactly-once guarded category fallback used only when official Avito docs are insufficient.
+
+    This is deliberately account-scoped: a Feed Factory fallback cannot spend from an
+    unowned/global bucket. Same semantic intent is serialized across processes and cached
+    before downstream work so ambiguous retries do not repurchase the same answer.
+    """
+    import datetime as _dt
+    import hashlib as _hashlib
+    import json as _json
+    import os as _os
+    import tempfile as _tempfile
+    import requests as _requests
+    from sqlalchemy import text as _sql_text, create_engine as _create_engine
+    from sqlalchemy.pool import NullPool as _NullPool
+    from app.db.session import DATABASE_URL as _DATABASE_URL
+    from app.services import ai_budget as _ai_budget
+    from app.services.ai_guard_audit import log_guard_event as _audit_ai_guard
+    from app.usage import log_usage as _log_usage
+
+    aid=str(account_id or "").strip()
+    if not aid:
+        raise RuntimeError("CATEGORY_PAID_ACCOUNT_REQUIRED")
+    api_key=_os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("CATEGORY_OPENAI_KEY_MISSING")
+    basis=_json.dumps({"policy":"category_paid_exactly_once_v1","account_id":aid,"operation":operation,"model":"gpt-5.4","prompt":prompt,"max_tokens":int(max_tokens)},ensure_ascii=False,sort_keys=True,separators=(",",":"))
+    digest=_hashlib.sha256(basis.encode("utf-8")).hexdigest()
+    intent_key="category:"+digest
+    run_id="category:%s:%s"%(aid,digest)
+    root=_os.environ.get("BORIS_CATEGORY_PAID_CACHE_DIR","/root/BORIS/backend/.ai_paid_cache/category")
+    path=_os.path.join(root,digest+".json")
+    uncertain_path=path+".uncertain"
+    def _audit(code,status="blocked",details=None):
+        _audit_ai_guard(account_id=aid,source="category_resolver",operation=operation,
+                        event_code=code,status=status,intent_key=intent_key,
+                        details=details if isinstance(details,dict) else None)
+    def read_uncertain():
+        try:
+            with open(uncertain_path,"r",encoding="utf-8") as fh: obj=_json.load(fh)
+            return obj if isinstance(obj,dict) and obj.get("intent_hash")==digest else None
+        except Exception:
+            return None
+    def write_uncertain(error_code,provider_request_id=None):
+        _os.makedirs(root,exist_ok=True)
+        fd,tmp=_tempfile.mkstemp(prefix=".category-uncertain-",suffix=".json",dir=root)
+        try:
+            with _os.fdopen(fd,"w",encoding="utf-8") as fh:
+                _json.dump({"schema":1,"intent_hash":digest,"status":"provider_outcome_uncertain",
+                            "error_code":str(error_code or "category_outcome_unknown"),
+                            "provider_request_id":provider_request_id or None},fh,ensure_ascii=False,sort_keys=True)
+            _os.replace(tmp,uncertain_path)
+        except Exception:
+            try:_os.unlink(tmp)
+            except Exception as _suppressed_exc:observe_suppressed(__name__, _suppressed_exc, line=67)
+            raise
+        _audit("CATEGORY_OUTCOME_UNCERTAIN","quarantined",{"reason":str(error_code or "category_outcome_unknown")})
+    def read_cache():
+        try:
+            with open(path,"r",encoding="utf-8") as fh: obj=_json.load(fh)
+            if obj.get("intent_hash")==digest and isinstance(obj.get("result"),(dict,list)):
+                return obj.get("result")
+        except Exception:
+            return None
+        return None
+    cached=read_cache()
+    if cached is not None: return cached
+    uncertain=read_uncertain()
+    if uncertain is not None:
+        _audit("CATEGORY_OUTCOME_UNCERTAIN","quarantined",{"reason":str(uncertain.get("error_code") or "unknown")})
+        raise RuntimeError("CATEGORY_OUTCOME_UNCERTAIN:"+str(uncertain.get("error_code") or "unknown"))
+    raw=int.from_bytes(_hashlib.blake2b((aid+"|"+intent_key).encode("utf-8"),digest_size=8).digest(),"big",signed=False)
+    lock_key=raw if raw<(1<<63) else raw-(1<<64)
+    _lock_engine=_create_engine(_DATABASE_URL,poolclass=_NullPool,pool_pre_ping=True,
+                               connect_args={"application_name":"boris-category-paid-lock"})
+    db=_lock_engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        db.execute(_sql_text("select pg_advisory_lock(:k)"),{"k":lock_key})
+        cached=read_cache()
+        if cached is not None: return cached
+        uncertain=read_uncertain()
+        if uncertain is not None:
+            _audit("CATEGORY_OUTCOME_UNCERTAIN","quarantined",{"reason":str(uncertain.get("error_code") or "unknown")})
+            raise RuntimeError("CATEGORY_OUTCOME_UNCERTAIN:"+str(uncertain.get("error_code") or "unknown"))
+        now=_dt.datetime.now(_dt.timezone.utc); day=now.replace(hour=0,minute=0,second=0,microsecond=0); burst=now-_dt.timedelta(minutes=10)
+        row=db.execute(_sql_text("select count(*) from api_usage where account_id=:a and operation like 'category_%' and created_at>=:c"),{"a":aid,"c":burst}).scalar() or 0
+        day_row=db.execute(_sql_text("select count(*) from api_usage where account_id=:a and operation like 'category_%' and created_at>=:c"),{"a":aid,"c":day}).scalar() or 0
+        try: burst_cap=max(1,min(50,int(_os.environ.get("BORIS_CATEGORY_AI_BURST_CAP","10"))))
+        except Exception: burst_cap=10
+        try: daily_cap=max(burst_cap,min(200,int(_os.environ.get("BORIS_CATEGORY_AI_DAILY_CAP","40"))))
+        except Exception: daily_cap=40
+        if int(day_row)>=daily_cap:
+            _audit("CATEGORY_DAILY_CAP","blocked",{"daily_used":int(day_row),"daily_cap":daily_cap})
+            raise RuntimeError("CATEGORY_AI_DAILY_CAP_REACHED")
+        if int(row)>=burst_cap:
+            _audit("CATEGORY_BURST_CAP","blocked",{"used":int(row),"cap":burst_cap,"window_min":10})
+            raise RuntimeError("CATEGORY_AI_BURST_CAP_REACHED")
+        token=_ai_budget.reserve(account_id=aid,module="category_resolver",operation=operation,run_id=run_id,est_kopeks=100,calls_planned=1)
+        reserve_status=str((token or {}).get("status") or "")
+        if reserve_status not in {"reserved","observe","exists"}:
+            _audit("AI_BUDGET_RESERVE_FAILED","blocked",{"status":reserve_status})
+            raise RuntimeError("CATEGORY_BUDGET_RESERVE_FAILED")
+        try:
+            allow=_ai_budget.allow_next(run_id)
+            if not bool((allow or {}).get("allowed") if isinstance(allow,dict) else allow):
+                _audit("AI_BUDGET_NOT_ALLOWED","blocked",{"reason":str((allow or {}).get("reason") or "") if isinstance(allow,dict) else ""})
+                raise RuntimeError("CATEGORY_BUDGET_NOT_ALLOWED")
+            # Durable pre-provider barrier: a worker crash after the request leaves
+            # this intent quarantined instead of allowing a blind second purchase.
+            _os.makedirs(root,exist_ok=True)
+            fd_pending,tmp_pending=_tempfile.mkstemp(prefix=".category-inflight-",suffix=".json",dir=root)
+            try:
+                with _os.fdopen(fd_pending,"w",encoding="utf-8") as fh:
+                    _json.dump({"schema":1,"intent_hash":digest,"status":"provider_in_progress",
+                                "error_code":"provider_outcome_unknown"},fh,ensure_ascii=False,sort_keys=True)
+                _os.replace(tmp_pending,uncertain_path)
+            except Exception:
+                try:_os.unlink(tmp_pending)
+                except Exception as _suppressed_exc:observe_suppressed(__name__, _suppressed_exc, line=131)
+                raise
+            from app.services.ai_privacy import safe_external_ai_payload, restore_external_ai_output
+            external_prompt, privacy_vault = safe_external_ai_payload(prompt)
+            try:
+                response=_requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization":"Bearer "+api_key,"Content-Type":"application/json","Idempotency-Key":intent_key},
+                    json={"model":"gpt-5.4","messages":[{"role":"user","content":external_prompt}],"max_completion_tokens":int(max_tokens)},
+                    timeout=int(timeout),
+                )
+            except Exception as exc:
+                write_uncertain("category_transport_outcome_unknown")
+                raise RuntimeError("CATEGORY_OUTCOME_UNCERTAIN:category_transport_outcome_unknown") from exc
+            if int(getattr(response,"status_code",0) or 0) != 200:
+                try:_os.unlink(uncertain_path)
+                except Exception as _suppressed_exc:observe_suppressed(__name__, _suppressed_exc, line=147)
+                response.raise_for_status()
+            exact=str(response.headers.get("x-request-id") or "").strip()
+            try:
+                data=response.json()
+            except Exception as exc:
+                write_uncertain("provider_200_unparseable",exact or None)
+                raise RuntimeError("CATEGORY_OUTCOME_UNCERTAIN:provider_200_unparseable") from exc
+            usage=data.get("usage") or {}
+            raw_text=str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+            if raw_text:
+                raw_text=str(restore_external_ai_output(raw_text, privacy_vault)).replace("```json","").replace("```","").strip()
+            if not raw_text:
+                write_uncertain("provider_200_empty_result",exact or None)
+                raise RuntimeError("CATEGORY_OUTCOME_UNCERTAIN:provider_200_empty_result")
+            try:
+                result=_json.loads(raw_text)
+            except Exception as exc:
+                write_uncertain("provider_200_bad_result_json",exact or None)
+                raise RuntimeError("CATEGORY_OUTCOME_UNCERTAIN:provider_200_bad_result_json") from exc
+            exact=str(response.headers.get("x-request-id") or "").strip(); rid=exact or ("ambiguous-text:category:"+digest)
+            _os.makedirs(root,exist_ok=True); fd,tmp=_tempfile.mkstemp(prefix=".category-paid-",suffix=".json",dir=root)
+            try:
+                with _os.fdopen(fd,"w",encoding="utf-8") as fh: _json.dump({"schema":1,"intent_hash":digest,"provider_request_id":exact or None,"ambiguous_success":not bool(exact),"result":result},fh,ensure_ascii=False,sort_keys=True)
+                _os.replace(tmp,path)
+                try:_os.unlink(uncertain_path)
+                except Exception as _suppressed_exc:observe_suppressed(__name__, _suppressed_exc, line=173)
+            except Exception:
+                try: _os.unlink(tmp)
+                except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=176)
+                raise
+            _log_usage(aid,"openai",data.get("model") or "gpt-5.4",operation,int(usage.get("prompt_tokens") or 0),int(usage.get("completion_tokens") or 0),request_id=rid,usage_details=usage)
+            _ai_budget.commit(run_id,rid)
+            return result
+        finally:
+            _ai_budget.release(run_id)
+    finally:
+        try: db.execute(_sql_text("select pg_advisory_unlock(:k)"),{"k":lock_key})
+        except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=185)
+        db.close()
+        try: _lock_engine.dispose()
+        except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=188)
 
 async def _block_media_only(route):
     if route.request.resource_type in ("image", "media"):
@@ -57,15 +237,15 @@ async def scrape_template_page(template_id: int) -> str:
                     eng_button = page.get_by_text("Английский", exact=True).first
                     await eng_button.click()
                     await page.wait_for_timeout(3000)
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=239)
 
                 text = await page.inner_text("body")
                 await browser.close()
                 # проверка: не бан-страница ли (IP протух между проверкой и запросом)
                 if "Доступ ограничен" in text or "проблема с IP" in text:
                     import proxy_pool as _pp
-                    _pp._clean_port_cache = {"port": None, "ts": 0}  # сбросить протухший порт
+                    _pp._clean_port_cache.clear()  # сбросить протухшие account-scoped маршруты
                     last_error = Exception(f"бан-страница на попытке {attempt+1}, порт сброшен")
                     continue
                 return text
@@ -74,14 +254,14 @@ async def scrape_template_page(template_id: int) -> str:
                 if browser:
                     try:
                         await browser.close()
-                    except Exception:
-                        pass
+                    except Exception as _suppressed_exc:
+                        observe_suppressed(__name__, _suppressed_exc, line=256)
                 continue
 
     raise Exception(f"scrape_template_page: не удалось загрузить страницу шаблона {template_id} за 3 попытки: {last_error}")
 
 
-def structure_fields_via_gpt(raw_text: str, category_name: str) -> list:
+def structure_fields_via_gpt(raw_text: str, category_name: str, account_id: str = None) -> list:
     """
     Отдаёт сырой текст документации в GPT-5.4, получает структурированный список полей.
     Возвращает list[dict]: {tag, name_ru, required, depends_on, allowed_values, example}
@@ -114,34 +294,8 @@ def structure_fields_via_gpt(raw_text: str, category_name: str) -> list:
         "ТЕКСТ ДОКУМЕНТАЦИИ:\n" + raw_text[:15000]
     )
 
-    resp = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-        json={
-            "model": "gpt-5.4",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_completion_tokens": 4000,
-        },
-        proxies=proxies,
-        timeout=90,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    try:  # учёт расхода: служебный вызов без привязки к клиенту
-        from app.usage import log_usage as _lu
-        _u = data.get("usage") or {}
-        _lu(None, "openai", data.get("model") or "gpt-5.4", "system:category_doc_parse",
-            int(_u.get("prompt_tokens") or 0), int(_u.get("completion_tokens") or 0))
-    except Exception as _e:
-        print("[usage]", str(_e)[:100], flush=True)
-    raw = data["choices"][0]["message"]["content"].strip()
-    raw = raw.replace("```json", "").replace("```", "").strip()
-
-    match = re.search(r'\[.*\]', raw, re.DOTALL)
-    if match:
-        raw = match.group(0)
-
-    return json.loads(raw)
+    parsed = _category_paid_json(str(account_id or ""), "category_doc_parse", prompt, 4000, 90)
+    return parsed if isinstance(parsed, list) else []
 
 
 def _load_knowledge_base(db) -> dict:
@@ -265,8 +419,8 @@ async def _crawl_tree_node(page, path_labels: list, text: str, margin: int, cons
         try:
             await page.go_back()
             await page.wait_for_timeout(1200)
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=421)
         return
 
     rows2 = await _get_tree_rows(page)
@@ -294,8 +448,8 @@ async def _crawl_tree_node(page, path_labels: list, text: str, margin: int, cons
         try:
             await page.go_back()
             await page.wait_for_timeout(1200)
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=450)
 
 
 async def _crawl_category_tree_async() -> list:
@@ -326,8 +480,8 @@ async def _crawl_category_tree_async() -> list:
                 await page.wait_for_timeout(6000)
                 try:
                     await page.wait_for_selector("a[href*='/templates/']", timeout=20000)
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=482)
                 await page.wait_for_timeout(15000)
                 _live = await page.evaluate("() => document.body.innerHTML")
                 open("/tmp/crawl_live.html", "w", encoding="utf-8").write(_live)
@@ -344,8 +498,8 @@ async def _crawl_category_tree_async() -> list:
                 if browser:
                     try:
                         await browser.close()
-                    except Exception:
-                        pass
+                    except Exception as _suppressed_exc:
+                        observe_suppressed(__name__, _suppressed_exc, line=500)
                 browser = None
                 page = None
                 continue
@@ -440,8 +594,8 @@ async def _crawl_category_tree_partial_async(top_levels: list) -> list:
                 await page.wait_for_timeout(6000)
                 try:
                     await page.wait_for_selector(NAV_SCOPE, timeout=20000)
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=596)
                 await page.wait_for_timeout(5000)
                 break
             except Exception as e:
@@ -449,8 +603,8 @@ async def _crawl_category_tree_partial_async(top_levels: list) -> list:
                 if browser:
                     try:
                         await browser.close()
-                    except Exception:
-                        pass
+                    except Exception as _suppressed_exc:
+                        observe_suppressed(__name__, _suppressed_exc, line=605)
                 browser = None
                 page = None
                 continue
@@ -503,8 +657,8 @@ def _pick_leaf_via_gigachat(candidates: list, niche: str, account_id: str = None
         idx = int(parsed.get("index"))
         if 0 <= idx < len(candidates):
             return candidates[idx]
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=659)
     return None
 
 
@@ -544,7 +698,7 @@ def resolve_template_id_for_niche(api_category: str, niche: str, account_id: str
         db.close()
 
 
-def pick_value_via_gpt(field: dict, niche: str, allowed_values, format_rule: str = None) -> dict:
+def pick_value_via_gpt(field: dict, niche: str, allowed_values, format_rule: str = None, account_id: str = None) -> dict:
     """
     Подбирает значение поля под конкретную нишу клиента.
     Возвращает {"value": ... или None, "clarify_question": ... или None}.
@@ -581,34 +735,11 @@ def pick_value_via_gpt(field: dict, niche: str, allowed_values, format_rule: str
     )
 
     try:
-        resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-            json={
-                "model": "gpt-5.4",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_completion_tokens": 300,
-            },
-            proxies=proxies,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        try:  # учёт расхода: прямой вызов идёт мимо пула
-            from app.usage import log_usage as _lu
-            _u = data.get("usage") or {}
-            _lu(None, "openai", data.get("model") or "gpt-5.4", "system:category_field_value",
-                int(_u.get("prompt_tokens") or 0), int(_u.get("completion_tokens") or 0))
-        except Exception as _ue:
-            print("[usage]", str(_ue)[:100], flush=True)
-        raw = data["choices"][0]["message"]["content"].strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        parsed = _json.loads(raw)
-        value = parsed.get("value")
+        parsed = _category_paid_json(str(account_id or ""), "category_field_value", prompt, 300, 30)
+        value = parsed.get("value") if isinstance(parsed, dict) else None
         if allowed_values and value is not None and value not in allowed_values:
-            # ИИ вернул то, чего нет в списке - не доверяем, просим уточнение у человека вместо вранья
-            return {"value": None, "clarify_question": parsed.get("clarify_question") or f"Уточните значение поля «{field.get('name_ru')}»"}
-        return {"value": value, "clarify_question": parsed.get("clarify_question")}
+            return {"value": None, "clarify_question": (parsed.get("clarify_question") if isinstance(parsed,dict) else None) or f"Уточните значение поля «{field.get('name_ru')}»"}
+        return {"value": value, "clarify_question": parsed.get("clarify_question") if isinstance(parsed,dict) else None}
     except Exception:
         return {"value": None, "clarify_question": f"Уточните значение поля «{field.get('name_ru')}»"}
 
@@ -655,6 +786,8 @@ def _extract_official_field_docs(html_text: str, template_id) -> list:
                 continue
             values = f.get("values")
             dependency = f.get("dependency")
+            field_type=str(f.get("type") or f.get("input_type") or "").lower()
+            multiple=bool(f.get("multiple") or f.get("is_multiple") or f.get("multi") or field_type in {"multiselect","multi_select","checkboxes","multiple"})
             fields.append({
                 "tag": tag,
                 "name_ru": f.get("label") or f.get("description"),
@@ -664,6 +797,7 @@ def _extract_official_field_docs(html_text: str, template_id) -> list:
                 "example": f.get("example"),
                 "depends_on": " | ".join(dependency) if dependency else None,
                 "values_range": f.get("values_range"),
+                "multiple": multiple,
             })
     return fields
 
@@ -677,12 +811,11 @@ def fetch_template_fields_via_http(template_id) -> list:
 
     url = f"https://www.avito.ru/autoload/documentation/templates/{template_id}"
     last_err = None
+    headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"}
     for _attempt in range(3):
         try:
             proxies = get_intl_requests_proxies()
-            r = requests.get(url, proxies=proxies, timeout=20, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-            })
+            r = requests.get(url, proxies=proxies, timeout=20, headers=headers)
             r.raise_for_status()
             fields = _extract_official_field_docs(r.text, template_id)
             if fields:
@@ -691,8 +824,211 @@ def fetch_template_fields_via_http(template_id) -> list:
         except Exception as e:
             last_err = e
             continue
+    # Proxy pool may be temporarily unavailable (for example 407). Official Avito docs are public;
+    # retry directly before falling back to the heavier Playwright/GPT path.
+    try:
+        r = requests.get(url, timeout=20, headers=headers)
+        r.raise_for_status()
+        fields = _extract_official_field_docs(r.text, template_id)
+        if fields:
+            return fields
+        last_err = "categoryDataCache не найден на странице при direct HTTPS"
+    except Exception as e:
+        last_err = e
     print(f"[fetch_template_fields_via_http] не удалось получить поля шаблона {template_id} через HTTP ({last_err}) - падаю на Playwright+GPT", flush=True)
     return []
+
+
+
+def _account_docs_cache_fresh_enough(cached_fields, fetched_at, now=None):
+    """True only when cached User Docs are fresh and no newer live-xmlcheck learning awaits enrichment."""
+    import datetime as _dt
+    now = now or _dt.datetime.utcnow()
+    try:
+        fresh = bool(fetched_at and (now - fetched_at).total_seconds() < 7 * 86400)
+    except Exception:
+        fresh = False
+    fields = [x for x in (cached_fields or []) if isinstance(x, dict)]
+    has_user_docs = any(str(x.get("source") or "") == "official_avito_user_docs" for x in fields)
+    has_live_xmlcheck_learning = any(str(x.get("source") or "") == "official_avito_xmlcheck" for x in fields)
+    return bool(fresh and has_user_docs and not has_live_xmlcheck_learning)
+
+
+def refresh_category_template_from_account_docs(template_id, category_path, account_id, db, persist=True, force=False):
+    """Enrich a cached Avito template from the official authenticated User Docs API.
+
+    Used when public template scraping knows that a field exists but misses enums/dependencies.
+    Exact account credentials are used only to read Avito documentation; secrets never leave the
+    existing crypto/token path. Fail-open to cached contract on any transport/permission problem.
+    """
+    import datetime as _dt, json as _json
+    if not account_id or not template_id or not category_path:
+        return {"status":"skipped","refreshed":False,"fields":0}
+    try:
+        import httpx
+        from app.models.account import Account
+        from app.models.category_template import CategoryTemplate
+        from app.crypto_utils import decrypt_secret
+        acc=db.query(Account).filter(Account.account_id==str(account_id)).first()
+        row=db.query(CategoryTemplate).filter(CategoryTemplate.template_id==str(template_id)).first()
+        if not acc or not row or not acc.avito_client_id or not acc.avito_client_secret:
+            return {"status":"no_account_credentials","refreshed":False,"fields":0}
+        try:
+            _cached=_json.loads(row.required_fields or "[]") or []
+            # A live xmlcheck can reveal newly-required fields after the last User Docs
+            # refresh. Do not call the whole template "fresh" merely because older
+            # fields already came from User Docs: the new fields must get one official
+            # docs enrichment pass first (enum/dependency/multiplicity may be missing).
+            if (not force) and _account_docs_cache_fresh_enough(_cached, getattr(row,"fetched_at",None)):
+                return {"status":"fresh_account_docs","refreshed":False,"fields":len(_cached)}
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=883)
+        # CATEGORY_DOCS_SHARED_ACCOUNT_THROTTLE_V1: official User Docs reads are
+        # provider pressure too. A tenant Retry-After observed by any trusted BORIS
+        # stage wins before token/docs I/O and a local 429 is published tenant-wide.
+        from app.services.avito_account_throttle import account_throttle_remaining as _cat_throttle_remaining, record_account_throttle as _cat_record_throttle
+        if _cat_throttle_remaining(account_id) > 0:
+            return {"status":"docs_unavailable","http_status":429,"reason":"avito_account_throttled","refreshed":False,"fields":0}
+        def _cat_retry_after(resp):
+            raw=str(resp.headers.get("Retry-After") or "").strip()
+            if not raw: return 30
+            try: return max(0,int(float(raw)))
+            except Exception:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    from datetime import datetime, timezone
+                    dt=parsedate_to_datetime(raw)
+                    if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+                    return max(0,int((dt.astimezone(timezone.utc)-datetime.now(timezone.utc)).total_seconds()))
+                except Exception: return 30
+        with httpx.Client(timeout=25,trust_env=False) as client:
+            tr=client.post("https://api.avito.ru/token/",data={"grant_type":"client_credentials","client_id":decrypt_secret(acc.avito_client_id),"client_secret":decrypt_secret(acc.avito_client_secret)})
+            if tr.status_code==429:
+                _cat_record_throttle(account_id,_cat_retry_after(tr),source="category_docs_token_429")
+                return {"status":"token_error","http_status":429,"reason":"avito_account_throttled","refreshed":False,"fields":0}
+            if tr.status_code!=200:
+                return {"status":"token_error","refreshed":False,"fields":0}
+            token=(tr.json() or {}).get("access_token")
+            if not token: return {"status":"token_error","refreshed":False,"fields":0}
+            head={"Authorization":"Bearer "+token}
+            if _cat_throttle_remaining(account_id) > 0:
+                return {"status":"docs_unavailable","http_status":429,"reason":"avito_account_throttled","refreshed":False,"fields":0}
+            tree=client.get("https://api.avito.ru/autoload/v1/user-docs/tree",headers=head)
+            if tree.status_code==429:
+                _cat_record_throttle(account_id,_cat_retry_after(tree),source="category_docs_tree_429")
+            if tree.status_code!=200:
+                return {"status":"docs_unavailable","http_status":tree.status_code,"refreshed":False,"fields":0}
+            wanted=[x.strip() for x in str(category_path).split(">") if x.strip()]
+            candidates=[]
+            def walk(node,path):
+                if isinstance(node,dict):
+                    name=str(node.get("name") or "").strip(); cur=path+([name] if name else [])
+                    slug=str(node.get("slug") or "").strip()
+                    if slug and wanted and [x.lower() for x in cur[-len(wanted):]]==[x.lower() for x in wanted]:
+                        candidates.append(slug)
+                    for key,val in node.items():
+                        if key not in {"name","slug"}: walk(val,cur)
+                elif isinstance(node,list):
+                    for val in node: walk(val,path)
+            walk(tree.json(),[])
+            if not candidates:
+                # Safe fallback only to an exact leaf-name match; ambiguity is rejected.
+                leaf=wanted[-1].lower() if wanted else ""; leaf_hits=[]
+                def walk_leaf(node):
+                    if isinstance(node,dict):
+                        if str(node.get("name") or "").strip().lower()==leaf and node.get("slug"): leaf_hits.append(str(node.get("slug")))
+                        for val in node.values(): walk_leaf(val)
+                    elif isinstance(node,list):
+                        for val in node: walk_leaf(val)
+                walk_leaf(tree.json())
+                if len(set(leaf_hits))==1: candidates=[leaf_hits[0]]
+            if len(set(candidates))!=1:
+                return {"status":"node_ambiguous","refreshed":False,"fields":0}
+            slug=candidates[0]
+            if _cat_throttle_remaining(account_id) > 0:
+                return {"status":"fields_unavailable","http_status":429,"reason":"avito_account_throttled","refreshed":False,"fields":0}
+            fr=client.get(f"https://api.avito.ru/autoload/v1/user-docs/node/{slug}/fields",headers=head)
+            if fr.status_code==429:
+                _cat_record_throttle(account_id,_cat_retry_after(fr),source="category_docs_fields_429")
+            if fr.status_code!=200:
+                return {"status":"fields_unavailable","http_status":fr.status_code,"refreshed":False,"fields":0}
+            official=[]
+            for f in (fr.json() or {}).get("fields") or []:
+                tag=str(f.get("tag") or "").strip()
+                if not tag or tag in _SKIP_TAGS: continue
+                content=list(f.get("content") or [])
+                allowed=[]; deps=[]; required=False; multiple=False; fmt=""
+                for c in content:
+                    required=required or bool(c.get("required") or c.get("required_by_dependency"))
+                    ft=str(c.get("field_type") or "").lower(); multiple=multiple or ft in {"multiselect","checkbox","checkboxes","multiple"}
+                    for v in (c.get("values") or []):
+                        val=v.get("value") if isinstance(v,dict) else v
+                        if val not in (None,"") and str(val) not in [str(x) for x in allowed]: allowed.append(val)
+                    for d in (c.get("dependencies_text") or []):
+                        if str(d).strip() and str(d).strip() not in deps: deps.append(str(d).strip())
+                    vr=c.get("values_range") or {}
+                    if vr: fmt=_json.dumps(vr,ensure_ascii=False)
+                official.append({"tag":tag,"name_ru":f.get("label") or f.get("descriptions") or tag,"required":required,
+                                 "depends_on":" | ".join(deps),"allowed_values":allowed or None,"format_rule":fmt or None,
+                                 "multiple":multiple,"source":"official_avito_user_docs"})
+            if not official:
+                return {"status":"empty_fields","refreshed":False,"fields":0}
+        # Schema-drift callers need authoritative live fields without rewriting a
+        # shared legacy CategoryTemplate. Return a read-only contract snapshot.
+        if not persist:
+            return {"status":"official_account_docs_readonly","refreshed":False,"fields":len(official),"node_slug":slug,
+                    "category_path":str(category_path),"official_fields":official}
+        # Merge official docs over cached fields so a temporary API omission cannot delete knowledge.
+        try: cached=_json.loads(row.required_fields or "[]") or []
+        except Exception: cached=[]
+        merged={str(x.get("tag")):dict(x) for x in cached if isinstance(x,dict) and x.get("tag")}
+        for f in official:
+            old=merged.get(f["tag"],{}); combined=dict(old); combined.update({k:v for k,v in f.items() if v not in (None,"",[])})
+            if f.get("allowed_values") is not None: combined["allowed_values"]=f.get("allowed_values") or []
+            combined["required"]=bool(f.get("required") or old.get("required")); merged[f["tag"]]=combined
+        fields=list(merged.values())
+        row.required_fields=_json.dumps(fields,ensure_ascii=False)
+        row.field_rules=_json.dumps({f["tag"]:f.get("format_rule") for f in fields if f.get("format_rule")},ensure_ascii=False)
+        row.enum_values=_json.dumps({f["tag"]:f.get("allowed_values") for f in fields if f.get("allowed_values")},ensure_ascii=False)
+        row.fetched_at=_dt.datetime.utcnow(); db.commit()
+        return {"status":"official_account_docs","refreshed":True,"fields":len(fields),"node_slug":slug}
+    except Exception as exc:
+        try: db.rollback()
+        except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=996)
+        return {"status":"error","refreshed":False,"fields":0,"reason":type(exc).__name__}
+
+
+def refresh_category_template_if_stale(template_id, db, max_age_days=7):
+    """Refresh the existing CategoryTemplate cache from official Avito docs when stale.
+    Fail-open to the last known contract if Avito is temporarily unavailable; never delete cached fields.
+    """
+    import datetime as _dt
+    from app.models.category_template import CategoryTemplate
+    row=db.query(CategoryTemplate).filter(CategoryTemplate.template_id==str(template_id)).first()
+    if not row:
+        return {"status":"missing","refreshed":False,"fields":0}
+    fetched=getattr(row,"fetched_at",None)
+    now=_dt.datetime.utcnow()
+    if fetched and (now-fetched).total_seconds() < max(1,int(max_age_days))*86400:
+        try: count=len(json.loads(row.required_fields or "[]"))
+        except Exception: count=0
+        return {"status":"fresh","refreshed":False,"fields":count}
+    fields=fetch_template_fields_via_http(template_id)
+    if not fields:
+        try: count=len(json.loads(row.required_fields or "[]"))
+        except Exception: count=0
+        # Cooldown after a failed official-doc refresh (429/proxy/network): preserve the full cached contract
+        # and avoid hammering Avito on every intake page load.
+        row.fetched_at=now
+        db.commit()
+        return {"status":"stale_cached","refreshed":False,"fields":count}
+    fields=[f for f in fields if f.get("tag") not in _SKIP_TAGS]
+    row.required_fields=json.dumps(fields,ensure_ascii=False)
+    row.field_rules=json.dumps({f["tag"]:f["format_rule"] for f in fields if f.get("format_rule")},ensure_ascii=False)
+    row.enum_values=json.dumps({f["tag"]:f["allowed_values"] for f in fields if f.get("allowed_values")},ensure_ascii=False)
+    row.fetched_at=now
+    db.commit()
+    return {"status":"refreshed","refreshed":True,"fields":len(fields)}
 
 
 def get_category_template(category_id: str, niche: str = None, category_name_hint: str = None, template_id_hint: int = None, api_category: str = None, account_id: str = None) -> dict:
@@ -744,7 +1080,7 @@ def get_category_template(category_id: str, niche: str = None, category_name_hin
             fields = fetch_template_fields_via_http(template_id)
             if not fields:
                 raw_text = asyncio.run(scrape_template_page(template_id))
-                fields = structure_fields_via_gpt(raw_text, found_path)
+                fields = structure_fields_via_gpt(raw_text, found_path, account_id=account_id)
         except Exception as e:
             # Не роняем весь запрос из-за сбоя скрейпинга/структурирования - отдаём тот же
             # понятный "категория не резолвится", что и при провале resolve_template_id_for_niche.
@@ -869,7 +1205,7 @@ def resolve_required_fields(category_id: str, niche: str, characteristics: dict 
     for f in independent_fields:
         tag = f["tag"]
         allowed = f.get("allowed_values")
-        picked = pick_value_via_gpt(f, niche_context, allowed, f.get("format_rule"))
+        picked = pick_value_via_gpt(f, niche_context, allowed, f.get("format_rule"), account_id=account_id)
         if picked.get("value") is None:
             if f.get("required"):
                 needs_clarification.append({
@@ -950,8 +1286,8 @@ async def _anon_search_category(niche: str, city: str = "moskva") -> dict | None
                 if browser:
                     try:
                         await browser.close()
-                    except Exception:
-                        pass
+                    except Exception as _suppressed_exc:
+                        observe_suppressed(__name__, _suppressed_exc, line=1288)
                 continue
     return None
 
@@ -974,28 +1310,55 @@ def resolve_category_for_account(account_id: str, niche: str, city: str = "moskv
         if not acc:
             return {"error": f"аккаунт {account_id} не найден"}
 
-        token_data = get_avito_token(account_id)
-        token = token_data.get("access_token") if isinstance(token_data, dict) else None
-        if not token:
-            return {"error": "не удалось получить токен Avito"}
+        # CATEGORY_RESOLVER_SHARED_ACCOUNT_THROTTLE_V1: category detection must
+        # not bypass a Retry-After observed by stats/CPX/autoload workers. Check
+        # before token/provider I/O and publish any local items 429 tenant-wide.
+        from app.services.avito_account_throttle import account_throttle_remaining as _detect_throttle_remaining, record_account_throttle as _detect_record_throttle
+        if _detect_throttle_remaining(account_id) > 0:
+            token = None
+        else:
+            token_data = get_avito_token(account_id)
+            token = token_data.get("access_token") if isinstance(token_data, dict) else None
 
         # метод 1: реальные объявления
         try:
-            items_resp = httpx.get(
-                "https://api.avito.ru/core/v1/items",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"per_page": 1, "page": 1, "status": "active"},
-                timeout=15
-            )
-            if items_resp.status_code == 200:
+            items_resp = None
+            if token and _detect_throttle_remaining(account_id) <= 0:
+                items_resp = httpx.get(
+                    "https://api.avito.ru/core/v1/items",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"per_page": 1, "page": 1, "status": "active"},
+                    timeout=15
+                )
+            if items_resp is not None and items_resp.status_code == 429:
+                # CATEGORY_RESOLVER_RETRY_AFTER_HTTPDATE_V1: honor both delta-seconds
+                # and RFC/HTTP-date Retry-After values; never collapse a valid
+                # provider cooldown to the default merely because it is not numeric.
+                raw=str(items_resp.headers.get("Retry-After") or "").strip()
+                retry=30
+                if raw:
+                    try:
+                        retry=max(0,int(float(raw)))
+                    except Exception:
+                        try:
+                            from email.utils import parsedate_to_datetime as _parse_ra
+                            from datetime import datetime as _ra_dt, timezone as _ra_tz
+                            _when=_parse_ra(raw)
+                            if _when.tzinfo is None:
+                                _when=_when.replace(tzinfo=_ra_tz.utc)
+                            retry=max(0,int((_when.astimezone(_ra_tz.utc)-_ra_dt.now(_ra_tz.utc)).total_seconds()))
+                        except Exception:
+                            retry=30
+                _detect_record_throttle(account_id,retry,source="category_resolver_items_429")
+            if items_resp is not None and items_resp.status_code == 200:
                 resources = items_resp.json().get("resources", [])
                 if resources:
                     cat = resources[0].get("category", {})
                     cat_name = cat.get("name", "")
                     if cat_name:
                         return {"category_name": cat_name, "source": "api", "category_id": cat.get("id")}
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=1359)
 
         # метод 2: подбор из НАШЕГО справочника категорий (660 полных шаблонов) — без похода в Avito
         from app.models.category_template import CategoryTemplate as _CT

@@ -39,7 +39,7 @@ async def site_order(name: str = Form(""), phone: str = Form(...), niche: str = 
             from app.services import email_service as _es
             recipients = ["ostapenko-kirill-86@yandex.ru", "eliseev-ko@mail.ru"]
             body = text.replace("<b>", "").replace("</b>", "")
-            _es.send_email(recipients, "Новая заявка на сайт — БОРИС", body)
+            _es.send_email(recipients, "Новая заявка на сайт — БОРИС", body, tenant_scope=f"sitebuild:{account_id or 'public'}")
         except Exception as e:
             print("site_order email failed:", e)
 

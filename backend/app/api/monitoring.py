@@ -16,13 +16,16 @@ API экрана «Поиск клиентов» (Рост -> Поиск кли�
 from __future__ import annotations
 
 from typing import Any
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.auth import require_owner
 from app.monitoring import budget, store
+from app.api.monitoring_outcomes import router as monitoring_outcomes_router
 
 router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
+router.include_router(monitoring_outcomes_router)
 
 
 def _conn():
@@ -36,6 +39,74 @@ def overview(days: int = Query(7, ge=1, le=90), _=Depends(require_owner)) -> dic
     try:
         with con, con.cursor() as cur:
             return store.dashboard_stats(cur, days=days)
+    finally:
+        con.close()
+
+
+@router.get("/sales-autopilot")
+def sales_autopilot(_=Depends(require_owner)) -> dict[str, Any]:
+    """Live owner-facing state of the canonical Telegram sales autopilot."""
+    con = _conn()
+    try:
+        with con, con.cursor() as cur:
+            react_max_age=int(os.getenv('TG_CONTACT_REACT_MAX_AGE_DAYS','365') or 365)
+            cur.execute(f"""
+              SELECT
+                count(*) FILTER (WHERE (contacted_at AT TIME ZONE 'Europe/Moscow')::date = (now() AT TIME ZONE 'Europe/Moscow')::date AND outbound_transport='telegram_personal') AS sent_today,
+                count(*) FILTER (WHERE (followup_sent_at AT TIME ZONE 'Europe/Moscow')::date = (now() AT TIME ZONE 'Europe/Moscow')::date) AS followups_today,
+                count(*) FILTER (WHERE status='qualified') AS qualified_total,
+                count(*) FILTER (WHERE status IN ('replied','qualified')) AS replied_total,
+                count(*) FILTER (WHERE status='new' AND monitor_intent IS DISTINCT FROM 'existing_contact_reactivation'
+                                 AND boris_fit>=75 AND coalesce(source_posted_at,discovered_at)>=now()-interval '72 hours') AS fresh_external_waiting,
+                count(*) FILTER (WHERE status='new' AND monitor_intent='existing_contact_reactivation' AND boris_fit>=75
+                                 AND approval_required=FALSE AND (contact_username IS NOT NULL OR contact_peer_id IS NOT NULL)
+                                 AND coalesce(source_posted_at,discovered_at)>=now()-make_interval(days => {react_max_age})) AS reactivation_waiting,
+                count(*) FILTER (WHERE status='skipped' AND approval_note LIKE 'reactivation_%filter_v%') AS safety_filtered_total
+              FROM boris_sales_hot_leads
+            """)
+            row=cur.fetchone() or (0,0,0,0,0,0,0)
+            cur.execute("SELECT count(*) FROM monitor_sources WHERE platform='telegram' AND is_active=TRUE")
+            active_sources=int((cur.fetchone() or [0])[0] or 0)
+            cur.execute("SELECT value_text FROM monitor_runtime_state WHERE key='telegram_scan_cooldown_until'")
+            cooldown_raw=(cur.fetchone() or [None])[0]
+            cooldown_until=None
+            scan_state='active'
+            if cooldown_raw:
+                try:
+                    from datetime import datetime, timezone
+                    cooldown_dt=datetime.fromisoformat(str(cooldown_raw).replace('Z','+00:00'))
+                    if cooldown_dt.tzinfo is None:
+                        cooldown_dt=cooldown_dt.replace(tzinfo=timezone.utc)
+                    if cooldown_dt>datetime.now(timezone.utc):
+                        cooldown_until=cooldown_dt.isoformat()
+                        scan_state='cooldown'
+                except Exception:
+                    cooldown_until=None
+            cur.execute("""
+              SELECT max(coalesce(contacted_at,followup_sent_at,updated_at))
+              FROM boris_sales_hot_leads
+              WHERE outbound_transport='telegram_personal' OR followup_sent_at IS NOT NULL
+            """)
+            last_activity=(cur.fetchone() or [None])[0]
+            return {
+              'enabled': True,
+              'mode': 'autopilot',
+              'sent_today': int(row[0] or 0),
+              'followups_today': int(row[1] or 0),
+              'qualified_total': int(row[2] or 0),
+              'replied_total': int(row[3] or 0),
+              'fresh_external_waiting': int(row[4] or 0),
+              'reactivation_waiting': int(row[5] or 0),
+              'safety_filtered_total': int(row[6] or 0),
+              'active_sources': active_sources,
+              'scan_state': scan_state,
+              'scan_cooldown_until': cooldown_until,
+              'daily_cap': int(os.getenv('HOT_LEAD_AUTO_DAILY_CAP','10') or 10),
+              'min_fit': int(os.getenv('HOT_LEAD_AUTO_MIN_FIT','75') or 75),
+              'first_contact_interval_min': int(os.getenv('HOT_LEAD_AUTO_MIN_INTERVAL_MINUTES','10') or 10),
+              'send_window': f"{os.getenv('HOT_LEAD_AUTO_SEND_START_HOUR','10')}:00–{os.getenv('HOT_LEAD_AUTO_SEND_END_HOUR','19')}:00 МСК",
+              'last_activity_at': last_activity.isoformat() if last_activity else None,
+            }
     finally:
         con.close()
 

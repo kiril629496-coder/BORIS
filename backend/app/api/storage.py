@@ -10,8 +10,7 @@ from app.models.storage import Storage
 
 router = APIRouter(prefix="/api/storage", tags=["storage"])
 
-# создаём таблицу, если её ещё нет (безопасно — не трогает существующие)
-Base.metadata.create_all(bind=engine, tables=[Storage.__table__])
+# BORIS_SCHEMA_MIGRATION_055_OWNED: schema is verified before runtime starts.
 
 class SaveRequest(BaseModel):
     account_id: str = "default"

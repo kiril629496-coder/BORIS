@@ -46,6 +46,35 @@ def _requirements_text(needs):
     return out
 
 
+_INTRO_CONFIRMED = "Покупатели в этой нише часто уточняют:"
+_INTRO_OBSERVED = "По имеющимся данным покупатели могут уточнять:"
+_INTRO_MIXED = "Вопросы, которые встречаются в реальных обращениях:"
+
+
+def _questions_block(questions):
+    """Вводная фраза — одна на блок, а не приставка к каждой строке.
+
+    Смешанные источники не порождают семь разных вводных: берётся нейтральная,
+    а происхождение остаётся у каждой строки отдельной пометкой.
+    """
+    items = [{"text": q.get("text", ""), "source": q.get("confidence")}
+             for q in (questions or [])]
+    kinds = set()
+    for q in (questions or []):
+        conf = q.get("confidence")
+        kinds.add("confirmed" if conf in ("confirmed", "cross_client") else "observed")
+
+    if len(kinds) > 1:
+        intro = _INTRO_MIXED
+    elif kinds == {"confirmed"}:
+        intro = _INTRO_CONFIRMED
+    else:
+        intro = _INTRO_OBSERVED
+
+    return {"title": "Что я знаю о вашей нише", "intro": intro if items else "",
+            "items": items}
+
+
 def build(form_data, nz, resolution):
     """form_data — ответы мастера, nz — модуль niches, resolution — NicheResolution."""
     form = form_data or {}
@@ -62,7 +91,7 @@ def build(form_data, nz, resolution):
     }
 
     out = {"status": resolution.status, "profile": profile, "niche": None,
-           "buyer_questions": [], "problems": [],
+           "buyer_questions": _questions_block([]), "problems": [],
            "capabilities_now": [], "capabilities_after_connection": [], "capabilities_paid": [],
            "materials_missing": [], "plan": [], "automatic_after_avito": [],
            "channels_compare": {"have": [], "can_add_later": [], "not_required": []},
@@ -112,13 +141,7 @@ def build(form_data, nz, resolution):
     out["niche"] = {"slug": resolution.slug, "name": niche.get("name"),
                     "summary": niche.get("summary"), "source": "confirmed"}
 
-    for q in (niche.get("buyer_questions") or []):
-        conf = q.get("confidence")
-        if conf == "confirmed" or conf == "cross_client":
-            title = "Покупатели в этой нише часто уточняют: " + q.get("text", "")
-        else:
-            title = "По имеющимся данным покупатели могут уточнять: " + q.get("text", "")
-        out["buyer_questions"].append({"title": title, "source": conf})
+    out["buyer_questions"] = _questions_block(niche.get("buyer_questions") or [])
 
     for key in (niche.get("problems") or []):
         prob = nz.common("problems", key)

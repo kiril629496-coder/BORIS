@@ -13,6 +13,9 @@ class MessengerMessage(Base):
     item_id = Column(String, nullable=True, index=True)
     item_title = Column(String, nullable=True)
     item_url = Column(String, nullable=True)
+    # П.7: признак прочтения ИСХОДЯЩЕГО покупателем. Avito отдаёт isRead и read.
+    is_read = Column(Boolean, nullable=True)
+    read_at = Column(Integer, nullable=True)
     item_owner_id = Column(String, nullable=True)  # владелец объявления (для отсечки диалогов-покупок)
     direction = Column(String)
     msg_type = Column(String, nullable=True)  # user | seller | system

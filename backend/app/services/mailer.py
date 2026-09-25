@@ -28,7 +28,7 @@ def send_mail(to: str, subject: str, body: str) -> tuple:
     Возвращает (ok, reason). Пароль SMTP и тело письма в лог не попадают.
     reason: not_configured | no_recipient | ok | <тип исключения>
     """
-    ok, reason, _message_id = _es.send_email(to, subject, body)
+    ok, reason, _message_id = _es.send_email(to, subject, body, tenant_scope="mailer:direct")
     return ok, reason
 
 

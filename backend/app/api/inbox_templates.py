@@ -74,6 +74,24 @@ class TplUse(BaseModel):
     avito_chat_id: str = ""
 
 
+
+# BORIS_TPL_TEAM: владелец шаблонов - хозяин аккаунта, а не текущий человек.
+# Иначе у Сергея, Валерии и Юлии три разные базы быстрых ответов вместо одной.
+def _own_id(db, user):
+    from sqlalchemy import text as _t
+    uid = getattr(user, "id", 0)
+    row = db.execute(_t("SELECT 1 FROM accounts WHERE owner_user_id = :u LIMIT 1"),
+                     {"u": uid}).fetchone()
+    if row:
+        return uid
+    row = db.execute(_t(
+        "SELECT a.owner_user_id FROM user_account_access x"
+        " JOIN accounts a ON a.account_id = x.account_id"
+        " WHERE x.user_id = :u AND a.owner_user_id IS NOT NULL LIMIT 1"),
+        {"u": uid}).fetchone()
+    return row[0] if row else uid
+
+
 @router.get("/templates/meta")
 def tpl_meta(user=Depends(get_current_user)):
     return {"status": "ok", "categories": CATEGORIES, "variables": VARIABLES}
@@ -91,7 +109,7 @@ def tpl_list(q: str = "", category: str = "", include_inactive: bool = False,
             " WHERE owner_user_id = :own "
             "   AND (scope = 'global' OR user_id = :uid) "
             " ORDER BY is_pinned DESC, sort_order ASC, use_count DESC, id ASC"),
-            {"own": user.id, "uid": user.id}).all()
+            {"own": _own_id(db, user), "uid": user.id}).all()
         items = [_d(r) for r in rows]
         if not include_inactive:
             items = [i for i in items if i.get("is_active")]
@@ -121,7 +139,7 @@ def tpl_save(req: TplSave, user=Depends(get_current_user)):
         if req.id:
             own = db.execute(text("SELECT owner_user_id FROM inbox_templates WHERE id=:i"),
                              {"i": req.id}).scalar()
-            if own != user.id:
+            if own != _own_id(db, user):
                 return {"status": "error", "message": "Шаблон не найден"}
             db.execute(text(
                 "UPDATE inbox_templates SET name=:n, text=:t, category=:c, scope=:s, "
@@ -136,7 +154,7 @@ def tpl_save(req: TplSave, user=Depends(get_current_user)):
             "INSERT INTO inbox_templates (owner_user_id, user_id, scope, name, text, category, "
             " hotkey, sort_order, is_active, is_pinned, use_count, created_at, updated_at) "
             "VALUES (:own,:uid,:s,:n,:t,:c,:h,:so,:act,false,0,now(),now()) RETURNING id"),
-            {"own": user.id, "uid": user.id if scope == "personal" else None, "s": scope,
+            {"own": _own_id(db, user), "uid": user.id if scope == "personal" else None, "s": scope,
              "n": req.name.strip(), "t": req.text, "c": req.category,
              "h": req.hotkey or None, "so": req.sort_order, "act": req.is_active}).scalar()
         db.commit()
@@ -150,7 +168,7 @@ def tpl_delete(req: TplId, user=Depends(get_current_user)):
     db = SessionLocal()
     try:
         r = db.execute(text("DELETE FROM inbox_templates WHERE id=:i AND owner_user_id=:own"),
-                       {"i": req.id, "own": user.id})
+                       {"i": req.id, "own": _own_id(db, user)})
         db.commit()
         return {"status": "ok" if r.rowcount else "error",
                 "message": "" if r.rowcount else "Шаблон не найден"}
@@ -164,7 +182,7 @@ def tpl_pin(req: TplPin, user=Depends(get_current_user)):
     try:
         r = db.execute(text("UPDATE inbox_templates SET is_pinned=:p, updated_at=now() "
                             " WHERE id=:i AND owner_user_id=:own"),
-                       {"p": bool(req.pinned), "i": req.id, "own": user.id})
+                       {"p": bool(req.pinned), "i": req.id, "own": _own_id(db, user)})
         db.commit()
         return {"status": "ok" if r.rowcount else "error"}
     finally:
@@ -177,7 +195,7 @@ def tpl_use(req: TplUse, user=Depends(get_current_user)):
     db = SessionLocal()
     try:
         row = db.execute(text("SELECT * FROM inbox_templates WHERE id=:i AND owner_user_id=:own"),
-                         {"i": req.id, "own": user.id}).first()
+                         {"i": req.id, "own": _own_id(db, user)}).first()
         if not row:
             return {"status": "error", "message": "Шаблон не найден"}
         tpl = _d(row)

@@ -637,8 +637,8 @@
     "analyze_competitors": {
       "label": "BORIS сравнивает вас с конкурентами",
       "description": "Смотрит цены и предложения тех, кто рядом в выдаче.",
-      "status": "soon",
-      "soon_reason": "в app/api/parser.py прямо указано, что анализ конкурентов и парсинг Авито сейчас не работают",
+      "status": "ready",
+      "soon_reason": null,
       "needs": {
         "all": ["avito"],
         "any": [],

@@ -5,47 +5,148 @@ Telegram-бот BORIS для уведомлений и напоминаний.
 """
 import time
 import requests
+from app.services.reliability import dependency_call
+
 import os
+import re
 import socket
 import urllib3.util.connection as _urllib3_cn
+from app.services.exception_observability import observe_suppressed
 
 BOT_TOKEN = os.environ.get("BORIS_TELEGRAM_BOT_TOKEN")
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+# Telegram must not inherit the process-wide HTTP(S)_PROXY used for external
+# browser/AI traffic. The host has direct Telegram connectivity; inheriting the
+# global proxy caused ProxyError -> circuit-open even while api.telegram.org was
+# reachable directly.
+_TELEGRAM_SESSION = requests.Session()
+_TELEGRAM_SESSION.trust_env = False
+
+
+def _safe_telegram_error(exc) -> str:
+    """Redact bot credentials from request exceptions before they reach logs."""
+    msg = repr(exc)
+    msg = re.sub(r"https://api\.telegram\.org/bot[^/\s'\"]+", "https://api.telegram.org/bot<redacted>", msg)
+    msg = re.sub(r"/bot[^/\s'\"]+", "/bot<redacted>", msg)
+    return msg[:300]
+
 
 def _telegram_proxies():
-    """Прокси для Telegram API - IPv4 заблокирован в РФ, IPv6-форсинг ниже не всегда
-    надёжен, поэтому используем INTL-прокси как гарантированный путь."""
-    host = os.environ.get("PROXY_INTL_HOST")
-    user = os.environ.get("PROXY_INTL_USER")
-    pwd = os.environ.get("PROXY_INTL_PASS")
-    port_min = int(os.environ.get("PROXY_INTL_PORT_MIN", 10000))
-    port_max = int(os.environ.get("PROXY_INTL_PORT_MAX", 10999))
+    """
+    Возвращает proxy только для Telegram fallback.
+
+    Production env может содержать:
+      PROXY_INTL_HOST
+    или:
+      PROXY_INTL_HOSTS
+
+    BORIS сначала пробует прямой Telegram transport.
+    Proxy используется только при сетевой ошибке.
+    """
+    import random
+
+    host = (os.environ.get("PROXY_INTL_HOST") or "").strip()
+
+    if not host:
+        raw_hosts = (os.environ.get("PROXY_INTL_HOSTS") or "").strip()
+
+        if raw_hosts:
+            hosts = [
+                x.strip()
+                for x in re.split(r"[,;\s]+", raw_hosts)
+                if x.strip()
+            ]
+
+            if hosts:
+                host = random.choice(hosts)
+
+    user = (os.environ.get("PROXY_INTL_USER") or "").strip()
+    pwd = (os.environ.get("PROXY_INTL_PASS") or "").strip()
+
+    port_min = int(
+        os.environ.get(
+            "PROXY_INTL_PORT_MIN",
+            os.environ.get("PROXY_PORT_MIN", "10000"),
+        )
+    )
+
+    port_max = int(
+        os.environ.get(
+            "PROXY_INTL_PORT_MAX",
+            os.environ.get("PROXY_PORT_MAX", "10999"),
+        )
+    )
+
     if not all([host, user, pwd]):
         return None
-    import random
+
+    if port_min > port_max:
+        port_min, port_max = port_max, port_min
+
     port = random.randint(port_min, port_max)
+
     url = f"http://{user}:{pwd}@{host}:{port}"
-    return {"http": url, "https": url}
+
+    return {
+        "http": url,
+        "https": url,
+    }
+
+def _telegram_post(url, json_payload, timeout=8):
+    """
+    Direct Telegram POST through Telegram-only IPv6 transport.
+    Three attempts for transient failures.
+    """
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            return dependency_call(
+                "telegram", _TELEGRAM_SESSION.post, url,
+                json=json_payload,
+                timeout=(4, timeout),
+            )
+
+        except requests.RequestException as e:
+            last_error = e
+
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+
+    raise last_error
 
 
-def _telegram_post(url, json_payload, timeout=30):
-    """POST к Telegram с ретраем: сначала прямой запрос (IPv6-форсинг сверху),
-    при неудаче - через прокси."""
-    try:
-        return requests.post(url, json=json_payload, timeout=12)
-    except Exception:
-        px = _telegram_proxies()
-        if px:
-            return requests.post(url, json=json_payload, timeout=timeout, proxies=px)
-        raise
 
-# IPv4-адреса Telegram API заблокированы на этом сервере (РФ), но IPv6 доступен.
-# Стандартный requests/urllib3 не делает Happy Eyeballs и может зависать на IPv4
-# до истечения таймаута, так и не попробовав IPv6. Форсируем IPv6 ТОЛЬКО для
-# запросов к api.telegram.org, не трогая остальной сетевой код (Avito, GigaChat).
+
+def _telegram_get(url, params=None, timeout=10):
+    """
+    Direct Telegram GET through Telegram-only IPv6 transport.
+    Three attempts for transient failures.
+    """
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            return dependency_call(
+                "telegram", _TELEGRAM_SESSION.get, url,
+                params=params,
+                timeout=(4, timeout),
+            )
+
+        except requests.RequestException as e:
+            last_error = e
+
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+
+    raise last_error
+
+
+
+
+
 _original_create_connection = _urllib3_cn.create_connection
-
 
 def _create_connection_ipv6_for_telegram(address, *args, **kwargs):
     host, port = address[0], address[1]
@@ -74,6 +175,37 @@ def _create_connection_ipv6_for_telegram(address, *args, **kwargs):
 _urllib3_cn.create_connection = _create_connection_ipv6_for_telegram
 
 
+def _telegram_post_files(url, data, files, timeout=60):
+    """
+    Direct multipart Telegram POST.
+    Used by sendPhoto.
+    """
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            for obj in (files or {}).values():
+                try:
+                    obj.seek(0)
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=189)
+
+            return dependency_call(
+                "telegram", requests.post, url,
+                data=data,
+                files=files,
+                timeout=(5, timeout),
+            )
+
+        except requests.RequestException as e:
+            last_error = e
+
+            if attempt < 2:
+                time.sleep(0.8 * (attempt + 1))
+
+    raise last_error
+
+
 def send_telegram_message(chat_id: str, text: str, thread_id=None):
     """Отправляет сообщение в Telegram. thread_id — id темы (Topic) в супергруппе, если нужно писать в конкретную тему."""
     if not BOT_TOKEN or not chat_id:
@@ -89,24 +221,50 @@ def send_telegram_message(chat_id: str, text: str, thread_id=None):
 
 
 def send_telegram_photo(chat_id: str, photo_path: str, caption: str = "", thread_id=None):
-    """Отправляет фото с подписью в Telegram. thread_id — id темы (Topic). photo_path — путь к файлу на диске."""
+    """
+    Sends photo to Telegram through direct IPv6 transport.
+    Falls back to text when photo file is unavailable.
+    """
     if not BOT_TOKEN or not chat_id:
-        return {"ok": False, "error": "no_token_or_chat_id"}
-    import os as _os
+        return {
+            "ok": False,
+            "error": "no_token_or_chat_id",
+        }
+
     try:
-        if not photo_path or not _os.path.exists(photo_path):
-            # нет картинки — шлём просто текст
-            return send_telegram_message(chat_id, caption, thread_id=thread_id)
-        data = {"chat_id": str(chat_id), "caption": caption[:1024], "parse_mode": "HTML"}
+        if not photo_path or not os.path.exists(photo_path):
+            return send_telegram_message(
+                chat_id,
+                caption,
+                thread_id=thread_id,
+            )
+
+        data = {
+            "chat_id": str(chat_id),
+            "caption": caption[:1024],
+            "parse_mode": "HTML",
+        }
+
         if thread_id:
             data["message_thread_id"] = int(thread_id)
+
         with open(photo_path, "rb") as ph:
-            resp = requests.post(f"{API_BASE}/sendPhoto", data=data,
-                                 files={"photo": ph}, timeout=60,
-                                 proxies=_telegram_proxies())
+            resp = _telegram_post_files(
+                f"{API_BASE}/sendPhoto",
+                data=data,
+                files={"photo": ph},
+                timeout=60,
+            )
+
         return resp.json()
+
     except Exception as e:
-        return {"ok": False, "error": str(e)[:200]}
+        return {
+            "ok": False,
+            "error": str(e)[:200],
+        }
+
+
 
 
 def _normalize_keyboard(buttons: list) -> list:
@@ -336,8 +494,34 @@ def _handle_start_command(chat_id: str, account_id: str):
         db.close()
 
 
+def _handle_owner_report_command(chat_id, thread_id, text_value: str) -> bool:
+    """Owner-only operational report commands in the dedicated Telegram topic."""
+    if str(chat_id) != "-1003952038222" or int(thread_id or 0) != 1759:
+        return False
+    cmd = (text_value or "").strip().split()
+    if not cmd:
+        return False
+    base = cmd[0].split('@')[0].lower()
+    days = {"/report": 1, "/report1": 1, "/report7": 7, "/report30": 30}.get(base)
+    if not days:
+        return False
+    account_id = cmd[1].strip() if len(cmd) > 1 else ""
+    try:
+        from app.api.inbox_daily import render_owner_daily_report, render_owner_period_report, _telegram_chunks
+        if days == 1:
+            rep = render_owner_daily_report()
+        else:
+            rep = render_owner_period_report(days=days, account_id=account_id)
+        for chunk in _telegram_chunks(rep.get("text") or "Нет данных за выбранный период"):
+            send_telegram_message(str(chat_id), chunk, thread_id=int(thread_id))
+    except Exception as e:
+        print(f"OWNER_REPORT_COMMAND_ERROR: {repr(e)[:200]}", flush=True)
+        send_telegram_message(str(chat_id), "⚠️ Не удалось собрать отчёт. Ошибка записана в журнал BORIS.", thread_id=int(thread_id))
+    return True
+
+
 def _telegram_poll_loop():
-    """Фоновый поллинг getUpdates раз в 3 секунды. Обрабатывает только /start <account_id>."""
+    """Фоновый поллинг getUpdates раз в 3 секунды: /start, owner reports, MOP and edit flows."""
     if not BOT_TOKEN:
         print("BORIS_TELEGRAM_BOT_TOKEN не задан — поллинг Telegram-бота не запущен")
         return
@@ -347,7 +531,7 @@ def _telegram_poll_loop():
     while True:
         time.sleep(3)
         try:
-            resp = requests.get(
+            resp = _telegram_get(
                 f"{API_BASE}/getUpdates",
                 params={"offset": offset, "timeout": 2},
                 timeout=10,
@@ -373,6 +557,22 @@ def _telegram_poll_loop():
                 if _thr:
                     print(f"TG_TOPIC chat_id={chat_id} thread_id={_thr} text={text[:40]!r}", flush=True)
 
+                if not text.startswith("/start") and _handle_owner_report_command(chat_id, _thr, text):
+                    continue
+
+                # OWNER_DEV_INBOX_BRIDGE_V1: the production bot is already the
+                # sole getUpdates consumer. Hand each ordinary update to the
+                # autonomous development inbox before MOP/edit handlers; inbox
+                # filters exact owner chat/thread/user and returns None for all
+                # unrelated traffic, so no second Telegram bot/poller is needed.
+                if not text.startswith("/start"):
+                    try:
+                        from app.ext_api.inbox import handle_update as _dev_inbox_update
+                        if _dev_inbox_update(update, send_reply=True):
+                            continue
+                    except Exception as _e:
+                        print(f"DEV_INBOX_BRIDGE_ERROR: {_e}", flush=True)
+
                 if not text.startswith("/start"):
                     try:
                         from app.mop_core import handle_mop_message
@@ -397,4 +597,4 @@ def _telegram_poll_loop():
                             "(вкладка «Задачи и план» → «Подключить Telegram»)."
                         )
         except Exception as e:
-            print(f"TELEGRAM_POLL_ERROR: {repr(e)[:200]}", flush=True)
+            print(f"TELEGRAM_POLL_ERROR: {_safe_telegram_error(e)}", flush=True)

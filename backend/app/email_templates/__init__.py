@@ -20,7 +20,7 @@ CATEGORY_HEALTH = "health"
 
 # имя -> (категория, тема письма)
 TEMPLATES = {
-    "verify_email": (CATEGORY_SYSTEM, "БОРИС — код подтверждения почты"),
+    "verify_email": (CATEGORY_SYSTEM, "Код подтверждения регистрации в BORIS AI"),
 }
 
 

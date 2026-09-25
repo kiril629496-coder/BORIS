@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Request, Request
 from sqlalchemy import text
 from app.db.session import SessionLocal
 from app.api.auth import get_current_user
+from app.services.exception_observability import observe_suppressed
 
 router = APIRouter(prefix="/api/manager", tags=["manager"])
 
@@ -108,8 +109,8 @@ def overview(period: str = None, current=Depends(get_current_user)):
             if row:
                 try:
                     billing[c[1]] = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                except Exception:
-                    pass
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=111)
 
         return {
             "status": "ok",
@@ -478,18 +479,21 @@ def knowledge_save(data: dict, current=Depends(get_current_user)):
 # --- Мои клиенты: карточки, напоминания -----------------------------------
 
 @router.get("/leads")
-def leads_list(q: str = None, status: str = None, current=Depends(get_current_user)):
+def leads_list(q: str = None, status: str = None, source: str = None, current=Depends(get_current_user)):
     """Все контакты менеджера — включая тех, кто ещё не зарегистрировался."""
     if getattr(current, "role", None) not in ("manager", "owner"):
         return {"status": "error", "message": "Доступ запрещён"}
     db = SessionLocal()
     try:
         sql = """SELECT id, name, surname, position, phone, email, company, site, niche,
-                        comment, status, account_id, created_at, updated_at
+                        comment, status, account_id, created_at, updated_at,
+                        lead_source, telegram_username, telegram_peer_id
                  FROM manager_leads WHERE manager_email=:me"""
         params = {"me": current.email}
         if status:
             sql += " AND status=:st"; params["st"] = status
+        if source:
+            sql += " AND lead_source=:source"; params["source"] = source
         if q:
             sql += """ AND (COALESCE(name,'') ILIKE :q OR COALESCE(surname,'') ILIKE :q
                             OR COALESCE(phone,'') ILIKE :q OR COALESCE(company,'') ILIKE :q
@@ -516,12 +520,47 @@ def leads_list(q: str = None, status: str = None, current=Depends(get_current_us
                 "чем_занимается": r[8], "комментарий": r[9], "статус": r[10],
                 "account_id": r[11],
                 "создан": r[12].isoformat() if r[12] else None,
+                "источник": r[14],
+                "telegram_username": r[15],
+                "telegram_peer_id": r[16],
                 "напоминания": by_lead.get(r[0], []),
             })
         counts = {}
         for r in rows:
             counts[r[10] or "новый"] = counts.get(r[10] or "новый", 0) + 1
-        return {"status": "ok", "всего": len(out), "по_статусам": counts, "клиенты": out}
+
+        # Tenant-scoped acquisition funnel. Source metrics are built only from
+        # this manager's CRM cards; never expose global Telegram monitoring data
+        # through a client workspace.
+        source_rows = db.execute(text("""SELECT lead_source,status,count(*) n
+            FROM manager_leads
+            WHERE manager_email=:me AND lead_source IS NOT NULL
+            GROUP BY lead_source,status"""), {"me": current.email}).mappings().all()
+        source_tasks = {str(r[0]): int(r[1] or 0) for r in db.execute(text("""SELECT l.lead_source,count(DISTINCT n.id)
+            FROM manager_notes n JOIN manager_leads l ON l.id=n.lead_id
+            WHERE n.manager_email=:me AND l.manager_email=:me AND l.lead_source IS NOT NULL
+              AND n.kind='reminder' AND COALESCE(n.done,FALSE)=FALSE
+            GROUP BY l.lead_source"""), {"me": current.email}).all()}
+        source_labels = {
+            "telegram_reactivation": "Telegram · реактивация",
+            "telegram_prospecting": "Telegram · новые лиды",
+            "email_outreach": "Email · рассылка",
+        }
+        source_map = {}
+        for sr in source_rows:
+            key = str(sr["lead_source"] or "")
+            rec = source_map.setdefault(key, {"source": key, "label": source_labels.get(key, key), "total": 0,
+                "new": 0, "dialog": 0, "qualified": 0, "target_action": 0, "won": 0, "declined": 0, "open_tasks": source_tasks.get(key, 0)})
+            n = int(sr["n"] or 0); st = str(sr["status"] or "новый")
+            rec["total"] += n
+            if st in {"новый", "в работе"}: rec["new"] += n
+            if st == "в диалоге": rec["dialog"] += n
+            if st == "квалифицирован": rec["qualified"] += n
+            if st == "целевое действие": rec["target_action"] += n
+            if st in {"оплатил", "сделка"}: rec["won"] += n
+            if st == "отказ": rec["declined"] += n
+        sources = sorted(source_map.values(), key=lambda x: (-int(x["target_action"]), -int(x["qualified"]), -int(x.get("dialog",0)), -int(x["total"]), x["label"]))
+        return {"status": "ok", "всего": len(out), "по_статусам": counts, "источники": sources, "клиенты": out}
     finally:
         db.close()
 

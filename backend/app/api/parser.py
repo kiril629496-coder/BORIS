@@ -1,4 +1,5 @@
 import os as _os_gc
+from app.services.exception_observability import observe_suppressed
 _GC_MODEL = _os_gc.environ.get("GIGACHAT_MODEL", "GigaChat" + "-Pro")
 import asyncio
 from fastapi import APIRouter
@@ -9,44 +10,230 @@ from playwright.sync_api import sync_playwright
 
 
 def check_proxy_health() -> dict:
-    """Проверяет живость RU-прокси (для мониторинга). Резидентный пул считается мёртвым, только
-    если ВСЕ проверенные порты не отвечают - часть портов резидентного пула мертва почти всегда,
-    это норма, а не повод объявлять весь пул нерабочим (раньше проверка 3 фиксированных портов
-    могла попасть на 3 мёртвых из большого пула и ложно сигналить "пул мёртв").
-    Возвращает {"alive": bool, "checked_ports": int, "working_ports": int}."""
-    import requests as _requests
+    """Secret-free RU proxy health using the SAME endpoint source as production Avito.
+
+    PROXY_PORT is authoritative when configured. The legacy port range is sampled
+    only when no explicit endpoint exists. Any non-407 HTTP response proves that
+    transport + proxy authentication succeeded; the target itself may legitimately
+    return 3xx/4xx.
+    """
     import random as _random_ph
-    from proxy_pool import PROXY_HOST, PROXY_USER, PROXY_PASS, PROXY_PORT_MIN, PROXY_PORT_MAX
+    import requests as _requests
+    from proxy_pool import (
+        PROXY_HOST, PROXY_USER, PROXY_PASS, PROXY_PORT,
+        _avito_candidate_ports,
+    )
     if not all([PROXY_HOST, PROXY_USER, PROXY_PASS]):
-        return {"alive": False, "checked_ports": 0, "working_ports": 0, "reason": "не настроен"}
-    port_range = list(range(PROXY_PORT_MIN, PROXY_PORT_MAX + 1))
-    test_ports = _random_ph.sample(port_range, min(10, len(port_range)))
-    working = 0
+        return {
+            "alive": False, "state": "not_configured",
+            "checked_ports": 0, "working_ports": 0,
+            "configured_endpoints": 0, "explicit_port": bool(PROXY_PORT),
+            "auth_failures": 0, "transport_failures": 0,
+            "reason": "proxy_pool_not_configured",
+        }
+
+    candidates = list(_avito_candidate_ports())
+    if not candidates:
+        return {
+            "alive": False, "state": "transport_down",
+            "checked_ports": 0, "working_ports": 0,
+            "configured_endpoints": 0, "explicit_port": bool(PROXY_PORT),
+            "auth_failures": 0, "transport_failures": 0,
+            "reason": "empty_proxy_endpoint_set",
+        }
+
+    # Explicit endpoint: verify exactly it. Legacy pool: sample without replacement.
+    test_ports = candidates if len(candidates) <= 10 else _random_ph.sample(candidates, 10)
+    working = auth_failures = transport_failures = upstream_failures = 0
     for port in test_ports:
-        px = {"http": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{port}",
-              "https": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{port}"}
+        px = {
+            "http": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{port}",
+            "https": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{port}",
+        }
         try:
-            r = _requests.get("https://api.ipify.org?format=json", proxies=px, timeout=10)
-            if r.status_code == 200:
+            r = _requests.get(
+                "https://api.ipify.org?format=json",
+                proxies=px,
+                timeout=8,
+                allow_redirects=True,
+            )
+            if r.status_code == 407:
+                auth_failures += 1
+            elif 100 <= int(r.status_code or 0) < 500:
                 working += 1
+            else:
+                upstream_failures += 1
+        except _requests.exceptions.ProxyError as exc:
+            msg = str(exc).lower()
+            if "407" in msg or "authentication" in msg:
+                auth_failures += 1
+            else:
+                transport_failures += 1
+        except (_requests.exceptions.ConnectTimeout,
+                _requests.exceptions.ReadTimeout,
+                _requests.exceptions.ConnectionError):
+            transport_failures += 1
         except Exception:
-            pass
-    return {"alive": working > 0, "checked_ports": len(test_ports), "working_ports": working}
+            upstream_failures += 1
+
+    alive = working > 0
+    if alive:
+        state, reason = "ready", None
+    elif auth_failures and auth_failures >= max(transport_failures, upstream_failures):
+        state, reason = "auth_failed", "proxy_authentication_failed"
+    elif transport_failures:
+        state, reason = "transport_down", "proxy_connection_refused_or_unreachable"
+    else:
+        state, reason = "upstream_check_failed", "proxy_upstream_probe_failed"
+
+    return {
+        "alive": alive,
+        "state": state,
+        "checked_ports": len(test_ports),
+        "working_ports": working,
+        "configured_endpoints": len(candidates),
+        "explicit_port": bool(PROXY_PORT),
+        "auth_failures": auth_failures,
+        "transport_failures": transport_failures,
+        "upstream_failures": upstream_failures,
+        "reason": reason,
+    }
+
+
+
+
+def check_avito_proxy_route_health() -> dict:
+    """Validate whether the configured RU proxy is actually usable by public Avito.
+
+    Transport health and Avito route health are separate facts. The monitor forces
+    a fresh validation so a ten-minute clean-port cache cannot hide a newly blocked
+    exit. Returned payload is secret-free.
+    """
+    transport = check_proxy_health()
+    result = {
+        **transport,
+        "transport_state": transport.get("state"),
+        "route_validated": False,
+    }
+    if not transport.get("alive"):
+        return result
+
+    try:
+        import asyncio as _aio
+        from proxy_pool import find_clean_port, get_avito_proxy_health
+        port = _aio.run(find_clean_port(
+            max_tries=1,
+            cache_key="proxy_monitor",
+            force_refresh=True,
+        ))
+        route = get_avito_proxy_health()
+        if port:
+            result.update({
+                "alive": True,
+                "state": "ready",
+                "reason": None,
+                "route_validated": True,
+                "avito_detail": route.get("detail"),
+                "blocked_attempts": int(route.get("blocked_attempts") or 0),
+            })
+        else:
+            result.update({
+                "alive": False,
+                "state": str(route.get("state") or "avito_route_unavailable"),
+                "reason": str(route.get("detail") or "avito_route_unavailable"),
+                "route_validated": False,
+                "blocked_attempts": int(route.get("blocked_attempts") or 0),
+                "auth_failures": int(route.get("auth_errors") or result.get("auth_failures") or 0),
+                "transport_failures": int(route.get("transport_errors") or result.get("transport_failures") or 0),
+            })
+        return result
+    except Exception as exc:
+        result.update({
+            "alive": False,
+            "state": "avito_route_check_failed",
+            "reason": f"{type(exc).__name__}:{str(exc)[:120]}",
+            "route_validated": False,
+        })
+        return result
+
+def _proxy_health_monitor_update(result: dict, state_path: str | None = None, now_ts: float | None = None) -> dict:
+    """Persist consecutive failures so one transient probe never wakes the owner."""
+    import json
+    import os
+    import time
+    path = state_path or os.environ.get(
+        "PROXY_HEALTH_STATE_PATH",
+        "/root/BORIS/backend/run/proxy_health_monitor.json",
+    )
+    now = float(now_ts if now_ts is not None else time.time())
+    threshold = max(2, int(os.environ.get("PROXY_ALERT_FAIL_THRESHOLD", "3") or 3))
+    cooldown = max(900, int(os.environ.get("PROXY_ALERT_COOLDOWN_SEC", "21600") or 21600))
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            prev = json.load(fh) or {}
+    except Exception:
+        prev = {}
+
+    was_failed = int(prev.get("consecutive_failures") or 0) > 0
+    if result.get("alive"):
+        current = {
+            "consecutive_failures": 0,
+            "last_state": str(result.get("state") or "ready"),
+            "last_checked_at": now,
+            "last_alert_at": float(prev.get("last_alert_at") or 0),
+        }
+        should_alert = False
+        recovered = was_failed
+    else:
+        failures = int(prev.get("consecutive_failures") or 0) + 1
+        last_alert = float(prev.get("last_alert_at") or 0)
+        should_alert = failures >= threshold and (last_alert <= 0 or (now - last_alert) >= cooldown)
+        current = {
+            "consecutive_failures": failures,
+            "last_state": str(result.get("state") or "unknown"),
+            "last_checked_at": now,
+            "last_alert_at": now if should_alert else last_alert,
+        }
+        recovered = False
+
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + f".tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(current, fh, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, path)
+    except Exception as _suppressed_exc:
+        # Monitoring state must never break the parser/health endpoint.
+        observe_suppressed(__name__, _suppressed_exc, line=204)
+
+    return {
+        **current,
+        "threshold": threshold,
+        "cooldown_sec": cooldown,
+        "should_alert": should_alert,
+        "recovered": recovered,
+    }
 
 
 def check_proxy_and_alert():
-    """Проверяет прокси, шлёт алерт директору в Telegram если мёртв. Вызывается по расписанию."""
+    """Health + debounced owner escalation; one transient failure is self-contained."""
     import os
     from app.telegram_bot import send_telegram_message
-    result = check_proxy_health()
+    result = check_avito_proxy_route_health()
+    monitor = _proxy_health_monitor_update(result)
+    result["monitor"] = monitor
     chat_id = os.environ.get("DIRECTOR_CHAT_ID")
-    if not result["alive"] and chat_id:
-        send_telegram_message(chat_id,
-            f"🔴 <b>ПРОКСИ МЁРТВ!</b>\n\n"
-            f"RU-прокси (networkpw) не отвечает — проверено {result['checked_ports']} портов, "
-            f"живых: {result['working_ports']}.\n\n"
-            f"Анализ конкурентов и парсинг Avito сейчас НЕ РАБОТАЮТ.\n"
-            f"Проверь баланс/статус на pool.networkpw.com")
+    if monitor["should_alert"] and chat_id:
+        send_telegram_message(
+            chat_id,
+            "🔴 <b>RU-ПРОКСИ НЕДОСТУПЕН</b>\n\n"
+            f"Состояние: {result.get('state')}. "
+            f"Проверено endpoint: {result.get('checked_ports', 0)}, "
+            f"рабочих: {result.get('working_ports', 0)}.\n"
+            f"Последовательных неудачных проверок: {monitor['consecutive_failures']}.\n\n"
+            "Avito-контур использует прямые/Browser Gateway fallback-пути там, где они разрешены. "
+            "Эскалация отправлена только после подтверждённой серии сбоев."
+        )
     return result
 
 
@@ -90,8 +277,8 @@ def _fetch_rendered_html(url, wait_ms=3000):
             for _ in range(25):
                 page.mouse.wheel(0, 1000)
                 page.wait_for_timeout(500)
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=279)
         html = page.content()
         browser.close()
         return html
@@ -195,7 +382,7 @@ def parsed_products_to_drafts(req: ProductsToDraftsRequest):
     import json as _json, re as _re, time as _time
     from app.db.session import SessionLocal
     from app.models.storage import Storage
-    from app.api.avito import _load_drafts, _save_drafts, detect_category_endpoint, spin
+    from app.api.avito import _append_drafts, detect_category_endpoint, spin
 
     db = SessionLocal()
     try:
@@ -212,7 +399,12 @@ def parsed_products_to_drafts(req: ProductsToDraftsRequest):
         account_niche = None
         from app.models.account import Account
         acc = db.query(Account).filter(Account.account_id == req.account_id).first()
-        if acc and acc.company_niche:
+        try:  # NICHE_RESOLVER_V1: единый резолвер ниши, профиль первым приоритетом
+            from app.services.niche_resolver import business_niche
+            account_niche = business_niche(req.account_id, db) or None
+        except Exception:
+            account_niche = None
+        if not account_niche and acc and acc.company_niche:
             account_niche = acc.company_niche
 
         override_niche = req.topic.strip()
@@ -305,8 +497,9 @@ def parsed_products_to_drafts(req: ProductsToDraftsRequest):
                 images = [p["image"]] if p.get("image") else []
                 images += [im for im in p.get("images", []) if im not in images]
 
+                _draft_fp = __import__('hashlib').sha1(_json.dumps({"idx":idx,"title":title,"price":price,"category":str(category),"images":images[:10]},ensure_ascii=False,sort_keys=True,default=str).encode('utf-8')).hexdigest()[:12]
                 new_drafts.append({
-                    "id": f"parsed_{req.account_id}_{idx}_{int(_time.time())}",
+                    "id": f"parsed_{req.account_id}_{idx}_{_draft_fp}",
                     "batch_id": batch_id,
                     "batch_label": batch_label,
                     "title": title,
@@ -335,13 +528,38 @@ def parsed_products_to_drafts(req: ProductsToDraftsRequest):
                 "category_errors": category_errors,
             }
 
-        # добавляем к существующим черновикам аккаунта
-        existing = _load_drafts(req.account_id)
-        combined = existing + new_drafts
-        _save_drafts(req.account_id, combined)
+        # PARSED_DRAFT_TARIFF_EXACTLY_ONCE_V1: every deterministic draft has its
+        # own tariff intent. A retry after a lost response replays the ledger entry;
+        # a partial quota race appends only children whose tariff unit was settled.
+        from app.api.billing import check_and_consume as _billing_consume
+        charged_drafts = []
+        billing_blocked = []
+        for _draft in new_drafts:
+            _did = str(_draft.get("id") or "").strip()
+            _billing_key = f"parsed-draft:{req.account_id}:{_did}"
+            try:
+                _charge = _billing_consume(req.account_id, "listings", 1, idempotency_key=_billing_key)
+            except Exception as _billing_exc:
+                billing_blocked.append({"id": _did, "reason": str(_billing_exc)[:160]})
+                continue
+            if not _charge.get("allowed", False):
+                billing_blocked.append({"id": _did, "reason": str(_charge.get("blocked_reason") or _charge.get("message") or "billing_limit")[:160]})
+                continue
+            charged_drafts.append(_draft)
+
+        if not charged_drafts:
+            return {"status":"billing_limit","code":"billing_limit","unit":"listings","created":0,
+                    "message":"Тарифный лимит не подтвердил создание выбранных черновиков.",
+                    "billing_blocked":billing_blocked}
+
+        # PARSED_DRAFT_APPEND_ATOMIC_V1: merge by deterministic draft id under the
+        # account lock; concurrent workers cannot erase each other and HTTP retries
+        # of the same parsed product converge on one draft instead of duplicating it.
+        combined = _append_drafts(req.account_id, charged_drafts)
 
         return {
-            "status": "ok", "created": len(new_drafts), "total_drafts": len(combined),
+            "status": "ok", "created": len(charged_drafts), "requested": len(new_drafts), "total_drafts": len(combined),
+            "billing_blocked": billing_blocked,
             "batch_label": batch_label, "categories": categories_used,
             "clarifications_needed": clarifications_needed,
             "category_errors": category_errors,
@@ -901,53 +1119,65 @@ class CityAnalysisRequest(BaseModel):
 
 
 async def _fetch_avito_page_headed(url: str, timeout_ms: int = 25000, wait_ms: int = 5000):
-    """
-    Загружает страницу Avito через headed-Chromium в Xvfb + резидентный прокси + stealth.
-    Это единственный проверенно рабочий способ обойти firewallCaptcha (см. память проекта, 03.07.2026).
-    Требует, чтобы процесс был запущен под xvfb-run (см. systemd unit).
+    """Fetch Avito HTML with rotating proxy attempts and a direct last resort.
+
+    A dead proxy is transport noise, not a business error. Each attempt owns its
+    browser/context and is closed before the next one. Direct mode is used only after
+    proxy attempts fail; captcha pages are returned to the caller for normal retry logic.
     """
     from proxy_pool import get_playwright_proxy
     from playwright.async_api import async_playwright
     from playwright_stealth import Stealth
+    import asyncio as _aio
 
-    proxy = get_playwright_proxy()
-    stealth = Stealth()
+    stealth = Stealth(); last_error=None
+    attempts=[]
+    for _ in range(3):
+        try: attempts.append(get_playwright_proxy())
+        except Exception as e: last_error=e
+    attempts.append(None)  # public Avito fallback when the paid proxy pool is unhealthy
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, args=["--no-sandbox"], proxy=proxy)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-        )
-        await stealth.apply_stealth_async(context)
-        page = await context.new_page()
-
-        # Блокируем картинки/стили/шрифты/медиа - нам нужен только текст объявлений
-        # (заголовки, цены), это снижает трафик в 5-10 раз и себестоимость парсинга.
-        async def _block_heavy_resources(route):
-            if route.request.resource_type in ("image", "stylesheet", "font", "media", "script"):
-                await route.abort()
-            else:
-                await route.continue_()
-        await page.route("**/*", _block_heavy_resources)
-
-        _traffic = {"bytes": 0, "requests": 0}
-        async def _ct(response):
+    for proxy in attempts:
+        browser=None
+        try:
+            async with async_playwright() as p:
+                kwargs={"headless":False,"args":["--no-sandbox"]}
+                if proxy:
+                    kwargs["proxy"]=proxy
+                else:
+                    kwargs["args"]=["--no-sandbox","--no-proxy-server"]
+                browser=await p.chromium.launch(**kwargs)
+                context=await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+                await stealth.apply_stealth_async(context)
+                page=await context.new_page()
+                async def _block_heavy_resources(route):
+                    if route.request.resource_type in ("image","stylesheet","font","media"):
+                        await route.abort()
+                    else:
+                        await route.continue_()
+                await page.route("**/*",_block_heavy_resources)
+                _traffic={"bytes":0,"requests":0}
+                async def _ct(response):
+                    try:
+                        b=await response.body(); _traffic["bytes"]+=len(b); _traffic["requests"]+=1
+                    except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=1162)
+                page.on("response",lambda r:_aio.ensure_future(_ct(r)))
+                await page.goto(url,timeout=timeout_ms,wait_until="domcontentloaded")
+                await page.wait_for_timeout(wait_ms)
+                html=await page.content(); final_url=page.url
+                if not html or len(html)<500:
+                    raise RuntimeError("empty_avito_html")
+                _mb=_traffic["bytes"]/1024/1024; _rub=_mb/1024*4*95 if proxy else 0.0
+                print(f"[ТРАФИК] Парсинг Avito: {_mb:.2f} МБ, {_traffic['requests']} запросов, ~{_rub:.2f} руб, transport={'proxy' if proxy else 'direct'}",flush=True)
+                await browser.close(); browser=None
+                return {"html":html,"final_url":final_url,"transport":"proxy" if proxy else "direct"}
+        except Exception as e:
+            last_error=e
             try:
-                b = await response.body()
-                _traffic["bytes"] += len(b)
-                _traffic["requests"] += 1
-            except Exception:
-                pass
-        page.on("response", lambda r: __import__("asyncio").ensure_future(_ct(r)))
-        await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
-        await page.wait_for_timeout(wait_ms)
-        html = await page.content()
-        final_url = page.url
-        _mb = _traffic["bytes"] / 1024 / 1024
-        _rub = _mb / 1024 * 4 * 95
-        print(f"[ТРАФИК] Парсинг выдачи: {_mb:.2f} МБ, {_traffic['requests']} запросов, ~{_rub:.2f} руб (RU прокси $4/ГБ)", flush=True)
-        await browser.close()
-        return {"html": html, "final_url": final_url}
+                if browser: await browser.close()
+            except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=1177)
+            continue
+    raise RuntimeError("Avito browser transport unavailable: "+str(last_error)[:240])
 
 
 def _extract_total_count(html: str):
@@ -1211,12 +1441,133 @@ async def validate_feed_xmlcheck(feed_url: str) -> dict:
     """Автоматически проверяет фид через официальный валидатор Avito (autoload.avito.ru/format/xmlcheck/)."""
     from playwright.async_api import async_playwright
 
-    result = {"status": "unknown", "errors": [], "raw_text": ""}
+    result = {"status": "unknown", "errors": [], "raw_text": "", "issues": []}
+
+    # Primary path: use the same public API that Avito's own xml_checker.js calls.
+    # It is faster and much more stable than automating the page with Chromium.
+    try:
+        import asyncio as _asyncio, requests as _requests, time as _time, re as _re
+        from bs4 import BeautifulSoup as _BeautifulSoup
+        def _direct_check():
+            base="https://autoload.avito.ru"
+            headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+                     "Content-Type":"text/plain;charset=UTF-8"}
+            session=_requests.Session()
+            # Backend has proxy env for other integrations; the official Avito checker is
+            # public and works directly. Ignore inherited proxy/CA variables here.
+            session.trust_env=False
+            def _report_for(check_id: str, seconds: int) -> str:
+                for _ in range(max(1,int(seconds))):
+                    _time.sleep(1.0)
+                    r=session.get(base+f"/api/v2/public/xml_checker/result/{check_id}/", headers={"User-Agent":headers["User-Agent"]}, timeout=20)
+                    if r.status_code==200:
+                        candidate=r.text or ""
+                        if ("Общий статус" in candidate or "status_success" in candidate or "status_failed" in candidate or "status_warnings" in candidate):
+                            return candidate
+                    if r.status_code >= 500:
+                        r.raise_for_status()
+                return ""
+
+            post=session.post(base+"/api/v2/public/xml_checker/from_url/", data=str(feed_url).encode("utf-8"), headers=headers, timeout=20)
+            post.raise_for_status()
+            check_id=str(((post.json().get("data") or {}).get("id") or "")).strip()
+            if not check_id:
+                raise RuntimeError("Avito xmlcheck did not return check id")
+            # Avito de-duplicates identical URL/content checks. A rare checker failure
+            # can therefore leave that hash permanently returning the same 202 job.
+            # Give the normal URL flow a short fair window, then validate the exact
+            # same XML bytes through Avito's official /upload/ endpoint with a harmless
+            # XML comment nonce. The comment changes only the checker cache key, never
+            # any ad field, feed identity, price or media. This prevents a stale Avito
+            # checker job from blocking a valid BORIS campaign forever.
+            html_text=_report_for(check_id,12)
+            transport="avito_public_api_url"
+            if not html_text:
+                feed_resp=session.get(str(feed_url),headers={"User-Agent":headers["User-Agent"]},timeout=20)
+                feed_resp.raise_for_status()
+                xml_bytes=bytes(feed_resp.content or b"")
+                if not xml_bytes:
+                    raise RuntimeError("BORIS validation feed is empty")
+                nonce=("<!-- BORIS_XMLCHECK_CACHE_BUST %s -->\n" % _time.time_ns()).encode("utf-8")
+                first_nl=xml_bytes.find(b"\n")
+                upload_bytes=(xml_bytes[:first_nl+1]+nonce+xml_bytes[first_nl+1:]) if first_nl>=0 else (nonce+xml_bytes)
+                upload_headers={"User-Agent":headers["User-Agent"],"Content-Type":"application/xml"}
+                up=session.post(base+"/api/v2/public/xml_checker/upload/",data=upload_bytes,headers=upload_headers,timeout=20)
+                up.raise_for_status()
+                upload_id=str(((up.json().get("data") or {}).get("id") or "")).strip()
+                if not upload_id:
+                    raise RuntimeError("Avito xmlcheck upload did not return check id")
+                html_text=_report_for(upload_id,30)
+                transport="avito_public_api_upload_cache_bust"
+            if not html_text:
+                # Avito may keep a valid check in HTTP 202 «Отчет в работе» for
+                # several minutes. This is NOT a validation failure and must not
+                # be converted into a red ERROR or a dead Guardian job. Return an
+                # explicit pending state; the persistent campaign worker will retry
+                # the same read-only check later without asking the owner anything.
+                return {"status":"pending","errors":[],"raw_text":"Отчет Avito еще формируется","issues":[],"transport":transport,"check_id":check_id}
+            soup=_BeautifulSoup(html_text,"html.parser")
+            raw="\n".join(x.strip() for x in soup.stripped_strings)
+            normalized=" ".join(raw.split())
+            # Avito currently renders a Cyrillic 'Х' in one XML status string, so
+            # use the official status CSS class first and text only as a fallback.
+            if soup.select_one(".status_failed"):
+                status="errors"
+            elif soup.select_one(".status_success") or soup.select_one(".status_warnings"):
+                # Avito uses status_warnings for a feed it accepts with non-blocking
+                # hints (for example an automatically inferred HouseType). Publishing
+                # must stop only on status_failed / real validation errors.
+                status="ok"
+            elif "не полностью соответствует формату" in normalized:
+                status="ok"
+            elif "не соответствует формату" in normalized:
+                status="errors"
+            elif "соответствует формату" in normalized:
+                status="ok"
+            else:
+                status="unknown"
+            issues=[]
+            for tr in soup.select("table.report tbody tr"):
+                ad_el=tr.select_one("td.item-id")
+                ad_id=ad_el.get_text(" ",strip=True) if ad_el else ""
+                row_text=tr.get_text("\n",strip=True)
+                seen=set()
+                for m in _re.finditer(r"Правила:\s*([^/\n]+?)\s*/\s*([^\.\n]+)", row_text, _re.I):
+                    field=m.group(1).strip().replace("\xa0"," "); label=m.group(2).strip().replace("\xa0"," ")
+                    if field and field not in seen:
+                        seen.add(field); issues.append({"field":field,"label":label,"ad_id":ad_id,"message":row_text[:4000]})
+                for m in _re.finditer(r"Не заполнен обязательный параметр\s+([A-Za-z][A-Za-z0-9_]*)", row_text):
+                    field=m.group(1).strip()
+                    if field not in seen:
+                        seen.add(field); issues.append({"field":field,"label":field,"ad_id":ad_id,"message":row_text[:4000]})
+                # Range/format errors expose the technical tag on its own line, e.g.
+                # 'Length / Длина' after 'Значение должно быть от 60 до 1000 мм'.
+                for m in _re.finditer(r"(?:^|\n)([A-Za-z][A-Za-z0-9_]*)\s*/\s*([^\n]+)(?:\nПодробнее|$)", row_text, _re.I):
+                    field=m.group(1).strip(); label=m.group(2).strip()
+                    if field not in seen and "Ошибка параметра" in row_text:
+                        seen.add(field); issues.append({"field":field,"label":label,"ad_id":ad_id,"message":row_text[:4000]})
+                for m in _re.finditer(r"задайте его в элементе\s+([A-Za-z][A-Za-z0-9_]*)\s*/\s*([^\.\n]+)", row_text, _re.I):
+                    field=m.group(1).strip(); label=m.group(2).strip()
+                    if field not in seen:
+                        seen.add(field); issues.append({"field":field,"label":label,"severity":"warning","ad_id":ad_id,"message":row_text[:4000]})
+            return {"status":status,"errors":[],"raw_text":raw,"issues":issues,"transport":transport}
+        direct=await _asyncio.to_thread(_direct_check)
+        if str(direct.get("status") or "").lower() in {"ok","errors","pending"}:
+            return direct
+    except Exception as _direct_error:
+        result["errors"].append("direct_api: "+str(_direct_error))
+
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            # Official Avito validator is public and must be reached directly. The
+            # backend service has proxy env for other integrations; Chromium may
+            # otherwise inherit it and time out even while autoload.avito.ru is healthy.
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--no-proxy-server"])
             page = await browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-            await page.goto("https://autoload.avito.ru/format/xmlcheck/", timeout=40000, wait_until="domcontentloaded")
+            await page.goto("https://autoload.avito.ru/format/xmlcheck/", timeout=40000, wait_until="commit")
+            # Avito keeps non-critical analytics/resources alive; DOMContentLoaded can hang
+            # despite the validator UI already being usable. Wait for the actual validator control instead.
+            await page.get_by_text("По ссылке", exact=True).first.wait_for(state="visible", timeout=15000)
             await page.wait_for_timeout(2000)
 
             # переключаемся на вкладку "По ссылке"
@@ -1272,10 +1623,52 @@ async def validate_feed_xmlcheck(feed_url: str) -> dict:
             body_text = await page.inner_text("body")
             result["raw_text"] = body_text
 
-            if "XML соответствует формату" in body_text:
+            # Return machine-readable per-ad validation feedback as well as the human report.
+            # This lets Campaign intake ask only for real missing business facts instead of
+            # hiding Avito errors until the final publish step.
+            issues = []
+            try:
+                rows = page.locator("table.report tbody tr")
+                for i in range(await rows.count()):
+                    row = rows.nth(i)
+                    row_text = (await row.text_content()) or ""
+                    ad_id = ""
+                    try:
+                        ad_id = ((await row.locator("td.item-id").first.text_content()) or "").strip()
+                    except Exception as _suppressed_exc:
+                        observe_suppressed(__name__, _suppressed_exc, line=1637)
+                    # Hidden Avito detail contains the exact XML tag after 'Правила:'.
+                    import re as _re
+                    tags = []
+                    for m in _re.finditer(r"Правила:\s*([^/\n]+?)\s*/\s*([^\.\n]+)", row_text, _re.I):
+                        tag = m.group(1).strip().replace("\xa0", " ")
+                        label = m.group(2).strip().replace("\xa0", " ")
+                        if tag and tag not in [x.get("field") for x in tags]:
+                            tags.append({"field": tag, "label": label})
+                    # Some required fields are printed directly without a 'Правила:' line.
+                    for m in _re.finditer(r"Не заполнен обязательный параметр\s+([A-Za-z][A-Za-z0-9_]*)", row_text):
+                        tag = m.group(1).strip()
+                        if tag not in [x.get("field") for x in tags]:
+                            tags.append({"field": tag, "label": tag})
+                    # Optional-but-useful warning fields such as AdType are also explicit.
+                    for m in _re.finditer(r"задайте его в элементе\s+([A-Za-z][A-Za-z0-9_]*)\s*/\s*([^\.\n]+)", row_text, _re.I):
+                        tag = m.group(1).strip(); label = m.group(2).strip()
+                        if tag not in [x.get("field") for x in tags]:
+                            tags.append({"field": tag, "label": label, "severity": "warning"})
+                    for item in tags:
+                        item.update({"ad_id": ad_id, "message": row_text.strip()[:4000]})
+                        issues.append(item)
+            except Exception:
+                issues = []
+            result["issues"] = issues
+
+            normalized = " ".join(body_text.split())
+            if "XML не полностью соответствует формату" in normalized:
                 result["status"] = "ok"
-            elif "не соответствует формату" in body_text:
+            elif "XML не соответствует формату" in normalized:
                 result["status"] = "errors"
+            elif "XML соответствует формату" in normalized:
+                result["status"] = "ok"
             else:
                 result["status"] = "unknown"
 
@@ -1326,6 +1719,24 @@ def _generate_product_description(title: str, price: str, characteristics: dict,
     chars_text = "\n".join([f"- {k}: {v}" for k, v in list(characteristics.items())[:8]]) if characteristics else ""
 
     sample_block = ""
+    memory_block = ""
+    if account_id:
+        try:
+            from app.db.session import SessionLocal
+            from app.api.client_memory import confirmed_context
+            _mdb = SessionLocal()
+            try:
+                _mem = confirmed_context(_mdb, account_id, limit=80, max_chars=10000)
+            finally:
+                _mdb.close()
+            if _mem:
+                memory_block = (
+                    "\nПОДТВЕРЖДЁННАЯ ПАМЯТЬ BORIS ПО ЭТОМУ АККАУНТУ — это факты владельца, их можно использовать в объявлении. "
+                    "Не добавляй утверждений, которых нет в товарных данных, образце или этом подтверждённом блоке:\n"
+                    + _mem + "\n"
+                )
+        except Exception as _mem_e:
+            print(f"[product_description] memory unavailable: {type(_mem_e).__name__}", flush=True)
     _smp = (sample or "").strip()
     if _smp:
         sample_block = (
@@ -1368,6 +1779,7 @@ def _generate_product_description(title: str, price: str, characteristics: dict,
 Цена: {price}
 Характеристики:
 {chars_text}
+{memory_block}
 {sample_block}
 
 {_rules}
@@ -1388,6 +1800,13 @@ def _generate_product_description(title: str, price: str, characteristics: dict,
 
 В САМОМ КОНЦЕ описания, отдельным абзацем, добавь ОДНУ спинтакс-группу из РОВНО 10 синонимичных поисковых формулировок этого товара (как реально ищут в Avito/Яндексе), в ОДИНАРНЫХ скобках. Каждый вариант с заглавной буквы.
 Пример формата: {{Тротуарная плитка|Плитка тротуарная|Плитка для дорожек|Брусчатка тротуарная|Плитка садовая|Плитка для двора|Уличная плитка|Плитка для мощения|Плитка для укладки|Тротуарная плитка недорого}}
+
+ГЛОБАЛЬНЫЙ СТАНДАРТ BORIS:
+- Пиши как сильный коммерческий копирайтер: сильный первый заход, короткие смысловые блоки, уместные иконки, выгоды, процесс/доказательства только из фактов, снятие возражений, предметный пример и CTA.
+- Разные объявления должны иметь реально разные маркетинговые заходы, а не замену нескольких слов.
+- Каждое предложение завершается корректным знаком препинания.
+- Для любого физически видимого товара, материала, объекта или визуально видимого результата услуги цвет является обязательным параметром уникализации. Используй только цвет из подтверждённых характеристик/памяти клиента. Если цвет неизвестен — не выдумывай его.
+- При географической уникализации используй только подтверждённые районы, населённые пункты и улицы клиента.
 
 КРИТИЧЕСКИ ВАЖНЫЙ ЗАПРЕТ: если товар — конкретная модель конкретного производителя, НИКОГДА не создавай спинтакс-группу для марки/бренда/модели с ДРУГИМИ производителями — это недостоверная реклама. Марка и модель ФИКСИРОВАНЫ. Варьировать можно только объективно переменные характеристики самого товара."""
 
@@ -1668,6 +2087,180 @@ def city_analysis(req: CityAnalysisRequest):
 
 
 
+class GatewayCityAnalysisRequest(BaseModel):
+    account_id: str
+    query: str
+    cities: list[str]
+    top_n: int = 20
+    use_market_patterns: bool = False
+    blue_ocean: bool = True
+
+
+@router.post("/city_analysis_gateway")
+def city_analysis_gateway(req: GatewayCityAnalysisRequest):
+    """Queue real Avito search-result analysis in the account-bound Browser Gateway.
+
+    This is the production READ transport for competitor/ranking analysis. It reuses
+    the same Browser Gateway session as the mass editor and never mutates listings.
+    """
+    from urllib.parse import quote_plus
+    import secrets as _secrets
+    from app.api.browser_gateway import _account_gateway_state, _db_put as _gw_put, _iso as _gw_iso
+
+    session = _account_gateway_state(req.account_id)
+    if not session.get("online"):
+        return {"status": "error", "code": "browser_session_required", "message": "Для анализа выдачи нужна активная Browser Session этого аккаунта."}
+
+    _gw_put(req.account_id, "avito_competitor_strategy", {
+        "query": req.query,
+        "cities": req.cities[:20],
+        "top_n": max(1, min(int(req.top_n), 60)),
+        "use_market_patterns": bool(req.use_market_patterns),
+        "blue_ocean": bool(req.blue_ocean),
+        "updated_at": _gw_iso(),
+        "source": "account_browser_gateway",
+    })
+
+    jobs = []
+    for city in req.cities[:20]:
+        city_slug = _normalize_city(city)
+        url = f"https://www.avito.ru/{city_slug}?q={quote_plus(req.query)}"
+        job_id = "browser_" + _secrets.token_hex(7)
+        job = {
+            "job_id": job_id,
+            "kind": "browser",
+            "status": "waiting_gateway",
+            "created_at": _gw_iso(),
+            "updated_at": _gw_iso(),
+            "account_id": req.account_id,
+            "domain": "avito.ru",
+            "capability": "avito_search_analysis",
+            "risk_level": "READ",
+            "mode": "read",
+            "steps": [
+                {"action": "open_url", "url": url, "selector": None, "text": None, "value": None, "timeout_ms": 25000, "redact_selectors": []},
+                {"action": "scroll", "url": None, "selector": None, "text": None, "value": "1100", "timeout_ms": 5000, "redact_selectors": []},
+                {"action": "scroll", "url": None, "selector": None, "text": None, "value": "1100", "timeout_ms": 5000, "redact_selectors": []},
+                {"action": "read_avito_search", "url": None, "selector": None, "text": None, "value": None, "timeout_ms": 15000, "redact_selectors": []},
+            ],
+            "gateway_id": None,
+            "confirmed": False,
+            "metadata": {"purpose": "avito_competitor_analysis", "query": req.query, "city": city, "top_n": max(1, min(int(req.top_n), 60)), "use_market_patterns": bool(req.use_market_patterns), "blue_ocean": bool(req.blue_ocean)},
+            "results": [], "error": None,
+            "privacy": {"guard": True, "never_read_passwords": True},
+        }
+        _gw_put(req.account_id, f"browser_job:{job_id}", job)
+        jobs.append({"job_id": job_id, "city": city, "query": req.query})
+    return {"status": "queued", "account_id": req.account_id, "jobs": jobs}
+
+
+@router.get("/city_analysis_gateway/status")
+def city_analysis_gateway_status(account_id: str, job_id: str):
+    from app.api.browser_gateway import _db_get as _gw_get
+    from app.api.mass_editor import _latest_items
+
+    job = _gw_get(account_id, f"browser_job:{job_id}")
+    if not job:
+        return {"status": "error", "message": "Задание анализа не найдено"}
+    if job.get("status") not in {"completed", "completed_with_errors"}:
+        return {"status": job.get("status"), "job_id": job_id, "city": (job.get("metadata") or {}).get("city")}
+    if job.get("status") == "completed_with_errors":
+        return {"status": "error", "job_id": job_id, "error": job.get("error")}
+
+    result = {}
+    for row in job.get("results") or []:
+        r = row.get("result") or {}
+        if isinstance(r, dict) and isinstance(r.get("items"), list):
+            result = r
+    items = list(result.get("items") or [])
+    top_n = max(1, min(int((job.get("metadata") or {}).get("top_n") or 20), 60))
+    items = items[:top_n]
+    prices = [int(x.get("price")) for x in items if isinstance(x.get("price"), (int, float))]
+    own_ids = {str(x.get("id")) for x in _latest_items(account_id)}
+    own_positions = [
+        {"position": x.get("position"), "item_id": x.get("item_id"), "title": x.get("title"), "price": x.get("price"), "url": x.get("url")}
+        for x in items if str(x.get("item_id") or "") in own_ids
+    ]
+    # Browser DOM flags are useful, but Avito also marks promoted cards in visible text
+    # as «Продвинуто». Normalize that server-side so an older extractor cannot undercount.
+    for x in items:
+        txt = str(x.get("text") or "").lower()
+        x["promoted"] = bool(x.get("promoted") or "продвинуто" in txt or "продвигается" in txt or "реклама" in txt)
+    competitors = [x for x in items if str(x.get("item_id") or "") not in own_ids]
+    promoted_count = sum(1 for x in items if x.get("promoted"))
+
+    sorted_prices = sorted(prices)
+    median_price = None
+    if sorted_prices:
+        mid = len(sorted_prices) // 2
+        median_price = sorted_prices[mid] if len(sorted_prices) % 2 else round((sorted_prices[mid - 1] + sorted_prices[mid]) / 2)
+
+    import re as _re_market
+    from collections import Counter as _CounterMarket
+    stop = {"для","под","или","и","в","на","с","из","по","от","до","за","без","новый","новая","новое","купить","продажа","заказать"}
+    tokens = []
+    for x in competitors[:20]:
+        for token in _re_market.findall(r"[A-Za-zА-Яа-яЁё0-9-]{3,}", str(x.get("title") or "").lower()):
+            if token not in stop and not token.isdigit():
+                tokens.append(token)
+    title_patterns = [w for w, _n in _CounterMarket(tokens).most_common(8)]
+
+    best_own = min((int(x.get("position")) for x in own_positions if x.get("position")), default=None)
+    top_prices = [int(x.get("price")) for x in competitors[:10] if isinstance(x.get("price"), (int, float))]
+    top_avg_price = round(sum(top_prices) / len(top_prices)) if top_prices else None
+    own_prices = [int(x.get("price")) for x in own_positions if isinstance(x.get("price"), (int, float))]
+    own_avg_price = round(sum(own_prices) / len(own_prices)) if own_prices else None
+
+    recommendations = []
+    if best_own is None:
+        recommendations.append("В проверенном топе своих объявлений нет: сначала усилить релевантность заголовка, главное фото и продвижение по этому запросу.")
+    elif best_own > 5:
+        recommendations.append(f"Лучшая собственная позиция — №{best_own}: приоритет — дотянуть хотя бы до топ-5 и повторно измерить выдачу.")
+    else:
+        recommendations.append(f"Собственное объявление уже в топ-{best_own}: не менять всё сразу, а улучшать точечно и контролировать позицию после каждого изменения.")
+    if own_avg_price and top_avg_price:
+        delta = round((own_avg_price - top_avg_price) / top_avg_price * 100) if top_avg_price else 0
+        if abs(delta) >= 8:
+            direction = "выше" if delta > 0 else "ниже"
+            recommendations.append(f"Средняя цена своих объявлений в срезе на {abs(delta)}% {direction} среднего топ-10; проверить, оправдана ли разница оффером и комплектацией.")
+    if promoted_count >= max(2, len(items)//4):
+        recommendations.append("В верхней выдаче заметная доля продвигаемых объявлений: учитывать платное продвижение отдельно от качества карточки.")
+    if title_patterns:
+        recommendations.append("Частые слова в заголовках лидеров: " + ", ".join(title_patterns[:6]) + ". Использовать только релевантные рынку паттерны без копирования чужих формулировок.")
+
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "account_id": account_id,
+        "query": (job.get("metadata") or {}).get("query"),
+        "city": (job.get("metadata") or {}).get("city"),
+        "count_on_page": len(items),
+        # Compatibility aliases keep the existing client UI stable while the
+        # source of truth changes from the old proxy parser to Browser Gateway.
+        "count_found": len(items),
+        "min_price": min(prices) if prices else None,
+        "max_price": max(prices) if prices else None,
+        "avg_price": round(sum(prices) / len(prices)) if prices else None,
+        "price": {
+            "min": min(prices) if prices else None,
+            "max": max(prices) if prices else None,
+            "avg": round(sum(prices) / len(prices)) if prices else None,
+            "median": median_price,
+            "top10_avg": top_avg_price,
+            "own_avg": own_avg_price,
+        },
+        "promoted_count": promoted_count,
+        "own_positions": own_positions,
+        "best_own_position": best_own,
+        "title_patterns": title_patterns,
+        "top_competitors": competitors[:10],
+        "top5": competitors[:5],
+        "recommendations": recommendations,
+        "items": items,
+        "source": "account_browser_gateway",
+    }
+
+
 @router.post("/city_analysis_async")
 def city_analysis_async(req: CityAnalysisRequest):
     """Создаёт фоновую задачу парсинга и сразу возвращает task_id.
@@ -1835,8 +2428,8 @@ def _fetch_html_tolerant(url, timeout=25):
         if r.status_code == 200:
             r.encoding = r.apparent_encoding
             return r.text, r.url
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=2430)
     try:
         s = _rq.Session()
         s.mount("https://", _LegacySSLAdapter())
@@ -1844,15 +2437,15 @@ def _fetch_html_tolerant(url, timeout=25):
         if r.status_code == 200:
             r.encoding = r.apparent_encoding
             return r.text, r.url
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=2439)
     try:
         r = _rq.get(url.replace("https://", "http://", 1), timeout=timeout, headers=headers)
         if r.status_code == 200:
             r.encoding = r.apparent_encoding
             return r.text, r.url
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=2446)
     return None, None
 
 

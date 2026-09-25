@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import text
+from app.services.exception_observability import observe_suppressed
 
 log = logging.getLogger(__name__)
 
@@ -36,17 +37,44 @@ def words(s):
 
 def _fetch_active(account_id):
     """Возвращает (ids, vocab) или (None, None), если Avito не ответил."""
+    from app.services.avito_account_throttle import account_throttle_remaining, record_account_throttle
+    # REACTIVATION_PROFILE_SHARED_ACCOUNT_THROTTLE_V1: this daily inventory reader
+    # must not bypass a tenant Retry-After observed by marketer/stats. Check before
+    # token/provider I/O and before every page; a confirmed 429 invalidates partial data.
+    if account_throttle_remaining(account_id) > 0:
+        return None, None
     from app.api.messenger import _get_user_id_and_token
     uid, tok = _get_user_id_and_token(account_id)
     ids, vocab, page = set(), set(), 1
     while page <= 20:
+        if account_throttle_remaining(account_id) > 0:
+            return None, None
         r = httpx.get("https://api.avito.ru/core/v1/items",
                       params={"per_page": 100, "page": page, "status": "active"},
                       headers={"Authorization": "Bearer %s" % tok}, timeout=40)
+        if r.status_code == 429:
+            raw = str(r.headers.get("Retry-After") or "").strip()
+            retry = 30
+            try:
+                retry = max(0, int(float(raw))) if raw else 30
+            except Exception:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    when = parsedate_to_datetime(raw)
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    retry = max(0, int((when.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
+                except Exception:
+                    retry = 30
+            record_account_throttle(account_id, retry, source="reactivation_profile_items_429")
+            return None, None
         if r.status_code != 200:
+            # REACTIVATION_PROFILE_NO_PARTIAL_INVENTORY_V1: role/profile evidence
+            # must be complete. A late-page provider failure cannot turn an
+            # arbitrary prefix of the account inventory into authoritative truth.
             log.warning("профиль: %s ответил HTTP %s на странице %d",
                         account_id, r.status_code, page)
-            return (None, None) if page == 1 else (ids, vocab)
+            return None, None
         batch = (r.json() or {}).get("resources") or []
         if not batch:
             break
@@ -70,8 +98,8 @@ def profile_of(db, account_id, max_age_hours=CACHE_TTL_HOURS, force=False):
                 at = at.replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc) - at < timedelta(hours=max_age_hours):
                 return set(data["ids"]), set(data["vocab"])
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=100)
     try:
         ids, vocab = _fetch_active(account_id)
     except Exception as e:
@@ -83,8 +111,8 @@ def profile_of(db, account_id, max_age_hours=CACHE_TTL_HOURS, force=False):
                 data = json.loads(row[0]) if isinstance(row[0], str) else row[0]
                 log.info("профиль: беру устаревший кэш %s", account_id)
                 return set(data["ids"]), set(data["vocab"])
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=113)
         return None, None
     payload = json.dumps({"ids": sorted(ids), "vocab": sorted(vocab),
                           "at": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False)

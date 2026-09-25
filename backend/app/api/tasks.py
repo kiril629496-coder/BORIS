@@ -1,4 +1,5 @@
 import os as _os_gc
+from app.services.exception_observability import observe_suppressed
 _GC_MODEL = _os_gc.environ.get("GIGACHAT_MODEL", "GigaChat" + "-Pro")
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -15,7 +16,7 @@ from app.api.auth import get_current_user_or_internal
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
-Base.metadata.create_all(bind=engine, tables=[Task.__table__])
+# BORIS_SCHEMA_MIGRATION_055_OWNED: runtime never creates the tasks table.
 
 class CreateTaskRequest(BaseModel):
     account_id: str = "default"
@@ -183,7 +184,7 @@ def _worker_loop():
                 elif task.task_type == "parse_site":
                     result = _run_parse_site(payload, task=task, db=db)
                 elif task.task_type == "product_banner":
-                    result = _run_product_banner(payload)
+                    result = _run_product_banner(payload, task=task)
                 elif task.task_type == "product_description":
                     result = _run_product_description(payload)
                 elif task.task_type == "fetch_all_galleries":
@@ -228,8 +229,8 @@ def _worker_loop():
                     task.error_message = str(e)[:500]
                     try:
                         _escalate_to_director(db, task.account_id, task.task_type, task.error_message)
-                    except Exception:
-                        pass
+                    except Exception as _suppressed_exc:
+                        observe_suppressed(__name__, _suppressed_exc, line=231)
             finally:
                 if _needs_browser_slot:
                     _browser_task_semaphore.release()
@@ -283,12 +284,14 @@ def _run_generate_images(payload):
     results = []
     for i in range(count):
         full_prompt = f"Нарисуй {prompt}. Стиль: {style}. Профессиональное качество. ВАЖНО: без текста, без надписей."
+        from app.services.ai_privacy import safe_external_ai_payload
+        provider_prompt, _privacy_vault = safe_external_ai_payload(full_prompt)
         try:
             with GigaChat(credentials=os.getenv("GIGACHAT_KEY"), scope=_os_gc.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"), model=_GC_MODEL, verify_ssl_certs=False, timeout=120) as client:
                 response = client.chat(Chat(
                     messages=[
                         Messages(role=MessagesRole.SYSTEM, content="Ты — художник Kandinsky."),
-                        Messages(role=MessagesRole.USER, content=full_prompt)
+                        Messages(role=MessagesRole.USER, content=provider_prompt)
                     ],
                     function_call="auto"
                 ))
@@ -335,16 +338,23 @@ def _revive_stuck_tasks():
     finally:
         db.close()
 
-_revive_stuck_tasks()
-
-# Пул из нескольких параллельных воркеров вместо одного — с SKIP LOCKED
-# несколько потоков безопасно разбирают очередь без гонки за одну задачу.
+# TASK_WORKER_IMPORT_SIDE_EFFECT_GUARD_V1:
+# Importing the API module must not implicitly start production-like daemon
+# threads in test/analysis processes. Production remains enabled by default;
+# callers that need an import-only process must opt out explicitly.
+TASK_WORKERS_ENABLED = str(os.getenv("BORIS_TASK_WORKERS_ENABLED", "1")).strip().lower() not in {
+    "0", "false", "no", "off",
+}
 WORKER_POOL_SIZE = int(os.getenv("WORKER_POOL_SIZE", 4))
 _worker_threads = []
-for _i in range(WORKER_POOL_SIZE):
-    _t = threading.Thread(target=_worker_loop, daemon=True, name=f"worker-{_i+1}")
-    _t.start()
-    _worker_threads.append(_t)
+if TASK_WORKERS_ENABLED:
+    _revive_stuck_tasks()
+    # Пул из нескольких параллельных воркеров вместо одного — с SKIP LOCKED
+    # несколько потоков безопасно разбирают очередь без гонки за одну задачу.
+    for _i in range(WORKER_POOL_SIZE):
+        _t = threading.Thread(target=_worker_loop, daemon=True, name=f"worker-{_i+1}")
+        _t.start()
+        _worker_threads.append(_t)
 
 
 def _run_fetch_all_galleries(payload):
@@ -537,18 +547,19 @@ def _run_enrich_parsed_descriptions(payload, task=None, db=None):
 
             ok = False
             last_err = None
-            for attempt in range(3):
-                try:
-                    p["ai_description"] = _generate_product_description(
-                        p.get("title", ""), p.get("price", ""), p.get("characteristics") or {}, sample=sample
-                    , account_id=getattr(task, "account_id", None), operation="parsed_description_enrichment")
-                    ok = True
-                    break
-                except Exception as e:
-                    last_err = e
-                    print(f"[enrich_descriptions] карточка {idx} попытка {attempt+1}/3 не удалась: {e}", flush=True)
-                    if attempt < 2:
-                        _time_mod.sleep(5 * (2 ** attempt))  # 5с, потом 10с перед следующей попыткой
+            # One product card is one paid semantic intent. The underlying text
+            # provider/fallback layer owns durable intent protection; an outer
+            # retry here could buy the same description again after an ambiguous
+            # network result. Fail this card once and let the durable task queue
+            # continue with the remaining cards.
+            try:
+                p["ai_description"] = _generate_product_description(
+                    p.get("title", ""), p.get("price", ""), p.get("characteristics") or {}, sample=sample
+                , account_id=getattr(task, "account_id", None), operation="parsed_description_enrichment")
+                ok = True
+            except Exception as e:
+                last_err = e
+                print(f"[enrich_descriptions] карточка {idx} остановлена без скрытого платного повтора: {e}", flush=True)
 
             if ok:
                 done_count += 1
@@ -581,7 +592,7 @@ def _run_enrich_parsed_descriptions(payload, task=None, db=None):
             titles = ", ".join(f"«{f['title']}»" for f in failed_so_far[:10] if f.get("title"))
             more = " и другие" if len(failed_so_far) > 10 else ""
             text = (f"✅ Обогащено {done_count} из {original_total} товаров. "
-                    f"{len(failed_so_far)} пропущено: {titles}{more}. Причина: ошибка ИИ после 3 попыток.")
+                    f"{len(failed_so_far)} пропущено: {titles}{more}. Причина: безопасная генерация не завершилась; скрытый платный повтор запрещён.")
         else:
             text = f"✅ Обогащено {done_count} из {original_total} товаров. 0 ошибок."
         _push_notification(_db, account_id, text)
@@ -592,10 +603,10 @@ def _run_enrich_parsed_descriptions(payload, task=None, db=None):
             _db.close()
 
 
-def _run_product_banner(payload):
+def _run_product_banner(payload, task=None):
     """Генерирует баннер по товару из карточки и сохраняет URL обратно в parsed_products."""
     import json as _json
-    from app.api.banners import create_full_ai_banner, FullAiRequest
+    from app.api.banners import create_avito_safe_banner
     from app.db.session import SessionLocal
     from app.models.storage import Storage
 
@@ -610,13 +621,12 @@ def _run_product_banner(payload):
     chars_text = ", ".join([f"{k}: {v}" for k, v in list(characteristics.items())[:5]]) if characteristics else ""
     desc = f"{title}. Цена: {price}. {chars_text}".strip()
 
-    req = FullAiRequest(
+    res = create_avito_safe_banner(
         account_id=account_id,
-        raw_description=desc,
-        format="infographic",
-        reference_image_urls=[image] if image else [], operation="banner_product_card"
+        description=desc,
+        direction="result",
+        idempotency_key=f"task-product-banner:{getattr(task, 'id', None) or account_id}:{product_idx}",
     )
-    res = create_full_ai_banner(req)
     banner_url = res.get("url") or (res.get("urls", [None])[0] if res.get("urls") else None)
 
     # сохраняем banner_url обратно в товар
@@ -796,40 +806,12 @@ def _run_city_analysis(payload, task=None, db=None):
 
 
 def _push_notification(db, account_id: str, text: str, related_results: list = None) -> dict:
-    """Кладёт запись в Storage 'notifications' (список, последние 50) под account_id - чтобы чат
-    Бориса на фронте мог показать её бейджем/карточкой при следующем открытии (поллинг там уже
-    есть, GET /api/chat/notifications). Общий хелпер - раньше эта логика была только внутри
-    _run_report_back, теперь её же используют и длинные фоновые задачи (enrich_descriptions)."""
-    from app.models.storage import Storage
-    import json as _json
+    """Атомарно добавляет уведомление; параллельные workers не теряют сообщения."""
+    from app.services.notification_store import append_notification
     from datetime import datetime
-
-    report = {
-        "ts": datetime.now().isoformat(timespec="seconds"),
-        "text": text,
-        "related_results": related_results or [],
-        "read": False,
-    }
-
-    key = "notifications"
-    row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == key).first()
-    notifications = []
-    if row:
-        try:
-            notifications = _json.loads(row.value)
-        except Exception:
-            notifications = []
-    notifications.append(report)
-    notifications = notifications[-50:]
-    raw = _json.dumps(notifications, ensure_ascii=False)
-    if row:
-        row.value = raw
-    else:
-        row = Storage(account_id=account_id, key=key, value=raw)
-        db.add(row)
-    db.commit()
+    report={"ts":datetime.now().isoformat(timespec="seconds"),"text":text,"related_results":related_results or [],"read":False}
+    append_notification(db,account_id,report,commit=True)
     return report
-
 
 def _run_report_back(payload):
     """Собирает результаты связанных задач (например А/Б-теста) и формирует отчёт.
@@ -1166,7 +1148,7 @@ def _run_pipeline_texts(payload, task=None, db=None):
     в needs_confirmation и ждёт решения владельца (см. POST /api/tasks/{id}/confirm), а не рвёт
     конвейер безвозвратно."""
     import requests as _requests
-    from app.api.avito import spin, _load_drafts, _save_drafts
+    from app.api.avito import spin, _append_drafts
 
     account_id = payload["account_id"]
     direction = payload["direction"]
@@ -1180,6 +1162,12 @@ def _run_pipeline_texts(payload, task=None, db=None):
     root_task_id = payload.get("root_task_id") or (task.id if task else None)
     batch_id = payload.get("batch_id")
     batch_label = f"Конвейер: {direction}"
+    # PIPELINE_TEXT_ECONOMIC_INTENT_V1: one stable identity for provider calls,
+    # deterministic draft ids and tariff ledger replay across worker restarts.
+    import hashlib as _hashlib_pipeline
+    _pipeline_identity = str(task.id if task is not None else (root_task_id or batch_id or ""))
+    if not _pipeline_identity:
+        _pipeline_identity = _hashlib_pipeline.sha1(f"{account_id}|{direction}|{batch_label}".encode("utf-8")).hexdigest()[:20]
 
     def _write_progress(step, done, total, label, finished=False, next_task_id=None):
         progress = {
@@ -1266,12 +1254,15 @@ def _run_pipeline_texts(payload, task=None, db=None):
         got = 0
         for _attempt in range(1, 4):
             try:
+                _chunk_start = len(ads)
+                _text_intent = f"pipeline-text:{_pipeline_identity}:{_chunk_start}:{this_chunk}"
                 r = _requests.post("http://127.0.0.1:8000/api/avito/generate_ads", json={
                     "topic": direction, "count": this_chunk,
                     "price_from": price_from, "price_to": price_to,
                     "extra": f"Владелец уточнил: {user_answer}" if user_answer else "",
                     "goal": "message", "length": "medium",
                     "use_my_ads": False, "account_id": account_id,
+                    "idempotency_key": _text_intent,
                 }, timeout=400)
                 chunk_ads = r.json().get("ads", [])
                 if chunk_ads:
@@ -1291,13 +1282,12 @@ def _run_pipeline_texts(payload, task=None, db=None):
         _write_progress(2, len(ads), count, f"Шаг 2 из 5: генерирую тексты ({len(ads)} из {count})")
 
     new_drafts = []
-    ts = int(time.time())
     for i, ad in enumerate(ads):
         title = _pipeline_resolve_spintax(ad.get("title", ""), uniquify_titles)[:100]
         description = _pipeline_resolve_spintax(ad.get("description", ""), uniquify_descriptions)
         new_drafts.append({
-            "id": f"pipeline-{task.id if task else ts}-{i}-{ts}",
-            "batch_id": f"pipeline-{task.id if task else ts}",
+            "id": f"pipeline-{_pipeline_identity}-{i}",
+            "batch_id": f"pipeline-{_pipeline_identity}",
             "batch_label": batch_label,
             "variant": "pipeline",
             "title": title,
@@ -1312,8 +1302,35 @@ def _run_pipeline_texts(payload, task=None, db=None):
             "created_at": __import__("datetime").datetime.utcnow().isoformat(),
         })
 
-    existing_drafts = _load_drafts(account_id)
-    _save_drafts(account_id, existing_drafts + new_drafts)
+    # PIPELINE_DRAFT_TARIFF_EXACTLY_ONCE_V1: settle each deterministic draft
+    # before it becomes durable. Same worker retry replays the same tariff intent;
+    # a concurrent quota race can never create free uncharged inventory.
+    from app.api.billing import check_and_consume as _pipeline_bill_consume
+    charged_drafts = []
+    billing_blocked = []
+    for _draft in new_drafts:
+        _did = str(_draft.get("id") or "")
+        _bill_key = f"pipeline-draft:{account_id}:{_did}"
+        try:
+            _charge = _pipeline_bill_consume(account_id, "listings", 1, idempotency_key=_bill_key)
+        except Exception as _billing_exc:
+            billing_blocked.append({"id": _did, "reason": str(_billing_exc)[:160]})
+            continue
+        if not _charge.get("allowed", False):
+            billing_blocked.append({"id": _did, "reason": str(_charge.get("blocked_reason") or _charge.get("message") or "billing_limit")[:160]})
+            continue
+        charged_drafts.append(_draft)
+
+    if not charged_drafts:
+        reason = "Тарифный лимит не подтвердил создание черновиков конвейера"
+        _write_progress(2, 0, count, reason, finished=True)
+        return {"status":"billing_limit","code":"billing_limit","unit":"listings","drafts_created":0,
+                "requested":len(new_drafts),"billing_blocked":billing_blocked,"reason":reason}
+
+    # Atomic upsert by deterministic id; never stale-read/full-overwrite another
+    # worker's drafts. Charged replay remains free and converges to one row.
+    _append_drafts(account_id, charged_drafts)
+    new_drafts = charged_drafts
 
     next_payload = {
         "account_id": account_id, "direction": direction, "batch_label": batch_label,
@@ -1361,8 +1378,11 @@ def _run_pipeline_banners(payload, task=None, db=None):
     def _on_progress(done, total):
         _write_progress(done, total, f"Шаг 3 из 5: генерирую баннеры ({done} из {total})")
 
-    result = apply_banner_to_batch_impl(account_id, batch_label, banner_count=banner_count,
-                                         photos_per_ad=1, folder="", on_progress=_on_progress)
+    result = apply_banner_to_batch_impl(
+        account_id, batch_label, banner_count=banner_count, photos_per_ad=1, folder="",
+        on_progress=_on_progress,
+        idempotency_key=f"pipeline-banners:{root_task_id or getattr(task, 'id', None)}:{batch_id or batch_label}",
+    )
 
     banners_generated = result.get("banners_generated", 0) if result.get("status") == "ok" else 0
 

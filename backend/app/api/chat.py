@@ -29,12 +29,12 @@ BORIS_CONTEXT = """Ты — Борис, ИИ-помощник внутри SaaS-
       - После генерации — блок "Добавить всё в фид": указываешь город, можно выбрать фото из хранилища галочками (кнопка "Загрузить из хранилища", фото распределяются по кругу), жмёшь "Добавить всё в фид" — получаешь ссылку фида.
    б) РУЧНЫЕ ШАБЛОНЫ — заготовки: название, категория Авито (выбор: главная категория → подкатегория), шаблон заголовка и описания (с переменными {название}, {город}, спинтакс {Вариант1|Вариант2}), цена (оригинальная с сайта / наценка% / фиксированная), города (кнопки наборов: РФ 100000+, Москва+МО, Миллионники, или вручную), время публикации, задержка мин/макс между объявлениями (минуты), дни публикации.
 
-3. МАРКЕТИНГ (Студия картинок Бориса) — генерация картинок через Kandinsky:
+3. МАРКЕТИНГ (Студия картинок Бориса) — генерация картинок через OpenAI (gpt-image-2):
    - Промпт (что нарисовать), стиль, количество (1-50), папка проекта (можно называть как угодно, например датой).
    - Кнопка "Нарисовать" — генерирует партию с вариациями ракурсов.
    - Можно скачать картинку по прямой ссылке (JPG/PNG) в папку.
    - Галерея: показывает все папки и картинки, можно удалить (🗑) или скопировать ссылку кликом.
-   - На картинках Kandinsky никогда нет текста/букв (запрет зашит).
+   - На картинках OpenAI никогда нет текста/букв (запрет зашит).
 
 4. АНАЛИТИКА ПО ГОРОДАМ — сравнение конкурентов по городам (цены, количество объявлений).
 
@@ -86,7 +86,7 @@ BORIS_CONTEXT = """Ты — Борис, ИИ-помощник внутри SaaS-
 
 ПОЛЕЗНЫЕ ЦИФРЫ:
 - Себестоимость одного ИИ-объявления ≈ 0.5-1 ₽ (токены GigaChat).
-- Картинка Kandinsky ≈ 5-6 ₽.
+- Картинка OpenAI — по тарифу OpenAI.
 - Задержка мин/макс — сколько минут паузы между публикацией соседних объявлений (защита от резкого всплеска активности, который может привлечь модерацию Авито).
 
 Если пользователь спрашивает что делать, куда нажать, как работает какая-то функция — объясни просто и по шагам, ссылаясь на конкретную вкладку и кнопку. Если не уверен в деталях — честно скажи, что лучше уточнить у разработчика, не выдумывай несуществующие кнопки.
@@ -209,6 +209,74 @@ def _load_extra_knowledge(account_id=None):
     except Exception:
         return ""
 
+
+# CHAT_RUNTIME_CONTEXT_V2: accountless and account chats receive deterministic Brain runtime truth.
+def _load_control_plane_context(account_id=None):
+    """Bounded runtime truth for every BORIS chat; never relies on conversation memory alone.
+
+    Account chats receive account-scoped module facts plus the current deterministic
+    Brain action lanes. A chat without an account still receives the global Brain
+    summary, so a new owner session does not start from conversational amnesia.
+    """
+    try:
+        import json as _json_cp
+        from app.db.session import SessionLocal
+        from app.models.control_plane import ControlRequirement, ControlExecution, ControlIncident, ControlEvidence
+        from app.services.control_plane import applicable_requirements
+        from app.services.control_plane_adapters import get as _get_adapter
+        db=SessionLocal()
+        try:
+            # Resolve only rules that can actually affect this account. Keep payload bounded.
+            all_rules=[]
+            modules=set()
+            if account_id:
+                for module in ("marketing","mop","crm","telephony","messages","rop","feed_factory","social","email","telegram","analytics","direct","billing","sitebuild"):
+                    rows=applicable_requirements(db,module=module,account_id=str(account_id))
+                    rows=[r for r in rows if r.module!='system']
+                    if rows:
+                        modules.add(module)
+                        for r in rows[-12:]:
+                            all_rules.append({"id":str(r.id),"module":r.module,"title":r.title,"scope":f"{r.scope_type}:{r.scope_id}","desired":r.desired_state_json or {},"last_verified_at":r.last_verified_at.isoformat() if r.last_verified_at else None})
+            states={}
+            for module in sorted(modules):
+                adapter=_get_adapter(module)
+                if adapter:
+                    try: states[module]=adapter.get_state(db,str(account_id)) or {}
+                    except Exception: states[module]={"state":"unavailable"}
+            incidents_q=db.query(ControlIncident).filter(ControlIncident.state=='open')
+            executions_q=db.query(ControlExecution)
+            if account_id:
+                incidents_q=incidents_q.filter(ControlIncident.account_id==str(account_id))
+                executions_q=executions_q.filter(ControlExecution.account_id==str(account_id))
+            else:
+                incidents_q=incidents_q.filter(ControlIncident.account_id.is_(None))
+            incidents=incidents_q.order_by(ControlIncident.opened_at.desc()).limit(12).all()
+            executions=executions_q.order_by(ControlExecution.created_at.desc()).limit(12).all()
+            ex_out=[]
+            for e in executions:
+                evidence_count=db.query(ControlEvidence).filter(ControlEvidence.execution_id==e.id,ControlEvidence.passed.is_(True),ControlEvidence.level.in_(("L4","L5","L6"))).count()
+                ex_out.append({"id":str(e.id),"module":e.module,"status":e.status,"error_code":e.error_code,"runtime_evidence":evidence_count>0,"finished_at":e.finished_at.isoformat() if e.finished_at else None})
+            from app.services.brain_world_state import build_world_state
+            from app.services.brain_action_planner import build_action_plan
+            global_world=build_world_state(db)
+            plan=build_action_plan(db,account_id=str(account_id) if account_id else None)
+            lanes={}
+            for lane in ("NOW","NEXT","WAITING","BLOCKED"):
+                lanes[lane]=[{"module":x.get("module"),"account_id":x.get("account_id"),"classification":x.get("classification"),"action":x.get("action"),"owner_action_required":x.get("owner_action_required")} for x in (plan.get("queue",{}).get(lane) or [])[:8]]
+            payload={
+                "global_brain":{"status":global_world.get("status"),"summary":global_world.get("summary") or {}},
+                "action_lanes":lanes,
+                "effective_rules":all_rules[-30:],
+                "current_module_state":states,
+                "unresolved_incidents":[{"type":i.incident_type,"priority":i.priority,"module":i.module,"symptom":i.symptom} for i in incidents],
+                "recent_executions":ex_out,
+            }
+            return "=== CONTROL PLANE RUNTIME TRUTH ===\n"+_json_cp.dumps(payload,ensure_ascii=False,default=str)+"\nRULE: do not claim an action is completed unless the relevant execution is PASS and has runtime evidence; otherwise say it is pending, blocked, failed, or unverified."
+        finally:
+            db.close()
+    except Exception:
+        return "=== CONTROL PLANE RUNTIME TRUTH ===\nRuntime truth unavailable. Do not claim that changes are completed without evidence."
+
 @router.post("")
 def chat(req: ChatRequest):
     _acc = getattr(req, "account_id", None)
@@ -216,6 +284,9 @@ def chat(req: ChatRequest):
     _base = BORIS_CONTEXT if _is_owner_account(_acc) else BORIS_CONTEXT_BASE
     _base = _base + _topic_extra(req.message)
     _ctx = _base + ("\n\n=== ДОПОЛНИТЕЛЬНЫЕ ЗНАНИЯ (добавлены владельцем) ===\n" + _extra if _extra else "")
+    _cp = _load_control_plane_context(_acc)
+    if _cp:
+        _ctx += "\n\n" + _cp
     messages = [Messages(role=MessagesRole.SYSTEM, content=_ctx)]
     for m in req.history[-10:]:
         role = MessagesRole.USER if m.role == "user" else MessagesRole.ASSISTANT
@@ -250,7 +321,7 @@ def _extract_text_from_file(filename: str, content: bytes) -> str:
     return ""
 
 @router.post("/knowledge/upload")
-async def upload_knowledge_file(file: UploadFile = File(...)):
+async def upload_knowledge_file(file: UploadFile = File(...), account_id: str = "global"):
     """Принимает файл (PDF/Word/txt), извлекает текст, добавляет в знания Бориса."""
     content = await file.read()
     text = _extract_text_from_file(file.filename, content)
@@ -384,24 +455,17 @@ def parse_task(req: ParseTaskRequest):
 
 @router.get("/notifications")
 def get_notifications(account_id: str, unread_only: bool = True):
-    """Возвращает уведомления/отчёты Бориса (например report_back после А/Б-теста).
-    unread_only=true — только непрочитанные (для бейджика в чате)."""
+    """Возвращает уведомления BORIS из единого атомарного notification store."""
     from app.db.session import SessionLocal
-    from app.models.storage import Storage
-    import json as _json
-
-    db = SessionLocal()
+    from app.services.notification_store import read_notifications
+    db=SessionLocal()
     try:
-        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "notifications").first()
-        if not row:
-            return {"status": "ok", "notifications": []}
-        notifications = _json.loads(row.value)
+        notifications=read_notifications(db,account_id)
         if unread_only:
-            notifications = [n for n in notifications if not n.get("read")]
-        return {"status": "ok", "notifications": list(reversed(notifications))}
+            notifications=[n for n in notifications if not n.get("read")]
+        return {"status":"ok","notifications":list(reversed(notifications))}
     finally:
         db.close()
-
 
 class MarkReadRequest(BaseModel):
     account_id: str = "otdushi"
@@ -410,23 +474,12 @@ class MarkReadRequest(BaseModel):
 
 @router.post("/notifications/mark_read")
 def mark_notification_read(req: MarkReadRequest):
-    """Помечает уведомление прочитанным по его timestamp."""
+    """Помечает уведомление прочитанным без stale read/write overwrite."""
     from app.db.session import SessionLocal
-    from app.models.storage import Storage
-    import json as _json
-
-    db = SessionLocal()
+    from app.services.notification_store import mark_read
+    db=SessionLocal()
     try:
-        row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "notifications").first()
-        if not row:
-            return {"status": "ok"}
-        notifications = _json.loads(row.value)
-        for n in notifications:
-            if n.get("ts") == req.ts:
-                n["read"] = True
-        row.value = _json.dumps(notifications, ensure_ascii=False)
-        db.commit()
-        return {"status": "ok"}
+        mark_read(db,req.account_id,req.ts,commit=True)
+        return {"status":"ok"}
     finally:
         db.close()
-

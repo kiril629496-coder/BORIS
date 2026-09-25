@@ -51,11 +51,13 @@ def _audit(db, **kw):
         print("[inbox_image] audit failed:", repr(e)[:150], flush=True)
 
 
-def _upload(uid, token, fname, data, mime):
-    """(ok, image_id, http_code, body)"""
-    r = httpx.post(UPLOAD_URL.format(uid=uid),
-                   headers={"Authorization": f"Bearer {token}"},
-                   files={"uploadfile[]": (fname, data, mime)}, timeout=60)
+def _upload(account_id, uid, token, fname, data, mime):
+    """(ok, image_id, http_code, body) via canonical Messenger transport owner."""
+    from app.api.messenger import _provider_upload_image
+    r = _provider_upload_image(
+        account_id=account_id, user_id=uid, token=token,
+        file_name=fname, data=data, mime=mime, timeout=60,
+    )
     if r.status_code != 200:
         return False, None, r.status_code, r.text[:400]
     try:
@@ -68,11 +70,13 @@ def _upload(uid, token, fname, data, mime):
     return True, image_id, r.status_code, ""
 
 
-def _send(uid, token, chat_id, image_id):
-    """(ok, http_code, body)"""
-    r = httpx.post(SEND_URL.format(uid=uid, cid=chat_id),
-                   headers={"Authorization": f"Bearer {token}"},
-                   json={"image_id": image_id}, timeout=30)
+def _send(account_id, uid, token, chat_id, image_id):
+    """(ok, http_code, body) via canonical Messenger transport owner."""
+    from app.api.messenger import _provider_send_image
+    r = _provider_send_image(
+        account_id=account_id, user_id=uid, token=token,
+        chat_id=chat_id, image_id=image_id, timeout=30,
+    )
     return r.status_code in (200, 201), r.status_code, r.text[:400]
 
 
@@ -132,7 +136,7 @@ def service_send_image(user, account_id, chat_id, file_name, data, mime, idempot
         if not avito_uid:
             return {"status": "error", "code": "auth", "message": "Не удалось авторизоваться в Avito"}
 
-        ok, image_id, code, body = _upload(avito_uid, token, file_name, data, mime)
+        ok, image_id, code, body = _upload(account_id, avito_uid, token, file_name, data, mime)
         if not ok:
             _audit(db, user_id=uid_user, account_id=account_id, chat_id=chat_id, file_name=file_name,
                    mime=mime, size=len(data), sha256=sha, stage="upload", status="error",
@@ -140,7 +144,7 @@ def service_send_image(user, account_id, chat_id, file_name, data, mime, idempot
             return {"status": "error", "code": "upload_failed", "http": code,
                     "message": "Avito не принял изображение", "detail": body}
 
-        ok2, code2, body2 = _send(avito_uid, token, chat_id, image_id)
+        ok2, code2, body2 = _send(account_id, avito_uid, token, chat_id, image_id)
         if not ok2:
             _audit(db, user_id=uid_user, account_id=account_id, chat_id=chat_id, file_name=file_name,
                    mime=mime, size=len(data), sha256=sha, image_id=image_id, stage="send",

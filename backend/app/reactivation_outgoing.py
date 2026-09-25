@@ -8,6 +8,7 @@ import logging
 import re
 
 from sqlalchemy import text
+from app.services.exception_observability import observe_suppressed
 
 log = logging.getLogger(__name__)
 
@@ -73,8 +74,8 @@ def own_avito_uid(db, account_id):
             "   AND avito_user_id IS NOT NULL LIMIT 1"), {"a": account_id}).fetchone()
         if row and row[0]:
             return str(row[0])
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=76)
     return None
 
 
@@ -129,17 +130,45 @@ def _fetch_inactive_item_ids(account_id):
     """Снятые и архивные объявления. Если Avito не поддерживает статус — пусто."""
     out = set()
     try:
+        from app.services.avito_account_throttle import account_throttle_remaining, record_account_throttle
+        # REACTIVATION_OUTGOING_SHARED_ACCOUNT_THROTTLE_V1: role classification is
+        # read-only, but inventory pressure still shares the tenant Retry-After.
+        # Never continue pages/statuses, nor retain partial evidence, after 429.
+        if account_throttle_remaining(account_id) > 0:
+            return set()
         from app.api.messenger import _get_user_id_and_token
         import httpx
+        from datetime import datetime, timezone
         uid, tok = _get_user_id_and_token(account_id)
         for status in ("old", "removed"):
             page = 1
             while page <= 10:
+                if account_throttle_remaining(account_id) > 0:
+                    return set()
                 r = httpx.get("https://api.avito.ru/core/v1/items",
                               params={"per_page": 100, "page": page, "status": status},
                               headers={"Authorization": "Bearer %s" % tok}, timeout=40)
+                if r.status_code == 429:
+                    raw = str(r.headers.get("Retry-After") or "").strip()
+                    retry = 30
+                    try:
+                        retry = max(0, int(float(raw))) if raw else 30
+                    except Exception:
+                        try:
+                            from email.utils import parsedate_to_datetime
+                            when = parsedate_to_datetime(raw)
+                            if when.tzinfo is None:
+                                when = when.replace(tzinfo=timezone.utc)
+                            retry = max(0, int((when.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()))
+                        except Exception:
+                            retry = 30
+                    record_account_throttle(account_id, retry, source="reactivation_inactive_items_429")
+                    return set()
                 if r.status_code != 200:
-                    break
+                    # REACTIVATION_OUTGOING_NO_PARTIAL_INVENTORY_V1: inactive-item
+                    # ownership evidence must be complete. Any incomplete provider
+                    # pagination fails closed instead of preserving a partial set.
+                    return set()
                 batch = (r.json() or {}).get("resources") or []
                 if not batch:
                     break

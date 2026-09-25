@@ -1,14 +1,29 @@
 """ИИ РОП — калтрекинг Avito: статистика звонков, запись→whisper→разбор по чек-листу."""
-import os, json, datetime, requests
-from fastapi import APIRouter, Body
+import os, json, datetime, requests, tempfile, threading, math
+from fastapi import APIRouter, Body, Depends, HTTPException
 from app.api.avito import get_avito_token
 from proxy_pool import get_intl_requests_proxies
+from app.api.auth import get_current_user
+from app.services.exception_observability import observe_suppressed
 
 router = APIRouter(prefix="/api/calltracking", tags=["calltracking"])
 
-# тариф whisper: $0.006/мин; GPT-5.4 см. messenger. Курс ~95.
-_WHISPER_PER_MIN_USD = 0.006
-_USD_TO_RUB = 95
+# CALLTRACKING_DIRECT_TRANSPORT_V1: Avito API must not inherit host-wide proxy
+# variables. Direct TLS is production-reachable; provider errors remain observable.
+_CALLTRACKING_HTTP = requests.Session()
+_CALLTRACKING_HTTP.trust_env = False
+
+# CALL_STT_LOCAL_V1: распознавание звонков локально через faster-whisper.
+# Названия legacy-констант сохранены для совместимости отчётов, но стоимость STT=0.
+_WHISPER_PER_MIN_USD = 0.0
+_LOCAL_STT_MODEL = None
+_LOCAL_STT_LOCK = threading.Lock()
+_LOCAL_STT_MODEL_NAME = os.getenv("BORIS_CALL_STT_MODEL", "small").strip() or "small"
+_LOCAL_STT_MODEL_ROOT = os.getenv("BORIS_CALL_STT_MODEL_ROOT", "/root/BORIS/models/faster-whisper")
+_LOCAL_STT_MIN_CONFIDENCE = float(os.getenv("BORIS_CALL_STT_MIN_CONFIDENCE", "0.45"))
+_LOCAL_STT_MAX_NO_SPEECH = float(os.getenv("BORIS_CALL_STT_MAX_NO_SPEECH", "0.75"))
+_LOCAL_STT_MIN_AVG_LOGPROB = float(os.getenv("BORIS_CALL_STT_MIN_AVG_LOGPROB", "-1.5"))
+from app.usage import USD_TO_RUB as _USD_TO_RUB   # единый источник курса
 
 
 def _ct_token(account_id: str):
@@ -19,13 +34,15 @@ def _ct_token(account_id: str):
     return td["access_token"], None
 
 
-def _get_calls(token: str, date_from: str, date_to: str):
+def _get_calls(token: str, date_from: str, date_to: str, account_id: str = None):
     """POST /calltracking/v1/getCalls/ — список звонков за период."""
-    r = requests.post(
+    from app.services.reliability import dependency_call
+    r = dependency_call(
+        "avito.calltracking", _CALLTRACKING_HTTP.post,
         "https://api.avito.ru/calltracking/v1/getCalls/",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json={"dateTimeFrom": date_from, "dateTimeTo": date_to, "limit": 100, "offset": 0},
-        timeout=60,
+        timeout=60, threshold=4, cooldown_seconds=120, account_id=account_id, tenant_limit_per_minute=30,
     )
     return r.status_code, r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
 
@@ -40,7 +57,7 @@ def calltracking_stats(account_id: str, days: int = 30):
     date_from = (now - datetime.timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
     date_to = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        code, data = _get_calls(token, date_from, date_to)
+        code, data = _get_calls(token, date_from, date_to, account_id)
     except Exception as e:
         return {"status": "error", "message": str(e)[:150]}
     if code != 200:
@@ -85,14 +102,14 @@ CHECKLIST = [
 ]
 
 
-def _talk_minutes(token: str, call_id, days: int = 90) -> float:
+def _talk_minutes(token: str, call_id, days: int = 90, account_id: str = None) -> float:
     """Минуты разговора по call_id — из getCalls, того же источника, что и
     статистика в кабинете. Так остаток пакета сходится с цифрами Avito."""
     import datetime as _dt
     now = _dt.datetime.utcnow()
     d_from = (now - _dt.timedelta(days=int(days))).strftime("%Y-%m-%dT00:00:00Z")
     d_to = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    code, data = _get_calls(token, d_from, d_to)
+    code, data = _get_calls(token, d_from, d_to, account_id)
     if code != 200 or not isinstance(data, dict):
         return 0.0
     for c in data.get("calls", []):
@@ -102,12 +119,14 @@ def _talk_minutes(token: str, call_id, days: int = 90) -> float:
     return 0.0
 
 
-def _get_record(token: str, call_id):
+def _get_record(token: str, call_id, account_id: str = None):
     """GET /calltracking/v1/getRecordByCallId/?callId=N → байты аудио."""
-    r = requests.get(
+    from app.services.reliability import dependency_call
+    r = dependency_call(
+        "avito.calltracking", _CALLTRACKING_HTTP.get,
         "https://api.avito.ru/calltracking/v1/getRecordByCallId/",
         headers={"Authorization": f"Bearer {token}"},
-        params={"callId": call_id}, timeout=120,
+        params={"callId": call_id}, timeout=120, threshold=4, cooldown_seconds=120, account_id=account_id, tenant_limit_per_minute=30,
     )
     return r.status_code, r.content, r.headers.get("content-type", "")
 
@@ -142,27 +161,135 @@ def _asr_hint(account_id: str) -> str:
                 if r[0]:
                     words.append(str(r[0]))
             c.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=158)
     txt = ", ".join(w.strip() for w in words if w and len(str(w).strip()) > 2)
     return txt[:900]
 
 
-def _transcribe(audio_bytes: bytes, filename: str = "call.mp3", hint: str = "") -> str:
-    """OpenAI whisper: аудио → текст. Тот же ключ/прокси что GPT."""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    proxies = get_intl_requests_proxies()
-    r = requests.post(
-        "https://api.openai.com/v1/audio/transcriptions",
-        headers={"Authorization": "Bearer " + api_key},
-        files={"file": (filename, audio_bytes)},
-        data={"model": "whisper-1", "language": "ru",
-              **({"prompt": hint} if hint else {})},
-        proxies=proxies, timeout=300,
+class LocalSTTLowConfidence(RuntimeError):
+    """Local ASR produced text, but confidence is too low for automatic success."""
+
+    def __init__(self, text_value: str, confidence: float, no_speech_prob: float, avg_logprob: float):
+        self.text_value = str(text_value or "")
+        self.confidence = float(confidence)
+        self.no_speech_prob = float(no_speech_prob)
+        self.avg_logprob = float(avg_logprob)
+        super().__init__(
+            "CALL_STT_LOCAL_LOW_CONFIDENCE:"
+            f"confidence={self.confidence:.3f};"
+            f"no_speech={self.no_speech_prob:.3f};"
+            f"avg_logprob={self.avg_logprob:.3f}"
+        )
+
+
+_LOCAL_STT_RUN_LOCK = threading.Lock()
+
+
+def _local_stt_model():
+    """Load the pre-downloaded CPU model. Production never downloads a model."""
+    global _LOCAL_STT_MODEL
+    if _LOCAL_STT_MODEL is not None:
+        return _LOCAL_STT_MODEL
+    with _LOCAL_STT_LOCK:
+        if _LOCAL_STT_MODEL is not None:
+            return _LOCAL_STT_MODEL
+        try:
+            from faster_whisper import WhisperModel
+        except Exception as exc:
+            raise RuntimeError("CALL_STT_LOCAL_RUNTIME_MISSING:faster_whisper") from exc
+        os.makedirs(_LOCAL_STT_MODEL_ROOT, exist_ok=True)
+        try:
+            _LOCAL_STT_MODEL = WhisperModel(
+                _LOCAL_STT_MODEL_NAME,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=max(1, min(4, int(os.cpu_count() or 2))),
+                num_workers=1,
+                download_root=_LOCAL_STT_MODEL_ROOT,
+                local_files_only=True,
+            )
+        except Exception as exc:
+            raise RuntimeError("CALL_STT_LOCAL_MODEL_UNAVAILABLE") from exc
+        return _LOCAL_STT_MODEL
+
+
+def _transcribe(audio_bytes: bytes, filename: str = "call.mp3", hint: str = "",
+                account_id: str = None, provenance: dict | None = None) -> str:
+    """Call recording -> text through local faster-whisper only.
+
+    No OpenAI/provider fallback exists here. The model must already be present
+    on disk. Low-confidence output is raised as LocalSTTLowConfidence so callers
+    cannot mark a doubtful transcript as successful.
+    """
+    if not str(account_id or "").strip():
+        raise RuntimeError("CALLTRACKING_TRANSCRIPTION_ACCOUNT_REQUIRED")
+    if not audio_bytes:
+        raise RuntimeError("CALL_STT_LOCAL_EMPTY_AUDIO")
+    ext = str(filename or "").lower().rsplit(".", 1)[-1] if "." in str(filename or "") else "mp3"
+    suffix = "." + "".join(ch for ch in ext if ch.isalnum())[:8] if ext else ".mp3"
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="boris_call_stt_", suffix=suffix, delete=False) as fh:
+            fh.write(audio_bytes)
+            tmp_path = fh.name
+        model = _local_stt_model()
+        with _LOCAL_STT_RUN_LOCK:
+            segments, _info = model.transcribe(
+                tmp_path,
+                language="ru",
+                beam_size=5,
+                vad_filter=True,
+                word_timestamps=True,
+                initial_prompt=(hint or None),
+                condition_on_previous_text=True,
+            )
+            segments = list(segments)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    text_value = " ".join(str(getattr(s, "text", "") or "").strip() for s in segments).strip()
+    avg_logprob = (
+        sum(float(getattr(s, "avg_logprob", -99.0)) for s in segments) / len(segments)
+        if segments else -99.0
     )
-    if r.status_code != 200:
-        raise RuntimeError(f"whisper {r.status_code}: {r.text[:200]}")
-    return r.json().get("text", "")
+    no_speech_prob = (
+        sum(float(getattr(s, "no_speech_prob", 1.0)) for s in segments) / len(segments)
+        if segments else 1.0
+    )
+    word_probs = []
+    for seg in segments:
+        for word in (getattr(seg, "words", None) or []):
+            prob = getattr(word, "probability", None)
+            if prob is not None:
+                word_probs.append(float(prob))
+    confidence = (
+        sum(word_probs) / len(word_probs)
+        if word_probs else max(0.0, min(1.0, math.exp(max(-20.0, avg_logprob))))
+    )
+    if isinstance(provenance, dict):
+        provenance.update({
+            "stt_provider": "local_faster_whisper",
+            "stt_model": _LOCAL_STT_MODEL_NAME,
+            "stt_confidence": round(confidence, 4),
+            "stt_no_speech_prob": round(no_speech_prob, 4),
+            "stt_avg_logprob": round(avg_logprob, 4),
+            "paid_stt": False,
+        })
+
+    low_confidence = (
+        not text_value
+        or confidence < _LOCAL_STT_MIN_CONFIDENCE
+        or no_speech_prob > _LOCAL_STT_MAX_NO_SPEECH
+        or avg_logprob < _LOCAL_STT_MIN_AVG_LOGPROB
+    )
+    if low_confidence:
+        raise LocalSTTLowConfidence(text_value, confidence, no_speech_prob, avg_logprob)
+    return text_value
 
 
 def _checklist_for(account_id: str):
@@ -182,8 +309,8 @@ def _checklist_for(account_id: str):
                 items = [str(x).strip() for x in v if str(x).strip()]
                 if items:
                     return items
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=306)
     return CHECKLIST
 
 
@@ -223,15 +350,16 @@ def _account_context(account_id: str) -> str:
         u = _db_url()
         if not u: return ""
         c = psycopg2.connect(u); cur = c.cursor()
-        cur.execute("""SELECT company_niche, company_description, company_advantages, company_tone
+        cur.execute("""SELECT company_niche, company_description, company_advantages, company_tone, company_client_description
                        FROM accounts WHERE account_id=%s""", (account_id,))
         row = cur.fetchone(); c.close()
         if not row: return ""
-        niche, descr, adv, tone = [(x or "").strip() for x in row]
+        niche, descr, adv, tone, client_descr = [(x or "").strip() for x in row]
         parts = []
         if niche: parts.append("Ниша: " + niche)
         if descr: parts.append("Чем занимается: " + descr[:600])
         if adv: parts.append("Преимущества: " + adv[:400])
+        if client_descr: parts.append("Целевой клиент: " + client_descr[:500])
         if tone: parts.append("Тон общения: " + tone[:200])
         if not parts: return ""
         return ("\n\nБИЗНЕС КЛИЕНТА (учитывай при разборе — оценивай применительно к этой нише, "
@@ -240,7 +368,49 @@ def _account_context(account_id: str) -> str:
         return ""
 
 
-def _analyze_call(transcript: str, account_id: str) -> dict:
+def _global_rop_context(account_id: str = "") -> str:
+    """Shared playbook + private account coaching, with hard scope separation."""
+    try:
+        from app.services.rop_global_brain import coaching_context, account_coaching_context
+        global_ctx = coaching_context(max_chars=5000)
+        account_ctx = account_coaching_context(str(account_id or ""), max_chars=3000)
+        return (global_ctx + ("\n\n" + account_ctx if account_ctx else "")).strip()
+    except Exception:
+        return ""
+
+
+def _rop_sales_ai(
+    *,
+    account_id: str,
+    operation: str,
+    prompt: str,
+    idempotency_key: str,
+    max_output_tokens: int,
+    timeout: int = 120,
+    expect_json: bool = False,
+) -> dict:
+    """One ROP model boundary: OpenAI -> free Gemini -> local Qwen."""
+    from app.services import sales_ai_router as _sales_ai
+
+    return _sales_ai.generate_text(
+        account_id=str(account_id or ""),
+        operation=str(operation),
+        prompt=str(prompt),
+        module="rop",
+        idempotency_key=str(idempotency_key or ""),
+        openai_model=str(os.getenv("BORIS_ROP_OPENAI_MODEL") or "gpt-5.4"),
+        gemini_model=str(os.getenv("BORIS_ROP_GEMINI_MODEL") or "gemini-2.5-flash"),
+        local_model=str(os.getenv("BORIS_ROP_LOCAL_MODEL") or "qwen3:4b"),
+        max_output_tokens=max(64, int(max_output_tokens or 900)),
+        timeout=max(5, int(timeout or 120)),
+        expect_json=bool(expect_json),
+        local_temperature=0.10,
+        local_num_ctx=4096,
+        local_num_predict=max(64, int(max_output_tokens or 900)),
+    )
+
+
+def _analyze_call(transcript: str, account_id: str, provenance: dict | None = None) -> dict:
     """GPT-5.4 разбор звонка по чек-листу: имя, ЛПР/ЛВР, галочки, балл, где провалился."""
     _cl = _checklist_for(account_id)
     checklist_txt = "\n".join(f"{i+1}. {item}" for i, item in enumerate(_cl))
@@ -259,31 +429,32 @@ def _analyze_call(transcript: str, account_id: str) -> dict:
         '"growth_points": ["зоны роста мягко, как возможности усилить — до 4"], '
         '"stop_words": [{"phrase": "слово/фраза которую лучше не употреблять", "why": "чем мешает в продаже одной фразой", "better": "как сказать вместо — пример"}], '
         '"speech_tips": ["рекомендации по речи менеджера: темп, уверенность, структура фразы — конкретно и полезно, до 4"], '
-        '"client_hooks": ["что клиента зацепило/заинтересовало — до 4"]}\n\n'
+        '"client_hooks": ["что клиента зацепило/заинтересовало — до 4"], '
+        '"agreement": {"exists": true/false, "type": "звонок|встреча|замер|визит|доставка|другое|", "datetime_local": "YYYY-MM-DDTHH:MM:SS или пусто", "timezone": "IANA timezone или пусто", "text": "точная суть договорённости или пусто", "confidence": число 0-1}}\n\n'
+        + "\n\n" + _global_rop_context(account_id) + "\n\n"
         + _account_context(account_id) +
         f"РАСШИФРОВКА РАЗГОВОРА:\n{transcript[:6000]}"
     )
-    api_key = os.environ.get("OPENAI_API_KEY")
-    r = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-        json={"model": "gpt-5.4", "messages": [{"role": "user", "content": prompt}], "max_completion_tokens": 1400},
-        proxies=get_intl_requests_proxies(), timeout=120,
-    )
-    if r.status_code != 200:
-        return {"error": f"GPT {r.status_code}"}
-    data = r.json()
-    usage = data.get("usage", {})
     try:
-        from app.usage import log_usage as _lc
-        _lc(account_id, "openai", "gpt-5.4", "разбор звонка РОП", usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
-    except Exception:
-        pass
-    raw = data["choices"][0]["message"]["content"].strip().replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(raw)
-    except Exception:
-        return {"error": "не удалось разобрать ответ GPT", "raw": raw[:300]}
+        import hashlib as _hashlib_paid
+        intent = "call-analysis:" + _hashlib_paid.sha256(
+            ("call_analysis_v2\n" + str(account_id or "") + "\n" + prompt).encode("utf-8")
+        ).hexdigest()
+        routed = _rop_sales_ai(
+            account_id=str(account_id or ""),
+            operation="calltracking_call_analysis",
+            prompt=prompt,
+            idempotency_key=intent,
+            max_output_tokens=1400,
+            timeout=120,
+            expect_json=True,
+        )
+        data = routed.get("json")
+        if isinstance(data, dict):
+            return data
+        return {"error": "ИИ вернул ответ неподходящего формата"}
+    except Exception as exc:
+        return {"error": str(exc)[:180]}
 
 
 @router.post("/analyze_call")
@@ -304,20 +475,21 @@ def analyze_call(account_id: str, body: dict = Body(...)):
             if _row:
                 _an = _row[1] if isinstance(_row[1], dict) else _json.loads(_row[1])
                 return {"status": "ok", "call_id": call_id, "transcript": _row[0], "analysis": _an, "cached": True}
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=472)
     token, err = _ct_token(account_id)
     if err:
         return {"status": "no_access", "message": err}
     try:
         from app.api.nps import ensure_trial as _et
         _et(account_id, "rop")
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=480)
     _mins = float(body.get("minutes") or 0)
     _bal = get_rop_minutes(account_id)
-    if _bal["left"] <= 0:
-        return {"status": "no_minutes", "message": "Минуты пакета РОП закончились. Докупите пакет, чтобы продолжить разбор.", "balance": _bal}
+    if not _bal.get("active") or _bal["left"] <= 0:
+        reason = "Период пакета РОП истёк. Продлите пакет, чтобы продолжить разбор." if _bal.get("expired") else "Минуты пакета РОП закончились. Докупите пакет, чтобы продолжить разбор."
+        return {"status": "no_minutes", "message": reason, "balance": _bal}
     try:
         code, audio, ctype = _get_record(token, call_id)
     except Exception as e:
@@ -328,7 +500,7 @@ def analyze_call(account_id: str, body: dict = Body(...)):
         return {"status": "error", "code": code, "message": "запись недоступна"}
     ext = "mp3" if "mpeg" in ctype or "mp3" in ctype else "wav"
     try:
-        transcript = _asr_fix(account_id, _transcribe(audio, f"call_{call_id}.{ext}", _asr_hint(account_id)))
+        transcript = _asr_fix(account_id, _transcribe(audio, f"call_{call_id}.{ext}", _asr_hint(account_id), account_id))
     except Exception as e:
         return {"status": "error", "message": str(e)[:150]}
     if not transcript.strip():
@@ -354,21 +526,21 @@ def analyze_call(account_id: str, body: dict = Body(...)):
                 ON CONFLICT (account_id, call_id) DO UPDATE SET transcript=EXCLUDED.transcript, analysis=EXCLUDED.analysis, minutes=EXCLUDED.minutes""",
                 (account_id, int(call_id), transcript, _json.dumps(analysis), float(_mins_final)))
             _cc.commit(); _cc.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=523)
     try:
         _nm = analysis.get("client_name") or "Клиент"
         _sc = analysis.get("score", "-")
         _rc = analysis.get("recommendation") or ""
         _tg_notify(account_id, f"\U0001F4DE Разобран звонок\n\n{_nm} \u00b7 балл {_sc}/100\n\n\U0001F4A1 {_rc}", topic="sales")
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=530)
     return {"status": "ok", "call_id": call_id, "transcript": transcript, "analysis": analysis, "cached": False}
 
 
 # ============ PDF-ОТЧЁТ ПО ЗВОНКАМ ============
-_WHISPER_MIN_USD = 0.006      # whisper за минуту аудио
-_USD_RUB = 95
+_WHISPER_MIN_USD = 0.0      # local faster-whisper: платного STT нет
+_USD_RUB = _USD_TO_RUB
 _GPT_CALL_RUB = 1.28         # ср. стоимость GPT-разбора одного звонка.
                              # Замер api_usage 07.08: 1,276 руб (946 промпт / 737 ответ).
                              # Прежние 0.74 занижали цену отчёта клиенту почти вдвое.
@@ -412,14 +584,18 @@ def _cache_put_analysis(account_id: str, call_id, transcript: str, analysis: dic
             ON CONFLICT (account_id, call_id) DO UPDATE SET transcript=EXCLUDED.transcript, analysis=EXCLUDED.analysis""",
             (account_id, int(call_id), transcript, _j.dumps(analysis), float(minutes or 0)))
         c.commit(); c.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=581)
 
 
 def _report_recommendations(account_id: str, managers: list, totals: dict) -> dict:
-    """GPT-рекомендации по отделу и по каждому менеджеру на основе цифр."""
-    import os, json as _j, requests
-    from proxy_pool import get_intl_requests_proxies
+    """Exactly-once AI recommendations for a normalized report snapshot.
+
+    Re-generating the same report statistics reuses the durable paid-text result.
+    Changed statistics create a new business intent. Ambiguous provider outcomes
+    are quarantined by the shared guard instead of silently buying a retry.
+    """
+    import hashlib, json as _j
     mgr_txt = "\n".join(
         f"- Менеджер {m['phone']}: звонков {m['total']}, отвечено {m['answered']}, пропущено {m['missed']}, минут {m['minutes']}"
         for m in managers
@@ -432,23 +608,29 @@ def _report_recommendations(account_id: str, managers: list, totals: dict) -> di
         '{"overall": ["2-4 рекомендации по отделу"], '
         '"by_manager": [{"phone": "номер", "note": "1 фраза — что улучшить этому менеджеру"}]}'
     )
+    normalized = _j.dumps({
+        "policy": "calltracking_report_recommendations_v2",
+        "account_id": str(account_id or ""),
+        "totals": totals,
+        "managers": managers,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    idem = "call-report-recs:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     try:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        r = requests.post("https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-            json={"model": "gpt-5.4", "messages": [{"role": "user", "content": prompt}], "max_completion_tokens": 800},
-            proxies=get_intl_requests_proxies(), timeout=90)
-        if r.status_code != 200:
+        routed = _rop_sales_ai(
+            account_id=str(account_id or ""),
+            operation="calltracking_report_recommendations",
+            prompt=prompt,
+            idempotency_key=idem,
+            max_output_tokens=800,
+            timeout=90,
+            expect_json=True,
+        )
+        data = routed.get("json")
+        if not isinstance(data, dict):
             return {"overall": [], "by_manager": []}
-        data = r.json()
-        try:
-            from app.usage import log_usage as _lc
-            u = data.get("usage", {})
-            _lc(account_id, "openai", "gpt-5.4", "отчёт РОП рекомендации", u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
-        except Exception:
-            pass
-        raw = data["choices"][0]["message"]["content"].strip().replace("```json", "").replace("```", "").strip()
-        return _j.loads(raw)
+        overall = data.get("overall") if isinstance(data.get("overall"), list) else []
+        by_manager = data.get("by_manager") if isinstance(data.get("by_manager"), list) else []
+        return {"overall": overall[:8], "by_manager": by_manager[:100]}
     except Exception:
         return {"overall": [], "by_manager": []}
 
@@ -582,13 +764,14 @@ def calltracking_report(account_id: str, date_from: str = None, date_to: str = N
                 _c["_min"] = round(g(c, "talkDuration", 0) / 60, 1)
                 call_reviews.append(_c)
                 continue
-            if get_rop_minutes(account_id)["left"] <= 0:
+            _rop_balance = get_rop_minutes(account_id)
+            if not _rop_balance.get("active") or _rop_balance["left"] <= 0:
                 break
             rc, audio, ctype = _get_record(token, cid)
             if rc != 200 or not audio:
                 continue
             ext = "mp3" if ("mpeg" in ctype or "mp3" in ctype) else "wav"
-            tr = _asr_fix(account_id, _transcribe(audio, f"call_{cid}.{ext}", _asr_hint(account_id)))
+            tr = _asr_fix(account_id, _transcribe(audio, f"call_{cid}.{ext}", _asr_hint(account_id), account_id))
             if not tr.strip():
                 continue
             an = _analyze_call(tr, account_id)
@@ -789,8 +972,8 @@ def calltracking_report(account_id: str, date_from: str = None, date_to: str = N
     consume_rop_report(account_id, "calls")
     try:
         _tg_notify(account_id, f"\U0001F4C4 Готов отчёт по звонкам\n\nПериод: {date_from[:10]} \u2014 {date_to[:10]}\nЗвонков: {total} \u00b7 разобрано: {len(call_reviews)}\n\nСкачать можно в кабинете: Продажи \u2192 РОП \u2192 Отчёты", topic="sales")
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=969)
     # сохраняем отчёт в архив (хранится 30 дней)
     try:
         import os as _os, psycopg2
@@ -805,7 +988,8 @@ def calltracking_report(account_id: str, date_from: str = None, date_to: str = N
                 (account_id, date_from[:10], date_to[:10], total, len(call_reviews), "", len(_pdf)))
             _rid = _cur.fetchone()[0]
             _fp = _os.path.join(_dir, f"report_{_rid}.pdf")
-            open(_fp, "wb").write(_pdf)
+            with open(_fp, "wb") as _fh:
+                _fh.write(_pdf)
             _cur.execute("UPDATE call_reports SET file_path=%s WHERE id=%s", (_fp, _rid))
             _cc.commit(); _cc.close()
         out.seek(0)
@@ -843,7 +1027,7 @@ def _save_report(account_id, pdf_bytes, date_from, date_to, fname):
         items.insert(0, rec)
         for old in items[50:]:
             try: _os.remove(old.get("file", ""))
-            except Exception: pass
+            except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=1024)
         items = items[:50]
         if row:
             row.value = _json.dumps(items, ensure_ascii=False)
@@ -905,14 +1089,14 @@ def _purge_old_reports():
         for rid, fp in rows:
             try:
                 if fp and _os.path.exists(fp): _os.remove(fp)
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=1086)
         if rows:
             cur.execute("DELETE FROM call_reports WHERE created_at < NOW() - INTERVAL '%s days'" % _REPORT_KEEP_DAYS)
             c.commit()
         c.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1092)
 
 
 @router.get("/reports/list")
@@ -957,8 +1141,14 @@ def reports_download(account_id: str, id: int):
     row = cur.fetchone(); c.close()
     if not row or not row[0] or not _os.path.exists(row[0]):
         raise HTTPException(status_code=404, detail="Отчёт не найден или уже удалён")
+    cur_kind = None
+    try:
+        c = psycopg2.connect(u); cur = c.cursor(); cur.execute("SELECT COALESCE(kind,'calls') FROM call_reports WHERE id=%s AND account_id=%s", (id, account_id)); kr=cur.fetchone(); c.close(); cur_kind = kr[0] if kr else "calls"
+    except Exception:
+        cur_kind = "calls"
+    prefix = "otchet_perepiski" if cur_kind == "chats" else "otchet_zvonki"
     return FileResponse(row[0], media_type="application/pdf",
-        filename=f"otchet_zvonki_{row[1]}_{row[2]}.pdf")
+        filename=f"{prefix}_{row[1]}_{row[2]}.pdf")
 
 
 @router.post("/reports/delete")
@@ -980,8 +1170,8 @@ def reports_delete(account_id: str, body: dict = Body(...)):
         for rid, fp in rows:
             try:
                 if fp and _os.path.exists(fp): _os.remove(fp)
-            except Exception:
-                pass
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=1167)
         if rows:
             cur.execute("DELETE FROM call_reports WHERE account_id=%s AND id = ANY(%s)", (account_id, [r[0] for r in rows]))
             c.commit()
@@ -1020,8 +1210,8 @@ def report_estimate(account_id: str, date_from: str = None, date_to: str = None,
                         (account_id, [int(g(c, "callId")) for c in take if g(c, "callId")]))
             cached_ids = {int(r[0]) for r in cur.fetchall()}
             cc.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1207)
     new_calls = [c for c in take if int(g(c, "callId") or 0) not in cached_ids]
     new_min = round(sum(g(c, "talkDuration", 0) for c in new_calls) / 60, 1)
     cost = round(new_min * _WHISPER_MIN_USD * _USD_RUB + len(new_calls) * _GPT_CALL_RUB + _GPT_REPORT_RUB, 2)
@@ -1041,18 +1231,13 @@ def report_estimate(account_id: str, date_from: str = None, date_to: str = None,
 
 # ============ ПАКЕТ МИНУТ РОП ============
 def _is_owner_account(account_id: str) -> bool:
-    """Аккаунты владельца сервиса — без лимитов и списаний."""
-    try:
-        import psycopg2
-        u = _db_url()
-        if not u: return False
-        c = psycopg2.connect(u); cur = c.cursor()
-        cur.execute("""SELECT u.role FROM accounts a JOIN users u ON u.id = a.owner_user_id
-                       WHERE a.account_id=%s""", (account_id,))
-        row = cur.fetchone(); c.close()
-        return bool(row and str(row[0]).lower() == "owner")
-    except Exception:
-        return False
+    """Legacy name: only the explicitly marked BORIS-owned account is unlimited.
+
+    Client accounts may be administered by the platform owner user, therefore
+    accounts.owner_user_id -> users.role='owner' is NOT an entitlement signal.
+    Keep one fail-closed source of truth: accounts.is_own.
+    """
+    return _is_own_account(account_id)
 
 
 def get_rop_minutes(account_id: str) -> dict:
@@ -1089,8 +1274,8 @@ def get_rop_minutes(account_id: str) -> dict:
             else:
                 cur.execute("SELECT COALESCE(SUM(minutes),0) FROM call_analysis WHERE account_id=%s", (account_id,))
             used = float(cur.fetchone()[0] or 0); c.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1271)
     used = used + _overflow
     left = round(purchased - used, 1)
     _alive = True
@@ -1172,10 +1357,12 @@ def get_rop_reports(account_id: str, kind: str = "calls") -> dict:
     if _is_own_account(account_id):
         return {"purchased": 0, "used": 0, "left": 999999, "active": True, "unlimited": True}
     d = _billing_get(account_id)
-    purchased_total = int(d.get(f"rop_reports_purchased_{kind}", 0) or 0)
-    half = purchased_total // 2
+    purchased = int(d.get(f"rop_reports_purchased_{kind}", 0) or 0)
     used = int(d.get(f"rop_reports_used_{kind}", 0) or 0)
-    return {"purchased": half, "used": used, "left": max(0, half - used), "active": (half - used) > 0}
+    # Billing stores separate counters for calls and chats already. Do not split
+    # either counter again: rep_calls=30 and rep_chats=30 means 30 of each.
+    return {"purchased": purchased, "used": used, "left": max(0, purchased - used),
+            "active": (purchased - used) > 0}
 
 
 def consume_rop_report(account_id: str, kind: str = "calls") -> bool:
@@ -1184,7 +1371,8 @@ def consume_rop_report(account_id: str, kind: str = "calls") -> bool:
         return True
     b = get_rop_reports(account_id, kind)
     if b["left"] <= 0:
-        if get_rop_minutes(account_id)["left"] <= 0:
+        _rop_balance = get_rop_minutes(account_id)
+        if not _rop_balance.get("active") or _rop_balance["left"] <= 0:
             return False
         _add_overflow_minutes(account_id, 1)
         return True
@@ -1340,10 +1528,13 @@ def _get_chats(account_id: str, days: int = 30, limit: int = 15):
     import psycopg2
     u = _db_url()
     if not u: return []
+    import time as _time
     c = psycopg2.connect(u); cur = c.cursor()
+    cutoff = int(_time.time() - max(1, int(days or 30)) * 86400)
     cur.execute("""SELECT l.avito_chat_id, l.item_title, l.stage
-        FROM messenger_leads l WHERE l.account_id=%s ORDER BY l.last_msg_at DESC NULLS LAST LIMIT %s""",
-        (account_id, limit * 5))
+        FROM messenger_leads l WHERE l.account_id=%s AND COALESCE(l.last_msg_at,0) >= %s
+        ORDER BY l.last_msg_at DESC NULLS LAST LIMIT %s""",
+        (account_id, cutoff, limit * 5))
     leads = cur.fetchall()
     out = []
     for chat_id, title, stage in leads:
@@ -1361,7 +1552,7 @@ def _get_chats(account_id: str, days: int = 30, limit: int = 15):
     return out
 
 
-def _analyze_chat(convo: str, account_id: str) -> dict:
+def _analyze_chat(convo: str, account_id: str, provenance: dict | None = None) -> dict:
     """Мягкий разбор одной переписки по чек-листу — как разбор звонка."""
     import os, json as _j, requests
     from proxy_pool import get_intl_requests_proxies
@@ -1379,28 +1570,58 @@ def _analyze_chat(convo: str, account_id: str) -> dict:
         '"growth_points": ["зоны роста мягко — до 4"], '
         '"stop_words": [{"phrase": "фраза которую лучше не писать", "why": "чем мешает", "better": "как написать вместо"}], '
         '"speech_tips": ["советы по стилю переписки — до 3"]}\n\n'
+        + "\n\n" + _global_rop_context(account_id) + "\n\n"
         + _account_context(account_id) +
         f"ПЕРЕПИСКА:\n{convo[:6000]}"
     )
     try:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        r = requests.post("https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-            json={"model": "gpt-5.4", "messages": [{"role": "user", "content": prompt}], "max_completion_tokens": 1400},
-            proxies=get_intl_requests_proxies(), timeout=120)
-        if r.status_code != 200:
-            return {"error": f"gpt {r.status_code}"}
-        data = r.json()
-        try:
-            from app.usage import log_usage as _lc
-            u = data.get("usage", {})
-            _lc(account_id, "openai", "gpt-5.4", "разбор переписки РОП", u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
-        except Exception:
-            pass
-        raw = data["choices"][0]["message"]["content"].strip().replace("```json", "").replace("```", "").strip()
-        return _j.loads(raw)
+        import hashlib as _hashlib_paid
+        from app.services import sales_ai_router as _sales_ai
+        intent = "chat-analysis:" + _hashlib_paid.sha256(
+            ("chat_analysis_v3\n" + str(account_id or "") + "\n" + prompt).encode("utf-8")
+        ).hexdigest()
+        _schema = {
+            "type":"object",
+            "properties":{
+                "client_name":{"type":"string"},
+                "outcome":{"type":"string"},
+                "checklist":{"type":"array"},
+                "score":{"type":"integer"},
+                "recommendation":{"type":"string"},
+                "strong_moments":{"type":"array"},
+                "growth_points":{"type":"array"},
+                "stop_words":{"type":"array"},
+                "speech_tips":{"type":"array"},
+            },
+            "required":[
+                "client_name","outcome","checklist","score","recommendation",
+                "strong_moments","growth_points","stop_words","speech_tips"
+            ],
+            "additionalProperties":True,
+        }
+        routed = _sales_ai.generate_text(
+            account_id=str(account_id or ""),
+            operation="rop_chat_analysis",
+            prompt=prompt,
+            module="rop",
+            idempotency_key=intent,
+            openai_model=str(os.getenv("BORIS_ROP_OPENAI_MODEL") or "gpt-5.4"),
+            max_output_tokens=1400,
+            timeout=120,
+            expect_json=True,
+            local_format=_schema,
+            local_temperature=0.10,
+            local_num_ctx=6144,
+            local_num_predict=1400,
+        )
+        result = routed.get("json")
+        if not isinstance(result, dict):
+            raise _sales_ai.SalesAIOutputInvalid("ROP analysis is not a JSON object")
+        result["_ai_provider"] = str(routed.get("provider") or "")
+        result["_ai_model"] = str(routed.get("model") or "")
+        return result
     except Exception as e:
-        return {"error": str(e)[:150]}
+        return {"error": str(e)[:180]}
 
 
 def _chat_cache_get(account_id: str, chat_id: str):
@@ -1427,8 +1648,8 @@ def _chat_cache_put(account_id: str, chat_id: str, analysis: dict):
             ON CONFLICT (account_id, chat_id) DO UPDATE SET analysis=EXCLUDED.analysis""",
             (account_id, str(chat_id), _j.dumps(analysis)))
         c.commit(); c.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1645)
 
 
 @router.get("/chats_report/estimate")
@@ -1438,7 +1659,12 @@ def chats_report_estimate(account_id: str, days: int = 30, max_chats: int = 15):
     _used = _chat_day_used(account_id)
     _left = max(0, _CHAT_DAY_LIMIT - _used)
     _pack = get_rop_chats(account_id)["left"]
-    _will = min(len(new), _left, _pack)
+    # chats_report itself falls back to the active minute pool at 1 minute per new
+    # chat when the dedicated chat pack is empty. Expired minutes must never fund AI.
+    _rop_balance = get_rop_minutes(account_id)
+    _minute_fallback = max(0, int(_rop_balance["left"])) if _pack <= 0 and _rop_balance.get("active") else 0
+    _effective_pack = _pack if _pack > 0 else _minute_fallback
+    _will = min(len(new), _left, _effective_pack)
     return {"status": "ok", "total": len(chats), "already_done": len(chats) - len(new),
             "new_chats": len(new), "will_analyze": _will, "skipped_by_day_limit": len(new) - _will,
             "day_used": _used, "day_limit": _CHAT_DAY_LIMIT, "day_left": _left, "pack_left": _pack,
@@ -1472,7 +1698,8 @@ def chats_report(account_id: str, days: int = 30, max_chats: int = 15, owner: bo
         an = _chat_cache_get(account_id, ch["chat_id"])
         if not an:
             if _chats_left <= 0:
-                if get_rop_minutes(account_id)["left"] > 0:
+                _rop_balance = get_rop_minutes(account_id)
+                if _rop_balance.get("active") and _rop_balance["left"] > 0:
                     _add_overflow_minutes(account_id, 1)
                 else:
                     _pack_stop = True
@@ -1480,7 +1707,7 @@ def chats_report(account_id: str, days: int = 30, max_chats: int = 15, owner: bo
             if _day_used >= _CHAT_DAY_LIMIT:
                 _day_stop = True
                 continue
-            an = _analyze_chat(ch["convo"], account_id)
+            an = _analyze_chat(ch["convo"], account_id, provenance={"source":"calltracking_chat_analysis","chat_id":str(ch["chat_id"])})
             if an.get("error"):
                 continue
             _chat_cache_put(account_id, ch["chat_id"], an)
@@ -1585,8 +1812,8 @@ def chats_report(account_id: str, days: int = 30, max_chats: int = 15, owner: bo
     consume_rop_report(account_id, "chats")
     try:
         _tg_notify(account_id, f"\U0001F4AC Готов отчёт по перепискам\n\nДиалогов разобрано: {len(reviews)} \u00b7 средний балл: {avg}/100\n\nСкачать можно в кабинете: Продажи \u2192 РОП \u2192 Отчёты", topic="sales")
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1809)
     try:
         _pdf = out.getvalue()
         _dir = _os.path.join(_os.path.dirname(__file__), "..", "..", "reports", account_id)
@@ -1600,7 +1827,8 @@ def chats_report(account_id: str, days: int = 30, max_chats: int = 15, owner: bo
                 (account_id, _today, _today, len(chats), len(reviews), "", len(_pdf)))
             _rid = _cur.fetchone()[0]
             _fp = _os.path.join(_dir, f"chats_{_rid}.pdf")
-            open(_fp, "wb").write(_pdf)
+            with open(_fp, "wb") as _fh:
+                _fh.write(_pdf)
             _cur.execute("UPDATE call_reports SET file_path=%s WHERE id=%s", (_fp, _rid))
             _cc.commit(); _cc.close()
         out.seek(0)
@@ -1637,8 +1865,8 @@ def _tg_notify(account_id: str, text: str, topic: str = None):
         row = cur.fetchone(); c.close()
         if row and row[0]:
             send_telegram_message(str(row[0]), text)
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1862)
 
 
 
@@ -1654,8 +1882,8 @@ def setup_check(account_id: str):
         cur.execute("SELECT avito_client_id, avito_client_secret FROM accounts WHERE account_id=%s", (account_id,))
         row = cur.fetchone(); c.close()
         has_keys = bool(row and row[0] and row[1])
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1879)
     steps.append({
         "key": "api",
         "ok": has_keys,
@@ -1698,8 +1926,8 @@ def setup_check(account_id: str):
         c = psycopg2.connect(u); cur = c.cursor()
         cur.execute("SELECT COUNT(*) FROM messenger_leads WHERE account_id=%s", (account_id,))
         chats = int(cur.fetchone()[0] or 0); c.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1923)
     steps.append({
         "key": "chats",
         "ok": chats > 0,
@@ -1744,20 +1972,20 @@ def all_limits(account_id: str):
                         paid = _dt.date.fromisoformat(sub.get("paid_at", ""))
                         if (_dt.date.today() - paid).days < int(sub.get("period_days", 30)):
                             act += 1
-                    except Exception:
-                        pass
+                    except Exception as _suppressed_exc:
+                        observe_suppressed(__name__, _suppressed_exc, line=1969)
                     per_day += int(sub.get("posts_per_day", 3) or 3)
                 c = db.query(Storage).filter(Storage.account_id == account_id,
                                              Storage.key == "posting_count:" + str(pr.get("id", "")) + ":" + today).first()
                 if c:
                     try: used += int(c.value)
-                    except Exception: pass
+                    except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=1976)
             social = {"projects": len(projects), "active": act, "posts_today": used,
                       "per_day": per_day, "left_today": max(0, per_day - used)}
         finally:
             db.close()
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1981)
 
     return {
         "status": "ok",
@@ -1776,17 +2004,149 @@ def all_limits(account_id: str):
 
 
 _TRAIN_MARK = "=== Опыт от ИИ Руководителя отдела продаж ==="
+_CHANGE_HISTORY_KEY = "rop_mop_change_history"
+
+def _change_account_allowed(account_id: str, user):
+    if getattr(user,"role","")=="owner": return True
+    from app.db.session import SessionLocal
+    from sqlalchemy import text
+    db=SessionLocal()
+    try:
+        uid=getattr(user,"id",0)
+        if db.execute(text("SELECT 1 FROM accounts WHERE account_id=:a AND owner_user_id=:u"),{"a":account_id,"u":uid}).first(): return True
+        return bool(db.execute(text("SELECT 1 FROM user_account_access WHERE user_id=:u AND account_id=:a AND can_view=true"),{"u":uid,"a":account_id}).first())
+    finally: db.close()
+
+def _change_history_load(account_id: str):
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    db=SessionLocal()
+    try:
+        row=db.query(Storage).filter(Storage.account_id==account_id, Storage.key==_CHANGE_HISTORY_KEY).order_by(Storage.id.desc()).first()
+        if not row or not row.value: return [], None
+        try: data=json.loads(row.value)
+        except Exception: data=[]
+        return data if isinstance(data,list) else [], row.id
+    finally: db.close()
+
+def _change_history_save(account_id: str, items: list):
+    from app.db.session import SessionLocal
+    from app.models.storage import Storage
+    db=SessionLocal()
+    try:
+        row=db.query(Storage).filter(Storage.account_id==account_id, Storage.key==_CHANGE_HISTORY_KEY).order_by(Storage.id.desc()).first()
+        payload=json.dumps(items[-100:], ensure_ascii=False)
+        if row: row.value=payload
+        else: db.add(Storage(account_id=account_id,key=_CHANGE_HISTORY_KEY,value=payload))
+        db.commit()
+    finally: db.close()
+
+def _current_rop_rule(account_id: str):
+    from app.db.session import SessionLocal
+    from app.models.messenger_prompt import MessengerPrompt
+    db=SessionLocal()
+    try:
+        active=db.query(MessengerPrompt).filter(MessengerPrompt.account_id==account_id, MessengerPrompt.is_active==True).first()
+        txt=(active.custom_instructions or "") if active else ""
+        return txt.split(_TRAIN_MARK,1)[1].strip() if _TRAIN_MARK in txt else ""
+    finally: db.close()
+
+def _change_metrics(account_id: str, before=None, after=None, limit=None):
+    """Read-only projection over canonical analyses/leads. No provider calls, no synthetic events."""
+    import psycopg2
+    u=_db_url(); c=psycopg2.connect(u); cur=c.cursor()
+    where="account_id=%s"; args=[account_id]
+    if before: where += " AND created_at < %s"; args.append(before)
+    if after: where += " AND created_at >= %s"; args.append(after)
+    lim=(" LIMIT %s" if limit else ""); largs=([int(limit)] if limit else [])
+    cur.execute("SELECT analysis,created_at FROM call_analysis WHERE "+where+" ORDER BY created_at DESC"+lim, tuple(args+largs)); calls=cur.fetchall()
+    cur.execute("SELECT analysis,created_at FROM chat_analysis WHERE "+where+" ORDER BY created_at DESC"+lim, tuple(args+largs)); chats=cur.fetchall()
+    analyses=calls+chats
+    scores=[]
+    for a,_ in analyses:
+        x=a if isinstance(a,dict) else (json.loads(a) if a else {})
+        v=x.get('score') if isinstance(x,dict) else None
+        if isinstance(v,(int,float)): scores.append(float(v))
+    # Lead/contact metrics have reliable created_at but qualification coverage is not guaranteed.
+    lw="account_id=%s"; la=[account_id]
+    window_from=after; window_to=before
+    # For a baseline limited to recent analyses, use the same real time span for lead/contact metrics.
+    if limit and not after and not before and analyses:
+        window_from=min(dt for _,dt in analyses if dt is not None)
+    if window_to: lw += " AND created_at < %s"; la.append(window_to)
+    if window_from: lw += " AND created_at >= %s"; la.append(window_from)
+    cur.execute("SELECT count(*),count(*) FILTER (WHERE has_phone) FROM messenger_leads WHERE "+lw, tuple(la)); leads,phones=cur.fetchone()
+    c.close()
+    return {"interactions":len(analyses),"avg_score":round(sum(scores)/len(scores),1) if scores else None,"scored":len(scores),
+            "inquiries":int(leads or 0),"phones_received":int(phones or 0),
+            "phone_rate":round(100*float(phones)/float(leads),1) if leads else None,
+            "window_from":str(window_from) if window_from else None,"window_to":str(window_to) if window_to else None}
+
+def _effect(before: dict, after: dict):
+    # Evidence-driven threshold: require at least half of the available baseline, capped 5..10.
+    baseline=max(int(before.get('interactions') or 0), int(before.get('inquiries') or 0))
+    needed=max(5,min(10,(baseline+1)//2)) if baseline else 5
+    after_n=max(int(after.get('interactions') or 0), int(after.get('inquiries') or 0))
+    if after_n < needed: return "INSUFFICIENT_DATA", needed
+    deltas=[]
+    if before.get('avg_score') is not None and after.get('avg_score') is not None: deltas.append(float(after['avg_score'])-float(before['avg_score']))
+    if before.get('phone_rate') is not None and after.get('phone_rate') is not None: deltas.append((float(after['phone_rate'])-float(before['phone_rate']))/2.0)
+    if not deltas: return "INSUFFICIENT_DATA", needed
+    signal=sum(deltas)/len(deltas)
+    return ("IMPROVED" if signal>=5 else "WORSE" if signal<=-5 else "NO_CLEAR_EFFECT"), needed
+
+@router.get("/mop_change_lifecycle")
+def mop_change_lifecycle(account_id: str, user=Depends(get_current_user)):
+    if not _change_account_allowed(account_id,user): raise HTTPException(status_code=403, detail="Аккаунт недоступен")
+    hist,_=_change_history_load(account_id)
+    out=[]
+    for item in reversed(hist[-20:]):
+        x=dict(item)
+        if x.get('state') in ('APPLIED','OBSERVING') and x.get('applied_at'):
+            after=_change_metrics(account_id, after=x['applied_at'])
+            effect,needed=_effect(x.get('before_metrics') or {},after)
+            x.update({"after_metrics":after,"effect":effect,"needed_sample":needed,
+                      "state":"MEASURED" if effect!='INSUFFICIENT_DATA' else "OBSERVING"})
+        out.append(x)
+    return {"status":"ok","account_id":account_id,"items":out}
+
+@router.post("/mop_change_rollback")
+def mop_change_rollback(account_id: str, body: dict=Body(default=None), user=Depends(get_current_user)):
+    if not _change_account_allowed(account_id,user): raise HTTPException(status_code=403, detail="Аккаунт недоступен")
+    body=body or {}; change_id=str(body.get('change_id') or '')
+    hist,_=_change_history_load(account_id); target=next((x for x in hist if x.get('change_id')==change_id),None)
+    if not target: return {"status":"error","message":"Изменение не найдено"}
+    if target.get('state')=='ROLLED_BACK': return {"status":"ok","rolled_back":True,"idempotent":True,"change_id":change_id}
+    current=_current_rop_rule(account_id); applied=str(target.get('new_rule') or '').strip()
+    if current != applied:
+        return {"status":"conflict","message":"Правило после применения уже менялось. Автоматический возврат остановлен, чтобы сохранить более новые изменения."}
+    from app.db.session import SessionLocal
+    from app.models.messenger_prompt import MessengerPrompt
+    db=SessionLocal()
+    try:
+        active=db.query(MessengerPrompt).filter(MessengerPrompt.account_id==account_id, MessengerPrompt.is_active==True).first()
+        if not active: return {"status":"error","message":"Активная инструкция МОП не найдена"}
+        txt=active.custom_instructions or ""; head=txt.split(_TRAIN_MARK,1)[0].rstrip()
+        old=str(target.get('old_rule') or '').strip()
+        active.custom_instructions=(head+("\n\n"+_TRAIN_MARK+"\n"+old if old else "")).strip(); db.commit()
+    finally: db.close()
+    target['state']='ROLLED_BACK'; target['rolled_back_at']=datetime.datetime.utcnow().isoformat()+"Z"; _change_history_save(account_id,hist)
+    return {"status":"ok","rolled_back":True,"change_id":change_id}
 
 
 @router.post("/train_manager")
-def train_manager(account_id: str, body: dict = Body(default=None)):
+def train_manager(account_id: str, body: dict = Body(default=None), user=Depends(get_current_user)):
     """РОП обучает МОПа: собирает выводы из готовых разборов и дописывает правила в скрипт менеджера.
     apply=false — только показать текст, apply=true — записать в настройки менеджера."""
     import json as _j, os, requests, psycopg2
     from proxy_pool import get_intl_requests_proxies
 
+    if not _change_account_allowed(account_id,user): raise HTTPException(status_code=403, detail="Аккаунт недоступен")
     body = body or {}
     apply = bool(body.get("apply"))
+    preview_rules = str(body.get("rules") or "").strip()
+    if apply and not preview_rules:
+        return {"status":"error","message":"Сначала подготовьте и подтвердите точный preview изменения."}
 
     u = _db_url()
     if not u:
@@ -1798,7 +2158,7 @@ def train_manager(account_id: str, body: dict = Body(default=None)):
     chats = [r[0] if isinstance(r[0], dict) else _j.loads(r[0]) for r in cur.fetchall()]
     c.close()
 
-    if not calls and not chats:
+    if not calls and not chats and not (apply and preview_rules):
         return {"status": "empty", "message": "Пока нечего передать: сначала разберите звонки или переписки — РОП учит менеджера на их основе."}
 
     def collect(items, key):
@@ -1834,31 +2194,66 @@ def train_manager(account_id: str, body: dict = Body(default=None)):
         + _account_context(account_id) +
         "МАТЕРИАЛ РАЗБОРА:\n" + _j.dumps(material, ensure_ascii=False)[:6000]
     )
-    try:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        r = requests.post("https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-            json={"model": "gpt-5.4", "messages": [{"role": "user", "content": prompt}], "max_completion_tokens": 1200},
-            proxies=get_intl_requests_proxies(), timeout=120)
-        if r.status_code != 200:
-            return {"status": "error", "message": f"gpt {r.status_code}"}
-        data = r.json()
+    if apply and preview_rules:
+        # Explicit apply must use the exact text the manager already previewed.
+        # This avoids a second provider call and guarantees preview == applied rules.
+        rules = preview_rules
+    else:
         try:
-            from app.usage import log_usage as _lc
-            us = data.get("usage", {})
-            _lc(account_id, "openai", "gpt-5.4", "обучение менеджера от РОП",
-                us.get("prompt_tokens", 0), us.get("completion_tokens", 0))
-        except Exception:
-            pass
-        rules = data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return {"status": "error", "message": str(e)[:150]}
+            import hashlib as _hashlib_paid
+            intent = "rop-training-preview:" + _hashlib_paid.sha256(
+                ("rop_training_preview_v2\n" + str(account_id or "") + "\n" + prompt).encode("utf-8")
+            ).hexdigest()
+            routed = _rop_sales_ai(
+                account_id=str(account_id or ""),
+                operation="calltracking_rop_training_preview",
+                prompt=prompt,
+                idempotency_key=intent,
+                max_output_tokens=1200,
+                timeout=120,
+                expect_json=False,
+            )
+            rules = str(routed.get("text") or "").strip()
+            if not rules:
+                return {"status": "error", "message": "ИИ не вернул правила обучения"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)[:180]}
 
     block = _TRAIN_MARK + "\n" + rules
 
     if not apply:
-        return {"status": "ok", "applied": False, "rules": rules,
+        import hashlib as _hashlib
+        from datetime import datetime as _dt_preview
+        generated_at=_dt_preview.utcnow().isoformat()+"Z"
+        old_rule=_current_rop_rule(account_id)
+        raw=(account_id+"\n"+rules+"\n"+generated_at).encode("utf-8")
+        preview_id=_hashlib.sha256(raw).hexdigest()[:24]
+        growth=material.get("точки роста") or []
+        problem=growth[0] if growth else ((material.get("главные советы") or ["РОП нашёл точки роста в последних разборах."])[0])
+        evidence=f"Основано на {len(calls)} звонках и {len(chats)} переписках" + (f"; средняя оценка {avg}" if avg is not None else "")
+        before_metrics=_change_metrics(account_id, limit=40)
+        hist,_=_change_history_load(account_id)
+        hist.append({"change_id":preview_id,"preview_id":preview_id,"state":"PREVIEWED","account_id":account_id,"source":"ROP",
+                     "created_at":generated_at,"problem":problem,"evidence":evidence,"old_rule":old_rule,"new_rule":rules,
+                     "before_metrics":before_metrics,"based_on":{"calls":len(calls),"chats":len(chats),"avg_score":avg}})
+        _change_history_save(account_id,hist)
+        return {"status": "ok", "applied": False, "rules": rules,"preview_id":preview_id,
+                "account_id": account_id, "source": "ROP persisted call/chat analyses",
+                "generated_at": generated_at,"problem":problem,"evidence":evidence,"current_rule":old_rule,
                 "based_on": {"calls": len(calls), "chats": len(chats), "avg_score": avg}}
+
+    # Apply is bound to the exact persisted preview: no second generation and no changed content.
+    preview_id=str(body.get("preview_id") or "").strip()
+    hist,_=_change_history_load(account_id)
+    change=next((x for x in hist if x.get("preview_id")==preview_id),None) if preview_id else None
+    if preview_rules:
+        if not change or str(change.get("new_rule") or "").strip()!=preview_rules:
+            return {"status":"error","message":"Preview устарел или изменён. Подготовьте рекомендацию заново перед применением."}
+        if change.get("state") in ("APPLIED","OBSERVING","MEASURED"):
+            return {"status":"ok","applied":True,"rules":preview_rules,"used_preview":True,"idempotent":True,
+                    "change_id":change.get("change_id"),"based_on":change.get("based_on") or {}}
+        if _current_rop_rule(account_id) != str(change.get("old_rule") or "").strip():
+            return {"status":"conflict","message":"Инструкция МОП изменилась после preview. Обновите рекомендацию, чтобы не затереть более новое изменение."}
 
     # записываем в активный скрипт менеджера, не затирая то, что там уже есть
     try:
@@ -1884,13 +2279,299 @@ def train_manager(account_id: str, body: dict = Body(default=None)):
     except Exception as e:
         return {"status": "error", "message": "не удалось записать в настройки менеджера: " + str(e)[:120]}
 
+    if preview_rules and change:
+        change['state']='OBSERVING'; change['applied_at']=datetime.datetime.utcnow().isoformat()+"Z"; change['owner_confirmation']=True
+        _change_history_save(account_id,hist)
     try:
         _tg_notify(account_id, "🧠 РОП обучил ИИ-менеджера\n\nВ скрипт добавлены правила по итогам разбора "
                    f"({len(calls)} звонков, {len(chats)} переписок).", topic="sales")
-    except Exception:
-        pass
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=2282)
     return {"status": "ok", "applied": True, "rules": rules,
+            "used_preview": bool(preview_rules),"change_id":change.get('change_id') if change else None,
+            "observation_state":"OBSERVING" if change else None,
             "based_on": {"calls": len(calls), "chats": len(chats), "avg_score": avg}}
+
+
+
+@router.get("/product_summary")
+def rop_product_summary(account_id: str, days: int = 7):
+    """Screen-first ROP aggregation from already persisted call/chat analyses.
+    No AI/provider calls: dashboard is a read-only projection of real production data."""
+    import collections, json as _j, psycopg2, re
+    from datetime import datetime, timedelta
+    days = 1 if int(days) <= 1 else (7 if int(days) <= 7 else 30)
+    u = _db_url()
+    if not u:
+        return {"status": "error", "message": "Нет доступа к базе"}
+    c = psycopg2.connect(u); cur = c.cursor()
+    since = datetime.utcnow() - timedelta(days=days)
+    prev_since = since - timedelta(days=days)
+    try:
+        cur.execute("SELECT call_id, created_at, minutes, transcript, analysis FROM call_analysis WHERE account_id=%s AND created_at >= %s ORDER BY created_at DESC", (account_id, since))
+        call_rows = cur.fetchall()
+        cur.execute("SELECT chat_id, created_at, analysis FROM chat_analysis WHERE account_id=%s AND created_at >= %s ORDER BY created_at DESC", (account_id, since))
+        chat_rows = cur.fetchall()
+        chat_inbound = {}
+        chat_ids = [str(r[0]) for r in chat_rows if r and r[0]]
+        if chat_ids:
+            cur.execute("""
+                SELECT avito_chat_id,
+                       string_agg(coalesce(text,''), ' ' ORDER BY stored_at)
+                  FROM messenger_messages
+                 WHERE account_id=%s
+                   AND direction='in'
+                   AND avito_chat_id = ANY(%s)
+                   AND coalesce(text,'') <> ''
+                   AND text NOT LIKE '[Системное сообщение]%%'
+                 GROUP BY avito_chat_id
+            """, (account_id, chat_ids))
+            chat_inbound = {str(r[0]): str(r[1] or '') for r in cur.fetchall()}
+        cur.execute("SELECT analysis FROM call_analysis WHERE account_id=%s AND created_at >= %s AND created_at < %s", (account_id, prev_since, since))
+        prev_calls = cur.fetchall()
+        cur.execute("SELECT analysis FROM chat_analysis WHERE account_id=%s AND created_at >= %s AND created_at < %s", (account_id, prev_since, since))
+        prev_chats = cur.fetchall()
+        cur.execute("SELECT name FROM accounts WHERE account_id=%s", (account_id,))
+        _name_row = cur.fetchone()
+        account_name = str((_name_row[0] if _name_row else "") or "").strip()
+        if not account_name or account_name == "\\":
+            account_name = "компания"
+    finally:
+        c.close()
+
+    def obj(v):
+        if isinstance(v, dict): return v
+        try: return _j.loads(v or "{}") or {}
+        except Exception: return {}
+    def score(a):
+        v=a.get("score")
+        return float(v) if isinstance(v,(int,float)) else None
+    def texts(a, key):
+        v=a.get(key) or []
+        if isinstance(v,str): return [v] if v.strip() else []
+        out=[]
+        for x in v:
+            if isinstance(x,dict):
+                t=x.get("phrase") or x.get("item") or x.get("why") or ""
+            else: t=str(x or "")
+            if t.strip(): out.append(t.strip())
+        return out
+    def compact_counter(items, limit=6):
+        cnt=collections.Counter(x for x in items if x)
+        return [{"text":k,"count":v} for k,v in cnt.most_common(limit)]
+
+    def failure_code(raw):
+        s=str(raw or "").strip().lower()
+        s=s.lstrip("0123456789. )-")
+        if ("попривет" in s or "поздоров" in s) and "представ" in s: return "greeting"
+        if "выявил потреб" in s: return "needs"
+        if "презентовал реш" in s: return "solution"
+        if "отработал возраж" in s: return "objection"
+        if "назвал цену" in s or "вилку цен" in s: return "price"
+        if "закрыл на следующий шаг" in s: return "next_step"
+        if "взял контакт" in s or "зафиксировал договор" in s: return "contact"
+        if "ответил быстро" in s: return "speed"
+        if "ответил по сути" in s: return "substance"
+        return "other:" + str(raw or "").strip()
+
+    def action_meta(code):
+        company=(account_name or "компания").strip()
+        if code=="greeting":
+            return {
+                "problem":"Не представились в первом касании",
+                "action":"Первое сообщение или начало звонка должно за 1–2 фразы объяснить, кто отвечает, и сразу задать вопрос по заявке. Не начинать с длинной презентации.",
+                "script":f"Здравствуйте! Компания {company}. Подскажите, в каком городе нужен проект и что именно хотите заказать?",
+                "applies_to":"МОП и менеджеры",
+                "verify":"Проверить следующие 10 первых касаний: представление должно быть минимум в 8 из 10."
+            }
+        if code=="needs":
+            return {
+                "problem":"Не собраны ключевые параметры запроса",
+                "action":"До расчёта или передачи менеджеру собрать минимум два конкретных параметра из уже неизвестных: город, что нужно, примерные размеры, срок, ориентир по бюджету. Не переспрашивать то, что клиент уже написал.",
+                "script":"Подскажите, пожалуйста, в каком городе нужен проект и есть ли примерные размеры? После этого сможем точнее предложить следующий шаг.",
+                "applies_to":"МОП и менеджеры",
+                "verify":"В следующих 10 содержательных диалогах минимум 8 должны содержать не меньше двух зафиксированных параметров запроса."
+            }
+        if code=="solution":
+            return {
+                "problem":"Не показали решение под конкретный запрос",
+                "action":"После уточнения задачи связать предложение именно с запросом клиента: что сделаем, какая польза и какой следующий шаг. Не отвечать общей рекламной фразой.",
+                "script":"По вашим размерам можем подготовить предварительный расчёт и визуализацию, а затем уточнить всё на замере. Если пришлёте размеры или фото, начнём с расчёта.",
+                "applies_to":"МОП и менеджеры",
+                "verify":"В следующих 10 квалифицированных диалогах минимум 8 должны содержать конкретное решение под уже названную задачу клиента."
+            }
+        if code=="objection":
+            return {
+                "problem":"Возражение не отработано или не зафиксировано",
+                "action":"Если клиент пишет «дорого», «подумаю», «позже» или сомневается в сроках — сначала признать сомнение, затем дать одну полезную причину продолжить и закончить конкретным следующим шагом. Если возражения не было, не считать этот пункт ошибкой менеджера.",
+                "script":"Понимаю. Чтобы не выбирать вслепую, можем сначала сделать замер и визуализацию, а после подобрать комплектацию под ваш бюджет. Когда будет удобно продолжить?",
+                "applies_to":"МОП и менеджеры",
+                "verify":"Проверять только диалоги с явным возражением: минимум в 8 из 10 должен появиться ответ на возражение и следующий шаг."
+            }
+        if code=="price":
+            return {
+                "problem":"Не дали понятный путь к цене или расчёту",
+                "action":"Если подтверждённой цены или диапазона нет — не придумывать цифры. Сразу объяснить, какие данные нужны для расчёта, и перевести клиента к получению расчёта.",
+                "script":"Точную стоимость без размеров не буду придумывать. Пришлите примерные размеры или фото — подготовим предварительный расчёт и предложим следующий шаг.",
+                "applies_to":"МОП и менеджеры",
+                "verify":"Каждый запрос цены должен завершаться либо подтверждённой ценой/диапазоном, либо конкретным действием для получения расчёта."
+            }
+        if code=="next_step":
+            return {
+                "problem":"Диалог не закрыт на конкретный следующий шаг",
+                "action":"Каждый содержательный диалог заканчивать одним понятным действием: получить телефон, согласовать звонок, замер, расчёт или время следующего контакта. Не оставлять клиента на «будем на связи».",
+                "script":"Могу передать специалисту на расчёт. Напишите номер телефона и удобное время звонка — зафиксирую следующий шаг.",
+                "applies_to":"МОП и менеджеры",
+                "verify":"В следующих 10 содержательных диалогах минимум 8 должны иметь зафиксированный следующий шаг."
+            }
+        if code=="contact":
+            return {
+                "problem":"Не взят контакт или не закреплена договорённость",
+                "action":"Когда клиент готов двигаться дальше, получить телефон или явно зафиксировать дату/время следующего контакта. Не считать лид переданным без контакта или договорённости.",
+                "script":"Чтобы специалист точно связался с вами, напишите, пожалуйста, номер телефона и удобное время звонка.",
+                "applies_to":"МОП и менеджеры",
+                "verify":"У каждого переданного лида должен быть телефон либо явно сохранённая договорённость о следующем контакте."
+            }
+        if code=="speed":
+            return {
+                "problem":"Ответ был недостаточно быстрым",
+                "action":"При новом входящем сообщении отвечать без лишней паузы в рамках рабочего режима; если нужен человек — сразу создавать передачу, а не оставлять диалог без следующего действия.",
+                "script":"Здравствуйте! Уже вижу ваш вопрос. Уточню один момент, чтобы сразу дать полезный ответ: что именно хотите заказать?",
+                "applies_to":"МОП и менеджеры",
+                "verify":"Отдельно контролировать фактическое время от входящего сообщения Авито до первого ответа BORIS/менеджера."
+            }
+        if code=="substance":
+            return {
+                "problem":"Не ответили по сути вопроса клиента",
+                "action":"Сначала дать прямой ответ на последний вопрос клиента, затем задавать следующий квалифицирующий вопрос. Не перескакивать сразу к продаже или замеру.",
+                "script":"Да, такой вариант можно рассчитать. Чтобы ответить точнее, подскажите, пожалуйста, примерные размеры.",
+                "applies_to":"МОП и менеджеры",
+                "verify":"В следующих 10 диалогах ответ на прямой вопрос клиента должен идти раньше нового продающего вопроса."
+            }
+        raw=code.split(":",1)[1] if code.startswith("other:") else code
+        return {
+            "problem":"Не выполнен пункт: "+raw,
+            "action":"Разобрать этот шаг в последних слабых взаимодействиях и закрепить единое правило для МОП и менеджеров.",
+            "script":"",
+            "applies_to":"МОП и менеджеры",
+            "verify":"Проверить выполнение этого пункта на следующих 10 взаимодействиях."
+        }
+
+    _PRICE_RE=re.compile(r"(цена|стоим\w*|сколько|поч[её]м|бюджет\w*|\bруб\w*|\bтыс\w*)", re.I)
+    _OBJECTION_RE=re.compile(
+        r"(дорог\w*|подума\w*|не\s+нуж\w*|не\s+устраива\w*|слишком\w*|"
+        r"не\s+готов\w*|не\s+актуал\w*|очень\s+далеко|зачем\w*|не\s+хоч\w*|"
+        r"нет\s+денег|мне\s+везде\s+счита\w*|скидк\w*|бюджетн\w*)", re.I
+    )
+    def failure_applicable(code, interaction_text):
+        text_value=str(interaction_text or "")
+        if code=="price":
+            return bool(_PRICE_RE.search(text_value))
+        if code=="objection":
+            return bool(_OBJECTION_RE.search(text_value))
+        return True
+
+    calls=[]; chats=[]
+    all_a=[]
+    for cid,dt,mins,tr,raw in call_rows:
+        a=obj(raw); all_a.append(a)
+        calls.append({"id":str(cid),"created_at":dt.isoformat() if dt else None,"minutes":round(float(mins or 0),1),
+            "score":score(a),"client":a.get("client_name") or "","role":a.get("role") or "",
+            "result":a.get("outcome") or a.get("recommendation") or "","recommendation":a.get("recommendation") or "",
+            "growth_points":texts(a,"growth_points"),"strong_moments":texts(a,"strong_moments"),
+            "client_hooks":texts(a,"client_hooks"),"speech_tips":texts(a,"speech_tips"),"stop_words":a.get("stop_words") or [],
+            "checklist":a.get("checklist") or [],"transcript":tr or ""})
+    for chid,dt,raw in chat_rows:
+        a=obj(raw); all_a.append(a)
+        chats.append({"id":str(chid),"created_at":dt.isoformat() if dt else None,"score":score(a),
+            "client":a.get("client_name") or "","result":a.get("outcome") or "","recommendation":a.get("recommendation") or "",
+            "growth_points":texts(a,"growth_points"),"strong_moments":texts(a,"strong_moments"),
+            "speech_tips":texts(a,"speech_tips"),"stop_words":a.get("stop_words") or [],"checklist":a.get("checklist") or []})
+    scores=[score(a) for a in all_a if score(a) is not None]
+    weak=sum(1 for x in scores if x < 60); strong=sum(1 for x in scores if x >= 80)
+    growth=[]; recs=[]; hooks=[]; stops=[]; strengths=[]
+    failure_counts=collections.Counter()
+    applicable_counts=collections.Counter()
+    failure_examples=collections.defaultdict(list)
+    interaction_contexts=[]
+    for cid,dt,mins,tr,raw in call_rows:
+        interaction_contexts.append(str(tr or ""))
+    for chid,dt,raw in chat_rows:
+        interaction_contexts.append(str(chat_inbound.get(str(chid)) or ""))
+
+    for idx,a in enumerate(all_a):
+        interaction_text = interaction_contexts[idx] if idx < len(interaction_contexts) else ""
+        codes=set()
+        checklist_codes=set()
+        for x in (a.get("checklist") or []):
+            if isinstance(x,dict):
+                code=failure_code(x.get("item") or "")
+                if not code:
+                    continue
+                # Price/objection checks are conditional. Do not penalize a manager
+                # when the customer never asked about price or raised an objection.
+                if not failure_applicable(code, interaction_text):
+                    continue
+                applicable_counts[code] += 1
+                checklist_codes.add(code)
+                if not x.get("done"):
+                    codes.add(code)
+        for code in codes:
+            failure_counts[code] += 1
+            context=" ".join(str(interaction_text or "").split())[:220]
+            if context and context not in failure_examples[code] and len(failure_examples[code]) < 2:
+                failure_examples[code].append(context)
+            elif len(failure_examples[code]) < 2:
+                rec=str(a.get("recommendation") or "").strip()
+                if rec and rec not in failure_examples[code]:
+                    failure_examples[code].append(rec)
+        growth += texts(a,"growth_points"); hooks += texts(a,"client_hooks"); strengths += texts(a,"strong_moments")
+        if a.get("recommendation"): recs.append(str(a["recommendation"]))
+        for x in a.get("stop_words") or []:
+            stops.append(str(x.get("phrase") if isinstance(x,dict) else x))
+
+    detailed_actions=[]
+    total_interactions=len(all_a)
+    for code,count in failure_counts.most_common(6):
+        item=action_meta(code)
+        denominator=int(applicable_counts.get(code) or total_interactions)
+        item.update({
+            "code":code,
+            "count":int(count),
+            "total":denominator,
+            "share_pct":round(float(count)*100.0/float(denominator),1) if denominator else 0.0,
+            "evidence_examples":failure_examples.get(code,[])[:2],
+        })
+        detailed_actions.append(item)
+    main_problems=[{
+        "text":x.get("problem"),
+        "count":x.get("count"),
+        "share_pct":x.get("share_pct"),
+        "total":x.get("total"),
+        "code":x.get("code"),
+    } for x in detailed_actions]
+    prev_a=[obj(r[0]) for r in prev_calls+prev_chats]
+    prev_scores=[score(a) for a in prev_a if score(a) is not None]
+    avg=round(sum(scores)/len(scores),1) if scores else None
+    pavg=round(sum(prev_scores)/len(prev_scores),1) if prev_scores else None
+    attention=[]
+    for kind, rows in (("call",calls),("chat",chats)):
+        for x in rows:
+            if x["score"] is not None and x["score"] < 60:
+                attention.append({"type":kind,"id":x["id"],"score":x["score"],"created_at":x["created_at"],
+                                  "reason":"Низкая оценка","recommendation":x["recommendation"]})
+    return {"status":"ok","period_days":days,
+        "summary":{"calls_analyzed":len(calls),"chats_analyzed":len(chats),"analyzed":len(all_a),
+                   "avg_score":avg,"strong":strong,"weak":weak,"call_minutes":round(sum(x["minutes"] for x in calls),1)},
+        "comparison":{"previous_analyzed":len(prev_a),"previous_avg_score":pavg,
+                      "score_delta":round(avg-pavg,1) if avg is not None and pavg is not None else None,
+                      "analyzed_delta":len(all_a)-len(prev_a)},
+        "insights":{"main_problems":main_problems,"growth_points":compact_counter(growth),
+                    "recommendations":compact_counter(recs),"detailed_actions":detailed_actions,
+                    "client_triggers":compact_counter(hooks),
+                    "objections":[],
+                    "stop_words":compact_counter(stops),"strong_methods":compact_counter(strengths)},
+        "attention":attention[:20],"calls":calls,"chats":chats}
 
 
 @router.get("/analyzed")
@@ -1934,3 +2615,25 @@ def analyzed_calls(account_id: str, days: int = 7, limit: int = 50):
             "зоны_роста": a.get("growth_points") or [],
         })
     return {"status": "ok", "звонки": out, "всего": len(out)}
+
+
+@router.get("/analyzed_chats")
+def analyzed_chats(account_id: str, days: int = 7, limit: int = 50):
+    """Persisted chat analyses for product UI; read-only, no AI calls."""
+    import json as _j, psycopg2
+    u = _db_url()
+    if not u: return {"status":"error","message":"Нет доступа к базе","переписки":[]}
+    c=psycopg2.connect(u); cur=c.cursor()
+    try:
+        cur.execute("SELECT chat_id, created_at, analysis FROM chat_analysis WHERE account_id=%s AND created_at > now() - (%s || ' days')::interval ORDER BY created_at DESC LIMIT %s", (account_id,str(int(days)),int(limit)))
+        rows=cur.fetchall()
+    finally: c.close()
+    out=[]
+    for chat_id,created,analysis in rows:
+        a=analysis if isinstance(analysis,dict) else (_j.loads(analysis or "{}") or {})
+        out.append({"chat_id":str(chat_id),"когда":created.isoformat() if created else None,"клиент":a.get("client_name") or "",
+                    "балл":a.get("score"),"результат":a.get("outcome") or "","чеклист":a.get("checklist") or [],
+                    "совет":a.get("recommendation") or "","сильные":a.get("strong_moments") or [],
+                    "зоны_роста":a.get("growth_points") or [],"стоп_слова":a.get("stop_words") or [],
+                    "советы_по_речи":a.get("speech_tips") or []})
+    return {"status":"ok","переписки":out,"всего":len(out)}

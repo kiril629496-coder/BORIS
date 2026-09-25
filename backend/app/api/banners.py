@@ -4,6 +4,13 @@ from typing import Optional, List
 import os
 import json as _json
 
+def _is_legacy_fullai_banner_url(value: str) -> bool:
+    """Old text-in-image renderer (including trimmed/uploaded copies) is banned."""
+    s = str(value or "").strip().lower().split("?", 1)[0]
+    name = s.rsplit("/", 1)[-1]
+    return any(marker in name for marker in ("fullai_", "gptimg_"))
+
+
 def _slugify_theme(text: str) -> str:
     import re
     text = (text or "bez_temy").strip().lower()
@@ -28,32 +35,133 @@ def _save_banner_record(account_id, filename, folder, theme_label, prompt, sourc
 
 
 
-def _generate_marketing_copy(raw_description: str, account_id: str = None, operation: str = "marketing_copy_full_banner") -> dict:
-    """Через GigaChat превращает сырое описание бизнеса от клиента в короткие
-    продающие заголовок/подзаголовок/цену/преимущества для баннера."""
-    try:
-        from gigachat_pool import chat_with_fallback
-        from gigachat.models import Messages, MessagesRole
+def _generate_marketing_copy(
+    raw_description: str,
+    account_id: str = None,
+    operation: str = "marketing_copy_full_banner",
+) -> dict:
+    """
+    OpenAI-копирайтер баннерного контура.
 
-        prompt = f'''Ты опытный маркетолог-копирайтер рекламных баннеров. На основе описания бизнеса от клиента придумай КОРОТКИЙ текст для рекламного баннера.
-ВАЖНО: используй ТОЛЬКО факты, явно упомянутые в описании клиента. НИКОГДА не выдумывай гарантии/скидки/бесплатные услуги, которых там нет.
-Ответь СТРОГО в формате JSON без markdown-разметки, без пояснений:
-{{"title": "короткий цепляющий заголовок, до 4 слов, без капса", "subtitle": "короткое уточнение до 5 слов или пустая строка", "price_text": "краткая цена-предложение если есть в описании, иначе пустая строка", "advantages": ["преимущество 1", "преимущество 2", "преимущество 3"]}}
+    Вход:
+        сырое описание бизнеса клиента.
 
-Описание бизнеса от клиента: {raw_description}'''
+    Выход:
+        title
+        subtitle
+        price_text
+        advantages
 
-        raw = chat_with_fallback([Messages(role=MessagesRole.USER, content=prompt)], account_id=account_id, operation=operation).strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        data = _json.loads(raw)
+    Правила:
+        - только факты из исходного описания;
+        - никаких выдуманных скидок;
+        - никаких выдуманных гарантий;
+        - никаких выдуманных сроков;
+        - короткий текст для дизайнерского макета;
+        - преимущества пригодны для отдельных визуальных элементов.
+    """
+
+    import json
+    import os
+
+    source = " ".join(
+        (raw_description or "").strip().split()
+    )
+
+    if not source:
         return {
-            "title": data.get("title", raw_description[:40]),
-            "subtitle": data.get("subtitle", ""),
-            "price_text": data.get("price_text", ""),
-            "advantages": data.get("advantages", [])[:3],
+            "title": "",
+            "subtitle": "",
+            "price_text": "",
+            "advantages": [],
         }
-    except Exception as e:
-        print(f"[_generate_marketing_copy] Ошибка, используем сырой текст: {e}", flush=True)
-        return {"title": raw_description[:40], "subtitle": "", "price_text": "", "advantages": []}
+
+    fallback = {
+        "title": source[:70],
+        "subtitle": "",
+        "price_text": "",
+        "advantages": [],
+    }
+
+    try:
+        import hashlib
+        from app.api.campaigns import _ff_guarded_openai_response
+
+        # Reuse the existing canonical paid Responses contour used by
+        # Campaign/Feed Factory. One source text is one durable economic intent:
+        # no OpenAI SDK retries, exact provider request id, ai_budget, account
+        # burst/daily caps, cross-process lock and durable paid-result cache.
+        prompt = (
+            "Ты арт-директор и рекламный копирайтер BORIS. Создай короткий текст для рекламного баннера. "
+            "Работай ТОЛЬКО с фактами из входного описания. Ничего не придумывай. "
+            "Не добавляй скидки, гарантии, сроки, цены, подарки или преимущества, которых нет во входных данных. "
+            "Не используй пустые клише, если они явно не подтверждены. Заголовок до 4 слов, подзаголовок до 7 слов, "
+            "максимум 3 коротких преимущества. Если цены нет — price_text пустой. "
+            "Верни только JSON вида {\"title\":\"\",\"subtitle\":\"\",\"price_text\":\"\",\"advantages\":[]}.\n\n"
+            "Описание бизнеса клиента:\n" + source
+        )
+        source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        paid = _ff_guarded_openai_response(
+            str(account_id or ""), operation, "gpt-5-mini",
+            [{"role": "user", "content": prompt}], 800,
+            "banner-copy:" + source_hash, timeout=120,
+        )
+        raw = str((paid or {}).get("text") or "").strip()
+        data = json.loads(raw)
+
+        title = str(
+            data.get("title") or ""
+        ).strip()
+
+        subtitle = str(
+            data.get("subtitle") or ""
+        ).strip()
+
+        price_text = str(
+            data.get("price_text") or ""
+        ).strip()
+
+        advantages = [
+            str(x).strip()
+            for x in (
+                data.get("advantages")
+                or []
+            )
+            if str(x).strip()
+        ][:3]
+
+        if not title:
+            title = fallback["title"]
+
+        result = {
+            "title": title[:90],
+            "subtitle": subtitle[:140],
+            "price_text": price_text[:60],
+            "advantages": [
+                x[:80]
+                for x in advantages
+            ],
+        }
+
+        print(
+            "[BANNER COPY] provider=openai"
+            " model=gpt-5-mini"
+            f" operation={operation}"
+            f" account={account_id}",
+            flush=True,
+        )
+
+        return result
+
+    except Exception as exc:
+        print(
+            "[BANNER COPY] OpenAI failed; safe fallback; "
+            f"error={repr(exc)[:300]}",
+            flush=True,
+        )
+
+        return fallback
+
 
 router = APIRouter(prefix="/api/banners", tags=["banners"])
 
@@ -75,7 +183,7 @@ class InfographicRequest(BaseModel):
     photo_source: str = "ai"
     ai_quality: str = "medium"
     own_photo_url: str = ""
-    ai_model: str = "gpt-image-2"
+    ai_model: str = "gpt-image-1-mini"
 
 
 class DiagonalRequest(BaseModel):
@@ -123,11 +231,23 @@ def _account_banner_dir(account_id: str, subfolder: str) -> str:
 from fastapi import Depends as _DepSec
 from app.api.auth import require_owner as _ReqOwner, get_current_user as _CurUser
 @router.post("/infographic")
-def create_infographic(req: InfographicRequest):
+def create_infographic(req: InfographicRequest, current_user=_DepSec(_CurUser)):
     from banner_generator import generate_infographic_banner
     import time as _time
 
-    folder = _account_banner_dir(req.account_id, "infographic")
+    # This legacy-compatible own-photo route is still used by the dashboard.
+    # Enforce the same account authorization as V4 before touching media or paid AI.
+    account_id = _banner_v2_account_access(req.account_id, current_user)
+    # The dashboard uses this endpoint only when the owner selected an existing
+    # account photo. AI-background infographic mode is retired: new generated
+    # advertising visuals must use the canonical local-text compositor.
+    if not str(req.own_photo_url or "").strip():
+        return {
+            "status": "error", "code": "legacy_infographic_ai_mode_retired",
+            "detail": "Для нового баннера используйте безопасный генератор: визуал без AI-текста + локальная типографика.",
+            "safe_endpoint": "/api/banners/v2/create-one",
+        }
+    folder = _account_banner_dir(account_id, "infographic")
     fname = f"infographic_{int(_time.time())}.png"
     fpath = f"{folder}/{fname}"
 
@@ -136,21 +256,38 @@ def create_infographic(req: InfographicRequest):
     title = req.title
     subtitle = req.subtitle
     price_text = req.price_text
-    if len(req.title) > 45 and not req.subtitle:
-        copy = _generate_marketing_copy(req.title, account_id=req.account_id, operation="marketing_copy_infographic")
+    # Own-photo mode is explicitly local-only: choosing an existing client image
+    # must never trigger a hidden paid copy/image request. Long owner text is
+    # normalized by the deterministic mobile contract below instead.
+    if len(req.title) > 45 and not req.subtitle and not req.own_photo_url:
+        copy = _generate_marketing_copy(req.title, account_id=account_id, operation="marketing_copy_infographic")
         title = copy["title"]
         subtitle = copy["subtitle"]
         price_text = copy["price_text"] or req.price_text
 
+    # Mobile Avito contract for the still-active own-photo compositor. Never
+    # shrink a long paragraph into unreadable microcopy: keep one short hero
+    # statement and a short optional subtitle.
+    title = " ".join(str(title or "").split()[:6])[:70].strip()
+    subtitle = " ".join(str(subtitle or "").split()[:8])[:90].strip()
+    if not title:
+        raise HTTPException(400, "Для баннера нужен короткий заголовок")
+
     own_photo_path = None
     if req.own_photo_url:
         try:
-            _rel = req.own_photo_url.split("/images/")[-1]
-            _candidate = f"{IMAGES_DIR}/{_rel}"
-            if os.path.isfile(_candidate):
-                own_photo_path = _candidate
+            from pathlib import Path as _Path
+            _root = _Path(IMAGES_DIR).resolve()
+            _rel = str(req.own_photo_url).split("?", 1)[0].split("/images/", 1)[-1].lstrip("/")
+            _candidate = (_root / _rel).resolve()
+            # No traversal and no cross-account media reuse through this endpoint.
+            _candidate.relative_to(_root / account_id)
+            if _candidate.is_file():
+                own_photo_path = str(_candidate)
         except Exception:
             own_photo_path = None
+        if not own_photo_path:
+            raise HTTPException(400, "Выбранное фото недоступно в медиатеке этого аккаунта")
 
     generate_infographic_banner(
         title=title,
@@ -163,19 +300,43 @@ def create_infographic(req: InfographicRequest):
         bg_color_bottom=req.bg_color_bottom,
         accent_color=req.accent_color,
         output_path=fpath,
-        photo_source="ai",  # клиентский баннер всегда рисует OpenAI
+        # Own-photo mode is local-only: never buy/generate a replacement when the
+        # owner explicitly selected an existing image. AI remains background-only
+        # only when no owner photo was selected.
+        photo_source="ai",
         ai_quality=req.ai_quality,
         ai_model=req.ai_model,
-        own_photo_path=None, account_id=req.account_id, operation="banner_infographic",
+        own_photo_path=own_photo_path, account_id=account_id, operation="banner_infographic",
     )
 
     _theme = _slugify_theme(req.title)
-    _save_banner_record(req.account_id, fname, "infographic", req.title, f"{req.title} | {req.subtitle or ''}", "pillow", "infographic")
-    return {"status": "ok", "url": f"{BASE_URL}/{req.account_id}/banners/infographic/{fname}"}
+    _save_banner_record(account_id, fname, "infographic", req.title, f"{req.title} | {req.subtitle or ''}", "pillow", "infographic")
+    # Canonical media registration: the gallery, feed validators and later reuse
+    # must see the same approved artifact the dashboard just created.
+    from app.services.banner_media import register_banner as _register_banner
+    _media = _register_banner(
+        account_id=account_id, absolute_path=fpath,
+        source_provider=("boris_local" if own_photo_path else "openai_visual_local_text"),
+        source_ref=("own_photo_local_text_v1" if own_photo_path else "legacy_infographic_visual_local_text_v1"),
+    )
+    _canonical_url = "/images/" + str(_media["storage_key"]).lstrip("/")
+    return {
+        "status": "ok", "url": _canonical_url, "urls": [_canonical_url],
+        "media_id": _media["id"], "storage_key": _media["storage_key"],
+        "avito_safe": True, "layout": "own_photo_local_text" if own_photo_path else "visual_local_text",
+    }
 
 
 @router.post("/diagonal")
 def create_diagonal(req: DiagonalRequest):
+    # Retired legacy paid layout. No active production UI calls this route.
+    # Return the migration target before any provider/budget logic executes.
+    return {
+        "status": "error", "code": "legacy_banner_layout_retired",
+        "detail": "Старый диагональный генератор отключён. Используйте V4 с локальной типографикой.",
+        "safe_endpoint": "/api/banners/v4/design-one",
+    }
+
     from banner_generator import _generate_diagonal_slide
     import time as _time
 
@@ -210,6 +371,14 @@ def create_diagonal(req: DiagonalRequest):
 
 @router.post("/carousel")
 def create_carousel(req: CarouselRequest):
+    # Retired legacy paid layout; stale callers get a deterministic migration
+    # response before any provider/budget logic executes.
+    return {
+        "status": "error", "code": "legacy_banner_layout_retired",
+        "detail": "Старый карусельный генератор отключён. Используйте V4 с локальной типографикой.",
+        "safe_endpoint": "/api/banners/v4/design-one",
+    }
+
     from banner_generator import generate_carousel_banner_v2
     import time as _time
 
@@ -258,6 +427,8 @@ class FullAiRequest(BaseModel):
     reference_image_base64: str = ""
     reference_image_urls: list = []
     exact_text: str = ""
+    exact_subtitle: str = ""
+    exact_price: str = ""
     count: int = 1  # сколько РАЗНЫХ вариантов баннера сгенерировать за один запрос (макс 5)
     vary_colors: bool = False    # варьировать цветовую палитру между вариантами
     vary_image: bool = False     # варьировать фоновую картинку/сцену между вариантами
@@ -265,112 +436,90 @@ class FullAiRequest(BaseModel):
     vary_all: bool = False       # варьировать полностью всё (композиция, текст, цвет, сцена)
     template_id: str = ""               # id шаблона из banner_library аккаунта
     use_template_library: bool = False  # opt-in: текст и стиль из библиотеки, фон рисует OpenAI
+    idempotency_key: str = ""  # stable key for safe retry of the same paid generation
 
 
 def _describe_reference_style(image_base64: str, account_id: str = None, operation: str = "reference_style_analysis") -> str:
-    """Через OpenAI Vision описывает стиль/композицию референс-фото словами,
-    чтобы использовать это описание как стилевой ориентир для генерации."""
+    """One paid vision intent per reference image; no automatic paid retries."""
     try:
-        import requests
-        import os
-        from proxy_pool import get_intl_requests_proxies
-
-        api_key = os.getenv("OPENAI_API_KEY")
-
-        for _attempt in range(1, 4):
-            proxies = get_intl_requests_proxies()
-            try:
-                resp = requests.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-                    json={
-                        "model": "gpt-4o-mini",
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "Опиши визуальный стиль, композицию, цветовую палитру и расположение элементов на этом рекламном изображении, чтобы использовать это описание как ориентир для генерации похожего дизайна другой картинки. Пиши на английском, компактно, только по делу, без лишних слов."},
-                                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_base64}},
-                            ],
-                        }],
-                        "max_tokens": 300,
-                    },
-                    proxies=proxies,
-                    timeout=60,
-                )
-                if resp.status_code != 200:
-                    print("[_describe_reference_style] Попытка " + str(_attempt) + ": статус " + str(resp.status_code), flush=True)
-                    continue
-                data = resp.json()
-                try:
-                    from app.usage import log_usage as _log_ref
-                    _u = data.get("usage") or {}
-                    _log_ref(account_id, "openai", data.get("model") or "gpt-4o-mini", operation,
-                             prompt_tokens=_u.get("prompt_tokens", 0),
-                             completion_tokens=_u.get("completion_tokens", 0),
-                             request_id=resp.headers.get("x-request-id"))
-                except Exception as _ue:
-                    print("[usage]", str(_ue)[:100], flush=True)
-                return data["choices"][0]["message"]["content"].strip()
-            except Exception as _e:
-                print("[_describe_reference_style] Попытка " + str(_attempt) + " не удалась: " + str(_e), flush=True)
-                continue
-        return ""
-    except Exception as e:
-        print("[_describe_reference_style] Ошибка: " + str(e), flush=True)
+        import base64, hashlib
+        from app.api.campaigns import _ff_guarded_openai_response
+        from app.services.ai_privacy import sanitize_external_reference_image_bytes
+        raw = str(image_base64 or "").strip()
+        if not raw:
+            return ""
+        encoded = raw.split(",", 1)[1] if raw.startswith("data:image/") and "," in raw else raw
+        source_bytes = base64.b64decode(encoded, validate=False)
+        safe_bytes, safe_mime = sanitize_external_reference_image_bytes(
+            source_bytes, max_side=384, blur_radius=3.5
+        )
+        safe_b64 = base64.b64encode(safe_bytes).decode("ascii")
+        fp = hashlib.sha256(safe_bytes).hexdigest()
+        content = [
+            {"type": "input_text", "text": "Опиши только общую визуальную композицию, цветовую палитру и расположение крупных элементов. Не пытайся читать или восстанавливать имена, телефоны, адреса, номера, лица или другой идентифицирующий текст. Пиши на английском, компактно."},
+            {"type": "input_image", "image_url": "data:" + safe_mime + ";base64," + safe_b64},
+        ]
+        paid = _ff_guarded_openai_response(
+            str(account_id or ""), operation, "gpt-5-mini",
+            [{"role": "user", "content": content}], 500,
+            "banner-ref-style:" + fp, timeout=90,
+        )
+        return str((paid or {}).get("text") or "").strip()
+    except Exception as exc:
+        print("[_describe_reference_style] guarded vision failed: " + str(exc)[:240], flush=True)
         return ""
 
 
 def _describe_reference_style_multi(image_urls: list, account_id: str = None, operation: str = "reference_style_analysis_multi") -> str:
-    """Как _describe_reference_style, но принимает до 3 прямых URL уже готовых баннеров
-    (без base64) и просит модель выделить ОБЩИЙ стиль между ними как единый ориентир."""
+    """One paid vision intent for the selected reference set; only sanitized local media leaves BORIS."""
     try:
-        import requests
-        import os
-        from proxy_pool import get_intl_requests_proxies
+        import base64, hashlib, json, os
+        from urllib.parse import urlparse
+        from app.api.campaigns import _ff_guarded_openai_response
+        from app.services.ai_privacy import sanitize_external_reference_image_bytes
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        # OpenAI Vision скачивает картинку САМ по этому URL со своих серверов - относительный
-        # путь вида "/images/..." (как отдают browse_all_banners/showcase) для него не URL,
-        # а мусор: "Failed to download image ... Image URL is invalid." Достраиваем домен.
-        def _absolute_url(u: str) -> str:
-            if u.startswith("http://") or u.startswith("https://"):
-                return u
-            return "https://boris-ai.pro" + (u if u.startswith("/") else "/" + u)
-
-        content_blocks = [{"type": "text", "text": "Ниже приведено до 3 примеров рекламных баннеров, которые нравятся владельцу как эталон стиля. Опиши ОБЩИЙ визуальный стиль, композицию, цветовую палитру и расположение элементов, объединяющий эти примеры, чтобы использовать это описание как ориентир для генерации похожего дизайна другого баннера. Пиши на английском, компактно, только по делу, без лишних слов."}]
-        for url in image_urls[:3]:
-            content_blocks.append({"type": "image_url", "image_url": {"url": _absolute_url(url)}})
-
-        for _attempt in range(1, 4):
-            proxies = get_intl_requests_proxies()
-            try:
-                resp = requests.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-                    json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": content_blocks}], "max_tokens": 300},
-                    proxies=proxies,
-                    timeout=60,
-                )
-                if resp.status_code != 200:
-                    print("[_describe_reference_style_multi] Попытка " + str(_attempt) + ": статус " + str(resp.status_code) + " - " + resp.text[:500], flush=True)
-                    continue
-                data = resp.json()
-                try:
-                    from app.usage import log_usage as _log_ref
-                    _u = data.get("usage") or {}
-                    _log_ref(account_id, "openai", data.get("model") or "gpt-4o-mini", operation,
-                             prompt_tokens=_u.get("prompt_tokens", 0),
-                             completion_tokens=_u.get("completion_tokens", 0),
-                             request_id=resp.headers.get("x-request-id"))
-                except Exception as _ue:
-                    print("[usage]", str(_ue)[:100], flush=True)
-                return data["choices"][0]["message"]["content"].strip()
-            except Exception as _e:
-                print("[_describe_reference_style_multi] Попытка " + str(_attempt) + " не удалась: " + str(_e), flush=True)
+        safe_images = []
+        for raw_url in (image_urls or [])[:3]:
+            u = str(raw_url or "").strip()
+            if not u:
                 continue
-        return ""
-    except Exception as e:
-        print("[_describe_reference_style_multi] Ошибка: " + str(e), flush=True)
+            source_bytes = None
+            if u.startswith("data:image/") and ";base64," in u[:120]:
+                try:
+                    source_bytes = base64.b64decode(u.split(",", 1)[1], validate=False)
+                except Exception:
+                    source_bytes = None
+            else:
+                parsed = urlparse(u if "://" in u else "https://boris-ai.pro/" + u.lstrip("/"))
+                if parsed.hostname in {"boris-ai.pro", "www.boris-ai.pro", "193.160.209.44", "127.0.0.1", "localhost"} and parsed.path.startswith("/images/"):
+                    local_path = os.path.realpath("/root/BORIS/backend" + parsed.path)
+                    images_root = os.path.realpath("/root/BORIS/backend/images")
+                    if local_path.startswith(images_root + os.sep) and os.path.isfile(local_path):
+                        with open(local_path, "rb") as fh:
+                            source_bytes = fh.read()
+            if not source_bytes:
+                # Never give an external model a private/signed/arbitrary URL.
+                continue
+            safe_bytes, safe_mime = sanitize_external_reference_image_bytes(
+                source_bytes, max_side=384, blur_radius=3.5
+            )
+            safe_images.append(
+                "data:" + safe_mime + ";base64," + base64.b64encode(safe_bytes).decode("ascii")
+            )
+
+        if not safe_images:
+            return ""
+        fp = hashlib.sha256(json.dumps(safe_images, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        content = [{"type": "input_text", "text": "Ниже до 3 обезличенных рекламных референсов. Опиши только ОБЩИЙ визуальный стиль, композицию, цветовую палитру и расположение крупных элементов. Не восстанавливай имена, телефоны, адреса, номера, лица или другой идентифицирующий текст. Пиши на английском, компактно."}]
+        content.extend({"type": "input_image", "image_url": u} for u in safe_images)
+        paid = _ff_guarded_openai_response(
+            str(account_id or ""), operation, "gpt-5-mini",
+            [{"role": "user", "content": content}], 500,
+            "banner-ref-style-multi:" + fp, timeout=90,
+        )
+        return str((paid or {}).get("text") or "").strip()
+    except Exception as exc:
+        print("[_describe_reference_style_multi] guarded vision failed: " + str(exc)[:240], flush=True)
         return ""
 
 
@@ -399,6 +548,10 @@ def browse_all_banners(limit: int = 200, user=_DepSec(_CurUser)):
                 continue
             for root, _dirs, files in _os_ex.walk(banners_root):
                 for fname in files:
+                    # Quarantined legacy text-in-image banners stay on disk only as
+                    # recovery evidence; never expose them as reusable UI choices.
+                    if fname.lower().startswith(("fullai_", "gptimg_")):
+                        continue
                     if fname.lower().endswith((".png", ".jpg", ".jpeg")):
                         full_path = _os_ex.path.join(root, fname)
                         rel = _os_ex.path.relpath(full_path, IMAGES_DIR)
@@ -425,6 +578,11 @@ def get_banner_showcase(account_id: str, user=_DepSec(_CurUser)):
     try:
         row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "banner_showcase").first()
         items = _json_sc.loads(row.value) if row else []
+        # Never return quarantined legacy full-AI text banners from a showcase,
+        # even if an old storage snapshot still contains their URL.
+        items = [it for it in items if not _is_legacy_fullai_banner_url(
+            (it.get("url") if isinstance(it, dict) else str(it)) or ""
+        )]
         if getattr(user, "role", "") != "owner":
             from app.models.account import Account as _AccSc
             _allowed = {a.account_id for a in db.query(_AccSc).filter(
@@ -572,6 +730,8 @@ def add_to_banner_showcase(req: ShowcaseUrlRequest):
     from PIL import Image as _Image_sc
 
     final_url = req.url
+    if _is_legacy_fullai_banner_url(final_url):
+        return {"status": "error", "message": "Этот старый тип баннера запрещён для повторного использования в Avito."}
     try:
         if req.url.startswith("/images/") or req.url.startswith("http://193.160.209.44:8000/images/") or req.url.startswith("https://boris-ai.pro/images/"):
             rel = req.url.split("/images/", 1)[1]
@@ -666,7 +826,8 @@ def _template_background_query(tpl: dict, style: dict) -> str:
     """Запрос на ФОН для OpenAI: сцена без единой надписи, текст накладываем сами."""
     photo = (tpl.get("photo") or "").strip() or (tpl.get("subtype") or "объект")
     niche = (style or {}).get("niche", "")
-    scene = "строительная бытовка, блок-контейнер" if niche == "bytovki" else "мебель на заказ в интерьере"
+    scene = (style or {}).get("scene") or (
+        "строительная бытовка, блок-контейнер" if niche == "bytovki" else "мебель на заказ в интерьере")
     return (
         "Photorealistic advertising background photo, square. Scene: " + photo + " (" + scene + "). "
         "Professional commercial photography, natural lighting, clean uncluttered composition, "
@@ -680,8 +841,24 @@ def _template_background_query(tpl: dict, style: dict) -> str:
 
 @router.post("/full_ai")
 def create_full_ai_banner(req: FullAiRequest):
-    from banner_generator import generate_ai_image
     import time as _time
+
+    # Reject the retired unsafe mode BEFORE any paid-generation/idempotency logic.
+    # Old callers therefore get a deterministic migration answer without being
+    # mistaken for a paid request and without any provider/budget side effects.
+    if not req.use_template_library:
+        return {
+            "status": "error",
+            "code": "legacy_text_in_image_forbidden",
+            "detail": "Старая генерация текста внутри AI-изображения отключена. Используйте безопасный V4: визуал без текста + локальная типографика.",
+            "safe_endpoint": "/api/banners/v2/create-one",
+        }
+
+    # Only the safe template-library branch is paid; it requires one stable caller identity.
+    _idem = str(getattr(req, "idempotency_key", "") or "").strip()
+    if not _idem:
+        return {"status": "idempotency_required", "code": "paid_idempotency_required",
+                "detail": "Для платной генерации нужен ключ безопасного повтора. Обновите страницу и запустите ещё раз."}
 
     if req.use_template_library:
         from fastapi import HTTPException as _HTTPExc
@@ -698,13 +875,14 @@ def create_full_ai_banner(req: FullAiRequest):
         _price = (_tpl.get("price") or "") if _tpl.get("has_price") else ""
         _q = _template_background_query(_tpl, _style)
         _folder = _account_banner_dir(req.account_id, "infographic")
-        _fname = "tpl_" + str(req.template_id) + "_" + str(int(_t2.time())) + ".png"
+        _tpl_intent = _h2.sha256((str(req.account_id) + "|" + _idem + "|" + str(req.template_id)).encode("utf-8")).hexdigest()[:24]
+        _fname = "tpl_" + str(req.template_id) + "_idem_" + _tpl_intent + ".png"
         _fpath = _folder + "/" + _fname
         _gen_info(
             title=_tpl["title"], subtitle=_tpl.get("subtitle", ""), price_text=_price,
             icon_name="circle-check.svg", bg_color_top=_primary, bg_color_bottom=_primary,
             accent_color=_accent, output_path=_fpath, photo_query=_q,
-            photo_source="ai", ai_quality=req.quality, ai_model="gpt-image-2",
+            photo_source="ai", ai_quality=req.quality, ai_model="gpt-image-1-mini",
             own_photo_path=None, account_id=req.account_id, operation="banner_from_template",
         )
         _meta = {"template_id": _tpl.get("id"), "template_type": _tpl.get("type"),
@@ -718,236 +896,8 @@ def create_full_ai_banner(req: FullAiRequest):
                 "urls": [BASE_URL + "/" + req.account_id + "/banners/infographic/" + _fname],
                 "template_id": _tpl.get("id")}
 
-    size_map = {
-        "infographic": ("1024x1024", "infographic"),
-        "extended_pc": ("1536x1024", "extended"),
-        "extended_mobile": ("1024x1536", "extended"),
-        "max_pc": ("1536x1024", "max_carousel"),
-        "max_mobile": ("1024x1536", "max_carousel"),
-    }
-    size, subfolder = size_map.get(req.format, ("1024x1024", "infographic"))
-
-    target_dims = {
-        "extended_pc": (1202, 436),
-        "extended_mobile": (1242, 936),
-        "max_pc": (1304, 480),
-        "max_mobile": (1420, 960),
-    }
-
-    def _safe_zone_percent(fmt, gen_size_str):
-        """Реальный % высоты, переживающий smart-crop (вместо угадывания 55% для всех форматов).
-        Мобильные форматы обрезаются сильнее (портретный источник -> альбомная цель), поэтому
-        считаем честно под каждый конкретный формат, с запасом 15% на неточность ИИ-художника."""
-        if fmt not in target_dims:
-            return 55
-        target_w, target_h = target_dims[fmt]
-        src_w, src_h = [int(x) for x in gen_size_str.split("x")]
-        scale = max(target_w / src_w, target_h / src_h)
-        new_h = src_h * scale
-        kept_fraction = target_h / new_h
-        safe_percent = int(kept_fraction * 100 * 0.85)
-        return max(30, min(safe_percent, 90))
-
-    safe_percent = _safe_zone_percent(req.format, size)
-
-    if req.exact_text:
-        copy = {"title": req.exact_text, "subtitle": "", "price_text": "", "advantages": []}
-    else:
-        copy = _generate_marketing_copy(req.raw_description, account_id=req.account_id, operation="marketing_copy_full_banner")
-
-    style_reference_text = ""
-    if req.reference_image_urls:
-        style_desc = _describe_reference_style_multi(req.reference_image_urls, account_id=req.account_id, operation="reference_style_analysis_multi")
-        if style_desc:
-            style_reference_text = "\n\nStyle reference (match this visual style/layout/palette as closely as possible, based on chosen example banners): " + style_desc
-    elif req.reference_image_base64:
-        style_desc = _describe_reference_style(req.reference_image_base64, account_id=req.account_id, operation="reference_style_analysis")
-        if style_desc:
-            style_reference_text = "\n\nStyle reference (match this visual style/layout/palette as closely as possible): " + style_desc
-
-    advantages_text = ""
-    if copy["advantages"]:
-        adv_lines = []
-        for a in copy["advantages"]:
-            adv_lines.append("- circular icon with label: \"" + a + "\"")
-        adv_joined = "\n".join(adv_lines)
-        advantages_text = "\nBelow the subtitle, show a row of small circular icon badges with short labels, one per line:\n" + adv_joined
-
-    is_wide_crop_format = req.format in ("extended_pc", "extended_mobile", "max_pc", "max_mobile")
-
-    price_block = ""
-    if copy["price_text"]:
-        if is_wide_crop_format:
-            price_block = "\nWithin the central horizontal band (NOT at the extreme top edge), a rounded badge with the exact text: \"" + copy["price_text"] + "\""
-        else:
-            price_block = "\nIn the top corner, a rounded badge with the exact text: \"" + copy["price_text"] + "\""
-
-    subtitle_block = ""
-    if copy["subtitle"]:
-        subtitle_block = "\nBelow it, smaller, write this Russian subtitle: \"" + copy["subtitle"] + "\""
-
-    contact_block = ""
-    if req.include_contacts and (req.phone or req.address):
-        contact_parts = " | ".join([p for p in [req.phone, req.address] if p])
-        if is_wide_crop_format:
-            contact_block = "\nWithin the central horizontal band (NOT at the extreme bottom edge), a solid color contact bar with phone icon and exact text: \"" + contact_parts + "\""
-        else:
-            contact_block = "\nAt the very bottom, a solid color contact bar with phone icon and exact text: \"" + contact_parts + "\""
-
-    def _make_title_line(text, wide_crop):
-        if wide_crop:
-            return ("In bold modern font, write exactly this Russian text as the main headline: \"" + text + "\". "
-                    "CRITICAL: this banner will be cropped to a WIDE strip — the LEFT and RIGHT edges of the square image WILL BE CUT OFF. "
-                    "Therefore place ALL headline text strictly in the CENTRAL area, both vertically AND horizontally, "
-                    "keeping a wide safe margin (at least 20% of width) from the left and right edges, so NO letter or word gets cropped. "
-                    "Keep the entire headline on as few lines as possible and never let any word touch or exceed the central safe zone.")
-        return "At the top, in bold modern font, write exactly this Russian text as the main headline: \"" + text + "\""
-
-    title_line = _make_title_line(copy["title"], is_wide_crop_format)
-
-    full_prompt = (
-        "Create a professional, vivid advertising banner in Russian, in the style of premium modern advertising campaigns "
-        "(bold colors, dynamic composition, high production value, NOT a plain stock photo).\n\n"
-        "Main accent color theme: " + req.accent_color + " and complementary dark/neutral tones.\n\n"
-        + title_line
-        + subtitle_block
-        + advantages_text
-        + price_block
-        + contact_block
-        + "\n\nMAIN SUBJECT — render the key object EXACTLY as described, matching type, color, size, number of axles/wheels and any special equipment mentioned; do NOT substitute a generic stock version. Business/product description: " + req.raw_description
-        + style_reference_text
-        + "\n\nStyle: clean layout, safe margins from all edges, no watermarks, no random extra text, "
-        "professional advertising photography lighting, composition matching a " + size + " canvas. "
-        "IMPORTANT LAYOUT CONSTRAINT: since this image will later be cropped to a wide/tall banner strip, "
-        "keep ALL important content (text, logo, icons, key visual elements) strictly within the CENTRAL "
-        "horizontal band (middle " + str(safe_percent) + "% of the image height), leaving the top and bottom margins as simple "
-        "background/scene continuation with no critical text or logo elements there.\n\n"
-        "CRITICAL TEXT RULES: Every word of text must be COMPLETELY visible and fully readable, with generous "
-        "padding on all sides — NEVER let any letter, word, or line get cut off, cropped, or run off the edge "
-        "of the image. If the text seems too long, make the font smaller rather than letting it overflow. "
-        "Leave clear empty space around every text block so nothing touches the image border.\n\n"
-        "CRITICAL ORIENTATION RULE: The entire banner must be composed perfectly level and straight — "
-        "horizontal lines (text baselines, horizon, table edges, badge rows) must be exactly horizontal "
-        "(0 degrees), and vertical elements must be exactly vertical (90 degrees). Do NOT tilt, rotate, "
-        "or skew the overall composition or the camera angle even slightly — no Dutch angle, no diagonal framing."
-    )
-
-    is_carousel = req.format in ("max_pc", "max_mobile")
-
-    if is_carousel:
-        # У каждого слайда СВОЙ набор текстовых блоков — карусель не должна показывать
-        # один и тот же заголовок трижды, иначе слайды выглядят как копии друг друга.
-        subtitle_for_slide2 = subtitle_block if copy["subtitle"] else ""
-
-        slide1_text = title_line + price_block
-        slide1_focus = "\n\nThis is slide 1 of 3 in a carousel: the MAIN OFFER slide, headline and price badge are the visual center of attention."
-
-        slide2_text = advantages_text + subtitle_for_slide2
-        slide2_focus = "\n\nThis is slide 2 of 3 in a carousel: the ADVANTAGES/BENEFITS slide — do NOT repeat the main headline text from slide 1, instead show only the benefit icon badges prominently, slightly different camera angle or scene detail than a generic hero shot."
-
-        slide3_text = contact_block if contact_block else _make_title_line(copy["title"], is_wide_crop_format)
-        slide3_focus = "\n\nThis is slide 3 of 3 in a carousel: a CALL TO ACTION / trust-building close-up slide — do NOT repeat the exact headline text from slide 1, use a warmer, more personal framing of the scene, still matching the same brand style and colors."
-
-        base_prefix = (
-            "Create a professional, vivid advertising banner in Russian, in the style of premium modern advertising campaigns "
-            "(bold colors, dynamic composition, high production value, NOT a plain stock photo).\n\n"
-            "Main accent color theme: " + req.accent_color + " and complementary dark/neutral tones.\n\n"
-        )
-        base_suffix = (
-            "\n\nBackground scene: relevant photorealistic imagery matching this business description: " + req.raw_description
-            + style_reference_text
-            + "\n\nStyle: clean layout, safe margins from all edges, no watermarks, no random extra text, "
-            "professional advertising photography lighting, composition matching a " + size + " canvas. "
-            "IMPORTANT LAYOUT CONSTRAINT: since this image will later be cropped to a wide/tall banner strip, "
-            "keep ALL important content (text, logo, icons, key visual elements) strictly within the CENTRAL "
-            "horizontal band (middle " + str(safe_percent) + "% of the image height), leaving the top and bottom margins as simple "
-            "background/scene continuation with no critical text or logo elements there.\n\n"
-            "CRITICAL TEXT RULES: Every word of text must be COMPLETELY visible and fully readable, with generous "
-            "padding on all sides — NEVER let any letter, word, or line get cut off, cropped, or run off the edge "
-            "of the image. If the text seems too long, make the font smaller rather than letting it overflow. "
-            "Leave clear empty space around every text block so nothing touches the image border.\n\n"
-            "CRITICAL ORIENTATION RULE: The entire banner must be composed perfectly level and straight — "
-            "horizontal lines (text baselines, horizon, table edges, badge rows) must be exactly horizontal "
-            "(0 degrees), and vertical elements must be exactly vertical (90 degrees). Do NOT tilt, rotate, "
-            "or skew the overall composition or the camera angle even slightly — no Dutch angle, no diagonal framing."
-        )
-
-        slide_prompts = [
-            base_prefix + slide1_text + base_suffix + slide1_focus,
-            base_prefix + slide2_text + base_suffix + slide2_focus,
-            base_prefix + slide3_text + base_suffix + slide3_focus,
-        ]
-    else:
-        variant_count = max(1, min(req.count, 5))
-        if variant_count == 1:
-            slide_prompts = [full_prompt]
-        else:
-            # цветовые темы и сцены для вариаций - используются только если соответствующая галочка включена
-            color_themes = ["warm orange/red tones", "cool blue/teal tones", "vibrant purple/pink tones",
-                             "fresh green/lime tones", "elegant gold/black tones"]
-            scene_variants = ["close-up product-centered shot", "wide establishing shot with more environment",
-                               "dynamic action/movement shot", "minimalist clean studio shot", "lifestyle in-use shot"]
-            icon_variants = ["circular badge icons", "square rounded-corner icons", "outline/line-style icons",
-                              "filled solid-color icons", "no icons, text-only labels"]
-
-            slide_prompts = []
-            for i in range(variant_count):
-                parts = ["\n\nVARIANT {idx} of {n}:".format(idx=i+1, n=variant_count)]
-                if req.vary_all:
-                    parts.append(" Make this variant COMPLETELY different from the others: different composition/camera angle ("
-                                 + scene_variants[i % len(scene_variants)] + "), different color palette ("
-                                 + color_themes[i % len(color_themes)] + "), different icon style ("
-                                 + icon_variants[i % len(icon_variants)] + "), and rephrase all text with fresh wording (do not repeat exact phrasing from other variants).")
-                else:
-                    if req.vary_colors:
-                        parts.append(" Use this color palette: " + color_themes[i % len(color_themes)] + ".")
-                    if req.vary_image:
-                        parts.append(" Use this scene/composition: " + scene_variants[i % len(scene_variants)] + ".")
-                    if req.vary_icons:
-                        parts.append(" Use this icon style: " + icon_variants[i % len(icon_variants)] + ".")
-                    if not (req.vary_colors or req.vary_image or req.vary_icons):
-                        # ничего не выбрано, но count>1 - минимальная защита от полных дублей
-                        parts.append(" Use a slightly different composition/angle than the other variants (variant #" + str(i+1) + ").")
-                slide_prompts.append(full_prompt + "".join(parts))
-
-    folder = _account_banner_dir(req.account_id, subfolder)
-    urls = []
-    for idx, slide_prompt in enumerate(slide_prompts):
-        suffix = ("_slide" + str(idx + 1)) if is_carousel else ""
-        fname = "fullai_" + req.format + suffix + "_" + str(int(_time.time())) + "_" + str(idx) + ".png"
-        fpath = folder + "/" + fname
-
-        result = generate_ai_image(slide_prompt, fpath, size=size, quality=req.quality, model="gpt-image-2", account_id=req.account_id, operation=req.operation)
-        if not result:
-            if urls:
-                break
-            return {"status": "error", "detail": "Генерация не удалась, попробуйте ещё раз"}
-
-        if req.format in target_dims:
-            from PIL import Image as _Image
-            target_w, target_h = target_dims[req.format]
-            img = _Image.open(fpath).convert("RGB")
-            src_w, src_h = img.size
-            scale = max(target_w / src_w, target_h / src_h)
-            new_w, new_h = int(src_w * scale), int(src_h * scale)
-            img = img.resize((new_w, new_h), _Image.LANCZOS)
-            left = (new_w - target_w) // 2
-            top = (new_h - target_h) // 2
-            img = img.crop((left, top, left + target_w, top + target_h))
-            img.save(fpath, "PNG", quality=95)
-
-        urls.append(BASE_URL + "/" + req.account_id + "/banners/" + subfolder + "/" + fname)
-        _theme_text = (copy.get("title") if isinstance(copy, dict) else None) or req.raw_description[:60]
-        _save_banner_record(req.account_id, fname, subfolder, _theme_text, req.raw_description[:300], "full_ai", req.format)
-        _theme_text = (copy.get("title") if isinstance(copy, dict) else None) or req.raw_description[:60]
-        _save_banner_record(req.account_id, fname, subfolder, _theme_text, req.raw_description[:300], "full_ai", req.format)
-
-    if not urls:
-        return {"status": "error", "detail": "Генерация не удалась, попробуйте ещё раз"}
-
-    if is_carousel or len(urls) > 1:
-        return {"status": "ok", "urls": urls, "url": urls[0], "generated_copy": copy}
-    return {"status": "ok", "url": urls[0], "generated_copy": copy}
+    # Both branches above return. Legacy AI-visible-text implementation was removed
+    # rather than merely left unreachable, so future refactors cannot accidentally revive it.
 
 
 @router.delete("/delete")
@@ -967,6 +917,7 @@ def list_banners(account_id: str):
         path = f"{base}/{subfolder}"
         if os.path.isdir(path):
             files = sorted(os.listdir(path), reverse=True)
+            files = [f for f in files if not f.lower().startswith(("fullai_", "gptimg_"))]
             result[subfolder] = [f"{BASE_URL}/{account_id}/banners/{subfolder}/{f}" for f in files]
     return {"status": "ok", "banners": result}
 
@@ -989,47 +940,32 @@ def classify_banner(req: ClassifyBannerRequest):
         return {"status": "error", "message": "Файл баннера не найден"}
 
     with open(local_path, "rb") as img:
-        b64 = base64.b64encode(img.read()).decode()
+        raw_image = img.read()
+    from app.services.ai_privacy import sanitize_external_reference_image_bytes
+    safe_image, safe_mime = sanitize_external_reference_image_bytes(
+        raw_image, max_side=384, blur_radius=3.5
+    )
+    b64 = base64.b64encode(safe_image).decode()
 
-    result = None
-    for _attempt in range(1, 4):
-        proxies = get_intl_requests_proxies()
-        try:
-            resp = _requests_cb.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "model": "gpt-5.4",
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Что рекламирует этот баннер? Ответь одним-двумя словами: конкретный товар или услуга (например 'дорожные плиты', 'бетон', 'шкафы-купе', 'ремонт стиральных машин' и т.п.), без лишних слов."},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
-                        ]
-                    }],
-                    "max_completion_tokens": 30
-                },
-                proxies=proxies, timeout=60
-            )
-            result = resp.json()
-            try:
-                from app.usage import log_usage as _log
-                _u = (result or {}).get("usage", {}) or {}
-                _log(req.account_id, "openai", "gpt-5.4", "распознавание баннера",
-                     _u.get("prompt_tokens", 0), _u.get("completion_tokens", 0))
-            except Exception as _ue:
-                print("[usage]", str(_ue)[:100], flush=True)
-            break
-        except Exception as _e:
-            print("[classify_banner] Попытка " + str(_attempt) + " не удалась: " + str(_e), flush=True)
-            continue
-
-    if result is None:
-        return {"status": "error", "message": "Не удалось связаться с сервисом распознавания (проблема с прокси)"}
     try:
-        topic = result["choices"][0]["message"]["content"].strip().lower()
-    except Exception:
-        return {"status": "error", "message": f"Не удалось распознать: {result}"}
+        import hashlib
+        from app.api.campaigns import _ff_guarded_openai_response
+        fp = hashlib.sha256(b64.encode("ascii", errors="ignore")).hexdigest()
+        content = [
+            {"type": "input_text", "text": "Что рекламирует этот баннер? Ответь одним-двумя словами: конкретный товар или услуга, без лишних слов."},
+            {"type": "input_image", "image_url": "data:" + safe_mime + ";base64," + b64},
+        ]
+        paid = _ff_guarded_openai_response(
+            str(req.account_id or ""), "banner_classify", "gpt-5-mini",
+            [{"role": "user", "content": content}], 80,
+            "banner-classify:" + fp, timeout=90,
+        )
+        topic = str((paid or {}).get("text") or "").strip().lower()
+        if not topic:
+            return {"status": "error", "message": "Не удалось распознать баннер"}
+    except Exception as exc:
+        print("[classify_banner] guarded vision failed: " + str(exc)[:240], flush=True)
+        return {"status": "error", "message": "Не удалось выполнить распознавание"}
 
     from app.db.session import SessionLocal
     from app.models.storage import Storage
@@ -1099,3 +1035,1262 @@ def download_selected(payload: dict = Body(...)):
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="boris_banners.zip"'},
     )
+
+# ===== BORIS BANNER V2 SAFE API =====
+
+
+# ===== BORIS BANNER V2 SAFE API =====
+
+class BannerV2CreateOneRequest(BaseModel):
+    account_id: str
+    description: str
+    title: str = ""
+    subtitle: str = ""
+    price_text: str = ""
+    photo_url: str = ""
+    accent_color: str = "#2F6FED"
+    idempotency_key: str = ""
+
+
+@router.post("/v2/create-one")
+def banner_v2_create_one(
+    req: BannerV2CreateOneRequest,
+    current_user=_DepSec(_CurUser),
+):
+    """
+    Один контрольный баннер.
+
+    Всегда count=1.
+    Клиент не выбирает AI-модель/quality.
+    Результат сохраняется legacy-совместимо и копируется в Единую медиатеку.
+    """
+    from sqlalchemy import text as _sql_text
+    from app.db.session import SessionLocal as _BannerSession
+    from app.services.banner_media import register_banner as _register_banner
+
+    account_id = (req.account_id or "").strip()
+
+    if not account_id:
+        raise HTTPException(400, "Не выбран аккаунт")
+
+    # Проверяем, что текущий пользователь имеет доступ к аккаунту.
+    db = _BannerSession()
+
+    try:
+        uid = getattr(current_user, "id", None)
+
+        if uid is None and isinstance(current_user, dict):
+            uid = current_user.get("id") or current_user.get("user_id")
+
+        if not uid:
+            raise HTTPException(401, "Требуется авторизация")
+
+        row = db.execute(
+            _sql_text("""
+                SELECT 1
+                FROM accounts a
+                WHERE a.account_id=:a
+                  AND (
+                       a.owner_user_id=:u
+                       OR EXISTS (
+                           SELECT 1
+                           FROM user_account_access x
+                           WHERE x.account_id=a.account_id
+                             AND x.user_id=:u
+                             AND coalesce(x.can_manage_ads, false)=true
+                       )
+                  )
+                LIMIT 1
+            """),
+            {"a": account_id, "u": int(uid)},
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(
+                403,
+                "Нет прав на этот аккаунт",
+            )
+
+    finally:
+        db.close()
+
+    raw = (req.description or "").strip()
+
+    if not raw:
+        raise HTTPException(
+            400,
+            "Опишите, что нужно показать на баннере",
+        )
+
+    idem = str(req.idempotency_key or "").strip()
+    if not idem:
+        return {
+            "status": "idempotency_required",
+            "code": "paid_idempotency_required",
+            "detail": "Для платной генерации нужен ключ безопасного повтора. Обновите экран и запустите ещё раз.",
+        }
+
+    # Пользовательские точные тексты имеют приоритет.
+    # Если заголовок не задан — существующий copy-контур предложит его сам.
+    exact_title = (req.title or "").strip()
+    exact_subtitle = (req.subtitle or "").strip()
+    exact_price = (req.price_text or "").strip()
+
+    result = create_avito_safe_banner(
+        account_id=account_id,
+        description=raw,
+        direction="architecture",
+        accent_color=req.accent_color or "#2F6FED",
+        exact_title=exact_title,
+        exact_subtitle=exact_subtitle,
+        exact_price=exact_price,
+        idempotency_key=idem,
+    )
+    if result.get("status") != "ok":
+        return result
+    return {
+        "status": "ok",
+        "url": result.get("url"),
+        "generated_copy": result.get("copy"),
+        "media": {"id": result.get("media_id"), "storage_key": result.get("storage_key")},
+        "layout": result.get("layout"),
+        "avito_safe": True,
+        "message": "Баннер готов",
+    }
+
+
+
+# ===== BORIS BANNER V2 STAGE C =====
+
+# ===== BORIS BANNER V2 STAGE C =====
+
+class BannerV2CopyRequest(BaseModel):
+    account_id: str
+    goal: str = "offer"
+    description: str
+
+
+class BannerV2DesignRequest(BaseModel):
+    account_id: str
+    goal: str = "offer"
+    description: str
+    title: str
+    subtitle: str = ""
+    price_text: str = ""
+    accent_color: str = "#2F6FED"
+
+
+def _banner_v2_uid(current_user):
+    uid = getattr(current_user, "id", None)
+
+    if uid is None and isinstance(current_user, dict):
+        uid = (
+            current_user.get("id")
+            or current_user.get("user_id")
+        )
+
+    try:
+        return int(uid)
+    except Exception:
+        raise HTTPException(
+            401,
+            "Требуется авторизация",
+        )
+
+
+def _banner_v2_account_access(account_id, current_user):
+    from sqlalchemy import text as _sql_text
+    from app.db.session import SessionLocal as _BannerSession
+
+    account_id = (account_id or "").strip()
+
+    if not account_id:
+        raise HTTPException(
+            400,
+            "Не выбран аккаунт",
+        )
+
+    uid = _banner_v2_uid(current_user)
+
+    db = _BannerSession()
+
+    try:
+        row = db.execute(
+            _sql_text("""
+                SELECT 1
+                FROM accounts a
+                WHERE a.account_id=:a
+                  AND (
+                    a.owner_user_id=:u
+                    OR EXISTS (
+                        SELECT 1
+                        FROM user_account_access x
+                        WHERE x.account_id=a.account_id
+                          AND x.user_id=:u
+                          AND coalesce(
+                              x.can_manage_ads,
+                              false
+                          )=true
+                    )
+                  )
+                LIMIT 1
+            """),
+            {
+                "a": account_id,
+                "u": uid,
+            },
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(
+                403,
+                "Нет прав на этот аккаунт",
+            )
+
+    finally:
+        db.close()
+
+    return account_id
+
+
+@router.post("/v2/copy")
+def banner_v2_copy(
+    req: BannerV2CopyRequest,
+    current_user=_DepSec(_CurUser),
+):
+    # Retired stage endpoint. Active UI uses V4 copy; return before any paid text call.
+    return {
+        "status": "error", "code": "legacy_banner_stage_retired",
+        "detail": "Старый этап копирайтинга отключён. Используйте V4.",
+        "safe_endpoint": "/api/banners/v4/copy",
+    }
+    account_id = _banner_v2_account_access(
+        req.account_id,
+        current_user,
+    )
+
+    description = (
+        req.description or ""
+    ).strip()
+
+    if not description:
+        raise HTTPException(
+            400,
+            "Расскажите о предложении",
+        )
+
+    goal_labels = {
+        "offer": "главное коммерческое предложение",
+        "price": "акцент на цене или акции",
+        "benefit": "ключевое преимущество",
+    }
+
+    context = (
+        "Цель баннера: "
+        + goal_labels.get(
+            req.goal,
+            goal_labels["offer"],
+        )
+        + ". "
+        + description
+    )
+
+    copy = _generate_marketing_copy(
+        context,
+        account_id=account_id,
+        operation="banner_v2_copy",
+    )
+
+    title = (
+        copy.get("title")
+        or description[:48]
+    ).strip()
+
+    subtitle = (
+        copy.get("subtitle")
+        or ""
+    ).strip()
+
+    price = (
+        copy.get("price_text")
+        or ""
+    ).strip()
+
+    # Защита от служебного текста.
+    banned = (
+        "показать предложение",
+        "сделать акцент на цене",
+        "показать преимущества",
+        "главное коммерческое предложение",
+    )
+
+    if title.lower() in banned:
+        title = description[:48].strip()
+
+    return {
+        "status": "ok",
+        "title": title[:85],
+        "subtitle": subtitle[:130],
+        "price_text": price[:35],
+    }
+
+
+@router.post("/v2/design-one")
+def banner_v2_design_one(
+    req: BannerV2DesignRequest,
+    current_user=_DepSec(_CurUser),
+):
+    # Retired paid compositor. Active UI uses V4; stale callers cannot spend here.
+    return {
+        "status": "error", "code": "legacy_banner_stage_retired",
+        "detail": "Старый дизайн баннера отключён. Используйте V4.",
+        "safe_endpoint": "/api/banners/v4/design-one",
+    }
+    import time as _time
+
+    from app.services.banner_design_v2 import (
+        compose_banner as _compose_banner,
+    )
+    from app.services.banner_media import (
+        register_banner as _register_banner,
+    )
+
+    account_id = _banner_v2_account_access(
+        req.account_id,
+        current_user,
+    )
+
+    description = (
+        req.description or ""
+    ).strip()
+
+    title = (
+        req.title or ""
+    ).strip()
+
+    if not description:
+        raise HTTPException(
+            400,
+            "Расскажите о предложении",
+        )
+
+    if not title:
+        raise HTTPException(
+            400,
+            "Проверьте заголовок",
+        )
+
+    folder = _account_banner_dir(
+        account_id,
+        "infographic",
+    )
+
+    fname = (
+        "design_v2_"
+        + str(int(_time.time()))
+        + ".png"
+    )
+
+    fpath = folder + "/" + fname
+
+    try:
+        design = _compose_banner(
+            account_id=account_id,
+            description=description,
+            goal=req.goal,
+            title=title,
+            subtitle=req.subtitle,
+            price_text=req.price_text,
+            accent_color=req.accent_color,
+            output_path=fpath,
+        )
+
+    except Exception as exc:
+        print(
+            "[banner_v2_design]",
+            repr(exc)[:300],
+            flush=True,
+        )
+
+        raise HTTPException(
+            500,
+            "Не удалось создать баннер",
+        )
+
+    _save_banner_record(
+        account_id,
+        fname,
+        "infographic",
+        title[:60],
+        description[:300],
+        "design_v2",
+        "infographic",
+    )
+
+    media_result = None
+
+    try:
+        media_result = _register_banner(
+            account_id,
+            fpath,
+        )
+    except Exception as exc:
+        print(
+            "[banner_v2_design] media registration failed:",
+            repr(exc)[:300],
+            flush=True,
+        )
+
+    url = (
+        BASE_URL
+        + "/"
+        + account_id
+        + "/banners/infographic/"
+        + fname
+    )
+
+    return {
+        "status": "ok",
+        "url": url,
+        "media": media_result,
+        "art_direction": design.get(
+            "art_direction"
+        ),
+        "message": "Баннер готов",
+    }
+
+
+# ===== BORIS BANNER V3 STAGE D =====
+
+# ===== BORIS BANNER V3 STAGE D =====
+
+class BannerV3CopyRequest(BaseModel):
+    account_id: str
+    goal: str = "offer"
+    description: str
+
+
+class BannerV3DesignRequest(BaseModel):
+    account_id: str
+    goal: str = "offer"
+    description: str
+    title: str
+    subtitle: str = ""
+    advantages: list[str] = []
+    price_text: str = ""
+    accent_color: str = "#2F6FED"
+
+
+@router.post("/v3/copy")
+def banner_v3_copy(
+    req: BannerV3CopyRequest,
+    current_user=_DepSec(_CurUser),
+):
+    # Retired stage endpoint. Active UI uses V4 copy; return before any paid text call.
+    return {
+        "status": "error", "code": "legacy_banner_stage_retired",
+        "detail": "Старый этап копирайтинга отключён. Используйте V4.",
+        "safe_endpoint": "/api/banners/v4/copy",
+    }
+    from app.services.banner_design_v3 import (
+        normalize_copy as _v3_normalize_copy,
+    )
+
+    account_id = _banner_v2_account_access(
+        req.account_id,
+        current_user,
+    )
+
+    description = (
+        req.description or ""
+    ).strip()
+
+    if not description:
+        raise HTTPException(
+            400,
+            "Расскажите о предложении",
+        )
+
+    goal_labels = {
+        "offer": "коммерческое предложение",
+        "price": "акцент на цене",
+        "benefit": "главное преимущество",
+    }
+
+    prompt_context = (
+        "Задача: "
+        + goal_labels.get(
+            req.goal,
+            "коммерческое предложение",
+        )
+        + ". "
+        + description
+    )
+
+    generated = _generate_marketing_copy(
+        prompt_context,
+        account_id=account_id,
+        operation="banner_v3_copy",
+    )
+
+    result = _v3_normalize_copy(
+        description=description,
+        goal=req.goal,
+        generated=generated,
+    )
+
+    return {
+        "status": "ok",
+        **result,
+    }
+
+
+@router.post("/v3/design-one")
+def banner_v3_design_one(
+    req: BannerV3DesignRequest,
+    current_user=_DepSec(_CurUser),
+):
+    # Retired paid compositor. V4 is the only interactive design surface.
+    return {
+        "status": "error", "code": "legacy_banner_stage_retired",
+        "detail": "Старый дизайн баннера отключён. Используйте V4.",
+        "safe_endpoint": "/api/banners/v4/design-one",
+    }
+    import time as _time
+
+    from app.services.banner_design_v3 import (
+        compose_banner_v3 as _v3_compose,
+    )
+
+    from app.services.banner_media import (
+        register_banner as _register_banner,
+    )
+
+    account_id = _banner_v2_account_access(
+        req.account_id,
+        current_user,
+    )
+
+    description = (
+        req.description or ""
+    ).strip()
+
+    title = (
+        req.title or ""
+    ).strip()
+
+    if not description:
+        raise HTTPException(
+            400,
+            "Расскажите о предложении",
+        )
+
+    if not title:
+        raise HTTPException(
+            400,
+            "Проверьте заголовок",
+        )
+
+    # Fail-closed лимиты клиентского текста.
+    if len(title.split()) > 7:
+        raise HTTPException(
+            422,
+            "Заголовок слишком длинный",
+        )
+
+    if len(title) > 62:
+        raise HTTPException(
+            422,
+            "Заголовок слишком длинный",
+        )
+
+    subtitle = (
+        req.subtitle or ""
+    ).strip()
+
+    if len(subtitle.split()) > 9:
+        raise HTTPException(
+            422,
+            "Дополнительная строка слишком длинная",
+        )
+
+    advantages = [
+        str(x).strip()
+        for x in (
+            req.advantages or []
+        )
+        if str(x).strip()
+    ][:3]
+
+    folder = _account_banner_dir(
+        account_id,
+        "infographic",
+    )
+
+    fname = (
+        "design_v3_"
+        + str(
+            int(
+                _time.time()
+            )
+        )
+        + ".png"
+    )
+
+    fpath = (
+        folder
+        + "/"
+        + fname
+    )
+
+    try:
+        result = _v3_compose(
+            account_id=account_id,
+            description=description,
+            goal=req.goal,
+            title=title,
+            subtitle=subtitle,
+            advantages=advantages,
+            price_text=req.price_text,
+            accent_color=req.accent_color,
+            output_path=fpath,
+        )
+
+    except Exception as exc:
+        print(
+            "[banner_v3]",
+            repr(exc)[:400],
+            flush=True,
+        )
+
+        raise HTTPException(
+            500,
+            "Не удалось создать баннер",
+        )
+
+    _save_banner_record(
+        account_id,
+        fname,
+        "infographic",
+        title[:60],
+        description[:300],
+        "design_v3",
+        "infographic",
+    )
+
+    media_result = None
+
+    try:
+        media_result = _register_banner(
+            account_id,
+            fpath,
+        )
+
+    except Exception as exc:
+        print(
+            "[banner_v3] media registration failed:",
+            repr(exc)[:300],
+            flush=True,
+        )
+
+    url = (
+        BASE_URL
+        + "/"
+        + account_id
+        + "/banners/infographic/"
+        + fname
+    )
+
+    return {
+        "status": "ok",
+        "url": url,
+        "media": media_result,
+        "layout": result.get(
+            "layout"
+        ),
+        "message": "Баннер готов",
+    }
+
+
+# ===== BORIS BANNER V4 STAGE E =====
+
+# ===== BORIS BANNER V4 STAGE E =====
+
+class BannerV4CopyRequest(BaseModel):
+    account_id: str
+    goal: str = "offer"
+    description: str
+
+
+class BannerV4DesignRequest(BaseModel):
+    account_id: str
+    goal: str = "offer"
+    description: str
+    title: str
+    subtitle: str = ""
+    advantages: list[str] = []
+    price_text: str = ""
+    accent_color: str = "#2F6FED"
+    idempotency_key: str = ""
+
+
+@router.post("/v4/copy")
+def banner_v4_copy(
+    req: BannerV4CopyRequest,
+    current_user=_DepSec(_CurUser),
+):
+    from app.services.banner_design_v4 import (
+        normalize_copy_v4 as _normalize_v4,
+    )
+
+    account_id = _banner_v2_account_access(
+        req.account_id,
+        current_user,
+    )
+
+    description = (
+        req.description
+        or ""
+    ).strip()
+
+    if not description:
+        raise HTTPException(
+            400,
+            "Расскажите о предложении",
+        )
+
+    goal_labels = {
+        "offer": "главное предложение",
+        "price": "акцент на цене",
+        "benefit": "главное преимущество",
+    }
+
+    context = (
+        "Подготовь очень короткий текст для рекламного баннера. "
+        "Не повторяй всё описание. "
+        "Заголовок максимум 6 слов. "
+        "Уточнение максимум 8 слов. "
+        "Преимущества только из фактов пользователя. "
+        "Не придумывай цены, сроки, гарантии и факты. "
+        "Задача: "
+        + goal_labels.get(
+            req.goal,
+            "главное предложение",
+        )
+        + ". Исходные факты: "
+        + description
+    )
+
+    generated = _generate_marketing_copy(
+        context,
+        account_id=account_id,
+        operation="banner_v4_copy",
+    )
+
+    normalized = _normalize_v4(
+        description=description,
+        goal=req.goal,
+        generated=generated,
+    )
+
+    return {
+        "status": "ok",
+        **normalized,
+    }
+
+
+@router.post("/v4/design-one")
+def banner_v4_design_one(
+    req: BannerV4DesignRequest,
+    current_user=_DepSec(_CurUser),
+):
+    import time as _time
+
+    from app.services.banner_design_v4 import (
+        compose_banner_v4 as _compose_v4,
+    )
+
+    from app.services.banner_media import (
+        register_banner as _register_banner,
+    )
+
+    account_id = _banner_v2_account_access(
+        req.account_id,
+        current_user,
+    )
+
+    description = (
+        req.description
+        or ""
+    ).strip()
+
+    title = (
+        req.title
+        or ""
+    ).strip()
+
+    subtitle = (
+        req.subtitle
+        or ""
+    ).strip()
+
+    if not description:
+        raise HTTPException(
+            400,
+            "Расскажите о предложении",
+        )
+
+    if not title:
+        raise HTTPException(
+            400,
+            "Проверьте заголовок",
+        )
+
+    if len(
+        title.split()
+    ) > 6:
+        raise HTTPException(
+            422,
+            "Заголовок должен быть короче",
+        )
+
+    if len(title) > 60:
+        raise HTTPException(
+            422,
+            "Заголовок должен быть короче",
+        )
+
+    if len(
+        subtitle.split()
+    ) > 8:
+        raise HTTPException(
+            422,
+            "Уточнение должно быть короче",
+        )
+
+    advantages = [
+        str(x).strip()
+        for x
+        in (
+            req.advantages
+            or []
+        )
+        if str(x).strip()
+    ][:3]
+
+    idem = str(req.idempotency_key or "").strip()
+    if not idem:
+        return {
+            "status": "idempotency_required",
+            "code": "paid_idempotency_required",
+            "detail": "Для платной генерации нужен ключ безопасного повтора. Обновите экран и запустите ещё раз.",
+        }
+
+    folder = _account_banner_dir(
+        account_id,
+        "infographic",
+    )
+
+    import hashlib as _hashlib_v4
+    _intent = _hashlib_v4.sha256((account_id + "|v4-design|" + idem).encode("utf-8", "ignore")).hexdigest()[:24]
+    fname = "design_v4_idem_" + _intent + ".png"
+    fpath = folder + "/" + fname
+
+    # Exact replay of a completed request returns the already-created artifact
+    # before any paid background generation. This is the last-line browser retry
+    # guard above ImageGenerationService's own provider idempotency/cache.
+    try:
+        from pathlib import Path as _V4Path
+        _existing = _V4Path(fpath)
+        if _existing.is_file() and _existing.stat().st_size > 1024:
+            with _existing.open("rb") as _fh:
+                _sig = _fh.read(8)
+            if _sig == b"\x89PNG\r\n\x1a\n":
+                _media_existing = _register_banner(
+                    account_id=account_id,
+                    absolute_path=fpath,
+                    source_provider="openai_visual_local_text",
+                    source_ref="banner_v4_design_idempotent",
+                )
+                _url_existing = "/images/" + str(_media_existing["storage_key"]).lstrip("/")
+                return {
+                    "status": "ok", "url": _url_existing,
+                    "media": _media_existing, "layout": "v4_local_text",
+                    "message": "Баннер готов", "idempotency_replay": True,
+                }
+    except OSError:
+        pass
+
+    try:
+        result = _compose_v4(
+            account_id=account_id,
+            description=description,
+            goal=req.goal,
+            title=title,
+            subtitle=subtitle,
+            advantages=advantages,
+            price_text=req.price_text,
+            accent_color=req.accent_color,
+            output_path=fpath,
+        )
+
+    except Exception as exc:
+        print(
+            "[banner_v4]",
+            repr(exc)[:500],
+            flush=True,
+        )
+
+        raise HTTPException(
+            500,
+            "Не удалось создать баннер",
+        )
+
+    _save_banner_record(
+        account_id,
+        fname,
+        "infographic",
+        title[:60],
+        description[:300],
+        "design_v4",
+        "infographic",
+    )
+
+    try:
+        media_result = _register_banner(
+            account_id=account_id,
+            absolute_path=fpath,
+            source_provider="openai_visual_local_text",
+            source_ref="banner_v4_design_idempotent",
+        )
+    except Exception as exc:
+        print(
+            "[banner_v4] media registration failed:",
+            repr(exc)[:400],
+            flush=True,
+        )
+        raise HTTPException(500, "Баннер создан, но не прошёл регистрацию в медиатеке")
+
+    url = "/images/" + str(media_result["storage_key"]).lstrip("/")
+
+    return {
+        "status": "ok",
+        "url": url,
+        "media": media_result,
+
+        # Внутреннее значение:
+        # текущий frontend его не показывает.
+        "design_reference": result.get(
+            "reference"
+        ),
+
+        "message": "Баннер готов",
+    }
+
+
+# ============================================================================
+# BANNER V4 / STAGE E
+# Клиентский поток:
+#   1. prepare — только бесплатная подготовка концепций;
+#   2. create-one — одна реальная генерация выбранного варианта.
+#
+# Установочный код ничего не генерирует.
+# ============================================================================
+
+class BannerV4PrepareRequest(BaseModel):
+    account_id: str
+    description: str
+
+
+class BannerV4CreateRequest(BaseModel):
+    account_id: str
+    description: str
+    direction: str = "architecture"
+    accent_color: str = "#2F6FED"
+    idempotency_key: str = ""
+
+
+_BANNER_V4_DIRECTIONS = {
+    "architecture": {
+        "title": "Архитектурный стиль",
+        "subtitle": "Чисто, дорого и профессионально",
+        "description": (
+            "Светлая современная композиция, аккуратная архитектурная "
+            "сцена, ощущение качества и порядка. Главный акцент — "
+            "профессиональный результат услуги."
+        ),
+    },
+    "result": {
+        "title": "Результат крупным планом",
+        "subtitle": "Показываем качество работы",
+        "description": (
+            "Крупный выразительный кадр результата работы, фактура и "
+            "качество поверхности на первом плане. Минимум отвлекающих "
+            "деталей, сильный визуальный акцент."
+        ),
+    },
+    "interior": {
+        "title": "Современный интерьер",
+        "subtitle": "Услуга в реальной жизни",
+        "description": (
+            "Стильный современный интерьер, естественный свет, "
+            "реалистичная квартира или дом. Услуга органично показана "
+            "в готовом пространстве."
+        ),
+    },
+}
+
+
+def avito_safe_banner_replay_available(account_id: str, idempotency_key: str, direction: str = "architecture") -> bool:
+    """Cheap/no-provider preflight: is this exact child intent already materialized?
+
+    This never trusts the presence of a DB row alone: the deterministic final file
+    must exist and have a real PNG signature. Payload conflicts are still checked
+    by create_avito_safe_banner under the cross-process intent lock.
+    """
+    import hashlib as _hashlib
+    from pathlib import Path as _Path
+    account_id = str(account_id or "").strip()
+    idem = str(idempotency_key or "").strip()
+    if not account_id or not idem:
+        return False
+    chosen = direction if direction in _BANNER_V4_DIRECTIONS else "architecture"
+    intent = _hashlib.sha256((account_id + "|" + idem).encode("utf-8", "ignore")).hexdigest()[:24]
+    path = _Path(IMAGES_DIR) / account_id / "banners" / "v4" / ("banner_v4_avito_idem_%s_%s.png" % (intent, chosen))
+    try:
+        if not path.is_file() or path.stat().st_size <= 1024:
+            return False
+        with path.open("rb") as fh:
+            return fh.read(8) == b"\x89PNG\r\n\x1a\n"
+    except OSError:
+        return False
+
+
+def create_avito_safe_banner(account_id: str, description: str, direction: str = "architecture", accent_color: str = "#2F6FED", exact_title: str = "", exact_subtitle: str = "", exact_price: str = "", idempotency_key: str = "") -> dict:
+    """Canonical internal Avito banner producer.
+
+    Avito must never depend on an AI model to render visible copy.  The paid
+    image layer generates only a photographic background; all Russian text is
+    composed locally by banner_design_v4 with deterministic fonts, wrapping,
+    safe zones and mobile-readable sizing.  Internal workers use this helper
+    instead of the legacy /full_ai route.
+    """
+    import time as _time
+    from pathlib import Path as _Path
+    from app.services.banner_design_v4 import compose_banner_v4 as _compose_banner
+    from app.services.banner_media import register_banner as _register_banner
+
+    account_id = str(account_id or "").strip()
+    description = str(description or "").strip()[:4000]
+    if not account_id:
+        raise ValueError("account_id required")
+    if not description:
+        raise ValueError("description required")
+
+    chosen = direction if direction in _BANNER_V4_DIRECTIONS else "architecture"
+    art = _BANNER_V4_DIRECTIONS[chosen]
+
+    # Stable caller idempotency for browser/network retries. The final local
+    # artifact path is deterministic; a completed valid PNG is returned before
+    # any copy/image provider call. Internal workers may omit the key and keep
+    # their existing explicit-operation semantics.
+    import hashlib as _hashlib
+    idem = str(idempotency_key or "").strip()
+    root = _Path(IMAGES_DIR) / account_id / "banners" / "v4"
+    root.mkdir(parents=True, exist_ok=True)
+    _idem_lock_fh = None
+    if idem:
+        import fcntl as _fcntl, json as _idem_json, os as _idem_os
+        intent = _hashlib.sha256((account_id + "|" + idem).encode("utf-8", "ignore")).hexdigest()[:24]
+        fname = "banner_v4_avito_idem_%s_%s.png" % (intent, chosen)
+        _intent_dir = _Path("/root/BORIS/backend/run/banner_idempotency")
+        _intent_dir.mkdir(parents=True, exist_ok=True)
+        _idem_lock_fh = (_intent_dir / (intent + ".lock")).open("a+")
+        _fcntl.flock(_idem_lock_fh.fileno(), _fcntl.LOCK_EX)
+        _request_hash = _hashlib.sha256(_idem_json.dumps({
+            "account_id": account_id, "description": description, "direction": chosen,
+            "accent_color": str(accent_color or ""), "exact_title": str(exact_title or ""),
+            "exact_subtitle": str(exact_subtitle or ""), "exact_price": str(exact_price or ""),
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        _intent_meta = _intent_dir / (intent + ".json")
+        _intent_record = {}
+        if _intent_meta.is_file():
+            try:
+                _intent_record = _idem_json.loads(_intent_meta.read_text(encoding="utf-8"))
+            except Exception:
+                _intent_record = {}
+            if str(_intent_record.get("request_hash") or "") != _request_hash:
+                _fcntl.flock(_idem_lock_fh.fileno(), _fcntl.LOCK_UN); _idem_lock_fh.close()
+                return {
+                    "status": "error", "code": "idempotency_conflict",
+                    "detail": "Этот ключ безопасного повтора уже использован для другого содержимого баннера.",
+                }
+        else:
+            _tmp_meta = _intent_dir / (intent + ".json.tmp." + str(_idem_os.getpid()))
+            _intent_record = {"request_hash": _request_hash, "created_at": _time.time()}
+            _tmp_meta.write_text(_idem_json.dumps(_intent_record, ensure_ascii=False), encoding="utf-8")
+            _idem_os.replace(_tmp_meta, _intent_meta)
+    else:
+        fname = "banner_v4_avito_%s_%s.png" % (int(_time.time() * 1000), chosen)
+    output_path = root / fname
+
+    if idem and output_path.is_file() and output_path.stat().st_size > 1024:
+        try:
+            with output_path.open("rb") as _fh:
+                _sig = _fh.read(8)
+            if _sig == b"\x89PNG\r\n\x1a\n":
+                media_result = _register_banner(
+                    account_id=account_id,
+                    absolute_path=str(output_path),
+                    source_provider="openai_visual_local_text",
+                    source_ref="avito_safe_v4_local_text",
+                )
+                canonical_url = "/images/" + str(media_result["storage_key"]).lstrip("/")
+                if _idem_lock_fh is not None:
+                    _fcntl.flock(_idem_lock_fh.fileno(), _fcntl.LOCK_UN); _idem_lock_fh.close()
+                return {
+                    "status": "ok", "url": canonical_url, "urls": [canonical_url],
+                    "media_id": media_result["id"], "storage_key": media_result["storage_key"],
+                    "layout": "v4_local_text", "avito_safe": True,
+                    "copy": (_intent_record.get("copy") or {"title": str(exact_title or ""), "subtitle": str(exact_subtitle or ""), "advantages": [], "price_text": str(exact_price or "")}),
+                    "idempotency_replay": True,
+                }
+        except OSError:
+            pass
+
+    copy = _generate_marketing_copy(
+        description,
+        account_id=account_id,
+        operation="banner_avito_safe_copy",
+    )
+    title = str(exact_title or copy.get("title") or description[:60]).strip()[:70]
+    subtitle = str(exact_subtitle or copy.get("subtitle") or "").strip()[:90]
+    advantages = copy.get("advantages") or []
+    if not isinstance(advantages, list):
+        advantages = []
+    advantages = [str(x).strip()[:55] for x in advantages[:3] if str(x).strip()]
+    price_text = str(exact_price or copy.get("price_text") or "").strip()[:35]
+    design_description = (
+        description
+        + "\n\nВЫБРАННАЯ КОНЦЕПЦИЯ:\n"
+        + art["description"]
+        + "\n\nAVITO MOBILE CONTRACT: один главный визуальный объект; крупная типографика; "
+          "не более трёх коротких преимуществ; никаких мелких таблиц, UI-карточек, "
+          "коллажей, псевдо-скриншотов, наклонного текста и текста, встроенного AI в фон."
+    )
+    result = _compose_banner(
+        account_id=account_id,
+        description=design_description,
+        goal="offer",
+        title=title,
+        subtitle=subtitle,
+        advantages=advantages,
+        price_text=price_text,
+        accent_color=accent_color,
+        output_path=str(output_path),
+    )
+    result_path = result.get("path") if isinstance(result, dict) else result
+    if not result_path:
+        raise RuntimeError("safe Avito banner generation failed")
+    media_result = _register_banner(
+        account_id=account_id,
+        absolute_path=str(result_path),
+        source_provider="openai_visual_local_text",
+        source_ref="avito_safe_v4_local_text",
+    )
+    canonical_url = "/images/" + str(media_result["storage_key"]).lstrip("/")
+    if idem:
+        _intent_record.update({
+            "request_hash": _request_hash, "completed_at": _time.time(),
+            "copy": {"title": title, "subtitle": subtitle, "advantages": advantages, "price_text": price_text},
+            "storage_key": str(media_result["storage_key"]), "media_id": media_result["id"],
+        })
+        _tmp_meta = _intent_dir / (intent + ".json.tmp." + str(_idem_os.getpid()))
+        _tmp_meta.write_text(_idem_json.dumps(_intent_record, ensure_ascii=False), encoding="utf-8")
+        _idem_os.replace(_tmp_meta, _intent_meta)
+    if _idem_lock_fh is not None:
+        _fcntl.flock(_idem_lock_fh.fileno(), _fcntl.LOCK_UN); _idem_lock_fh.close()
+    return {
+        "status": "ok",
+        "url": canonical_url,
+        "urls": [canonical_url],
+        "media_id": media_result["id"],
+        "storage_key": media_result["storage_key"],
+        "layout": "v4_local_text",
+        "avito_safe": True,
+        "copy": {"title": title, "subtitle": subtitle, "advantages": advantages, "price_text": price_text},
+    }
+
+
+@router.post("/v4/prepare")
+def banner_v4_prepare(
+    req: BannerV4PrepareRequest,
+    current_user=_DepSec(_CurUser),
+):
+    """
+    Бесплатная подготовка баннера.
+
+    Никакой генерации изображения здесь нет.
+    Возвращаются только три дизайнерские концепции.
+    """
+
+    account_id = _banner_v2_account_access(
+        req.account_id,
+        current_user,
+    )
+
+    description = (req.description or "").strip()
+
+    if not description:
+        raise HTTPException(
+            status_code=400,
+            detail="Добавьте описание услуги",
+        )
+
+    if len(description) > 4000:
+        description = description[:4000]
+
+    return {
+        "status": "ok",
+        "account_id": account_id,
+        "directions": [
+            {
+                "code": code,
+                "title": data["title"],
+                "subtitle": data["subtitle"],
+                "description": data["description"],
+            }
+            for code, data in _BANNER_V4_DIRECTIONS.items()
+        ],
+    }
+
+
+@router.post("/v4/create-one")
+def banner_v4_create_one(
+    req: BannerV4CreateRequest,
+    current_user=_DepSec(_CurUser),
+):
+    """Canonical Stage E: one paid banner with durable caller idempotency."""
+    account_id = _banner_v2_account_access(req.account_id, current_user)
+    description = str(req.description or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="Добавьте описание услуги")
+
+    idem = str(req.idempotency_key or "").strip()
+    if not idem:
+        return {
+            "status": "idempotency_required",
+            "code": "paid_idempotency_required",
+            "detail": "Для платной генерации нужен ключ безопасного повтора. Обновите экран и запустите ещё раз.",
+        }
+
+    result = create_avito_safe_banner(
+        account_id=account_id,
+        description=description,
+        direction=str(req.direction or "architecture"),
+        accent_color=str(req.accent_color or "#2F6FED"),
+        idempotency_key=idem,
+    )
+    if result.get("status") == "ok":
+        result["direction"] = str(req.direction or "architecture")
+    return result

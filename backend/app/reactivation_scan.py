@@ -3,6 +3,7 @@
 Ни одного обращения к модели: только SQL. AI подключается отдельным шагом.
 Режим dry=True ничего не пишет в базу."""
 import logging
+import re
 
 from sqlalchemy import text
 
@@ -27,6 +28,23 @@ CLOSING_RE = (r"^\s*(договорились|спасибо|спасиб|бла
 # он вычисляется по направлению, а не по содержимому. Фильтруем по тексту.
 SYSTEM_PREFIX_RE = r"^\[Системное сообщение\]"
 
+# Если последнее сообщение продавца уже обещает передачу специалисту/звонок,
+# клиент не должен получать автоматическую «реактивацию» поверх этого обещания.
+# Такой диалог уходит только на проверку человеку.
+HANDOFF_PENDING_RE = (
+    r"(?:передал|передам|передаю).{0,100}(?:специалист|коллег|менеджер)|"
+    r"(?:специалист|коллег|менеджер).{0,100}(?:свяж|позвон|набер)|"
+    r"\bсвяжется\s+с\s+вами\b|\bпозвонит\s+вам\b|\bнаберет\s+вас\b|\bнаберёт\s+вас\b"
+)
+
+# If the customer explicitly says they will write/contact us after their own next
+# event, silence is expected. Autopilot must not chase them before they return.
+CLIENT_RECONTACT_RE = (
+    r"(?:\b(?:сам(?:а)?\s+)?(?:напишу|отпишусь|свяжусь)\b.{0,40}\b(?:позже|потом|как|когда|после)\b|"
+    r"\b(?:как|когда|после).{0,55}\b(?:напишу|отпишусь|свяжусь)\b|"
+    r"\b(?:узнаю|уточню|посмотрю|подумаю|решу|приедет|приеду|вернется|вернётся).{0,55}\b(?:напишу|отпишусь|свяжусь)\b)"
+)
+
 # Верхняя граница давности: диалоги старше — отдельная история, часто вообще
 # из прошлой жизни аккаунта. Пока константа, в настройках такого поля нет.
 MAX_AGE_DAYS = 180
@@ -45,7 +63,7 @@ WITH msgs AS (
 ),
 last_msg AS (
   SELECT DISTINCT ON (avito_chat_id)
-         avito_chat_id, id AS last_msg_id, direction, ts, item_id, item_title
+         avito_chat_id, id AS last_msg_id, direction, ts, item_id, item_title, text AS last_text
   FROM msgs ORDER BY avito_chat_id, avito_created_at DESC, id DESC
 ),
 maxid AS (
@@ -65,7 +83,7 @@ has_content AS (
   SELECT DISTINCT avito_chat_id FROM msgs
   WHERE lower(direction) IN ('in','incoming') AND btrim(coalesce(text,'')) <> ''
 )
-SELECT l.avito_chat_id, l.ts, l.item_id, l.item_title, l.last_msg_id,
+SELECT l.avito_chat_id, l.ts, l.item_id, l.item_title, l.last_msg_id, l.last_text,
        m.last_id, m.msg_count, p.ev_id,
        i.in_text, (i.in_text ~* :closing_re) AS closing,
        (hc.avito_chat_id IS NOT NULL) AS has_content
@@ -104,8 +122,10 @@ def prefilter(db, account_id, silence_days=DEFAULT_SILENCE_DAYS,
         "window": window_days, "max_attempts": max_attempts}).fetchall()
     out = []
     for r in rows:
-        (chat, ts, item_id, item_title, last_msg_id, last_id, msg_count, ev_id,
+        (chat, ts, item_id, item_title, last_msg_id, last_text, last_id, msg_count, ev_id,
          in_text, closing, has_content) = r
+        handoff_pending = bool(re.search(HANDOFF_PENDING_RE, str(last_text or ""), re.I | re.S))
+        customer_recontact = bool(re.search(CLIENT_RECONTACT_RE, str(in_text or ""), re.I | re.S))
         matched = ["no_reply"]
         if ev_id:
             matched.insert(0, "price_requested")
@@ -115,7 +135,10 @@ def prefilter(db, account_id, silence_days=DEFAULT_SILENCE_DAYS,
             "msg_count": msg_count, "matched_reasons": matched,
             "primary_reason": matched[0],
             "evidence": [x for x in (ev_id, last_msg_id) if x],
-            "last_incoming": in_text, "needs_review": bool(closing),
+            "last_incoming": in_text,
+            "manager_handoff_pending": handoff_pending,
+            "customer_promised_to_recontact": customer_recontact,
+            "needs_review": bool(closing or handoff_pending or customer_recontact),
             "has_content": bool(has_content),
         })
     if not include_empty:
@@ -141,11 +164,47 @@ def pick_primary(matched, reasons_enabled):
     return allowed[0] if allowed else None
 
 
+def _qualification_policy(db, account_id, chat_id):
+    """Reuse current MOP qualification instead of treating every silence as no_reply."""
+    import json
+    try:
+        raw = db.execute(text("""
+            SELECT value FROM storage
+             WHERE account_id=:a AND key=:k
+             ORDER BY id DESC LIMIT 1
+        """), {"a": account_id, "k": "mop_qualification:" + str(chat_id)}).scalar()
+        q = json.loads(raw) if raw else {}
+    except Exception:
+        return {"skip": False, "needs_review": False, "reason": None}
+    if not isinstance(q, dict):
+        return {"skip": False, "needs_review": False, "reason": None}
+    if q.get("reactivation_candidate") is False:
+        return {"skip": True, "needs_review": False, "reason": "qualification_reactivation_disabled"}
+    if q.get("human_handoff") is True:
+        return {"skip": False, "needs_review": True, "reason": "human_handoff_pending"}
+    phone = bool(q.get("phone_received"))
+    stage = str(q.get("qualification_stage") or "").upper()
+    action = " ".join(str(q.get(k) or "") for k in ("target_action", "next_action", "handoff_reason")).lower()
+    if phone and stage == "TARGET_ACTION" and any(x in action for x in (
+        "связ", "позвон", "звон", "специалист", "менеджер", "коллег"
+    )):
+        return {"skip": False, "needs_review": True, "reason": "target_action_pending"}
+    return {"skip": False, "needs_review": False, "reason": None}
+
+
 def scan_account(db, account_id, dry=True, silence_days=None, limit=None):
     """dry=True — ничего не пишет, только возвращает найденное."""
     st = rc.settings_for(db, account_id)
+    # Default-on contract: every account with an active MOP participates even
+    # before the owner has opened Reactivation settings.  Explicit disabled=false
+    # remains authoritative.  Keep defaults in the existing core, no second engine.
     if st is None:
-        return {"account_id": account_id, "skipped": "no_settings", "found": 0, "items": []}
+        st = {
+            "enabled": True,
+            "reasons_enabled": list(rc.REASON_PRIORITY),
+            "attempts_window_days": 90,
+            "max_attempts_per_dialog": 2,
+        }
     if not st["enabled"]:
         return {"account_id": account_id, "skipped": "disabled", "found": 0, "items": [],
                 "disabled_reason": st.get("disabled_reason")}
@@ -156,6 +215,13 @@ def scan_account(db, account_id, dry=True, silence_days=None, limit=None):
                       max_attempts=st["max_attempts_per_dialog"])
     items, created, skipped = [], 0, 0
     for row in found:
+        qualification = _qualification_policy(db, account_id, row["avito_chat_id"])
+        if qualification.get("skip"):
+            skipped += 1
+            continue
+        if qualification.get("needs_review"):
+            row["needs_review"] = True
+            row["qualification_hold_reason"] = qualification.get("reason")
         primary = pick_primary(row["matched_reasons"], reasons)
         if not primary:
             skipped += 1
@@ -181,6 +247,21 @@ def scan_account(db, account_id, dry=True, silence_days=None, limit=None):
         db.execute(text(
             "UPDATE reactivation_candidates SET last_analyzed_message_id=:m, updated_at=now()"
             " WHERE id=:i"), {"m": row["last_analyzed_message_id"], "i": cid})
+        # Закрывающий ответ клиента (не актуально / уже купил / спасибо и т.п.)
+        # никогда не попадает в автоотправку. BORIS может подготовить вариант,
+        # но отправить его можно только после явной проверки человеком.
+        if row.get("needs_review"):
+            rc.set_candidate_status(
+                db, cid, "needs_review", ("candidate",), "needs_review",
+                meta={
+                    "source": "reactivation_scan",
+                    "reason": row.get("qualification_hold_reason") or (
+                        "manager_handoff_pending" if row.get("manager_handoff_pending")
+                        else "customer_promised_to_recontact" if row.get("customer_promised_to_recontact")
+                        else "closing_reply"
+                    ),
+                },
+            )
         row["candidate_id"] = cid
         created += 1
     db.commit()

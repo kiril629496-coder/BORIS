@@ -2,13 +2,12 @@
 """Генерация персонального черновика реактивации.
 Модель ПРОДОЛЖАЕТ конкретный разговор, а не пишет шаблон «актуально ли ещё».
 Всё, что она сочинила сверх переписки, ловится детерминированными проверками."""
-import json
 import logging
 import re
 
 from sqlalchemy import text
 
-from app.reactivation_ai import build_context, _extract_text
+from app.reactivation_ai import build_context
 
 log = logging.getLogger(__name__)
 
@@ -59,8 +58,48 @@ SYSTEM = """Ты менеджер по продажам. Пишешь ОДНО �
  "confidence": 0.0-1.0}"""
 
 
+def _safe_contextual_fallback(db, account_id, avito_chat_id, item_title=None, reason=None):
+    """Безопасный fallback без AI: только факт объявления + уже доказанная причина остановки."""
+    title = (item_title or "").strip()
+    if not title:
+        row = db.execute(text("""
+            SELECT item_title FROM messenger_messages
+             WHERE account_id=:a AND avito_chat_id=:c
+               AND btrim(coalesce(item_title,'')) <> ''
+             ORDER BY avito_created_at DESC,id DESC LIMIT 1
+        """), {"a": account_id, "c": avito_chat_id}).fetchone()
+        title = str(row[0] or "").strip() if row else ""
+    title = re.sub(r"\s+", " ", title)[:90]
+    subject = (" по «%s»" % title) if title else ""
+    templates = {
+        "price_requested": "Подскажите, вопрос%s ещё актуален? Если да, продолжим по расчёту и уточним недостающие детали." % subject,
+        "estimate_sent": "Подскажите, удалось посмотреть расчёт%s? Если вопрос ещё актуален, продолжим здесь." % subject,
+        "asked_to_contact_later": "Возвращаюсь к вашему вопросу%s, как договаривались. Актуально продолжить?" % subject,
+        "no_phone": "Подскажите, вопрос%s ещё актуален? Если да, продолжим здесь и согласуем удобный следующий шаг." % subject,
+        "no_reply": "Подскажите, вопрос%s ещё актуален? Если да, продолжим с того места, где остановились." % subject,
+    }
+    return templates.get(reason) or ("Подскажите, вопрос%s ещё актуален? Если да, продолжим с того места, где остановились." % subject)
+
+
 def _digits(s):
     return set(re.findall(r"\d[\d\s]{2,}\d|\d{3,}", re.sub(r"[.,]", "", s or "")))
+
+
+def is_duplicate_outgoing(db, account_id, avito_chat_id, body):
+    """Exact normalized duplicate of any previous real outgoing in this chat."""
+    normalized = re.sub(r"\s+", " ", str(body or "").strip().lower())
+    if not normalized:
+        return False
+    row = db.execute(text("""
+        SELECT 1
+          FROM messenger_messages
+         WHERE account_id=:a AND avito_chat_id=:c
+           AND lower(coalesce(direction,'')) IN ('out','outgoing')
+           AND coalesce(msg_type,'') <> 'system'
+           AND regexp_replace(lower(btrim(coalesce(text,''))), '\\s+', ' ', 'g')=:t
+         LIMIT 1
+    """), {"a": account_id, "c": avito_chat_id, "t": normalized}).fetchone()
+    return bool(row)
 
 
 def verify(draft_text, dialog_text):
@@ -75,6 +114,13 @@ def verify(draft_text, dialog_text):
     for rx, label in BANNED_RE:
         if re.search(rx, low) and not re.search(rx, dlow):
             problems.append(label)
+    # Business-policy claims are just as dangerous as invented prices. In auto
+    # reactivation they need explicit evidence in the dialog, not inference.
+    pickup_no = r"(?:самовывоз\w*.{0,24}(?:нет|нельзя|не\s+предусмотр)|(?:нет|нельзя|не\s+предусмотр).{0,24}самовывоз)"
+    if re.search(pickup_no, low) and not re.search(pickup_no, dlow):
+        problems.append("неподтверждённое условие самовывоза")
+    if re.search(r"\bзависит\b", low) and not re.search(r"\bзависит\b", dlow):
+        problems.append("неподтверждённое условие зависимости")
     # Сравниваем ТОЛЬКО цифры: в переписке между разрядами попадается неразрывный
     # пробел, и «85 000» из черновика не совпадало с «85\u00a0000» из диалога.
     dial_nums = {re.sub(r"\D", "", d) for d in _digits(dlow)}
@@ -93,40 +139,60 @@ def generate(db, account_id, avito_chat_id, item_title=None, reason=None, goal=N
     ctx, ids = build_context(db, account_id, avito_chat_id, item_title)
     if not ids:
         return {"ok": False, "error": "в диалоге нет сообщений"}
-    task = ("Причина, по которой диалог остановился: %s\n"
-            "Цель сообщения: %s — %s\n"
-            "Что известно о диалоге: %s\n\nПЕРЕПИСКА:\n%s"
-            % (reason or "no_reply", goal or "clarify_relevance",
-               GOAL_HINT.get(goal or "", "продолжить разговор по существу"),
-               summary or "-", ctx))
-    # ТОЛЬКО OpenAI. Решения «писать или не писать клиенту» не должны зависеть от того,
-    # какая модель сегодня доступна: A/B 05.08 показал у GigaChat ложные разрешения —
-    # он не видит невыполненных обещаний продавца и пропускает отказы клиентов.
-    from gigachat_pool import _openai_fallback_completion
-    from gigachat.models import Messages, MessagesRole
-    sys_role = getattr(MessagesRole, "SYSTEM", MessagesRole.USER)
-    resp = _openai_fallback_completion(
-        [Messages(role=sys_role, content=SYSTEM),
-         Messages(role=MessagesRole.USER, content=task)],
-        temperature=0.3, max_completion_tokens=700,
-        account_id=account_id, operation=OPERATION)
-    body = _extract_text(resp).strip()
-    body = re.sub(r"^```(?:json)?|```$", "", body, flags=re.M).strip()
-    m = re.search(r"\{.*\}", body, re.S)
-    if not m:
-        return {"ok": False, "error": "модель вернула не JSON", "raw": body[:300]}
+
+    # Canonical path: реактивация использует ТОТ ЖЕ генератор, память и обучение,
+    # что и обычный МОП. Никакого второго AI-контура и старого proxy здесь нет.
+    rows = db.execute(text("""
+        SELECT lower(coalesce(direction,'')), coalesce(text,'')
+          FROM messenger_messages
+         WHERE account_id=:a AND avito_chat_id=:c
+           AND coalesce(msg_type,'') <> 'system'
+           AND btrim(coalesce(text,'')) <> ''
+         ORDER BY avito_created_at ASC,id ASC LIMIT 30
+    """), {"a": account_id, "c": avito_chat_id}).fetchall()
+    training_messages = [
+        {"role": "client" if str(direction or "").startswith("in") else "mop", "text": txt}
+        for direction, txt in rows if str(txt or "").strip()
+    ]
+    goal_text = GOAL_HINT.get(goal or "clarify_relevance", "вернуть клиента в диалог и продолжить разговор по существу")
     try:
-        d = json.loads(m.group(0))
-    except Exception as e:
-        return {"ok": False, "error": "JSON не разобран: %s" % e, "raw": body[:300]}
-    for k in ("message", "facts_used", "confidence"):
-        if k not in d:
-            return {"ok": False, "error": "нет поля %s" % k}
-    facts = [f for f in (d.get("facts_used") or []) if isinstance(f, dict)]
-    invented_ids = [f.get("message_id") for f in facts
-                    if f.get("message_id") is not None and f.get("message_id") not in ids]
-    d["facts_used"] = [f for f in facts if f.get("message_id") in ids or f.get("message_id") is None]
-    d["invented_ids"] = invented_ids
-    d["problems"] = verify(d.get("message"), ctx)
-    d["ok_to_show"] = not d["problems"] and not invented_ids
-    return {"ok": True, "draft": d, "context_ids": ids}
+        from app.api.messenger import generate_ai_draft_reply
+        mop = generate_ai_draft_reply(
+            account_id,
+            {"id": "training:reactivation:" + str(avito_chat_id),
+             "_training_messages": training_messages,
+             "_training_goal": goal_text},
+            style_hint="reactivation",
+            return_meta=True,
+        )
+        body_text = str((mop or {}).get("text") or "").strip() if isinstance(mop, dict) else str(mop or "").strip()
+        if body_text and not body_text.startswith("[Ошибка генерации черновика:"):
+            problems = verify(body_text, ctx)
+            if is_duplicate_outgoing(db, account_id, avito_chat_id, body_text):
+                problems.append("точный дубль предыдущего исходящего")
+            if not problems:
+                return {"ok": True, "draft": {
+                    "message": body_text, "facts_used": [], "missing": [],
+                    "must_not_invent": [], "confidence": 1.0,
+                    "invented_ids": [], "problems": [], "ok_to_show": True,
+                    "provider": "canonical_mop", "analysis": (mop or {}).get("analysis") if isinstance(mop, dict) else None,
+                }, "context_ids": ids}
+            log.warning("canonical MOP draft rejected by deterministic verifier: %s", problems[:4])
+        else:
+            log.warning("canonical MOP draft unavailable: %s", body_text[:160])
+    except Exception as exc:
+        log.warning("canonical MOP draft failed: %s", str(exc)[:160])
+
+    # Только аварийный fallback: не делает второй платный AI-вызов и опирается
+    # лишь на доказанную причину + название объявления.
+    fallback = _safe_contextual_fallback(db, account_id, avito_chat_id, item_title, reason)
+    problems = verify(fallback, ctx)
+    if is_duplicate_outgoing(db, account_id, avito_chat_id, fallback):
+        problems.append("точный дубль предыдущего исходящего")
+    return {"ok": True, "draft": {
+        "message": fallback, "facts_used": [], "missing": [],
+        "must_not_invent": [], "confidence": 1.0,
+        "invented_ids": [], "problems": problems,
+        "ok_to_show": not problems, "fallback": "contextual_no_ai"
+    }, "context_ids": ids, "provider_fallback": True}
+

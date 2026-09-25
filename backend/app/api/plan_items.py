@@ -7,6 +7,7 @@ from datetime import datetime
 from app.db.session import SessionLocal
 from app.models.plan_item import PlanItem
 from app.api.avito import spin
+from app.services.exception_observability import observe_suppressed
 
 router = APIRouter(prefix="/api/plan_items", tags=["plan_items"])
 
@@ -199,8 +200,8 @@ def _get_category_specs(topic: str, db) -> dict:
     if row:
         try:
             return _json_specs.loads(row.value)
-        except Exception:
-            pass
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=202)
 
     from gigachat_pool import chat_with_fallback
     from gigachat.models import Messages, MessagesRole
@@ -407,8 +408,8 @@ photos_per_ad считай как 1 (баннер) + число обычных �
 """
 
 
-@router.post("/{item_id}/execute")
 def _fill_category_params(niche, existing=None, account_id=None):
+
     """Умное заполнение params категории из справочника CategoryTemplate.
     Тянет все теги категории, ставит значения из enum (полнота важна для ранжирования Avito).
     Опциональные поля без однозначного значения и без данных — пропускает."""
@@ -459,6 +460,7 @@ def _fill_category_params(niche, existing=None, account_id=None):
         _db.close()
 
 
+@router.post("/{item_id}/execute")
 def execute_plan_item(item_id: int):
     import json as _json
     import os
@@ -478,33 +480,33 @@ def execute_plan_item(item_id: int):
         api_key = os.environ.get("OPENAI_API_KEY")
         proxies = get_intl_requests_proxies()
 
-        def _openai_post(payload_json, attempts=3, tmo=35):
-            """Вызов OpenAI с ретраем и НОВЫМ прокси-портом на каждой попытке.
-            Порты пула часто дохлые - старый код брал один порт и висел на нём."""
-            last_err = None
-            for _a in range(attempts):
-                px = get_intl_requests_proxies()
-                try:
-                    r = _requests.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-                        json=payload_json, proxies=px, timeout=tmo,
-                    )
-                    try:  # учёт расхода: прямой вызов идёт мимо пула
-                        _j = r.json()
-                        from app.usage import log_usage as _lu
-                        _u = _j.get("usage") or {}
-                        _lu(None, "openai", _j.get("model") or "gpt-5.4", "system:plan_execute",
-                            int(_u.get("prompt_tokens") or 0),
-                            int(_u.get("completion_tokens") or 0))
-                    except Exception as _ue:
-                        print("[usage]", str(_ue)[:100], flush=True)
-                    return r
-                except Exception as _e:
-                    last_err = _e
-                    print(f"[plan_execute] прокси-попытка {_a+1}/{attempts} не удалась: {_e}", flush=True)
-                    continue
-            raise Exception(f"OpenAI недоступен через прокси за {attempts} попыток: {last_err}")
+        def _openai_post(payload_json, attempts=1, tmo=35):
+            """Exactly-once account-scoped paid planner call; no hidden provider retry."""
+            import hashlib as _hashlib
+            from app.api.campaigns import _ff_guarded_openai_response
+
+            messages = list((payload_json or {}).get("messages") or [])
+            model = str((payload_json or {}).get("model") or "gpt-5.4")
+            max_tokens = int((payload_json or {}).get("max_completion_tokens") or 16000)
+            basis = _json.dumps({"item_id": int(item.id), "model": model, "messages": messages,
+                                 "max_completion_tokens": max_tokens}, ensure_ascii=False, sort_keys=True)
+            intent = "plan-item:%s:%s" % (int(item.id), _hashlib.sha256(basis.encode("utf-8")).hexdigest())
+            paid = _ff_guarded_openai_response(
+                account_id=str(item.account_id or ""), operation="system:plan_execute",
+                model=model, input_payload=messages, max_output_tokens=max_tokens,
+                idempotency_key=intent, timeout=int(tmo),
+            )
+
+            class _CompatResponse:
+                status_code = 200
+                text = ""
+                def json(self_nonlocal):
+                    return {
+                        "model": model,
+                        "choices": [{"message": {"content": str((paid or {}).get("text") or "")}}],
+                        "usage": (paid or {}).get("usage") or {},
+                    }
+            return _CompatResponse()
 
         # === АВТОРАЗБИВКА: если задача касается НЕСКОЛЬКИХ разных направлений - разбиваем на подзадачи ===
         try:
@@ -560,22 +562,22 @@ def execute_plan_item(item_id: int):
                         "subtasks_count": len(created_ids),
                         "message": f"Задача разбита на {len(created_ids)} подзадач, Борис выполняет их одну за другой в фоне. Прогресс можно посмотреть во вкладке Задачи и план."
                     }
-        except Exception:
-            pass  # если разбивка не удалась - просто продолжаем как единую задачу
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=564)
 
         full_prompt = BORIS_CAPABILITIES + "\n\nЗадача: " + item.text + "\nАккаунт: " + item.account_id
         raw = None
         parsed = None
         gpt_cost_rub = 0
-        for _routing_attempt in range(1, 3):
+        # One semantic routing intent gets at most one provider attempt. The shared
+        # paid guard handles durable cache/quarantine; hidden retries are forbidden.
+        for _routing_attempt in range(1, 2):
             try:
                 resp = _openai_post(
                     {"model": "gpt-5.4", "messages": [{"role": "user", "content": full_prompt}], "max_completion_tokens": 16000},
                     tmo=90
                 )
                 if resp.status_code != 200:
-                    if _routing_attempt < 2:
-                        continue
                     return {"status": "error", "message": f"Ошибка GPT: {resp.status_code} {resp.text[:200]}"}
                 data = resp.json()
                 raw = data["choices"][0]["message"]["content"].strip()
@@ -589,9 +591,7 @@ def execute_plan_item(item_id: int):
                 parsed = _json.loads(raw)
                 break
             except Exception as _routing_e:
-                print(f"[plan_item_execute] Роутинг попытка {_routing_attempt}: {_routing_e}", flush=True)
-                if _routing_attempt < 2:
-                    continue
+                print(f"[plan_item_execute] Роутинг остановлен без скрытого повтора: {_routing_e}", flush=True)
                 if raw is not None:
                     _escalate_plan_error(db, item.account_id, "plan_item_execute", "Не удалось разобрать ответ от GPT: " + raw[:200])
                     return {"status": "error", "message": "Не удалось разобрать ответ от GPT: " + raw[:200]}
@@ -609,7 +609,7 @@ def execute_plan_item(item_id: int):
         results = []
         had_error = False
 
-        for step in steps:
+        for _step_index, step in enumerate(steps):
             action = step.get("action")
             payload = step.get("payload", {})
             payload["account_id"] = item.account_id
@@ -639,9 +639,19 @@ def execute_plan_item(item_id: int):
                     r = _httpx.post("http://127.0.0.1:8000/api/parser/city_analysis_async", json=payload, timeout=30)
                     results.append({"action": action, "result": r.json()})
                 elif action == "generate_banner":
-                    payload.setdefault("format", "infographic")
-                    r = _httpx.post("http://127.0.0.1:8000/api/banners/full_ai", json=payload, timeout=120)
-                    results.append({"action": action, "result": r.json()})
+                    # Canonical Avito visual contract: AI generates background only;
+                    # all visible copy is composed locally by V4. Never call legacy
+                    # /full_ai from a production plan worker.
+                    from app.api.banners import create_avito_safe_banner
+                    desc = str(payload.get("raw_description") or payload.get("description") or item.text or "").strip()
+                    result = create_avito_safe_banner(
+                        account_id=item.account_id,
+                        description=desc,
+                        direction=str(payload.get("direction") or "architecture"),
+                        accent_color=str(payload.get("accent_color") or "#2F6FED"),
+                        idempotency_key=f"plan:{item.id}:{_step_index}:generate_banner",
+                    )
+                    results.append({"action": action, "result": result})
                 elif action == "ab_test":
                     r = _httpx.post("http://127.0.0.1:8000/api/tasks/create", json={"account_id": item.account_id, "task_type": "ab_test", "payload": payload}, timeout=30)
                     results.append({"action": action, "result": r.json()})
@@ -688,14 +698,17 @@ def execute_plan_item(item_id: int):
 
                             banner_url = None
                             try:
-                                banner_resp = _httpx.post("http://127.0.0.1:8000/api/banners/full_ai", json={
-                                    "account_id": item.account_id, "raw_description": topic, "format": "infographic"
-                                }, timeout=120)
-                                banner_data = banner_resp.json()
+                                from app.api.banners import create_avito_safe_banner
+                                banner_data = create_avito_safe_banner(
+                                    account_id=item.account_id,
+                                    description=topic,
+                                    direction="architecture",
+                                    idempotency_key=f"plan:{item.id}:{_step_index}:publish_listings_banner",
+                                )
                                 if banner_data.get("status") == "ok":
                                     banner_url = banner_data.get("url")
-                            except Exception:
-                                pass
+                            except Exception as _suppressed_exc:
+                                observe_suppressed(__name__, _suppressed_exc, line=709)
 
                             feed_items = []
                             for i, ad in enumerate(ads):
@@ -832,6 +845,8 @@ def execute_plan_item(item_id: int):
                                     _company_parts.append(_acc.company_description)
                                 if _acc.company_advantages:
                                     _company_parts.append(f"Преимущества: {_acc.company_advantages}")
+                                if getattr(_acc, "company_client_description", None):
+                                    _company_parts.append(f"Целевой клиент: {_acc.company_client_description}")
                             _company_extra = payload.get("extra", "") or ". ".join(_company_parts)
 
                             new_drafts = []
@@ -852,7 +867,7 @@ def execute_plan_item(item_id: int):
                                 except Exception:
                                     first_line = first_line_raw[:70]
                                 new_drafts.append({
-                                    "id": f"draft-{item.id}-a{city_idx}-{int(__import__('time').time())}",
+                                    "id": f"draft-{item.id}-a{city_idx}",
                                     "batch_id": batch_id,
                                     "batch_label": batch_label,
                                     "variant": "authored",
@@ -931,7 +946,7 @@ def execute_plan_item(item_id: int):
                                     except Exception:
                                         _spun_desc_b = _desc_with_specs_b
                                     new_drafts.append({
-                                        "id": f"draft-{item.id}-b{city_idx}-{int(__import__('time').time())}",
+                                        "id": f"draft-{item.id}-b{city_idx}",
                                         "batch_id": batch_id,
                                         "batch_label": batch_label,
                                         "variant": "ai_generated",
@@ -954,29 +969,48 @@ def execute_plan_item(item_id: int):
                             # Если созданных больше, чем осталось в тарифе - режем партию по остатку
                             # и сообщаем клиенту (перейти на след.тариф или подождать обновления лимита).
                             _billing_notice = None
-                            try:
-                                from app.api.billing import get_status as _bill_status, check_and_consume as _bill_consume
-                                _st = _bill_status(item.account_id)
-                                if _st.get("unlimited"):
-                                    _bill_consume(item.account_id, "listings", len(new_drafts))
-                                    raise StopIteration  # пропускаем весь блок урезания партии - лимитов нет
-                                _remaining_listings = _st["usage"].get("listings", {}).get("remaining", 0)
-                                if len(new_drafts) > _remaining_listings:
-                                    _chk = _bill_consume(item.account_id, "listings", _remaining_listings if _remaining_listings > 0 else 1)
-                                    if _remaining_listings <= 0:
+                            _requested_drafts = len(new_drafts)
+                            if _requested_drafts:
+                                try:
+                                    from app.api.billing import get_status as _bill_status, check_and_consume as _bill_consume
+                                    _st = _bill_status(item.account_id)
+                                    if not _st.get("active", True):
                                         new_drafts = []
-                                        _billing_notice = _chk.get("message")
+                                        _billing_notice = _st.get("message") or "Тариф сейчас не активен — новые объявления не сохранены."
                                     else:
-                                        _billing_notice = f"Лимит объявлений почти исчерпан: сохранено {_remaining_listings} из {len(new_drafts)}, остальные не созданы. " + (_chk.get("message") or "")
-                                        new_drafts = new_drafts[:_remaining_listings]
-                                else:
-                                    _bill_consume(item.account_id, "listings", len(new_drafts))
-                            except StopIteration:
-                                pass
-                            except Exception as _be:
-                                print(f"[billing] listings check failed (пропускаем, не блокируем): {_be}", flush=True)
+                                        _allowed_count = _requested_drafts
+                                        if not _st.get("unlimited"):
+                                            _remaining_listings = max(0, int(((_st.get("usage") or {}).get("listings") or {}).get("remaining") or 0))
+                                            _allowed_count = min(_requested_drafts, _remaining_listings)
+                                        if _allowed_count <= 0:
+                                            new_drafts = []
+                                            _billing_notice = "Лимит объявлений на тарифе исчерпан — новые черновики не сохранены."
+                                        else:
+                                            # Slice before the atomic consume. A concurrent campaign may still
+                                            # spend the same remaining quota; check_and_consume is cross-process
+                                            # serialized and its denial is fail-closed below.
+                                            candidate_drafts = list(new_drafts[:_allowed_count])
+                                            _listing_intent_key=f"plan-listings:{item.id}:{_step_index}:{batch_id}:{len(candidate_drafts)}"
+                                            _chk = _bill_consume(item.account_id, "listings", len(candidate_drafts),
+                                                                 idempotency_key=_listing_intent_key)
+                                            if not _chk.get("allowed", False):
+                                                new_drafts = []
+                                                _billing_notice = _chk.get("message") or "Тарифный лимит изменился параллельно — BORIS ничего не сохранил и не списал повторно."
+                                            else:
+                                                new_drafts = candidate_drafts
+                                                if len(new_drafts) < _requested_drafts:
+                                                    _billing_notice = f"Лимит объявлений почти исчерпан: сохранено {len(new_drafts)} из {_requested_drafts}, остальные не создавались."
+                                except Exception as _be:
+                                    # Never turn billing infrastructure trouble into free inventory.
+                                    print(f"[billing] listings check failed closed: {_be}", flush=True)
+                                    new_drafts = []
+                                    _billing_notice = "BORIS временно не смог подтвердить тарифный лимит. Черновики не сохранены и лимит не списан; задача безопасно продолжится позже."
 
-                            save_resp = _httpx.post("http://127.0.0.1:8000/api/avito/drafts", json={"account_id": item.account_id, "drafts": existing_drafts + new_drafts}, timeout=30)
+                            # PLAN_DRAFT_APPEND_ATOMIC_V2: use deterministic draft IDs and append
+                            # under the account advisory lock. A retry of the same PlanItem replaces
+                            # only its own IDs and cannot erase drafts created concurrently elsewhere.
+                            from app.api.avito import _append_drafts as _append_plan_drafts
+                            _append_plan_drafts(item.account_id, new_drafts)
                             authored_n = sum(1 for d in new_drafts if d["variant"] == "authored")
                             ai_n = sum(1 for d in new_drafts if d["variant"] == "ai_generated")
                             _res_obj = {"status": "ok", "drafted": len(new_drafts), "authored": authored_n, "ai_generated": ai_n, "batch_id": batch_id, "batch_label": batch_label, "category": category}
@@ -991,7 +1025,8 @@ def execute_plan_item(item_id: int):
                         item.account_id, batch_label,
                         banner_count=payload.get("banner_count", 5),
                         photos_per_ad=payload.get("photos_per_ad", 10),
-                        folder=payload.get("folder", "")
+                        folder=payload.get("folder", ""),
+                        idempotency_key=f"plan:{item.id}:{_step_index}:apply_banner_to_batch"
                     )
                     if _res.get("notice"):
                         skipped.append(_res["notice"])
@@ -1041,14 +1076,17 @@ def execute_plan_item(item_id: int):
                         else:
                             banner_url = None
                             try:
-                                banner_resp = _httpx.post("http://127.0.0.1:8000/api/banners/full_ai", json={
-                                    "account_id": item.account_id, "raw_description": direction, "format": "infographic"
-                                }, timeout=120)
-                                banner_data = banner_resp.json()
+                                from app.api.banners import create_avito_safe_banner
+                                banner_data = create_avito_safe_banner(
+                                    account_id=item.account_id,
+                                    description=direction,
+                                    direction="result",
+                                    idempotency_key=f"plan:{item.id}:{_step_index}:edit_active_banner",
+                                )
                                 if banner_data.get("status") == "ok":
                                     banner_url = banner_data.get("url")
-                            except Exception:
-                                pass
+                            except Exception as _suppressed_exc:
+                                observe_suppressed(__name__, _suppressed_exc, line=1087)
 
                             moscow_locations = [
                                 "Москва, м. Тверская", "Москва, м. Сокольники", "Москва, м. Юго-Западная",
@@ -1076,8 +1114,12 @@ def execute_plan_item(item_id: int):
                                     it["images"] = ([banner_url] + old_images)[:10]
                                 updated_count += 1
 
-                            # Записываем изменения обратно в feed_data и сохраняем в рамках той же
-                            # заблокированной строки - блокировка снимется только после db.commit()
+                            # Записываем изменения обратно только после того, как весь будущий
+                            # feed проходит тот же глобальный media-quality gate, что и обычный
+                            # Feed Factory. Иначе этот старый plan-item путь мог обходить _save_feed_items.
+                            from app.api.avito import _assert_no_legacy_visual_urls
+                            for _feed_it in feed_data:
+                                _assert_no_legacy_visual_urls(db, item.account_id, (_feed_it or {}).get("images") or [])
                             feed_row.value = _json.dumps(feed_data, ensure_ascii=False)
                             db.commit()
 

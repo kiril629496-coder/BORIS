@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .base import RawMessage, ScannerError, SourceRef
+from app.services.exception_observability import observe_suppressed
 
 PLATFORM = "telegram"
 
@@ -155,6 +156,9 @@ class TelegramScanner:
             "has_media": bool(msg.get("media")),
             "chat_title": chat.get("title"),
             "chat_username": chat.get("username"),
+            "author_access_hash": str(sender.get("access_hash")) if sender.get("access_hash") else None,
+            "author_is_bot": bool(sender.get("bot")),
+            "author_is_min": bool(sender.get("min")),
         }
         payload = {k: v for k, v in payload.items() if v not in (None, False)}
 
@@ -191,20 +195,54 @@ class TelegramScanner:
         except Exception as e:  # noqa: BLE001
             raise ScannerError(f"telethon не установлен: {e}", source_id=source.id)
 
-        peer = source.username or source.external_id
+        # Prefer a stable InputPeerChannel(id, access_hash). StringSession does not
+        # persist the full entity cache like a SQLite session, so channel_id alone
+        # may still force ResolveUsername on every run and eventually trigger a
+        # multi-hour FloodWait.
+        peer = source.external_id or source.username
         if not peer:
             raise ScannerError("У источника нет ни username, ни external_id", source_id=source.id)
+        numeric_peer = isinstance(peer, str) and peer.lstrip('-').isdigit()
+        if numeric_peer:
+            peer = int(peer)
+        access_hash=(source.payload or {}).get('telegram_access_hash')
+        direct_input_peer=False
+        if access_hash and source.external_id and str(source.external_id).startswith('-100'):
+            try:
+                from telethon.tl.types import InputPeerChannel
+                peer=InputPeerChannel(int(str(source.external_id)[4:]),int(access_hash))
+                direct_input_peer=True
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=214)
 
         min_id = int(source.last_seen_external_id or 0)
         out: list[dict[str, Any]] = []
 
         try:
-            entity = self._client.get_entity(peer)
-            chat = {
-                "id": getattr(entity, "id", None),
-                "username": getattr(entity, "username", None),
-                "title": getattr(entity, "title", None),
-            }
+            if direct_input_peer:
+                # No entity lookup at all: iter_messages can consume InputPeerChannel
+                # directly, which avoids ResolveUsername/GetChannels pressure.
+                entity=peer
+                chat={"id":str(source.external_id)[4:] if source.external_id else None,
+                      "username":source.username,"title":source.title}
+            else:
+                try:
+                    entity = self._client.get_entity(peer)
+                except (ValueError, TypeError):
+                    # Never fall back from a stored numeric channel to username resolve.
+                    # Discovery will hydrate telegram_access_hash; until then skipping a
+                    # source is safer than extending a global FloodWait.
+                    if numeric_peer:
+                        return []
+                    if source.username and str(peer) != str(source.username):
+                        entity = self._client.get_entity(source.username)
+                    else:
+                        raise
+                chat = {
+                    "id": getattr(entity, "id", None),
+                    "username": getattr(entity, "username", None),
+                    "title": getattr(entity, "title", None),
+                }
             kwargs: dict[str, Any] = {"limit": limit}
             if min_id:
                 kwargs["min_id"] = min_id
@@ -221,6 +259,9 @@ class TelegramScanner:
                             "username": getattr(s, "username", None),
                             "first_name": getattr(s, "first_name", None),
                             "last_name": getattr(s, "last_name", None),
+                            "access_hash": getattr(s, "access_hash", None),
+                            "bot": bool(getattr(s, "bot", False)),
+                            "min": bool(getattr(s, "min", False)),
                         }
                 except Exception:  # noqa: BLE001
                     sender = None
@@ -247,7 +288,7 @@ def build_client(session_string: str, api_id: int, api_hash: str) -> Any:
     from telethon.sync import TelegramClient          # ленивый импорт
     from telethon.sessions import StringSession
 
-    client = TelegramClient(StringSession(session_string), api_id, api_hash)
+    client = TelegramClient(StringSession(session_string), api_id, api_hash, use_ipv6=True)
     client.connect()
     if not client.is_user_authorized():
         raise ScannerError("Сессия Telegram недействительна — нужна повторная авторизация")
