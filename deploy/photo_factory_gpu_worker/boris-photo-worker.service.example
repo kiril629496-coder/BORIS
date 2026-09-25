@@ -1,0 +1,17 @@
+[Unit]
+Description=BORIS Qwen Photo Factory GPU Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/boris-photo-worker/app
+EnvironmentFile=/etc/boris-photo-worker.env
+ExecStart=/opt/boris-photo-worker/venv/bin/python /opt/boris-photo-worker/app/boris_qwen_worker.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

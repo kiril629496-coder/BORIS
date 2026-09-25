@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+[[ "$(hostname)" == 8509713-oh794426* ]]
+[[ "$(id -u)" == "0" ]]
+[[ "$(pwd)" == "/root/BORIS/backend" ]]
+
+systemctl is-active --quiet boris-backend
+systemctl is-active --quiet boris-backend-green
+
+blue="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/docs)"
+green="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8001/docs)"
+
+echo "BLUE=$blue"
+echo "GREEN=$green"
+
+[[ "$blue" == "200" ]]
+[[ "$green" == "200" ]]
+
+venv/bin/python - <<'PY'
+import urllib.request
+import urllib.error
+from app.api.auth import create_access_token
+
+token=create_access_token(56)
+
+for base in (
+    "http://127.0.0.1:8000",
+    "http://127.0.0.1:8001",
+):
+    for path in (
+        "/api/auth/me",
+        "/api/accounts/list",
+        "/api/inbox/accounts",
+        "/api/crm/product/overview",
+    ):
+        req=urllib.request.Request(
+            base+path,
+            headers={"Authorization":"Bearer "+token},
+        )
+
+        with urllib.request.urlopen(req,timeout=10) as r:
+            print(base,path,r.status)
+
+            if r.status != 200:
+                raise SystemExit(20)
+
+print("BLUE_GREEN_SMOKE=PASS")
+PY

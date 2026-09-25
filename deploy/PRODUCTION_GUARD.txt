@@ -1,0 +1,37 @@
+BORIS PRODUCTION GUARD V1
+
+RULE 1
+Never stop boris-backend before candidate version is running and healthy
+on boris-backend-green / port 8001.
+
+RULE 2
+Every backend change must pass:
+- SERVER GATE
+- py_compile
+- GREEN startup
+- GREEN /docs = 200
+- authenticated account smoke
+- inbox smoke
+- CRM smoke
+- BLUE remains /docs = 200
+
+RULE 3
+If GREEN fails:
+- do NOT restart BLUE
+- do NOT touch nginx
+- fix candidate while clients remain on BLUE
+
+RULE 4
+Production client accounts must not be used for arbitrary write tests.
+
+RULE 5
+No future script should contain:
+    systemctl stop boris-backend
+before GREEN PASS.
+
+RULE 6
+Database migrations must remain backward-compatible with BLUE.
+
+RULE 7
+Frontend builds must also move to shadow deployment before further
+production UI work.

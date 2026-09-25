@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+[[ "$(hostname)" == 8509713-oh794426* ]]
+[[ "$(id -u)" == "0" ]]
+[[ "$(pwd)" == "/root/BORIS/backend" ]]
+
+systemctl is-active --quiet boris-backend
+
+venv/bin/python -m py_compile app/main.py
+
+systemctl restart boris-backend-green
+
+for i in {1..15}; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8001/docs || true)"
+    if [[ "$code" == "200" ]]; then
+        echo "GREEN_READY=YES"
+        exit 0
+    fi
+    sleep 2
+done
+
+echo "GREEN_READY=NO"
+exit 1
