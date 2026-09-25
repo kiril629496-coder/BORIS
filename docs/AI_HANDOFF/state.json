@@ -1,0 +1,49 @@
+{
+  "master_context": "sentinelx_context_sxc_EHE399B0",
+  "protocol_version": 1,
+  "updated_utc": "2026-09-25T09:44:00Z",
+  "workstreams": [
+    {
+      "id": "01",
+      "title": "Изучить БОРИС и собрать модули",
+      "context_id": "sentinelx_context_sxc_VJF6FSWR",
+      "file": "WORKSTREAM_01.md"
+    },
+    {
+      "id": "02",
+      "title": "Изучить изменения БОРИС",
+      "context_id": "sentinelx_context_sxc_A0S0X3M8",
+      "file": "WORKSTREAM_02.md"
+    },
+    {
+      "id": "03",
+      "title": "Стабилизировать раздел (название в sidebar обрезано)",
+      "context_id": "sentinelx_context_sxc_4EJ6EZGF",
+      "file": "WORKSTREAM_03.md"
+    },
+    {
+      "id": "04",
+      "title": "Аудит автономности МОП",
+      "context_id": "sentinelx_context_sxc_95ER53DT",
+      "file": "WORKSTREAM_04.md"
+    },
+    {
+      "id": "05",
+      "title": "Довести модули объявлений",
+      "context_id": "sentinelx_context_sxc_WJC053HW",
+      "file": "WORKSTREAM_05.md"
+    },
+    {
+      "id": "06",
+      "title": "Провести аудит проекта БОРИС",
+      "context_id": "sentinelx_context_sxc_T9BGAT43",
+      "file": "WORKSTREAM_06.md"
+    },
+    {
+      "id": "07",
+      "title": "Оценить разработку агрегатор (название в sidebar обрезано)",
+      "context_id": "sentinelx_context_sxc_CCPSKPKH",
+      "file": "WORKSTREAM_07.md"
+    }
+  ]
+}

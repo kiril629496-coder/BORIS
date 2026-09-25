@@ -7,6 +7,7 @@
 | Документ | Описание |
 |----------|----------|
 | [architecture.md](./architecture.md) | Архитектура системы |
+| [LEAD_RADAR.md](./LEAD_RADAR.md) | Lead Radar: мультиклиентский поиск спроса по товарам и услугам |
 | [../README.md](../README.md) | Быстрый старт |
 | [../backend/README.md](../backend/README.md) | Backend API |
 | [../frontend/README.md](../frontend/README.md) | Frontend |
