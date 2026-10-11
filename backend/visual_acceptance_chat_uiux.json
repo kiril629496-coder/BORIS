@@ -1,0 +1,5616 @@
+{
+  "summary": {
+    "total": 68,
+    "overflow": [],
+    "clipped": [
+      [
+        "mobile_390 /dashboard/campaign",
+        [
+          {
+            "tag": "BUTTON",
+            "text": "AI-фотостудия",
+            "left": 314,
+            "right": 438,
+            "top": 244.59375,
+            "bottom": 285.46875
+          }
+        ]
+      ]
+    ],
+    "console": [],
+    "pageerrors": [],
+    "chunks": [
+      [
+        "desktop_1536 /dashboard/scenarios",
+        [
+          {
+            "url": "https://boris-ai.pro/_next/static/chunks/0-mgan7loe8jg.js",
+            "type": "script",
+            "error": "net::ERR_ABORTED"
+          }
+        ]
+      ],
+      [
+        "desktop_1536 /dashboard/campaign",
+        [
+          {
+            "url": "https://boris-ai.pro/_next/static/chunks/17llhw81ympc7.js",
+            "type": "script",
+            "error": "net::ERR_ABORTED"
+          }
+        ]
+      ],
+      [
+        "tablet_768 /dashboard/home",
+        [
+          {
+            "url": "https://boris-ai.pro/_next/static/chunks/0rrd-xi2xun93.js",
+            "type": "script",
+            "error": "net::ERR_ABORTED"
+          },
+          {
+            "url": "https://boris-ai.pro/_next/static/chunks/40tzsf55kn4if.js",
+            "type": "script",
+            "error": "net::ERR_ABORTED"
+          },
+          {
+            "url": "https://boris-ai.pro/_next/static/chunks/44-mi749j6uee.js",
+            "type": "script",
+            "error": "net::ERR_ABORTED"
+          }
+        ]
+      ],
+      [
+        "tablet_768 /dashboard/command-center",
+        [
+          {
+            "url": "https://boris-ai.pro/_next/static/chunks/1xhkikvi-2p8t.js",
+            "type": "script",
+            "error": "net::ERR_ABORTED"
+          },
+          {
+            "url": "https://boris-ai.pro/_next/static/chunks/35y3q3hjdtrq0.js",
+            "type": "script",
+            "error": "net::ERR_ABORTED"
+          }
+        ]
+      ]
+    ],
+    "hydration": [],
+    "server500": [],
+    "nav": []
+  },
+  "results": [
+    {
+      "route": "/dashboard/home",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/command-center",
+        "bodyText": 2620,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Главная\nЕдиный командный центр BORIS\n🔕\n?\nВыйти\nАккаунт\nКлие",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "ASIDE",
+            "text": "КЛИЕНТЫ\n1 подключено\n↻\nГ\nГарик плитка МО\ngarik_plitka_mo_586",
+            "left": 328,
+            "top": 173,
+            "right": 566,
+            "bottom": 375.75,
+            "w": 238,
+            "h": 202.75,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/marketing?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_readiness?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/launch-client?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/factory-decisions?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/kpi_check?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/scenarios?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/kpi_action_memory?account_id=garik_plitka_mo_58647&limit=8",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/messenger/sales/settings?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/command-center",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/command-center",
+        "bodyText": 2032,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Главная\nЕдиный командный центр BORIS\n🔕\n?\nВыйти\nАккаунт\nКлие",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "ASIDE",
+            "text": "КЛИЕНТЫ\n1 подключено\n↻\nГ\nГарик плитка МО\ngarik_plitka_mo_586",
+            "left": 328,
+            "top": 173,
+            "right": 566,
+            "bottom": 375.75,
+            "w": 238,
+            "h": 202.75,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/dashboard/launch-client?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_readiness?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/factory-decisions?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/messenger/sales/settings?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/marketing?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/campaign?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/media/1bffadaabf893a1e-s.3-6t-g6q0vh0a.woff2",
+          "type": "font",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/messages",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/messages",
+        "bodyText": 1047,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Сообщения\n🔕\n?\nВыйти\nАккаунт\nКлиент",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/dashboard/factory-decisions?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/launch-client?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/marketing?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/campaign?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_readiness?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/scenarios",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/scenarios",
+        "bodyText": 936,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Бизнес-сценарии\n🔕\n?\nВыйти\nАккаунт\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "ASIDE",
+            "text": "Как это работает\n1\nВыберите бизнес-задачу\nНе инструмент, а р",
+            "left": 1200,
+            "top": 155,
+            "right": 1490,
+            "bottom": 609.375,
+            "w": 290,
+            "h": 454.375,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/memory?_rsc=lifMjxJDnt_mYV2a",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/memory?_rsc=ZTAJrf4o5fRdw5Kc",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages/setup?_rsc=nwRlfNz9ejY_2-QD",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/0-mgan7loe8jg.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages/setup?_rsc=a_qGt6IBAAQNYPQO",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/0-mgan7loe8jg.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/campaign",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/campaign",
+        "bodyText": 2547,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Объявления\n🔔\n?\nВыйти\nГарик плитка МО\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/dashboard/analytics?_rsc=xSXSm4Ss5-kVFEN6",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/integrations?_rsc=dz2dCvbwVP-tJ-bi",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/17llhw81ympc7.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/analytics?_rsc=5Xn_9t2HsUSsSho3",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=HNyA1e461shAp4ga",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/scenarios?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/17llhw81ympc7.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/analytics",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/analytics",
+        "bodyText": 1614,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Аналитика\n🔕\n?\nВыйти\nАккаунт\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/crm",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/crm",
+        "bodyText": 712,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "CRM\n🔕\n?\nВыйти\nАккаунт\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/ai",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/ai",
+        "bodyText": 907,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "AI-сотрудники\nПо выбранному аккаунту: результат МОП и РОП, п",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "AI-руководитель отдела продаж\nконтролирует качество и обучае",
+            "left": 310,
+            "top": 155,
+            "right": 610,
+            "bottom": 673.75,
+            "w": 300,
+            "h": 518.75,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/rop",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/rop",
+        "bodyText": 587,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Продажи\n🔕\n?\nВыйти\nАккаунт\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=8NrlRbFW63R2OT9E",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/analytics?_rsc=ORNM06JLqanRz5WI",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=r9ww0YtWET9o8tB0",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=ILUsg4dQNDsguDPa",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/marketing",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/marketing",
+        "bodyText": 1134,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Маркетинг\nЦели, спрос и переходы в реальные контентные инстр",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "NAV",
+            "text": "Обзор\nЦели и автопилот\nРабота BORIS\nАнализ спроса",
+            "left": 310,
+            "top": 321.375,
+            "right": 1490,
+            "bottom": 379.375,
+            "w": 1180,
+            "h": 58,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/dashboard/campaign?_rsc=mX6YghHQpvHxISEQ",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/campaign?_rsc=iZluvMRDlWDk5yez",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=md2v50mJ2hrxzw_u",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=H6SpDXsV293zNvyr",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/social",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/social",
+        "bodyText": 1393,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Социальные сети\n🔕\n?\nВыйти\nАккаунт\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_readiness?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/analytics?_rsc=Mn4UcmKzOLpwhjHL",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/campaign/banners?_rsc=Mn4UcmKzOLpwhjHL",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/campaign?_rsc=Mn4UcmKzOLpwhjHL",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/social?_rsc=Mn4UcmKzOLpwhjHL",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/billing",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/billing",
+        "bodyText": 1258,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Тарифы и финансы\nТариф, модули, реальные способы оплаты и ис",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=roBJyrQ35a3g0AYD",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=bndKnwlgEn26HJ_F",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=yrt2tnCaNlgigfFp",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/campaign?_rsc=yrt2tnCaNlgigfFp",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/sitebuild",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/sitebuild",
+        "bodyText": 1540,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Создание сайтов\nЗаявка и материалы через существующий sitebu",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/memory?_rsc=lBuBfIGCRtirewtU",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/social?_rsc=lBuBfIGCRtirewtU",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/payments/prices?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/calltracking/all_limits?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/ai?_rsc=lBuBfIGCRtirewtU",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages/setup?_rsc=lBuBfIGCRtirewtU",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/company",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/company",
+        "bodyText": 920,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "О компании\nПрофиль компании, который используют рабочие моду",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "Профиль аккаунта\nЧто видят рабочие модули\nСфера\nПроизводство",
+            "left": 992.75,
+            "top": 155,
+            "right": 1490,
+            "bottom": 535.546875,
+            "w": 497.25,
+            "h": 380.546875,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/rop?_rsc=OmippRUEIIee1sGd",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073411_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073423_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/rop?_rsc=HrMv6idzm9Uy6hmu",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073143_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/rop?_rsc=ffD9HAW4Q9Y2w5MK",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/social?_rsc=pBBBVTEenhq9RzMy",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073446_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/memory",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/memory",
+        "bodyText": 1720,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "База знаний компании\nПодтверждённые знания, которыми BORIS и",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/journal",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/journal",
+        "bodyText": 16314,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Что делал BORIS\nПонятная история действий: результат, причин",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "20.08.2026\n1",
+            "left": 310,
+            "top": 494.9375,
+            "right": 406,
+            "bottom": 532.9375,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "15.08.2026\n2",
+            "left": 310,
+            "top": 681.890625,
+            "right": 406,
+            "bottom": 719.890625,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "13.08.2026\n3",
+            "left": 310,
+            "top": 1069.171875,
+            "right": 406,
+            "bottom": 1107.171875,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "11.08.2026\n15",
+            "left": 310,
+            "top": 1618.03125,
+            "right": 406,
+            "bottom": 1656.03125,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "10.08.2026\n12",
+            "left": 310,
+            "top": 4338.328125,
+            "right": 406,
+            "bottom": 4376.328125,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "09.08.2026\n57",
+            "left": 310,
+            "top": 6515.765625,
+            "right": 406,
+            "bottom": 6553.765625,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/campaign/144",
+      "viewport": "desktop_1536",
+      "size": [
+        1536,
+        960
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/campaign/144",
+        "bodyText": 512,
+        "bodyScrollWidth": 1536,
+        "docScrollWidth": 1536,
+        "clientWidth": 1536,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 960,
+            "w": 286,
+            "h": 960,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Объявления\n🔔\n?\nВыйти\nГарик плитка МО\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1536,
+            "bottom": 78,
+            "w": 1250,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1458,
+            "top": 872,
+            "right": 1524,
+            "bottom": 938,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/home",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/command-center",
+        "bodyText": 2028,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Главная\nЕдиный командный центр BORIS\n🔕\n?\nВыйти\nАккаунт\nКлие",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "ASIDE",
+            "text": "КЛИЕНТЫ\nЗагрузка…\n↻\nГ\nГарик плитка МО\ngarik_plitka_mo_58647",
+            "left": 328,
+            "top": 173,
+            "right": 538,
+            "bottom": 375.75,
+            "w": 210,
+            "h": 202.75,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/integrations?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/analytics?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/crm/workspace?tab=tasks&_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/work-mode?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_readiness?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/command-center",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/command-center",
+        "bodyText": 2625,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Главная\nЕдиный командный центр BORIS\n🔕\n?\nВыйти\nАккаунт\nКлие",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "ASIDE",
+            "text": "КЛИЕНТЫ\n1 подключено\n↻\nГ\nГарик плитка МО\ngarik_plitka_mo_586",
+            "left": 328,
+            "top": 173,
+            "right": 538,
+            "bottom": 375.75,
+            "w": 210,
+            "h": 202.75,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/scenarios?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/social?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/command?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages/setup?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_readiness?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/messages",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/messages",
+        "bodyText": 1047,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Сообщения\n🔕\n?\nВыйти\nАккаунт\nКлиент",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/command?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/scenarios?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages/setup?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/social?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/scenarios",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/scenarios",
+        "bodyText": 936,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Бизнес-сценарии\n🔕\n?\nВыйти\nАккаунт\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "ASIDE",
+            "text": "Как это работает\n1\nВыберите бизнес-задачу\nНе инструмент, а р",
+            "left": 966,
+            "top": 155,
+            "right": 1256,
+            "bottom": 609.375,
+            "w": 290,
+            "h": 454.375,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages/setup?_rsc=7zoW7UR9UvnpsN2L",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/social?_rsc=a_qGt6IBAAQNYPQO",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages/setup?_rsc=nwRlfNz9ejY_2-QD",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages/setup?_rsc=n7mdOtOkUXP5LNDx",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/campaign",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/campaign",
+        "bodyText": 2539,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Объявления\n🔕\n?\nВыйти\nАккаунт\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/analytics",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/analytics",
+        "bodyText": 1614,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Аналитика\n🔕\n?\nВыйти\nАккаунт\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/crm",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/crm",
+        "bodyText": 720,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "CRM\n🔔\n?\nВыйти\nГарик плитка МО\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/dashboard/command-center?_rsc=WbpZyoIGLm7VD9RX",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/command-center?_rsc=xFDhlai_A_mt6DZ0",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/factory-decisions?_rsc=RmSPT4-fVi_zATx5",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/factory-decisions?_rsc=2fwm6Cp7Jx-Ck-T9",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/ai",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/ai",
+        "bodyText": 901,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "AI-сотрудники\nПо выбранному аккаунту: результат МОП и РОП, п",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "AI-руководитель отдела продаж\nконтролирует качество и обучае",
+            "left": 310,
+            "top": 155,
+            "right": 610,
+            "bottom": 673.75,
+            "w": 300,
+            "h": 518.75,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/rop",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/rop",
+        "bodyText": 595,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Продажи\n🔔\n?\nВыйти\nГарик плитка МО\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/rop?_rsc=ILUsg4dQNDsguDPa",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/social?_rsc=tdxRyETQ0XTuXeFo",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/social?_rsc=ILUsg4dQNDsguDPa",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/social?_rsc=445cN6t2OCQ3tUc2",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/marketing",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/marketing",
+        "bodyText": 1140,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Маркетинг\nЦели, спрос и переходы в реальные контентные инстр",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "NAV",
+            "text": "Обзор\nЦели и автопилот\nРабота BORIS\nАнализ спроса",
+            "left": 310,
+            "top": 338.78125,
+            "right": 1256,
+            "bottom": 396.78125,
+            "w": 946,
+            "h": 58,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/social",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/social",
+        "bodyText": 1401,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Социальные сети\n🔔\n?\nВыйти\nГарик плитка МО\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/billing",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/billing",
+        "bodyText": 2308,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Тарифы и финансы\nТариф, модули, реальные способы оплаты и ис",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/sitebuild",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/sitebuild",
+        "bodyText": 1727,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Создание сайтов\nЗаявка и материалы через существующий sitebu",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/company",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/company",
+        "bodyText": 920,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "О компании\nПрофиль компании, который используют рабочие моду",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "Профиль аккаунта\nЧто видят рабочие модули\nСфера\nПроизводство",
+            "left": 858.1875,
+            "top": 155,
+            "right": 1256,
+            "bottom": 535.546875,
+            "w": 397.8125,
+            "h": 380.546875,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073423_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073411_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073143_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073446_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/memory",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/memory",
+        "bodyText": 1720,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "База знаний компании\nПодтверждённые знания, которыми BORIS и",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/journal",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/journal",
+        "bodyText": 16322,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Что делал BORIS\nПонятная история действий: результат, причин",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "20.08.2026\n1",
+            "left": 310,
+            "top": 494.9375,
+            "right": 406,
+            "bottom": 532.9375,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "15.08.2026\n2",
+            "left": 310,
+            "top": 681.890625,
+            "right": 406,
+            "bottom": 719.890625,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "13.08.2026\n3",
+            "left": 310,
+            "top": 1088.546875,
+            "right": 406,
+            "bottom": 1126.546875,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "11.08.2026\n15",
+            "left": 310,
+            "top": 1637.40625,
+            "right": 406,
+            "bottom": 1675.40625,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "10.08.2026\n12",
+            "left": 310,
+            "top": 4357.703125,
+            "right": 406,
+            "bottom": 4395.703125,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "DIV",
+            "text": "09.08.2026\n57",
+            "left": 310,
+            "top": 6535.140625,
+            "right": 406,
+            "bottom": 6573.140625,
+            "w": 96,
+            "h": 38,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/campaign/144",
+      "viewport": "laptop_1280",
+      "size": [
+        1280,
+        800
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/campaign/144",
+        "bodyText": 512,
+        "bodyScrollWidth": 1280,
+        "docScrollWidth": 1280,
+        "clientWidth": 1280,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n‹\nРАБОТА\nГлавная\nТребуют решени",
+            "left": 0,
+            "top": 0,
+            "right": 286,
+            "bottom": 800,
+            "w": 286,
+            "h": 800,
+            "pos": "sticky"
+          },
+          {
+            "tag": "HEADER",
+            "text": "Объявления\n🔔\n?\nВыйти\nГарик плитка МО\nРуководитель",
+            "left": 286,
+            "top": 0,
+            "right": 1280,
+            "bottom": 78,
+            "w": 994,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 1202,
+            "top": 712,
+            "right": 1268,
+            "bottom": 778,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/home",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/command-center",
+        "bodyText": 2583,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nГлавная\n🔕\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/rop?_rsc=euSKzXzbpK-Dq7yo",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/0rrd-xi2xun93.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_readiness?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/40tzsf55kn4if.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/rop?_rsc=KSEhMQzJc2pd2-tk",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/work-mode?_rsc=euSKzXzbpK-Dq7yo",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/rop?_rsc=UwRsexKtGQuCYCYn",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/44-mi749j6uee.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/0rrd-xi2xun93.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/40tzsf55kn4if.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/44-mi749j6uee.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/command-center",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/command-center",
+        "bodyText": 2583,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nГлавная\n🔕\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/1xhkikvi-2p8t.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/campaign?_rsc=KPjnzpuEWhoaaUh0",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages?_rsc=euSKzXzbpK-Dq7yo",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/35y3q3hjdtrq0.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/campaign?_rsc=euSKzXzbpK-Dq7yo",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages?_rsc=0zXGv-EVQ5jMBDQL",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/1xhkikvi-2p8t.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/_next/static/chunks/35y3q3hjdtrq0.js",
+          "type": "script",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "hydration_errors": []
+    },
+    {
+      "route": "/messages",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/messages",
+        "bodyText": 1034,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nСообщения\n🔕\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/dashboard/sitebuild?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/messages/setup?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/memory?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/ai?_rsc=OIpe2L-bDLg8CPZz",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/scenarios",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/scenarios",
+        "bodyText": 917,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nБизнес-сценарии\n🔕\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/sitebuild?_rsc=GuEt-MhY33Rg7qVy",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/sitebuild?_rsc=J4iPLXJRO2QRvlSE",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/ai?_rsc=a_qGt6IBAAQNYPQO",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/sitebuild?_rsc=LwYj5s5HvTe1XDcR",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/campaign",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/campaign",
+        "bodyText": 2520,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nОбъявления\n🔕\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/analytics",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/analytics",
+        "bodyText": 1595,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nАналитика\n🔕\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/accounts/list",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/crm",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/crm",
+        "bodyText": 693,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nCRM\n🔔\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/ai",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/ai",
+        "bodyText": 799,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nAI-сотрудники\nAI-менеджер по продажам\nAI-руководитель отде",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/rop",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/rop",
+        "bodyText": 568,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nПродажи\n🔔\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/marketing",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/marketing",
+        "bodyText": 1064,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nМаркетинг\n🔕\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "NAV",
+            "text": "Обзор\nЦели и автопилот\nРабота BORIS\nАнализ спроса",
+            "left": 16,
+            "top": 428.5625,
+            "right": 752,
+            "bottom": 486.5625,
+            "w": 736,
+            "h": 58,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/social",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/social",
+        "bodyText": 1374,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nСоциальные сети\n🔔\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/billing",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/billing",
+        "bodyText": 2212,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nТарифы и финансы\n🔔\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/sitebuild",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/sitebuild",
+        "bodyText": 1644,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nСоздание сайтов\n🔔\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/company",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/company",
+        "bodyText": 835,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nО компании\n🔔\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073411_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073446_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073423_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073143_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/memory",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/memory",
+        "bodyText": 1610,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nБаза знаний компании\nПоказать\nПеречитать источники\n🔔\n?\nВы",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/journal",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/journal",
+        "bodyText": 16232,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nЧто делал BORIS\nОбновить\n🔔\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/campaign/144",
+      "viewport": "tablet_768",
+      "size": [
+        768,
+        1024
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/campaign/144",
+        "bodyText": 485,
+        "bodyScrollWidth": 768,
+        "docScrollWidth": 768,
+        "clientWidth": 768,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 1024,
+            "w": 310,
+            "h": 1024,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nОбъявления\n🔔\n?\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 768,
+            "bottom": 78,
+            "w": 768,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 690,
+            "top": 936,
+            "right": 756,
+            "bottom": 1002,
+            "w": 66,
+            "h": 66,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/home",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/command-center",
+        "bodyText": 2581,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nГлавная\n🔕\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/command-center",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/command-center",
+        "bodyText": 2581,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nГлавная\n🔕\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/avito/ai_marketing_daily_workspace?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/marketing?_rsc=m-D8pEsmTHkvRjQJ",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/work-mode?_rsc=euSKzXzbpK-Dq7yo",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/work-mode?_rsc=6sQW02_qkMaFXhh9",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/dashboard/work-mode?_rsc=K5satn_oAvdnW4XL",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/messages",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/messages",
+        "bodyText": 1032,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nСообщения\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/scenarios",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/scenarios",
+        "bodyText": 3217,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nБизнес-сценарии\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/campaign",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/campaign",
+        "bodyText": 2518,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [
+          {
+            "tag": "BUTTON",
+            "text": "AI-фотостудия",
+            "left": 314,
+            "right": 438,
+            "top": 244.59375,
+            "bottom": 285.46875
+          }
+        ],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nОбъявления\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/analytics",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/analytics",
+        "bodyText": 1593,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nАналитика\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/crm",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/crm",
+        "bodyText": 691,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nCRM\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/ai",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/ai",
+        "bodyText": 743,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nAI-сотрудники\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/rop",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/rop",
+        "bodyText": 566,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nПродажи\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/marketing",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/marketing",
+        "bodyText": 1884,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nМаркетинг\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "NAV",
+            "text": "Обзор\nЦели и автопилот\nРабота BORIS\nАнализ спроса",
+            "left": 16,
+            "top": 607.734375,
+            "right": 374,
+            "bottom": 665.734375,
+            "w": 358,
+            "h": 58,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/social",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/social",
+        "bodyText": 1372,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nСоциальные сети\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/api/home/overview?account_id=garik_plitka_mo_58647",
+          "type": "fetch",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/billing",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/billing",
+        "bodyText": 2210,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nТарифы и финансы\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/sitebuild",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/sitebuild",
+        "bodyText": 1642,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nСоздание сайтов\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/company",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/company",
+        "bodyText": 833,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nО компании\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073143_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073446_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073411_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        },
+        {
+          "url": "https://boris-ai.pro/images/_sitebuild/videos/1784073423_video.mp4",
+          "type": "media",
+          "error": "net::ERR_ABORTED"
+        }
+      ],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/memory",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/memory",
+        "bodyText": 1578,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nБаза знаний компании\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/journal",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/journal",
+        "bodyText": 16221,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nЧто делал BORIS\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    },
+    {
+      "route": "/dashboard/campaign/144",
+      "viewport": "mobile_390",
+      "size": [
+        390,
+        844
+      ],
+      "nav_error": null,
+      "metrics": {
+        "url": "https://boris-ai.pro/dashboard/campaign/144",
+        "bodyText": 483,
+        "bodyScrollWidth": 390,
+        "docScrollWidth": 390,
+        "clientWidth": 390,
+        "overflowX": false,
+        "clippedActions": [],
+        "fixed": [
+          {
+            "tag": "ASIDE",
+            "text": "B\nBORIS AI\nВаш AI-маркетолог\n×\nРАБОТА\nГлавная\nТребуют решени",
+            "left": -325.5,
+            "top": 0,
+            "right": -15.5,
+            "bottom": 844,
+            "w": 310,
+            "h": 844,
+            "pos": "fixed"
+          },
+          {
+            "tag": "HEADER",
+            "text": "☰\nОбъявления\n🔔\nВыйти",
+            "left": 0,
+            "top": 0,
+            "right": 390,
+            "bottom": 78,
+            "w": 390,
+            "h": 78,
+            "pos": "sticky"
+          },
+          {
+            "tag": "BUTTON",
+            "text": "✦\n·\nB",
+            "left": 318,
+            "top": 772,
+            "right": 376,
+            "bottom": 830,
+            "w": 58,
+            "h": 58,
+            "pos": "fixed"
+          }
+        ]
+      },
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ],
+      "page_errors": [],
+      "failed_requests": [],
+      "server_500": [],
+      "missing_chunks": [],
+      "hydration_errors": []
+    }
+  ]
+}

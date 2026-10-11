@@ -1,0 +1,877 @@
+[
+  {
+    "viewport": "desktop_1536",
+    "route": "/dashboard/home",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 69,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/dashboard/command-center",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/dashboard/scenarios",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 69,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/dashboard/campaign",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/dashboard/analytics",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 69,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/dashboard/crm",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/rop",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/dashboard/marketing",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/social",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/dashboard/billing",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/dashboard/sitebuild",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/memory",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 69,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "desktop_1536",
+    "route": "/journal",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/dashboard/home",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 69,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/dashboard/command-center",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/dashboard/scenarios",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/dashboard/analytics",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 69,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/dashboard/crm",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 69,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/ai",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/rop",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/dashboard/marketing",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/dashboard/billing",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/dashboard/sitebuild",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/dashboard/company",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/memory",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "laptop_1280",
+    "route": "/journal",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/dashboard/command-center",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/dashboard/scenarios",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/dashboard/campaign",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/dashboard/analytics",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/dashboard/crm",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 69,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/ai",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/rop",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/dashboard/marketing",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/dashboard/billing",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/dashboard/sitebuild",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/dashboard/company",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/memory",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "tablet_768",
+    "route": "/journal",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 70,
+        "cw": 64,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/dashboard/command-center",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/messages",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/dashboard/scenarios",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/dashboard/campaign",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/dashboard/analytics",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/dashboard/crm",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/rop",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/dashboard/marketing",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "Обзор",
+        "sw": 68,
+        "cw": 57,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Цели и автопилот",
+        "sw": 158,
+        "cw": 95,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Работа BORIS",
+        "sw": 125,
+        "cw": 81,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Анализ спроса",
+        "sw": 133,
+        "cw": 85,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/social",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/dashboard/billing",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/dashboard/sitebuild",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/dashboard/company",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/memory",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  },
+  {
+    "viewport": "mobile_390",
+    "route": "/journal",
+    "text": [
+      {
+        "tag": "BUTTON",
+        "text": "Все действия",
+        "sw": 121,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Публикация",
+        "sw": 107,
+        "cw": 52,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Объявления",
+        "sw": 110,
+        "cw": 53,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Сообщения",
+        "sw": 105,
+        "cw": 52,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Аналитика",
+        "sw": 97,
+        "cw": 50,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "Сценарий",
+        "sw": 90,
+        "cw": 48,
+        "overflow": "visible",
+        "white": "nowrap"
+      },
+      {
+        "tag": "BUTTON",
+        "text": "✦\n·\nB",
+        "sw": 62,
+        "cw": 56,
+        "overflow": "visible",
+        "white": "normal"
+      }
+    ],
+    "overlaps": []
+  }
+]
