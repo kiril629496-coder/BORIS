@@ -1296,6 +1296,21 @@ def _run_campaign_prepare(db, job, payload):
         from app.services.local_content_worker import run as run_local_content
         return run_local_content(db, job, payload)
     C, campaign, user, allowed, account_id = _campaign_job_context(db, job, payload)
+    _requested_scope=[]
+    for _raw in (dict(payload or {}).get("item_ids") or []):
+        try: _iid=int(_raw)
+        except (TypeError,ValueError): _iid=0
+        if _iid>0 and _iid not in _requested_scope:
+            _requested_scope.append(_iid)
+    _all_rows=C._ff_items(db,campaign.id,allowed)
+    if _requested_scope:
+        _by_id={int(r.id):r for r in _all_rows}
+        _missing_scope=[iid for iid in _requested_scope if iid not in _by_id]
+        if _missing_scope:
+            return {"stage":"scope_drift","code":"CAMPAIGN_PREPARE_SCOPE_DRIFT","campaign_id":campaign.id,"account_id":account_id,"missing_item_ids":_missing_scope[:100],"retryable":False}, "partial"
+        _preflight_rows=[_by_id[iid] for iid in _requested_scope]
+    else:
+        _preflight_rows=_all_rows
     _, _live_ff = C._ff_state_load(campaign)
     _premium_prepare = (str((C._ff_account_campaign_ai_policy(db, account_id) or {}).get("banner_engine") or "").strip().lower() == "full_ai_premium"
                         and _campaign_banner_required(_live_ff))
@@ -1322,7 +1337,7 @@ def _run_campaign_prepare(db, job, payload):
     # Resolve direction/category intake FIRST. It has richer account/company evidence
     # and can satisfy newly introduced Avito fields automatically. Running the legacy
     # compact-question builder first would ask the owner for facts BORIS already knows.
-    intake = C._ff_direction_intake(db, campaign, ff, C._ff_items(db, campaign.id, allowed))
+    intake = C._ff_direction_intake(db, campaign, ff, _preflight_rows)
     if not intake.get("all_complete"):
         return {"stage":"needs_input","intake":intake,"message":"Нужны обязательные факты Avito."}, "awaiting_confirmation"
     # Persist the exact trusted intake BORIS just resolved so downstream materialize
@@ -1423,7 +1438,8 @@ def _run_campaign_prepare(db, job, payload):
         return {"stage":"billing_pending","campaign_id":campaign.id,"account_id":account_id,
                 "unit":"listings","pending_charge":mat.get("pending_charge",0),"retryable":True,
                 "message":mat.get("message") or "BORIS повторно сверяет тарифный учёт. Повторно карточки не создаются."}, "retry"
-    item_ids = [int(x) for x in (mat.get("item_ids") or [])]
+    _materialized_ids = [int(x) for x in (mat.get("item_ids") or [])]
+    item_ids=list(_requested_scope) if _requested_scope else list(_materialized_ids)
     if not item_ids:
         # Imported/legacy campaigns can already contain complete cards while the
         # Feed Factory matrix is empty. Reuse those cards instead of failing the
@@ -1814,7 +1830,13 @@ def _run_campaign_prepare(db, job, payload):
         if not _premium_validated_snapshot.get("ok"):
             return {"stage": "prepare_reconciliation_required", "code": _premium_validated_snapshot.get("code"),
                     "item_id": _premium_validated_snapshot.get("item_id"), "retryable": False}, "partial"
-    val = C.campaign_validation(campaign.id, db, user)
+    def _scoped_validation():
+        _now=C._ff_items(db,campaign.id,allowed)
+        _scope=set(int(x) for x in item_ids)
+        _rows=[r for r in _now if int(r.id) in _scope]
+        _compare=[r for r in _now if int(r.id) in _scope or str(r.status or "").lower() in {"ready","published"}]
+        return C._campaign_validation_for_rows(campaign,_rows,db,comparison_rows=_compare)
+    val = _scoped_validation()
     if not val.get("ok"):
         if _premium_prepare:
             # Legacy cleanup below erases images/evidence and rebinds a stale
@@ -2149,7 +2171,7 @@ def _run_campaign_prepare(db, job, payload):
                     stamp_item_semantic_evidence(p,fresh,ordered)
                 row.payload_json=_json.dumps(p,ensure_ascii=False); row.content_hash=C.CS.content_hash(p)
                 db.commit()
-            val=C.campaign_validation(_campaign_id,db,user)
+            val=_scoped_validation()
         if not val.get("ok"):
             _post_codes={str(e.get("code") or "") for rr in (val.get("items") or []) for e in (rr.get("errors") or [])}
             _media_refill_codes={"photo_stack_incomplete","images_missing","media_semantic_no_links","media_semantic_proof_missing","media_semantic_proof_stale","media_semantic_link_payload_drift"}
@@ -2866,6 +2888,34 @@ def _run_campaign_deliver(db, job, payload):
             "activation":sent.get("activation"),"external_upload":True,"sha256":feed.get("current_sha"),
             "message":"Avito принял запуск. BORIS ждёт итоговый отчёт публикации."}, "queued"
 
+def _enqueue_scoped_prepare_after_banners(db, job, C, campaign, user, account_id, item_ids):
+    """Continue banner completion into prepare without widening item scope."""
+    import hashlib
+    ids=list(dict.fromkeys(int(x) for x in (item_ids or []) if int(x)>0))
+    if not ids:
+        return C._campaign_guardian_enqueue(db,campaign,user,account_id,"campaign_prepare")
+    scope_hash=hashlib.sha256(",".join(str(x) for x in ids).encode("utf-8")).hexdigest()[:16]
+    prior=dict(job.payload_json or {})
+    p={
+        "campaign_id":int(campaign.id),"account_id":account_id,"item_ids":ids,
+        "stage":"queued","_priority":10,
+        "_source_banner_job_id":int(job.id),
+        "_subset_continuation":True,
+        "_providerfree_ready_subset":bool(prior.get("_providerfree_ready_subset")),
+        "_cost_anomaly_free_only":bool(
+            prior.get("_cost_anomaly_free_only") or prior.get("_providerfree_ready_subset")
+        ),
+    }
+    row,_=enqueue(
+        db,"campaign_prepare",p,
+        owner_user_id=getattr(campaign,"owner_user_id",None),
+        account_id=account_id,
+        fingerprint=f"campaign_prepare:{int(campaign.id)}:{account_id}:ready_subset:{scope_hash}",
+        progress_total=8,
+    )
+    return row
+
+
 def _run_campaign_banners_standard(db, job, payload):
     """Regenerate campaign banners independently from XML/category readiness.
 
@@ -2915,7 +2965,7 @@ def _run_campaign_banners_standard(db, job, payload):
         done=total-len(remaining)
         _campaign_checkpoint(db,job,payload,"banners",done,total,{"remaining":remaining,"item_ids":all_ids})
         if not remaining:
-            C._campaign_guardian_enqueue(db,campaign,user,account_id,"campaign_prepare")
+            _enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,all_ids)
             return {"stage":"banners_done","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"retryable":False,
                     "message":"Баннеры прошли контроль. BORIS проверяет объявления и Avito-фид."}, "completed"
         return {"stage":"banners","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"retryable":True}, "retry"
@@ -2978,7 +3028,7 @@ def _run_campaign_banners_standard(db, job, payload):
     if not remaining:
         # Creative completion must continue automatically into the canonical
         # validation/XML preparation chain. No owner click is required.
-        C._campaign_guardian_enqueue(db,campaign,user,account_id,"campaign_prepare")
+        _enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,all_ids)
         return {"stage":"banners_done","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"retryable":False,"message":"Баннеры прошли контроль. BORIS проверяет объявления и Avito-фид."}, "completed"
     return {"stage":"banners","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"retryable":True}, "retry"
 
@@ -3037,7 +3087,7 @@ def _run_campaign_banners_premium(db, job, payload):
     initial = persist(plan)
     if plan["final"] != "invoke":
         if plan["final"] == "completed":
-            C._campaign_guardian_enqueue(db, campaign, user, account_id, "campaign_prepare")
+            _enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,all_ids)
         return initial, plan["final"]
     chunk = plan["chunk"]
     # The maps above were committed before entering a possible provider call.
@@ -3058,7 +3108,7 @@ def _run_campaign_banners_premium(db, job, payload):
     )
     final_result = persist(out)
     if out["final"] == "completed":
-        C._campaign_guardian_enqueue(db, campaign, user, account_id, "campaign_prepare")
+        _enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,all_ids)
         final_result["message"] = "Баннеры прошли контроль. BORIS проверяет объявления и Avito-фид."
     return final_result, out["final"]
 

@@ -3558,16 +3558,25 @@ def _ff_near_duplicate_pairs(rows, threshold: float = 0.86, limit: int = 200) ->
     return found
 
 
-@router.get("/{campaign_id}/validation")
-def campaign_validation(campaign_id:int, db=Depends(_db), user=Depends(get_current_user)):
-    allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); rows=_ff_items(db,campaign_id,allowed)
+def _campaign_validation_for_rows(campaign, rows, db, comparison_rows=None):
+    """Canonical campaign validation for an explicit immutable item scope.
+
+    Per-card and batch-banner checks apply only to the validation rows. Duplicate
+    and near-duplicate comparisons may additionally include already-ready or
+    published rows so a repaired later subset cannot collide with earlier output.
+    """
+    _scope_rows=list(rows or [])
+    _scope_ids={int(r.id) for r in _scope_rows}
     reports=[]
-    for _idx,r in enumerate(rows):
+    for _idx,r in enumerate(_scope_rows):
         reports.append(_ff_validate_row(r,db))
         if (_idx+1)%8==0:
             db.commit()
     from types import SimpleNamespace as _SimpleNamespace
-    rows=[_SimpleNamespace(id=int(r.id),account_id=str(getattr(r,"account_id","") or ""),segment=str(getattr(r,"segment","") or ""),payload_json=str(getattr(r,"payload_json","") or "{}")) for r in rows]
+    def _snap(_r):
+        return _SimpleNamespace(id=int(_r.id),account_id=str(getattr(_r,"account_id","") or ""),segment=str(getattr(_r,"segment","") or ""),payload_json=str(getattr(_r,"payload_json","") or "{}"))
+    rows=[_snap(r) for r in (comparison_rows if comparison_rows is not None else _scope_rows)]
+    _batch_rows=[r for r in rows if int(r.id) in _scope_ids]
     db.commit()
     seen={}; dup=[]; lead_seen={}; lead_dup=[]; desc_seen={}; desc_dup=[]; near_dup=_ff_near_duplicate_pairs(rows)
     import re as _copy_re
@@ -3630,13 +3639,13 @@ def campaign_validation(campaign_id:int, db=Depends(_db), user=Depends(get_curre
     try: _banner_every=max(1,min(int(_batch_order.get("banner_every_n") or 1),20))
     except (TypeError,ValueError): _banner_every=1
     _banner_rows=[]; _families={}
-    for _row in rows:
+    for _row in _batch_rows:
         _p=_ff_payload(_row)
         if str(_p.get("banner_url") or _p.get("banner") or "").strip():
             _banner_rows.append(int(_row.id))
             _fam=str(_p.get("banner_composition_family") or ((_p.get("banner_visual_metadata") or {}).get("composition_family") if isinstance(_p.get("banner_visual_metadata"),dict) else "") or "").strip().lower()
             if _fam: _families[_fam]=int(_families.get(_fam) or 0)+1
-    _banner_target=((len(rows)+_banner_every-1)//_banner_every) if (_banner_required and rows) else 0
+    _banner_target=((len(_batch_rows)+_banner_every-1)//_banner_every) if (_banner_required and _batch_rows) else 0
     _banner_actual=len(_banner_rows)
     _density_pass=(not _banner_required and _banner_actual==0) or (_banner_required and abs(_banner_actual-_banner_target)<=1)
     _family_total=sum(_families.values())
@@ -3651,8 +3660,19 @@ def campaign_validation(campaign_id:int, db=Depends(_db), user=Depends(get_curre
         _batch_errors.append({"code":"banner_density_mismatch","target":_banner_target,"actual":_banner_actual,"banner_every_n":_banner_every})
     if not _composition_pass:
         _batch_errors.append({"code":"banner_composition_imbalance","families":_families,"max_share":round(_max_family_share,4),"limit":0.35,"metadata_count":_family_total,"banner_count":_banner_actual})
+    dup=[p for p in dup if any(int(x) in _scope_ids for x in p)]
+    desc_dup=[p for p in desc_dup if any(int(x) in _scope_ids for x in p)]
+    lead_dup=[p for p in lead_dup if any(int(x) in _scope_ids for x in p)]
+    near_dup=[p for p in near_dup if int(p.get("a") or 0) in _scope_ids or int(p.get("b") or 0) in _scope_ids]
     ready=sum(1 for r in reports if r["valid"])
     return {"status":"ok","ok":ready==len(reports) and bool(reports) and not _batch_errors,"total":len(reports),"ready":ready,"blocked":len(reports)-ready,"duplicate_pairs":dup[:100],"duplicate_description_pairs":desc_dup[:100],"near_duplicate_description_pairs":near_dup[:100],"batch_errors":_batch_errors,"banner_batch_qa":{"required":_banner_required,"banner_every_n":_banner_every,"target_count":_banner_target,"actual_count":_banner_actual,"density_pass":_density_pass,"families":_families,"composition_pass":_composition_pass,"max_family_share":round(_max_family_share,4)},"items":reports}
+
+
+@router.get("/{campaign_id}/validation")
+def campaign_validation(campaign_id:int, db=Depends(_db), user=Depends(get_current_user)):
+    allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed)
+    rows=_ff_items(db,campaign_id,allowed)
+    return _campaign_validation_for_rows(campaign,rows,db)
 
 
 def _ff_restore_exact_media_links_from_payload(row, db, created_by=None):
