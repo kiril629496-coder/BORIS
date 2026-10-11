@@ -367,3 +367,12 @@ def test_providerfree_finalizer_never_delivers_before_required_banner_stage():
     assert "_banner_required=_campaign_banner_required(ff)" in src
     assert 'terminal["delivery_eligible"]=bool(' in src
     assert 'ready_ids and not _banner_required and not _campaign_owner_prepare_only_contract(ff)' in src
+
+
+def test_providerfree_ready_subset_routes_to_banner_stage_when_required():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert 'terminal["banner_stage_eligible"]=bool(ready_ids and _banner_required)' in src
+    assert 'db,"campaign_banners",banner_payload' in src
+    assert 'fingerprint=f"campaign_banners:{campaign_id}:{account_id}:ready_subset:{scope_hash}"' in src
+    assert 'terminal["next_stage"]="banners"' in src

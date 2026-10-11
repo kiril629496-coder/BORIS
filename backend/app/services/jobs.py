@@ -3874,12 +3874,31 @@ def _finalize_providerfree_campaign_repair(db, job, now=None):
     C._ff_state_save(db,campaign,ff)
 
     _banner_required=_campaign_banner_required(ff)
+    import hashlib
+    scope_hash=hashlib.sha256(",".join(str(x) for x in ready_ids).encode("utf-8")).hexdigest()[:16] if ready_ids else ""
+    terminal["banner_stage_eligible"]=bool(ready_ids and _banner_required)
     terminal["delivery_eligible"]=bool(
         ready_ids and not _banner_required and not _campaign_owner_prepare_only_contract(ff)
     )
-    if terminal["delivery_eligible"]:
-        import hashlib
-        scope_hash=hashlib.sha256(",".join(str(x) for x in ready_ids).encode("utf-8")).hexdigest()[:16]
+    if terminal["banner_stage_eligible"]:
+        banner_payload={
+            "campaign_id":campaign_id,"account_id":account_id,"item_ids":ready_ids,
+            "stage":"queued","_priority":10,
+            "_source_prepare_job_id":int(job.id),
+            "_providerfree_ready_subset":True,
+        }
+        banner_job,created=enqueue(
+            db,"campaign_banners",banner_payload,
+            owner_user_id=getattr(campaign,"owner_user_id",None),
+            account_id=account_id,
+            fingerprint=f"campaign_banners:{campaign_id}:{account_id}:ready_subset:{scope_hash}",
+            progress_total=len(ready_ids),
+        )
+        terminal["banner_job_id"]=int(banner_job.id)
+        terminal["banner_job_created"]=bool(created)
+        terminal["next_stage"]="banners"
+        job.result_json=terminal
+    elif terminal["delivery_eligible"]:
         child_payload={
             "campaign_id":campaign_id,"account_id":account_id,"item_ids":ready_ids,
             "stage":"queued","_priority":10,
@@ -3895,6 +3914,7 @@ def _finalize_providerfree_campaign_repair(db, job, now=None):
         )
         terminal["delivery_job_id"]=int(delivery.id)
         terminal["delivery_created"]=bool(created)
+        terminal["next_stage"]="delivery"
         job.result_json=terminal
     return True
 
