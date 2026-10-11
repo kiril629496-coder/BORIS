@@ -183,3 +183,28 @@ def test_auto_media_uses_semantic_family_pool_before_external_stock():
     stock_pos = auto_media.index("_campaign_provider_call(collect_stock")
     assert family_pos < stock_pos
     assert "vision_family_confirmed:" in auto_media
+
+
+def test_mortgage_subject_guard_accepts_clear_consultation_document_context():
+    payload = {
+        "title": "Семейная ипотека — помощь брокера",
+        "direction": "Ипотека / консультации по кредитам",
+    }
+    assert sem._clear_subject_family_match(
+        payload, "a person consulting with documents in an office setting"
+    ) is True
+    assert sem._clear_subject_family_match(
+        payload, "consultation for refinancing"
+    ) is True
+    assert sem._clear_subject_family_match(
+        payload, "financial consultation and analysis"
+    ) is True
+
+
+def test_mortgage_subject_guard_keeps_generic_finance_fail_closed():
+    payload = {
+        "title": "Кредит под залог недвижимости",
+        "direction": "Кредит под залог недвижимости",
+    }
+    assert sem._clear_subject_family_match(payload, "a house or building") is False
+    assert sem._clear_subject_family_match(payload, "man contemplating financial data") is False

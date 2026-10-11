@@ -1044,16 +1044,28 @@ def _clear_subject_family_match(payload: dict, subject: str) -> bool:
         )),
 
         "plastering_service": lambda x: any(k in x for k in ("plaster", "plastering", "штукатур")),
-        "mortgage_broker": lambda x: any(k in x for k in (
-            "mortgage broker", "mortgage consultation", "mortgage meeting",
-            "home loan", "loan consultation", "loan documents",
-            "contract discussion", "financial documents",
-            "real estate consultation", "realtor meeting",
-            "person offering consultation", "person offering help",
-            "consultation meeting", "client consultation", "service steps",
-            "mortgage concept", "home financing", "property documents",
-            "ипотеч", "кредит", "документ", "договор", "консультац"
-        )),
+        "mortgage_broker": lambda x: (
+            any(k in x for k in (
+                "mortgage broker", "mortgage consultation", "mortgage meeting",
+                "home loan", "loan consultation", "loan documents",
+                "contract discussion", "financial documents",
+                "real estate consultation", "realtor meeting",
+                "person offering consultation", "person offering help",
+                "consultation meeting", "client consultation", "service steps",
+                "mortgage concept", "home financing", "property documents",
+                "ипотеч", "кредит", "документ", "договор", "консультац"
+            ))
+            or (
+                any(k in x for k in (
+                    "consult", "discuss", "review", "analysis", "analyz",
+                    "meeting", "broker", "clipboard"
+                ))
+                and any(k in x for k in (
+                    "document", "financial", "mortgage", "loan", "refinanc",
+                    "property", "apartment", "building", "home", "real estate"
+                ))
+            )
+        ),
     }
     fn=checks.get(fam)
     return bool(fn and fn(s))
