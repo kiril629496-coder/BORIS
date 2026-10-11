@@ -556,12 +556,16 @@ def _acquire_job_execution_lock(conn, job_id: int) -> bool:
 
 
 
-def _job_execution_heartbeat_is_fresh(db, job, now=None, max_age_seconds: int = 5) -> bool:
+def _job_execution_heartbeat_is_fresh(
+    db, job, now=None, max_age_seconds: int = 5, waiting_grace_seconds: int = 120
+) -> bool:
     """Secondary fail-closed liveness proof for concurrent stale recovery.
 
     Multiple worker slots run run_once() concurrently. A slot must never recover
     a job that another slot is actively executing merely because an advisory-lock
     probe transiently fails. ExecutionClock persists a heartbeat every ~0.5s.
+    The brief waiting transition is the post-handler/final-commit window and
+    receives a larger bounded grace, but only for the exact current lease token.
     """
     from app.models.storage import Storage
     try:
@@ -573,6 +577,10 @@ def _job_execution_heartbeat_is_fresh(db, job, now=None, max_age_seconds: int = 
         if row is None or not str(getattr(row, "value", "") or "").strip():
             return False
         state = json.loads(row.value)
+        expected_token = str((getattr(job, "payload_json", None) or {}).get("_execution_lease_token") or "")
+        state_token = str(state.get("lease_token") or "")
+        if expected_token and state_token != expected_token:
+            return False
         heartbeat = str(state.get("heartbeat_at") or state.get("at") or "").strip()
         if not heartbeat:
             return False
@@ -581,12 +589,45 @@ def _job_execution_heartbeat_is_fresh(db, job, now=None, max_age_seconds: int = 
             stamp = stamp.replace(tzinfo=timezone.utc)
         current = now or datetime.now(timezone.utc)
         age = (current - stamp).total_seconds()
-        return (
-            -2.0 <= age <= max(1, int(max_age_seconds))
-            and str(state.get("mode") or "") in {"active", "provider", "waiting"}
-        )
+        mode = str(state.get("mode") or "")
+        limit = max(1, int(waiting_grace_seconds if mode == "waiting" else max_age_seconds))
+        return -2.0 <= age <= limit and mode in {"active", "provider", "waiting"}
     except Exception:
         return False
+
+
+def _recovery_progress_signature(job, payload=None) -> str:
+    """Stable progress coordinates for bounded stale-recovery debt."""
+    p = dict(payload or getattr(job, "payload_json", None) or {})
+    remaining = p.get("remaining")
+    if not isinstance(remaining, list):
+        remaining = p.get("pending_item_ids")
+    if not isinstance(remaining, list):
+        remaining = []
+    basis = {
+        "kind": str(getattr(job, "kind", "") or ""),
+        "stage": str(p.get("stage") or ""),
+        "progress_done": int(getattr(job, "progress_done", 0) or 0),
+        "progress_total": int(getattr(job, "progress_total", 0) or 0),
+        "remaining": [int(x) for x in remaining if str(x).isdigit()],
+    }
+    return json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _next_recovery_debt(job, payload=None):
+    """Return lifetime audit count plus consecutive no-progress recovery debt."""
+    p = dict(payload or getattr(job, "payload_json", None) or {})
+    lifetime = int(p.get("_recovery_count") or 0)
+    signature = _recovery_progress_signature(job, p)
+    previous = str(p.get("_last_recovery_progress_signature") or "")
+    consecutive = int(p.get("_consecutive_recovery_count") or 0)
+    next_consecutive = consecutive + 1 if previous == signature else 1
+    return {
+        "lifetime": lifetime,
+        "next_lifetime": lifetime + 1,
+        "signature": signature,
+        "next_consecutive": next_consecutive,
+    }
 
 
 def _job_execution_lock_is_held(job_id: int) -> bool:
@@ -4178,13 +4219,15 @@ def recover_interrupted_campaign_jobs():
                 # healthy remote execution back into queued work on local restart.
                 continue
             p=dict(job.payload_json or {})
-            recovery_count=int(p.get("_recovery_count") or 0)
-            if recovery_count >= MAX_RECOVERY_COUNT:
+            _debt=_next_recovery_debt(job,p)
+            if int(_debt["next_consecutive"]) > MAX_RECOVERY_COUNT:
                 if not _finalize_providerfree_campaign_repair(db,job,now):
                     job.status="failed"; job.finished_at=now
-                    job.error_text="Превышен лимит восстановлений после перезапуска worker"
+                    job.error_text="Превышен лимит последовательных восстановлений без прогресса после перезапуска worker"
             else:
-                p["_recovery_count"]=recovery_count+1
+                p["_recovery_count"]=int(_debt["next_lifetime"])
+                p["_consecutive_recovery_count"]=int(_debt["next_consecutive"])
+                p["_last_recovery_progress_signature"]=str(_debt["signature"])
                 p["_last_recovered_at"]=now.isoformat()
                 p["_last_recovery_reason"]="worker_startup_orphan"
                 job.payload_json=p
@@ -4702,13 +4745,15 @@ def run_once(verbose=True):
             if _job_execution_lock_is_held(int(j.id)):
                 continue
             p = dict(j.payload_json or {})
-            recovery_count = int(p.get("_recovery_count") or 0)
-            if recovery_count >= MAX_RECOVERY_COUNT:
+            _debt = _next_recovery_debt(j, p)
+            if int(_debt["next_consecutive"]) > MAX_RECOVERY_COUNT:
                 j.status = "failed"
-                j.error_text = "Превышен лимит автоматических восстановлений после прерывания задачи"
+                j.error_text = "Превышен лимит последовательных автоматических восстановлений без прогресса"
                 j.finished_at = now
             else:
-                p["_recovery_count"] = recovery_count + 1
+                p["_recovery_count"] = int(_debt["next_lifetime"])
+                p["_consecutive_recovery_count"] = int(_debt["next_consecutive"])
+                p["_last_recovery_progress_signature"] = str(_debt["signature"])
                 p["_last_recovered_at"] = now.isoformat()
                 p["_last_recovery_reason"] = "stale_without_execution_lock"
                 j.payload_json = p

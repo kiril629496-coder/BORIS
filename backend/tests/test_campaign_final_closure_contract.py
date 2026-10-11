@@ -358,7 +358,8 @@ def test_startup_recovery_uses_business_finalizer_before_failed_dead_letter():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
     assert "if not _finalize_providerfree_campaign_repair(db,job,now):" in src
-    assert 'job.error_text="Превышен лимит восстановлений после перезапуска worker"' in src
+    assert 'job.error_text="Превышен лимит последовательных восстановлений без прогресса после перезапуска worker"' in src
+    assert "_next_recovery_debt(job,p)" in src
 
 
 def test_providerfree_finalizer_never_delivers_before_required_banner_stage():
@@ -483,3 +484,76 @@ def test_stale_recovery_checks_heartbeat_before_execution_lock_probe():
     start = src.index("for j in stale:")
     body = src[start:start + 1600]
     assert body.index("_job_execution_heartbeat_is_fresh") < body.index("_job_execution_lock_is_held")
+
+
+def test_recovery_budget_is_consecutive_not_lifetime():
+    p = {
+        "_recovery_count": 10,
+        "stage": "internal_validation",
+    }
+    job = SimpleNamespace(
+        kind="campaign_prepare",
+        payload_json=p,
+        progress_done=5,
+        progress_total=8,
+    )
+    debt = jobs._next_recovery_debt(job, p)
+    assert debt["lifetime"] == 10
+    assert debt["next_lifetime"] == 11
+    assert debt["next_consecutive"] == 1
+
+    p["_last_recovery_progress_signature"] = debt["signature"]
+    p["_consecutive_recovery_count"] = 10
+    same = jobs._next_recovery_debt(job, p)
+    assert same["next_consecutive"] == 11
+    assert same["next_consecutive"] > jobs.MAX_RECOVERY_COUNT
+
+    p["stage"] = "ready_for_review"
+    progressed = jobs._next_recovery_debt(job, p)
+    assert progressed["next_consecutive"] == 1
+
+
+def test_waiting_heartbeat_grace_is_bound_to_exact_lease():
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    class Query:
+        def __init__(self, value):
+            self.row = SimpleNamespace(value=value)
+        def filter(self, *args, **kwargs):
+            return self
+        def first(self):
+            return self.row
+
+    class DB:
+        def __init__(self, value):
+            self.value = value
+        def query(self, *args, **kwargs):
+            return Query(self.value)
+
+    now = datetime.now(timezone.utc)
+    job = SimpleNamespace(
+        id=11530,
+        account_id="albertardashov_79016",
+        payload_json={"_execution_lease_token": "lease-current"},
+    )
+    waiting = json.dumps({
+        "mode": "waiting",
+        "heartbeat_at": (now - timedelta(seconds=90)).isoformat(),
+        "lease_token": "lease-current",
+    })
+    assert jobs._job_execution_heartbeat_is_fresh(DB(waiting), job, now, 5, 120) is True
+
+    old_waiting = json.dumps({
+        "mode": "waiting",
+        "heartbeat_at": (now - timedelta(seconds=121)).isoformat(),
+        "lease_token": "lease-current",
+    })
+    assert jobs._job_execution_heartbeat_is_fresh(DB(old_waiting), job, now, 5, 120) is False
+
+    foreign = json.dumps({
+        "mode": "waiting",
+        "heartbeat_at": (now - timedelta(seconds=1)).isoformat(),
+        "lease_token": "lease-old",
+    })
+    assert jobs._job_execution_heartbeat_is_fresh(DB(foreign), job, now, 5, 120) is False

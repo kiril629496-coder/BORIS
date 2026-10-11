@@ -288,6 +288,10 @@ class ExecutionClock:
         with self.lock:
             self.assert_current_owner()
             self.state = transition(self.state, mode, now())
+            if self.lease_token:
+                # RECOVERY_HEARTBEAT_LEASE_BINDING_V1: recovery may trust a fresh
+                # heartbeat only when it belongs to this exact durable execution.
+                self.state["lease_token"] = self.lease_token
             _save(self.job_id, self.account_id, self.state,
                   lease_token=self.lease_token if self.ownership_required else None)
 
