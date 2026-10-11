@@ -285,31 +285,36 @@ class BatchReceiptTests(Fixture):
             self.assertTrue(out["previews"][x+":v1"]["qa_passed"])
         self.finalize(*"ABCD")
         self.assertEqual(1, self.calls)
-    def test_slot_identity_version_hash_and_duplicates_fail_closed_per_item(self):
-        mutators = (
+    def test_slot_binding_ignores_model_identity_echo_but_duplicate_slot_fails_closed(self):
+        identity_mutators = (
             lambda rs: rs[1].update(banner_id="alien"),
             lambda rs: rs[1].update(version=999),
             lambda rs: rs[1].update(version="1"),
             lambda rs: rs[1].update(asset_sha256="0"*64),
             lambda rs: rs[1].update(qa_version="old"),
             lambda rs: rs[1].update(contract_sha256="0"*64),
-            lambda rs: rs.append(copy.deepcopy(rs[1])),
         )
-        for idx, mutate in enumerate(mutators):
-            with self.subTest(case=idx):
-                names = [f"case{idx}_{x}" for x in "ABCD"]
+        for idx, mutate in enumerate(identity_mutators):
+            with self.subTest(identity_case=idx):
+                names = [f"identity{idx}_{x}" for x in "ABCD"]
                 for name in names:
                     self.make_row(name)
                 self.mutate_response = lambda raw, f=mutate: f(raw["results"])
-                before = self.calls
                 out = self.finalize(*names)
-                self.assertFalse(out["previews"][names[1]+":v1"]["qa_passed"])
-                self.assertFalse(out["previews"][names[1]+":v1"]["qa_terminal"])
-                for pos in (0, 2, 3):
-                    self.assertTrue(out["previews"][names[pos]+":v1"]["qa_passed"])
+                for name in names:
+                    self.assertTrue(out["previews"][name+":v1"]["qa_passed"])
+                    self.assertTrue(out["previews"][name+":v1"]["qa_terminal"])
                 self.assertEqual(0, out["recovery_calls"])
-                self.finalize(*names)
-                self.assertEqual(1, self.calls-before)
+
+        names = [f"duplicate_{x}" for x in "ABCD"]
+        for name in names:
+            self.make_row(name)
+        self.mutate_response = lambda raw: raw["results"].append(copy.deepcopy(raw["results"][1]))
+        out = self.finalize(*names)
+        self.assertFalse(out["previews"][names[1]+":v1"]["qa_passed"])
+        self.assertFalse(out["previews"][names[1]+":v1"]["qa_terminal"])
+        for pos in (0, 2, 3):
+            self.assertTrue(out["previews"][names[pos]+":v1"]["qa_passed"])
     def test_duplicate_input_never_pays(self):
         self.make_row("A")
         out = self.finalize("A", "A")
@@ -702,3 +707,28 @@ class MetadataIdentityFalseRejectTests(Fixture):
         assert "NOT visible banner copy" in src
         assert "Evaluate ONLY visible pixels against CONTRACT" in src
         assert "never mention them in issues" in src
+
+
+def test_batch_slot_matching_ignores_model_machine_identity_echo():
+    identities = [
+        {"banner_id":"server-a","version":1,"asset_sha256":"a"*64,"qa_version":"q1","contract_sha256":"c"*64},
+        {"banner_id":"server-b","version":2,"asset_sha256":"b"*64,"qa_version":"q1","contract_sha256":"d"*64},
+    ]
+    raw = {"results":[
+        {"slot":1,"banner_id":"garbled","version":999,"asset_sha256":"not-a-sha","qa_version":"wrong","contract_sha256":"wrong"},
+        {"slot":2},
+    ]}
+    matched, errors = premium._matched_batch_results(raw, identities)
+    assert errors == {}
+    assert sorted(matched) == [1,2]
+
+
+def test_batch_slot_matching_still_fails_closed_on_missing_or_duplicate_slot():
+    identities = [
+        {"banner_id":"a","version":1,"asset_sha256":"a"*64,"qa_version":"q1","contract_sha256":"c"*64},
+        {"banner_id":"b","version":1,"asset_sha256":"b"*64,"qa_version":"q1","contract_sha256":"d"*64},
+    ]
+    matched, errors = premium._matched_batch_results({"results":[{"slot":1},{"slot":1}]}, identities)
+    assert matched == {}
+    assert errors[1] == "batch_duplicate_slot"
+    assert errors[2] == "batch_missing_slot"

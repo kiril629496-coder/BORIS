@@ -917,10 +917,10 @@ def _matched_batch_results(raw, identities):
             errors[slot] = "batch_duplicate_slot" if items else "batch_missing_slot"
             continue
         item = items[0]
-        if type(item.get("version")) is not int or any(item.get(key) != identity[key]
-                for key in ("banner_id", "version", "asset_sha256", "qa_version", "contract_sha256")):
-            errors[slot] = "batch_identity_mismatch"
-            continue
+        # BATCH_SLOT_IS_SERVER_IDENTITY_V1:
+        # Slot membership is server-authored and unique inside this request.
+        # Vision evaluates pixels only; machine identity is never trusted from
+        # model output and is rebound server-side after slot matching.
         matched[slot] = item
     return matched, errors
 
@@ -1945,9 +1945,9 @@ def _finalize_preview_vision_batch_locked(account_id, rows, provenance):
     _storage_json(account_id, allocation_key, {"schema": 1, "batch_id": batch_id, "entries": allocations})
     prompt = (
         "BATCH PREMIUM BANNER QA. Inspect each SLOT independently. Return one JSON object with results array. "
-        "IDENTITY fields are opaque MACHINE METADATA used only for exact result binding. banner_id, version, asset_sha256, "
-        "qa_version and contract_sha256 are NOT visible banner copy: do not judge their spelling, phone/ID format, semantics, "
-        "claims or typography, and never mention them in issues. Each result must echo slot and every IDENTITY field exactly. "
+        "IDENTITY fields are opaque MACHINE METADATA used only for server-side binding. Do not judge their spelling, "
+        "phone/ID format, semantics, claims or typography, and never mention them in issues. "
+        "Return the numeric slot for each result; identity echoes are ignored by the server. "
         "Evaluate ONLY visible pixels against that SLOT's CONTRACT. "
         "Include explicit JSON booleans pass, semantic_match, headline_ok, exact_text_ok, spelling_ok, forbidden_claims_ok, "
         "composition_ok, crop_safe_ok, professional_ok, mobile_ok, selling_typography_ok, palette_ok, reference_style_match, "
