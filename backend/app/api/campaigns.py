@@ -9968,6 +9968,35 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
                                 items.append({"id":int(_asset.id)}); _seen.add(int(_asset.id))
                                 if len(items)>=desired_count:
                                     break
+                if len(items) < desired_count:
+                    # ACCOUNT_SEMANTIC_FAMILY_POOL_V1:
+                    # Reuse any approved same-account asset that already carries a
+                    # conservative family proof. This turns historical paid QA and
+                    # BORIS-owned generation provenance into a real zero-paid pool.
+                    from app.services.media_semantic_validator import _semantic_family as _media_semantic_family
+                    _family_key=_media_semantic_family(p)
+                    if _family_key:
+                        _family_pool=(db.query(MediaAsset)
+                            .filter(
+                                MediaAsset.account_id==row.account_id,
+                                MediaAsset.deleted_at.is_(None),
+                                MediaAsset.status=="approved",
+                                MediaAsset.source_provider.notin_(["openai","boris_local","openai_full_ai_premium"]),
+                                ~MediaAsset.id.in_(_campaign_excluded_media_ids) if _campaign_excluded_media_ids else True,
+                            )
+                            .order_by(MediaAsset.id.asc()).limit(1000).all())
+                        _family_tag="vision_family_confirmed:"+_family_key
+                        _family_pool=[a for a in _family_pool if _family_tag in [str(t) for t in (a.tags or [])]]
+                        if _family_pool:
+                            _offset=max(0,(int(p.get("variant") or row.id)-1)%len(_family_pool))
+                            _family_pool=_family_pool[_offset:]+_family_pool[:_offset]
+                            _seen={int(x.get("id") or 0) for x in items}
+                            for _asset in _family_pool:
+                                if int(_asset.id) in _seen:
+                                    continue
+                                items.append({"id":int(_asset.id)}); _seen.add(int(_asset.id))
+                                if len(items)>=desired_count:
+                                    break
                 if len(items) < desired_count and bool(body.allow_paid_qa):
                     # External stock is a last resort after same-account approved
                     # media reuse. Cost-anomaly recovery is provider-free: collect_stock

@@ -148,3 +148,38 @@ def test_banner_qa_proof_cannot_seed_gallery_family_cache():
         "media_id": 17648,
     }
     assert sem.reusable_family_cache_candidate(payload, evidence) is None
+
+
+def test_campaign512_generation_provenance_maps_to_glazing_family():
+    cases = {
+        "campaign512_massmarket_v3:panoramic:2": "glazing_panoramic",
+        "campaign512_massmarket_v3:floor:9": "glazing_panoramic",
+        "campaign512_massmarket_v3:balcony:4": "glazing_balcony",
+        "campaign512_massmarket_v3:facade:3": "glazing_facade_storefront",
+        "campaign512_massmarket_v3:commercial:7": "glazing_commercial_storefront",
+        "campaign512_massmarket_v3:cold_to_warm:5": "glazing_cold_to_warm",
+        "campaign512_massmarket_v3:warm_aluminum:7": "glazing_warm_aluminum",
+        "campaign512_massmarket_v3:large_custom:8": "glazing_large_custom",
+        "campaign512_massmarket_v3:b2b:6": "glazing_b2b_project",
+        "campaign512_massmarket_v3:terrace:3": "glazing_terrace_sliding",
+        "campaign512_massmarket_v3:partitions:5": "glazing_aluminum_partition",
+        "campaign512_massmarket_v3:entrance:4": "glazing_entrance_group",
+        "campaign512_massmarket_v3:aluminum_doors:7": "glazing_aluminum_door",
+        "campaign512_partitions_v4:5": "glazing_aluminum_partition",
+    }
+    for source_ref, expected in cases.items():
+        assert sem.semantic_family_from_source_ref(source_ref) == expected
+    assert sem.semantic_family_from_source_ref("some_foreign_generator:panoramic:1") == ""
+
+
+def test_auto_media_uses_semantic_family_pool_before_external_stock():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    src = (root / "app/api/campaigns.py").read_text(encoding="utf-8")
+    start = src.index("def ff_workflow_auto_media")
+    end = src.index("def _ff_is_existing_banner_asset", start)
+    auto_media = src[start:end]
+    family_pos = auto_media.index("ACCOUNT_SEMANTIC_FAMILY_POOL_V1")
+    stock_pos = auto_media.index("_campaign_provider_call(collect_stock")
+    assert family_pos < stock_pos
+    assert "vision_family_confirmed:" in auto_media

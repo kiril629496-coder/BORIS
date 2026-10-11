@@ -1339,6 +1339,74 @@ def classify_item_media_vision(payload: dict, linked_media: list, account_id: st
 
 
 
+
+def semantic_family_from_source_ref(source_ref: str) -> str:
+    """Map BORIS-owned Campaign 512 generation provenance to semantic family."""
+    ref=str(source_ref or "").strip().lower()
+    if ref.startswith("campaign512_partitions_v4:"):
+        return "glazing_aluminum_partition"
+    if not ref.startswith(("campaign512_massmarket_v2:","campaign512_massmarket_v3:")):
+        return ""
+    parts=ref.split(":")
+    slug=parts[1] if len(parts)>1 else ""
+    mapping={
+        "panoramic_home":"glazing_panoramic",
+        "panoramic":"glazing_panoramic",
+        "floor_windows":"glazing_panoramic",
+        "floor":"glazing_panoramic",
+        "balcony_loggia":"glazing_balcony",
+        "balcony":"glazing_balcony",
+        "terrace_sliding":"glazing_terrace_sliding",
+        "terrace":"glazing_terrace_sliding",
+        "commercial":"glazing_commercial_storefront",
+        "facade":"glazing_facade_storefront",
+        "warm_aluminum":"glazing_warm_aluminum",
+        "cold_to_warm":"glazing_cold_to_warm",
+        "large_custom":"glazing_large_custom",
+        "b2b":"glazing_b2b_project",
+        "partitions":"glazing_aluminum_partition",
+        "entrance":"glazing_entrance_group",
+        "aluminum_doors":"glazing_aluminum_door",
+    }
+    return mapping.get(slug,"")
+
+
+def backfill_asset_family_cache_from_provenance(db, account_id: str, limit: int = 3000) -> dict:
+    """Reuse BORIS-owned deterministic generation provenance without provider QA."""
+    from app.models.media_asset import MediaAsset
+    aid=str(account_id or "").strip()
+    if not aid:
+        return {"scanned":0,"stamped":0}
+    rows=(db.query(MediaAsset)
+          .filter(MediaAsset.account_id==aid,
+                  MediaAsset.deleted_at.is_(None),
+                  MediaAsset.status=="approved",
+                  MediaAsset.source_provider.in_(["openai_photo","openai_photo_v3"]),
+                  MediaAsset.source_ref.like("campaign512_%"))
+          .order_by(MediaAsset.id.asc())
+          .limit(max(1,min(int(limit or 3000),10000))).all())
+    stamped=0; reused=0; conflicts=0; unmapped=0
+    for asset in rows:
+        family=semantic_family_from_source_ref(asset.source_ref)
+        if not family:
+            unmapped+=1
+            continue
+        existing_family,existing_conf,_existing_subject=_asset_family_cache(asset)
+        if existing_family and existing_family!=family:
+            conflicts+=1
+            continue
+        if existing_family==family and existing_conf>=1.0:
+            reused+=1
+            continue
+        _stamp_asset_family_cache(asset,family,1.0,"provenance:"+str(asset.source_ref or "")[:160])
+        stamped+=1
+    if stamped:
+        db.flush()
+    return {
+        "scanned":len(rows),"stamped":stamped,"reused":reused,
+        "conflicts":conflicts,"unmapped":unmapped,
+    }
+
 def reusable_family_cache_candidate(payload: dict, evidence: dict):
     """Return a conservative asset-family proof candidate from old item evidence."""
     if not isinstance(payload,dict) or not isinstance(evidence,dict):
