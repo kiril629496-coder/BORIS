@@ -888,6 +888,32 @@ def _campaign_prepared_photo_count(item):
     return count
 
 
+def _campaign_prepared_media_count(item, banner_required: bool = True):
+    """Count media that already satisfies the current owner order.
+
+    When banners are not part of the order, a previously generated hero is still
+    a legitimate image if it has a current positive semantic proof. Treating that
+    proven image as zero media creates an artificial 3-photo debt and can force
+    paid recovery for work the owner never requested.
+    """
+    ordinary=_campaign_prepared_photo_count(item)
+    if ordinary>0 or bool(banner_required):
+        return ordinary
+    item=item or {}
+    if not (item.get("gallery") or []):
+        return 0
+    for evidence in (item.get("media_semantic_evidence") or []):
+        if not isinstance(evidence,dict) or evidence.get("match") is not True:
+            continue
+        try:
+            confidence=float(evidence.get("confidence") or 0)
+        except (TypeError,ValueError):
+            confidence=0.0
+        if 0.80 <= confidence <= 1.0:
+            return 1
+    return 0
+
+
 def _campaign_media_shard_plan(pending_item_ids, claimed_item_ids=(), *, shard_size=10, slots=4):
     """Pure deterministic planner: no duplicates, bounded shard count and size."""
     pending=[]; seen=set()
@@ -1436,13 +1462,14 @@ def _run_campaign_prepare(db, job, payload):
 
     preview = C.campaign_preview(campaign.id, db, user)
     existing = {int(x.get("id")):x for x in (preview.get("items") or [])}
-    def _prepared_photo_count(item):
-        return _campaign_prepared_photo_count(item)
     # The durable owner order is authoritative for gallery size. Legacy tasks
     # default to three semantic photos; an explicit brief such as "8 изображений
     # на каждое объявление" raises the exact contract up to the safe cap of eight.
     _, _ff_media = C._ff_state_load(campaign)
     _media_order = dict((_ff_media or {}).get("order_contract") or {})
+    _media_banner_required=_campaign_banner_required(_ff_media)
+    def _prepared_photo_count(item):
+        return _campaign_prepared_media_count(item,_media_banner_required)
     media_target=max(1,min(int(_media_order.get("media_per_item") or 3),8))
 
     # CAMPAIGN_MEDIA_OVERFLOW_NORMALIZE_V2:

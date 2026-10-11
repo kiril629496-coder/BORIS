@@ -83,3 +83,34 @@ def test_cost_anomaly_auto_media_never_calls_external_stock():
     auto_media = src[start:end]
     assert "if len(items) < desired_count and bool(body.allow_paid_qa):" in auto_media
     assert "_campaign_provider_call(collect_stock" in auto_media
+
+
+def test_non_banner_order_counts_semantically_proven_hero_as_media():
+    item = {
+        "banner": "/images/banner.webp",
+        "gallery": [{
+            "url": "/images/banner.webp",
+            "source_provider": "openai_full_ai_premium",
+            "role": "hero",
+        }],
+        "media_semantic_evidence": [{
+            "match": True,
+            "confidence": 0.95,
+        }],
+    }
+    assert jobs._campaign_prepared_photo_count(item) == 0
+    assert jobs._campaign_prepared_media_count(item, banner_required=False) == 1
+    assert jobs._campaign_prepared_media_count(item, banner_required=True) == 0
+
+
+def test_non_banner_order_does_not_count_unproven_hero():
+    item = {
+        "banner": "/images/banner.webp",
+        "gallery": [{
+            "url": "/images/banner.webp",
+            "source_provider": "openai_full_ai_premium",
+            "role": "hero",
+        }],
+        "media_semantic_evidence": [],
+    }
+    assert jobs._campaign_prepared_media_count(item, banner_required=False) == 0
