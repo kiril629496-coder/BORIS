@@ -1446,7 +1446,21 @@ def _run_campaign_prepare(db, job, payload):
             return {"stage":"competitor_retry","retryable":True,"message":"BORIS повторно собирает реальную выдачу конкурентов перед созданием текстов.","internal_reason":type(_comp_exc).__name__}, "retry"
 
     payload = _campaign_checkpoint(db, job, payload, "materialize", 1, total)
-    mat = C.ff_workflow_materialize(campaign.id, C.FFMaterializeBody(account_id=account_id), db, user)
+    # SUBSET_CONTINUATION_REUSES_EXISTING_MATERIALIZATION_V1:
+    # A post-banner/repair continuation with an explicit immutable item scope
+    # must not re-run full-order materialization or billing. Those cards already
+    # exist and were scope-validated above; re-materializing the 100-card order
+    # can create a no-progress loop and widen an exact ready subset.
+    if _requested_scope and bool(payload.get("_subset_continuation")):
+        mat = {
+            "status": "ok",
+            "item_ids": list(_requested_scope),
+            "created": 0,
+            "qa_pass": len(_requested_scope),
+            "subset_reuse": True,
+        }
+    else:
+        mat = C.ff_workflow_materialize(campaign.id, C.FFMaterializeBody(account_id=account_id), db, user)
     _mat_status=str(mat.get("status") or "")
     if _mat_status == "billing_limit":
         return {"stage":"billing_limit","campaign_id":campaign.id,"account_id":account_id,
