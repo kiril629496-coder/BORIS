@@ -73,6 +73,9 @@ sys.modules[revisions.__name__] = revisions
 acceptance = types.ModuleType("app.services.campaign_editor_acceptance")
 acceptance.operation_for = lambda *a: None
 sys.modules[acceptance.__name__] = acceptance
+metadata_migration = types.ModuleType("app.services.banner_machine_metadata_migration")
+metadata_migration.migrate_receipt = lambda *args, **kwargs: {"status": "test_stub", "changed": False}
+sys.modules[metadata_migration.__name__] = metadata_migration
 
 
 class Campaign:
@@ -131,8 +134,9 @@ class Case:
         self.campaign, self.user = types.SimpleNamespace(id=900), types.SimpleNamespace(id=8)
         context = lambda *a: (self.C, self.campaign, self.user, ["acct-a"], "acct-a")
         path = ORIGINAL_JOBS if original else ROOT / "app/services/jobs.py"
-        self.jobs = extract(path, {"_run_campaign_banners", "_run_campaign_banners_premium", "_run_campaign_banners_standard", "_campaign_checkpoint", "_continuation_progress_basis"},
-                            {"_campaign_job_context": context, "_campaign_mutation_locked": lambda *a: (False, {}, {})})
+        self.jobs = extract(path, {"_run_campaign_banners", "_run_campaign_banners_premium", "_run_campaign_banners_standard", "_campaign_checkpoint", "_continuation_progress_basis", "_enqueue_scoped_prepare_after_banners"},
+                            {"_campaign_job_context": context, "_campaign_mutation_locked": lambda *a: (False, {}, {}),
+                             "enqueue": lambda *a, **k: (types.SimpleNamespace(id=999), True), "types": types})
         jobs_mod = types.ModuleType("app.services.jobs")
         jobs_mod._campaign_job_context = context
         sys.modules[jobs_mod.__name__] = jobs_mod
