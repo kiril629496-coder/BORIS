@@ -1434,6 +1434,11 @@ def _run_campaign_prepare(db, job, payload):
     if not item_ids:
         raise RuntimeError("campaign has no materialized or existing items")
 
+    _banner_demotion=C._ff_demote_unrequired_banner_metadata(
+        db,campaign,C._ff_items(db,campaign.id,allowed)
+    )
+    if _banner_demotion.get("demoted"):
+        db.commit()
     preview = C.campaign_preview(campaign.id, db, user)
     existing = {int(x.get("id")):x for x in (preview.get("items") or [])}
     text_pending = [i for i in item_ids if not str((existing.get(i) or {}).get("title") or "").strip() or not str((existing.get(i) or {}).get("description") or "").strip()]
@@ -1460,6 +1465,11 @@ def _run_campaign_prepare(db, job, payload):
                     "done":len(existing)-len(text_pending)+len(chunk),"total":len(item_ids),"retryable":True,
                     "message":"BORIS продолжает готовить объявления."}, "retry"
 
+    _banner_demotion=C._ff_demote_unrequired_banner_metadata(
+        db,campaign,C._ff_items(db,campaign.id,allowed)
+    )
+    if _banner_demotion.get("demoted"):
+        db.commit()
     preview = C.campaign_preview(campaign.id, db, user)
     existing = {int(x.get("id")):x for x in (preview.get("items") or [])}
     # The durable owner order is authoritative for gallery size. Legacy tasks
@@ -1648,6 +1658,11 @@ def _run_campaign_prepare(db, job, payload):
             "message":"BORIS параллельно подбирает и проверяет фотографии."
         }, "retry"
 
+    _banner_demotion=C._ff_demote_unrequired_banner_metadata(
+        db,campaign,C._ff_items(db,campaign.id,allowed)
+    )
+    if _banner_demotion.get("demoted"):
+        db.commit()
     preview = C.campaign_preview(campaign.id, db, user)
     existing = {int(x.get("id")):x for x in (preview.get("items") or [])}
     _, _ff_banner_gate = C._ff_state_load(campaign)

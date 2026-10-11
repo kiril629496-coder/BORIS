@@ -829,9 +829,16 @@ def validate_linked_media_semantics(db, row, payload: dict) -> list[dict]:
             if _provider == "openai_full_ai_premium":
                 if _premium_banner_receipt_matches(row, payload, link, asset):
                     continue
-                errors.append({"field":"images","code":"premium_banner_receipt_invalid","media_id":asset.id,
-                    "position":link.position,"message":"Текущий баннер не имеет действующего подтверждения QA для этого объявления"})
-                continue
+                # UNREQUIRED_PREMIUM_HERO_AS_MEDIA_V1:
+                # Some legacy campaigns generated Premium heroes before the
+                # durable order later proved banners were not requested. Such an
+                # asset may be treated as ordinary media only through the normal
+                # exact item-specific semantic proof below; never through a stale
+                # Premium receipt and never when banners are required.
+                if payload.get("_order_banner_required") is not False:
+                    errors.append({"field":"images","code":"premium_banner_receipt_invalid","media_id":asset.id,
+                        "position":link.position,"message":"Текущий баннер не имеет действующего подтверждения QA для этого объявления"})
+                    continue
             if _provider in {"openai","boris_local"} and _banner_qa.get("passed") is True and _asset_key and _asset_key in _banner_url and (_provider == "openai" or _local_premium_banner):
                 continue
             e = by_key.get((int(asset.id), int(link.position)))

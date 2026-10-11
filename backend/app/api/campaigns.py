@@ -2729,6 +2729,90 @@ def _ff_payload(row):
     try: p=json.loads(row.payload_json or "{}")
     except Exception: p={}
     return p if isinstance(p,dict) else {}
+
+
+def _ff_order_banner_required(campaign, ff=None) -> bool:
+    """Durable order-level banner requirement; legacy default stays conservative."""
+    if ff is None:
+        _, ff = _ff_state_load(campaign)
+    order=dict((ff or {}).get("order_contract") or {}) if isinstance(ff,dict) else {}
+    return bool(order.get("banner_required", True))
+
+
+def _ff_demote_unrequired_banner_metadata(db, campaign, rows) -> dict:
+    """Turn stale banner metadata into ordinary media only when exact semantic proof exists.
+
+    This never changes file provenance and never fabricates QA. It clears the
+    banner lifecycle fields only for orders that explicitly do not require a
+    banner and only when the current hero has a current item-specific semantic PASS.
+    """
+    import datetime as _dt
+    from app.models.media_asset import MediaAsset
+    from app.models.media_link import MediaLink
+    from app.services.media_semantic_validator import semantic_content_fingerprint
+
+    _, ff=_ff_state_load(campaign)
+    if _ff_order_banner_required(campaign,ff):
+        return {"eligible":0,"demoted":0,"blocked":0,"item_ids":[]}
+    demoted=[]; blocked=[]
+    banner_keys=(
+        "banner","banner_url","banner_provider","banner_qa","banner_regeneration_key",
+        "banner_composition_family","banner_visual_metadata","banner_visual_renderer",
+        "banner_text_renderer","banner_model","banner_engine","banner_hypothesis",
+    )
+    for row in rows or []:
+        p=_ff_payload(row)
+        banner_url=str(p.get("banner_url") or p.get("banner") or "").strip()
+        if not banner_url:
+            continue
+        links=(db.query(MediaLink,MediaAsset).join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+               .filter(MediaLink.entity_type=="campaign_item",MediaLink.entity_id==str(row.id),
+                       MediaAsset.deleted_at.is_(None))
+               .order_by(MediaLink.position.asc(),MediaLink.id.asc()).all())
+        if not links:
+            blocked.append(int(row.id)); continue
+        banner_key=banner_url.split("/images/",1)[1].split("?",1)[0] if "/images/" in banner_url else ""
+        pair=next(((l,a) for l,a in links if banner_key and str(a.storage_key or "").lstrip("/")==banner_key),None)
+        if pair is None:
+            pair=next(((l,a) for l,a in links if str(a.source_provider or "").lower()=="openai_full_ai_premium"
+                       and int(l.position or 0)==0),None)
+        if pair is None:
+            blocked.append(int(row.id)); continue
+        link,asset=pair
+        fp=semantic_content_fingerprint(p)
+        proof=None
+        for ev in (p.get("media_semantic_evidence") or []):
+            if not isinstance(ev,dict): continue
+            try:
+                same=(int(ev.get("media_id") or 0)==int(asset.id)
+                      and int(ev.get("position") or 0)==int(link.position or 0))
+                conf=float(ev.get("confidence") or 0)
+            except (TypeError,ValueError):
+                same=False; conf=0.0
+            if (same and ev.get("match") is True and conf>=0.80
+                    and str(ev.get("content_fingerprint") or "")==fp):
+                proof=ev; break
+        if proof is None:
+            blocked.append(int(row.id)); continue
+        hist=list(p.get("legacy_banner_demotions") or [])
+        hist.append({
+            "media_id":int(asset.id),
+            "source_provider":str(asset.source_provider or ""),
+            "source_ref":str(asset.source_ref or ""),
+            "reason":"order_banner_not_required_with_current_semantic_proof",
+            "at":_dt.datetime.now(_dt.timezone.utc).isoformat(),
+        })
+        p["legacy_banner_demotions"]=hist[-20:]
+        for key in banner_keys:
+            p.pop(key,None)
+        row.payload_json=json.dumps(p,ensure_ascii=False)
+        row.content_hash=CS.content_hash(p)
+        demoted.append(int(row.id))
+    if demoted:
+        db.flush()
+    return {"eligible":len(demoted)+len(blocked),"demoted":len(demoted),"blocked":len(blocked),
+            "item_ids":demoted,"blocked_item_ids":blocked}
+
 def _ff_enforce_sales_copy_shape(description: str, topic: str, city: str, max_chars: int = 2400) -> str:
     """Free deterministic presentation repair after the paid copy call.
 
@@ -3324,7 +3408,16 @@ def _ff_validate_row(row, db):
     cr=validate_feed_item({"id":str(row.id),"template_id":tid,"params":contract_params},contract)
     errors.extend(cr.get("errors") or [])
     from app.services.media_semantic_validator import validate_linked_media_semantics
-    errors.extend(validate_linked_media_semantics(db,row,p))
+    _semantic_payload=dict(p)
+    try:
+        from app.models.campaign import Campaign as _ValidationCampaign
+        _validation_campaign=db.query(_ValidationCampaign).filter(_ValidationCampaign.id==int(row.campaign_id)).first()
+        if _validation_campaign is not None:
+            _,_validation_ff=_ff_state_load(_validation_campaign)
+            _semantic_payload["_order_banner_required"]=_ff_order_banner_required(_validation_campaign,_validation_ff)
+    except Exception:
+        _semantic_payload["_order_banner_required"]=True
+    errors.extend(validate_linked_media_semantics(db,row,_semantic_payload))
     return {"id":row.id,"account_id":row.account_id,"status":row.status,"valid":not errors,"errors":errors,"warnings":warnings,"contract_version":cr.get("contract_version","")}
 
 @router.post("/{campaign_id}/brief/plan")
@@ -10132,6 +10225,7 @@ def ff_workflow_photo_stack(campaign_id:int, body:FFPhotoStackBody, db=Depends(_
     )
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed)
     _ff_assert_card_editor_mutable(campaign)
+    _photo_banner_required=_ff_order_banner_required(campaign)
     rows=_ff_items(db,campaign_id,allowed); wanted=set(body.item_ids or [r.id for r in rows]); rows=[r for r in rows if r.id in wanted]
     if not rows: raise HTTPException(400,"Не выбраны объявления")
     mids=[]
@@ -10175,6 +10269,8 @@ def ff_workflow_photo_stack(campaign_id:int, body:FFPhotoStackBody, db=Depends(_
         )
         if banner_pair is None:
             banner_pair=next(((l,a) for l,a in links if _ff_is_existing_banner_asset(p,l,a)),None)
+        if not _photo_banner_required:
+            banner_pair=None
         chosen=list(mids)
         if body.randomize:
             random.Random(f"{campaign_id}:{row.id}:{','.join(map(str,mids))}").shuffle(chosen)
@@ -10275,8 +10371,26 @@ def ff_workflow_photo_stack(campaign_id:int, body:FFPhotoStackBody, db=Depends(_
             M.link(db,a,"campaign_item",str(row.id),"hero" if pos==0 else "gallery",pos,created_by=getattr(user,"id",None))
         db.flush(); row.hero_media_id=int(ordered[0].id) if ordered else None
         fresh_links=(db.query(MediaLink,MediaAsset).join(MediaAsset,MediaAsset.id==MediaLink.media_id).filter(MediaLink.entity_type=="campaign_item",MediaLink.entity_id==str(row.id),MediaAsset.deleted_at.is_(None)).order_by(MediaLink.position.asc(),MediaLink.id.asc()).all())
+        if not _photo_banner_required:
+            _old_banner_url=str(p.get("banner_url") or p.get("banner") or "").strip()
+            if _old_banner_url:
+                _hist=list(p.get("legacy_banner_demotions") or [])
+                _hist.append({
+                    "media_id":int(getattr(banner_pair[1],"id",0) or 0) if banner_pair else None,
+                    "source_provider":str(getattr(banner_pair[1],"source_provider","") or "") if banner_pair else "",
+                    "reason":"replaced_by_semantically_validated_gallery_for_non_banner_order",
+                    "at":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+                p["legacy_banner_demotions"]=_hist[-20:]
+            for _key in (
+                "banner","banner_url","banner_provider","banner_qa","banner_regeneration_key",
+                "banner_composition_family","banner_visual_metadata","banner_visual_renderer",
+                "banner_text_renderer","banner_model","banner_engine","banner_hypothesis",
+            ):
+                p.pop(_key,None)
         stamp_item_semantic_evidence(p,[pair for pair in fresh_links if int(pair[1].id)!=_dedicated_banner_id],verdicts)
-        semantic_errors=validate_linked_media_semantics(db,row,p)
+        _semantic_payload=dict(p); _semantic_payload["_order_banner_required"]=_photo_banner_required
+        semantic_errors=validate_linked_media_semantics(db,row,_semantic_payload)
         if semantic_errors:
             db.rollback()
             raise HTTPException(422, detail={"code":"gallery_semantic_validation_failed","message":"Выбранная галерея не прошла финальную проверку соответствия объявлению. BORIS не сохранил изменение.","item_id":_row_id})
