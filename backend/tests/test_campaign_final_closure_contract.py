@@ -330,3 +330,40 @@ def test_auto_media_filters_banner_assets_before_gallery_stack():
     src = (Path(__file__).resolve().parents[1] / "app/api/campaigns.py").read_text(encoding="utf-8")
     assert "AUTO_MEDIA_NEVER_FEEDS_BANNER_AS_GALLERY_V1" in src
     assert "if asset and _ff_is_existing_banner_asset({},None,asset):" in src
+
+
+def test_providerfree_exhaustion_finalizer_is_terminal_and_subset_scoped():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "def _finalize_providerfree_campaign_repair" in src
+    assert '"stage":"providerfree_repair_exhausted"' in src
+    assert '"code":"PROVIDERFREE_REPAIR_EXHAUSTED"' in src
+    assert '"ready_ids":ready_ids' in src
+    assert '"blocked_ids":blocked_ids' in src
+    assert '"blocker_by_item":blocker_by_item' in src
+    assert 'job.status="partial"' in src
+    assert '"_providerfree_ready_subset":True' in src
+    assert 'fingerprint=f"campaign_deliver:{campaign_id}:{account_id}:ready_subset:{scope_hash}"' in src
+
+
+def test_providerfree_terminal_state_is_not_auto_resumed():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "PROVIDERFREE_EXHAUSTED_IS_TERMINAL_V1" in src
+    assert 'stage=="providerfree_repair_exhausted"' in src
+    assert 'payload.get("_providerfree_terminalized_at")' in src
+
+
+def test_startup_recovery_uses_business_finalizer_before_failed_dead_letter():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "if not _finalize_providerfree_campaign_repair(db,job,now):" in src
+    assert 'job.error_text="Превышен лимит восстановлений после перезапуска worker"' in src
+
+
+def test_providerfree_finalizer_never_delivers_before_required_banner_stage():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "_banner_required=_campaign_banner_required(ff)" in src
+    assert 'terminal["delivery_eligible"]=bool(' in src
+    assert 'ready_ids and not _banner_required and not _campaign_owner_prepare_only_contract(ff)' in src

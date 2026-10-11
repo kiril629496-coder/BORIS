@@ -3785,6 +3785,120 @@ HANDLERS = {
 }
 
 
+
+def _finalize_providerfree_campaign_repair(db, job, now=None):
+    """Terminalize exhausted provider-free repair without losing a valid subset.
+
+    This is deliberately local-only: it runs canonical per-card validation,
+    marks only genuinely valid rows ready, persists blocked reasons, and may
+    enqueue a scoped delivery only when the durable owner order does not forbid
+    external publication. No provider/AI call is made here.
+    """
+    if str(getattr(job, "kind", "") or "") != "campaign_prepare":
+        return False
+    payload=dict(getattr(job, "payload_json", None) or {})
+    if not bool(payload.get("_cost_anomaly_free_only")):
+        return False
+    try:
+        campaign_id=int(payload.get("campaign_id") or 0)
+    except (TypeError,ValueError):
+        campaign_id=0
+    account_id=str(getattr(job, "account_id", "") or payload.get("account_id") or "")
+    if campaign_id<=0 or not account_id:
+        return False
+
+    from app.api import campaigns as C
+    from app.models.campaign import Campaign
+    from app.models.campaign_item import CampaignItem
+
+    campaign=db.query(Campaign).filter(Campaign.id==campaign_id).first()
+    if campaign is None:
+        return False
+    rows=(db.query(CampaignItem)
+          .filter(CampaignItem.campaign_id==campaign_id,
+                  CampaignItem.account_id==account_id,
+                  CampaignItem.status!="superseded")
+          .order_by(CampaignItem.id.asc()).all())
+    if not rows:
+        return False
+
+    ready_ids=[]; blocked_ids=[]; blocker_by_item={}
+    for row in rows:
+        report=C._ff_validate_row(row,db)
+        if bool(report.get("valid")):
+            ready_ids.append(int(row.id))
+            if str(row.status or "").lower() not in {"published","ready"}:
+                row.status="ready"
+        else:
+            iid=int(row.id); blocked_ids.append(iid)
+            blocker_by_item[str(iid)]=[
+                {"code":str(e.get("code") or ""), "field":str(e.get("field") or ""),
+                 "message":str(e.get("message") or "")[:240]}
+                for e in (report.get("errors") or [])[:20]
+            ]
+
+    stamp=(now or datetime.now(timezone.utc)).isoformat()
+    terminal={
+        "stage":"providerfree_repair_exhausted",
+        "code":"PROVIDERFREE_REPAIR_EXHAUSTED",
+        "campaign_id":campaign_id,
+        "account_id":account_id,
+        "ready_count":len(ready_ids),
+        "blocked_count":len(blocked_ids),
+        "ready_ids":ready_ids,
+        "blocked_ids":blocked_ids,
+        "blocker_by_item":blocker_by_item,
+        "external_action":False,
+        "paid_action_required":False,
+        "manual_business_decision_required":bool(blocked_ids),
+        "message":"Бесплатное восстановление исчерпано: готовая часть сохранена отдельно, проблемная часть зафиксирована без новых платных вызовов.",
+    }
+    job.status="partial"
+    job.result_json=terminal
+    job.error_text=None
+    job.started_at=None
+    job.finished_at=now or datetime.now(timezone.utc)
+    job.scheduled_at=None
+    payload["_providerfree_terminalized_at"]=stamp
+    payload["_providerfree_ready_ids"]=ready_ids
+    payload["_providerfree_blocked_ids"]=blocked_ids
+    job.payload_json=payload
+
+    _,ff=C._ff_state_load(campaign)
+    ff["step"]="providerfree_repair_exhausted"
+    ff["providerfree_repair"]={
+        "status":"exhausted","ready_ids":ready_ids,"blocked_ids":blocked_ids,
+        "blocker_by_item":blocker_by_item,"finished_at":stamp,
+        "paid_action_required":False,
+    }
+    C._ff_state_save(db,campaign,ff)
+
+    _banner_required=_campaign_banner_required(ff)
+    terminal["delivery_eligible"]=bool(
+        ready_ids and not _banner_required and not _campaign_owner_prepare_only_contract(ff)
+    )
+    if terminal["delivery_eligible"]:
+        import hashlib
+        scope_hash=hashlib.sha256(",".join(str(x) for x in ready_ids).encode("utf-8")).hexdigest()[:16]
+        child_payload={
+            "campaign_id":campaign_id,"account_id":account_id,"item_ids":ready_ids,
+            "stage":"queued","_priority":10,
+            "_source_prepare_job_id":int(job.id),
+            "_providerfree_ready_subset":True,
+        }
+        delivery,created=enqueue(
+            db,"campaign_deliver",child_payload,
+            owner_user_id=getattr(campaign,"owner_user_id",None),
+            account_id=account_id,
+            fingerprint=f"campaign_deliver:{campaign_id}:{account_id}:ready_subset:{scope_hash}",
+            progress_total=5,
+        )
+        terminal["delivery_job_id"]=int(delivery.id)
+        terminal["delivery_created"]=bool(created)
+        job.result_json=terminal
+    return True
+
+
 def recover_interrupted_campaign_jobs():
     """Recover orphaned canonical jobs on worker startup.
 
@@ -3818,8 +3932,9 @@ def recover_interrupted_campaign_jobs():
             p=dict(job.payload_json or {})
             recovery_count=int(p.get("_recovery_count") or 0)
             if recovery_count >= MAX_RECOVERY_COUNT:
-                job.status="failed"; job.finished_at=now
-                job.error_text="Превышен лимит восстановлений после перезапуска worker"
+                if not _finalize_providerfree_campaign_repair(db,job,now):
+                    job.status="failed"; job.finished_at=now
+                    job.error_text="Превышен лимит восстановлений после перезапуска worker"
             else:
                 p["_recovery_count"]=recovery_count+1
                 p["_last_recovered_at"]=now.isoformat()
@@ -4010,6 +4125,12 @@ def _auto_resume_waiting_campaign_jobs(db):
             # keep the owner as an operator after the campaign is already
             # superseded or preparation has reached ready_for_review.
             payload=dict(job.payload_json or {})
+            if stage=="providerfree_repair_exhausted" or bool(payload.get("_providerfree_terminalized_at")):
+                # PROVIDERFREE_EXHAUSTED_IS_TERMINAL_V1: this is a truthful
+                # business terminal state, not a transient blocker. Never hot-
+                # resume it; a later explicit repair decision must create a new
+                # execution window/subset.
+                continue
             campaign_id=int(payload.get("campaign_id") or 0)
             campaign=db.query(Campaign).filter(Campaign.id==campaign_id).first() if campaign_id else None
             if job.kind=="campaign_prepare" and campaign is not None and str(campaign.status or "").lower()=="superseded":
