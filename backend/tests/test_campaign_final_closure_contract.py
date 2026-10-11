@@ -277,3 +277,56 @@ def test_subset_publication_receipt_is_bound_to_exact_scope():
     assert '"scope_mode":"explicit_subset" if body.item_ids else "full_campaign"' in src
     assert "_ready_scope_matches" in src
     assert "_scope_matches" in src
+
+
+def test_delivery_scope_rows_never_widens_subset():
+    from types import SimpleNamespace
+    from app.services import jobs
+
+    rows = [
+        SimpleNamespace(id=1, account_id="acc"),
+        SimpleNamespace(id=2, account_id="acc"),
+        SimpleNamespace(id=3, account_id="acc"),
+    ]
+    C = SimpleNamespace(_ff_items=lambda db, campaign_id, allowed: list(rows))
+    campaign = SimpleNamespace(id=77)
+
+    scoped = jobs._campaign_delivery_scope_rows(
+        C, None, campaign, ["acc"], "acc", payload={"item_ids":[3,1]}, activation={}
+    )
+    assert [r.id for r in scoped] == [3,1]
+
+    resumed = jobs._campaign_delivery_scope_rows(
+        C, None, campaign, ["acc"], "acc", payload={},
+        activation={"submitted_snapshot":{"scope_item_ids":[2]}}
+    )
+    assert [r.id for r in resumed] == [2]
+
+
+def test_delivery_scope_rows_fail_closed_on_scope_drift():
+    import pytest
+    from types import SimpleNamespace
+    from app.services import jobs
+
+    rows = [SimpleNamespace(id=1, account_id="acc")]
+    C = SimpleNamespace(_ff_items=lambda db, campaign_id, allowed: list(rows))
+    campaign = SimpleNamespace(id=77)
+    with pytest.raises(RuntimeError, match="DELIVERY_SCOPE_DRIFT"):
+        jobs._campaign_delivery_scope_rows(
+            C, None, campaign, ["acc"], "acc", payload={"item_ids":[999]}, activation={}
+        )
+
+
+def test_durable_delivery_passes_exact_scope_to_validation_and_activation():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "FFOwnerActivationBody(account_id=account_id, confirmed=False, item_ids=ids)" in src
+    assert "FFOwnerActivationBody(account_id=account_id, confirmed=True, item_ids=ids)" in src
+    assert "_campaign_delivery_scope_rows" in src
+
+
+def test_auto_media_filters_banner_assets_before_gallery_stack():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/api/campaigns.py").read_text(encoding="utf-8")
+    assert "AUTO_MEDIA_NEVER_FEEDS_BANNER_AS_GALLERY_V1" in src
+    assert "if asset and _ff_is_existing_banner_asset({},None,asset):" in src

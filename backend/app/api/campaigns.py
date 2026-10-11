@@ -10172,6 +10172,12 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
                 if not mid or mid in mids:
                     continue
                 asset=db.query(MediaAsset).filter(MediaAsset.id==mid,MediaAsset.deleted_at.is_(None)).first()
+                if asset and _ff_is_existing_banner_asset({},None,asset):
+                    # AUTO_MEDIA_NEVER_FEEDS_BANNER_AS_GALLERY_V1:
+                    # Legacy/source-campaign folders may contain an approved
+                    # Premium/banner asset. Gallery photo-stack rejects banners by
+                    # contract, so filter them here regardless of source path.
+                    continue
                 if asset and mid not in _campaign_excluded_media_ids and (not asset.account_id or str(asset.account_id)==_row_account_id):
                     mids.append(mid)
                 if len(mids)>=desired_count:

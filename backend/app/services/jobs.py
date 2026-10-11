@@ -2176,7 +2176,7 @@ def _run_campaign_prepare(db, job, payload):
                 "requested":_requested,"created":_created,"qa_pass":_qa}, "partial"
 
     payload = _campaign_checkpoint(db, job, payload, "official_avito_validation", 6, total)
-    feed = C.campaign_feed_validate(campaign.id, C.FFOwnerActivationBody(account_id=account_id, confirmed=False), db, user)
+    feed = C.campaign_feed_validate(campaign.id, C.FFOwnerActivationBody(account_id=account_id, confirmed=False, item_ids=ids), db, user)
     _, ff_after = C._ff_state_load(campaign)
     intake_after = C._ff_direction_intake(db, campaign, ff_after, C._ff_items(db, campaign.id, allowed))
     if not intake_after.get("all_complete"):
@@ -2268,6 +2268,27 @@ def _campaign_owner_prepare_only_contract(ff):
     ))
     avito_context=("avito" in raw or "авито" in raw or "фид" in raw or "feed" in raw)
     return bool(strong_no_publish and (avito_context or prepare_only))
+
+
+def _campaign_delivery_scope_rows(C, db, campaign, allowed, account_id, payload=None, activation=None):
+    """Return the exact durable delivery scope; never widen a subset on resume."""
+    rows=[r for r in C._ff_items(db,campaign.id,allowed) if str(r.account_id or "")==str(account_id)]
+    activation=dict(activation or {})
+    submitted=dict(activation.get("submitted_snapshot") or {})
+    raw_scope=dict(payload or {}).get("item_ids") or submitted.get("scope_item_ids") or []
+    scope=[]
+    for raw in raw_scope:
+        try: iid=int(raw)
+        except (TypeError,ValueError): iid=0
+        if iid>0 and iid not in scope:
+            scope.append(iid)
+    if not scope:
+        return rows
+    by_id={int(r.id):r for r in rows}
+    missing=[iid for iid in scope if iid not in by_id]
+    if missing:
+        raise RuntimeError("DELIVERY_SCOPE_DRIFT missing item ids: %s" % missing[:20])
+    return [by_id[iid] for iid in scope]
 
 
 def _run_campaign_deliver(db, job, payload):
@@ -2370,7 +2391,7 @@ def _run_campaign_deliver(db, job, payload):
         from app.services.campaign_identity import ensure_feed_identity
         baseline_id=int(payload.get("baseline_upload_id") or 0)
         watch_count=int(payload.get("watch_count") or 0)
-        scoped_rows=[r for r in C._ff_items(db,campaign.id,allowed) if str(r.account_id or "")==str(account_id)]
+        scoped_rows=_campaign_delivery_scope_rows(C,db,campaign,allowed,account_id,payload,_owner_activation)
         expected_ad_ids=[str(x) for x in (payload.get("expected_ad_ids") or []) if str(x)]
         if not expected_ad_ids:
             expected_ad_ids=[str(ensure_feed_identity(r)) for r in scoped_rows]
@@ -2569,7 +2590,7 @@ def _run_campaign_deliver(db, job, payload):
         # specific Campaign scope. Resolve the exact campaign feed identities before
         # ending the worker transaction so unrelated legacy ad errors cannot turn a
         # successful new campaign into a false partial result.
-        scoped_rows=[r for r in C._ff_items(db,campaign.id,allowed) if str(r.account_id or "")==str(account_id)]
+        scoped_rows=_campaign_delivery_scope_rows(C,db,campaign,allowed,account_id,payload,_owner_activation)
         expected_ad_ids=[str(x) for x in (payload.get("expected_ad_ids") or []) if str(x)]
         if not expected_ad_ids:
             expected_ad_ids=[str(ensure_feed_identity(r)) for r in scoped_rows]
@@ -2757,7 +2778,7 @@ def _run_campaign_deliver(db, job, payload):
         return {"stage":"publication_failed","campaign_id":campaign.id,"account_id":account_id,"upload_id":activation["upload_id"],"report":snap,
                 "message":"Avito не опубликовал объявления. Причины сохранены в итоговом отчёте."}, "failed"
 
-    rows = C._ff_items(db, campaign.id, allowed)
+    rows = _campaign_delivery_scope_rows(C,db,campaign,allowed,account_id,payload,_owner_activation)
     ids = [r.id for r in rows]
     if not ids:
         # CAMPAIGN_DELIVER_MATERIALIZE_BARRIER_V1:
@@ -2800,9 +2821,9 @@ def _run_campaign_deliver(db, job, payload):
     if approved.get("blocked"):
         raise RuntimeError("owner approval blocked invalid items")
     _campaign_checkpoint(db, job, payload, "revalidate", 2, 5)
-    feed = C.campaign_feed_validate(campaign.id, C.FFOwnerActivationBody(account_id=account_id, confirmed=False), db, user)
+    feed = C.campaign_feed_validate(campaign.id, C.FFOwnerActivationBody(account_id=account_id, confirmed=False, item_ids=ids), db, user)
     _, ff = C._ff_state_load(campaign)
-    intake = C._ff_direction_intake(db, campaign, ff, C._ff_items(db, campaign.id, allowed))
+    intake = C._ff_direction_intake(db, campaign, ff, rows)
     if not intake.get("all_complete"):
         return {"stage":"needs_input","intake":intake,"message":"Avito запросил ещё один обязательный факт."}, "awaiting_confirmation"
     if feed.get("validation_state") != "READY":
@@ -2813,7 +2834,7 @@ def _run_campaign_deliver(db, job, payload):
         return {"stage":"needs_autoload_access","autoload_http_status":feed.get("autoload_http_status"),
                 "message":feed.get("autoload_message") or "Включите автозагрузку Avito для этого аккаунта. После этого отправка продолжится автоматически."}, "awaiting_confirmation"
     _campaign_checkpoint(db, job, payload, "sending", 3, 5)
-    sent = C.campaign_owner_activate(campaign.id, C.FFOwnerActivationBody(account_id=account_id, confirmed=True), db, user)
+    sent = C.campaign_owner_activate(campaign.id, C.FFOwnerActivationBody(account_id=account_id, confirmed=True, item_ids=ids), db, user)
     if sent.get("status") != "ok":
         raise RuntimeError((sent.get("activation") or {}).get("message") or "Avito upload failed")
     from app.services.campaign_identity import ensure_feed_identity
