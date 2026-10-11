@@ -72,3 +72,14 @@ def test_semantic_cache_only_fails_closed_when_proof_missing(monkeypatch):
     )
     assert out[0]["match"] is False
     assert out[0]["checker"] == "cost_anomaly_cache_only"
+
+
+def test_cost_anomaly_auto_media_never_calls_external_stock():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    src = (root / "app/api/campaigns.py").read_text(encoding="utf-8")
+    start = src.index("def ff_workflow_auto_media")
+    end = src.index("def _ff_is_existing_banner_asset", start)
+    auto_media = src[start:end]
+    assert "if len(items) < desired_count and bool(body.allow_paid_qa):" in auto_media
+    assert "_campaign_provider_call(collect_stock" in auto_media

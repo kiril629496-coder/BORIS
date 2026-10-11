@@ -9968,9 +9968,11 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
                                 items.append({"id":int(_asset.id)}); _seen.add(int(_asset.id))
                                 if len(items)>=desired_count:
                                     break
-                if len(items) < desired_count:
+                if len(items) < desired_count and bool(body.allow_paid_qa):
                     # External stock is a last resort after same-account approved
-                    # media reuse. Request only the missing count.
+                    # media reuse. Cost-anomaly recovery is provider-free: collect_stock
+                    # performs its own semantic provider checks, so it is forbidden
+                    # when allow_paid_qa=False.
                     db.commit()
                     stock=_campaign_provider_call(collect_stock, StockCollectBody(
                         account_id=_row_account_id, topic=topic, count=max(1,desired_count-len(items)),
