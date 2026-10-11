@@ -691,6 +691,17 @@ def job_public(j):
     # not internal implementation detail, and removes the need to manually poll.
     scheduled = getattr(j, "scheduled_at", None)
     payload = getattr(j, "payload_json", None) or {}
+    result = getattr(j, "result_json", None) or {}
+    stage = str(result.get("stage") or payload.get("stage") or "").strip()
+    state_text = human.get(j.status, j.status)
+    if stage == "awaiting_external_funding":
+        state_text = "Ждёт пополнения аванса Avito"
+    elif stage == "providerfree_repair_exhausted":
+        state_text = "Готово частично: бесплатное восстановление исчерпано"
+    elif stage == "banners_partial":
+        state_text = "Баннеры готовы частично"
+    elif stage == "publication_partial":
+        state_text = "Опубликовано частично"
     from app.services.job_execution_clock import summary as _timing_summary
     return {"id": j.id, "kind": j.kind, "status": j.status,
             **_timing_summary(j),
@@ -706,7 +717,13 @@ def job_public(j):
             ),
             "attempts":int(j.attempts or 0),
             "progress_done":j.progress_done, "progress_total":j.progress_total,
-            "state_text": human.get(j.status, j.status),
+            "state_text": state_text,
+            "stage": stage or None,
+            "code": result.get("code"),
+            "ready_count": result.get("ready_count"),
+            "blocked_count": result.get("blocked_count"),
+            "next_stage": result.get("next_stage"),
+            "funding_required": stage == "awaiting_external_funding",
             "done": j.progress_done, "total": j.progress_total,
             "started_at": started.isoformat() if started else None,
             "finished_at": finished.isoformat() if finished else None,
