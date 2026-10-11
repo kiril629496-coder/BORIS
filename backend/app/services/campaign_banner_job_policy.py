@@ -24,11 +24,18 @@ def legacy_banner_attempted(payload, *, attempts=0, has_result=False):
 def _outcome(payload, ids, passed, *, stage, final, code=None, extra=None):
     p = deepcopy(payload)
     passed = set(int(i) for i in passed)
-    remaining = [i for i in ids if i not in passed]
+    terminal_blocked = {
+        int(k): dict(v or {}) for k, v in dict(p.get("banner_terminal_blocked") or {}).items()
+        if str(k).isdigit()
+    }
+    remaining = [i for i in ids if i not in passed and i not in terminal_blocked]
     p.update(item_ids=list(ids), remaining=remaining)
     result = {
         "stage": stage, "unit": "banners", "done": len(ids)-len(remaining),
         "total": len(ids), "pending_item_ids": remaining,
+        "passed_count": len(passed),
+        "blocked_count": len(terminal_blocked),
+        "blocked_items": [terminal_blocked[i] for i in sorted(terminal_blocked)],
         "retryable": final == "retry",
         "progress_evidence": dict(p.get("banner_confirmed_artifacts") or {}),
     }
@@ -53,7 +60,14 @@ def plan_banner_slice(*, job_id, payload, item_ids, passed_ids, legacy_attempted
     if not ids or any(i <= 0 for i in ids) or not passed.issubset(ids):
         return _outcome(p, ids, passed, stage="banners_blocked", final="partial",
                         code="BANNER_ITEM_SCOPE_INVALID")
-    remaining = [i for i in ids if i not in passed]
+    terminal_blocked = {
+        int(k) for k in dict(p.get("banner_terminal_blocked") or {})
+        if str(k).isdigit()
+    }
+    if not terminal_blocked.issubset(set(ids)):
+        return _outcome(p, ids, passed, stage="banners_blocked", final="partial",
+                        code="BANNER_BLOCKED_SCOPE_INVALID")
+    remaining = [i for i in ids if i not in passed and i not in terminal_blocked]
     if not remaining:
         return _outcome(p, ids, passed, stage="banners_done", final="completed")
     intents = dict(p.get("banner_item_intents") or {})
@@ -138,6 +152,10 @@ def finish_banner_slice(*, job_id, payload, item_ids, called_ids, result,
     authorizations = deepcopy(dict(p.get("banner_retry_authorizations") or {}))
     observed = dict(p.get("banner_confirmed_artifacts") or {})
     blocked = []
+    terminal_blocked = {
+        str(k): dict(v or {}) for k, v in dict(p.get("banner_terminal_blocked") or {}).items()
+        if str(k).isdigit()
+    }
     actions = {}
     for iid in sorted(called-passed):
         error = by_id.get(iid)
@@ -152,20 +170,33 @@ def finish_banner_slice(*, job_id, payload, item_ids, called_ids, result,
             # Same key must enter the adapter's non-image-spending recovery path.
             actions[str(iid)] = action
             continue
-        if action != "regenerate_quality" or error.get("retry_allowed") is not True:
+        if action != "regenerate_quality":
             blocked.append({"id": iid, "code": str(error.get("code") or "BANNER_RETRY_NOT_AUTHORIZED")})
             continue
         if (error.get("qa_terminal") is not True or not identity
                 or not str(error.get("qa_rejection_reason") or "").strip()):
             blocked.append({"id": iid, "code": "BANNER_QUALITY_REJECTION_UNPROVEN"})
             continue
+        # TERMINAL_QUALITY_BLOCK_DOES_NOT_STALL_BATCH_V1:
+        # A proven visual reject may be impossible to regenerate safely because
+        # the per-banner cost cap is exhausted. Freeze only that item and let
+        # siblings continue. Unknown/reconciliation outcomes never enter here.
         history = list(authorizations.get(str(iid)) or [])
-        if any(x.get("rejection") == identity for x in history):
-            blocked.append({"id": iid, "code": "BANNER_REJECTION_ALREADY_CONSUMED"})
-            continue
         current = int(counts.get(str(iid)) or 0)
-        if current >= int(quality_retry_limit):
-            blocked.append({"id": iid, "code": "BANNER_QUALITY_RETRY_EXHAUSTED"})
+        terminal_code = None
+        if error.get("retry_allowed") is not True:
+            terminal_code = str(error.get("code") or "BANNER_QUALITY_RETRY_NOT_AUTHORIZED")
+        elif any(x.get("rejection") == identity for x in history):
+            terminal_code = "BANNER_REJECTION_ALREADY_CONSUMED"
+        elif current >= int(quality_retry_limit):
+            terminal_code = "BANNER_QUALITY_RETRY_EXHAUSTED"
+        if terminal_code:
+            terminal_blocked[str(iid)] = {
+                "id": iid, "code": terminal_code,
+                "reason": str(error.get("qa_rejection_reason") or "")[:240],
+                "artifact_identity": identity,
+            }
+            actions.pop(str(iid), None)
             continue
         old_key = str(intents.get(str(iid)) or "")
         budget_key = str(budget_intents.get(str(iid)) or "")
@@ -182,10 +213,19 @@ def finish_banner_slice(*, job_id, payload, item_ids, called_ids, result,
         actions[str(iid)] = action
     p.update(banner_item_intents=intents, quality_retry_counts=counts,
              banner_retry_authorizations=authorizations,
-             banner_confirmed_artifacts=observed, banner_pending_actions=actions)
+             banner_confirmed_artifacts=observed, banner_pending_actions=actions,
+             banner_terminal_blocked=terminal_blocked)
     if blocked:
         return _outcome(p, ids, passed, stage="banners_blocked", final="partial",
                         code=blocked[0]["code"], extra={"blocked_items": blocked, "adapter_result": result})
-    final = "completed" if len(passed) == len(ids) else "retry"
-    return _outcome(p, ids, passed, stage="banners_done" if final == "completed" else "banners",
-                    final=final, extra={"batch_size": len(called), "adapter_result": result})
+    remaining_after = [i for i in ids if i not in passed and str(i) not in terminal_blocked]
+    if not remaining_after:
+        if terminal_blocked:
+            first = terminal_blocked[sorted(terminal_blocked, key=int)[0]]
+            return _outcome(p, ids, passed, stage="banners_partial", final="partial",
+                            code=str(first.get("code") or "BANNER_TERMINAL_BLOCKED"),
+                            extra={"batch_size": len(called), "adapter_result": result})
+        return _outcome(p, ids, passed, stage="banners_done", final="completed",
+                        extra={"batch_size": len(called), "adapter_result": result})
+    return _outcome(p, ids, passed, stage="banners", final="retry",
+                    extra={"batch_size": len(called), "adapter_result": result})
