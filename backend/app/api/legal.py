@@ -1,5 +1,5 @@
 """Правила использования продуктов + фиксация согласия в журнале."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from datetime import datetime
 import json
@@ -115,3 +115,124 @@ def accept_terms(body: AcceptBody, user=Depends(get_current_user)):
     finally:
         db.close()
     return {"status": "ok", "version": ver}
+
+
+# ==================== BORIS Messenger: versioned clickwrap ====================
+
+class MessengerLegalAcceptBody(BaseModel):
+    accepted: bool
+    documents: list[dict] = []
+
+
+@router.get("/messenger/documents")
+def messenger_documents():
+    """Public immutable current legal documents for the Messenger clickwrap."""
+    from app.services.messenger_legal import current_documents
+    return {"status": "ok", "documents": current_documents(include_text=True)}
+
+
+def _require_messenger_server_session(user) -> str:
+    """Messenger security v6 requires a revocable server-side device session."""
+    sid = str(getattr(user, "_auth_session_id", "") or "").strip()
+    if not sid:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "messenger_session_upgrade_required",
+                "message": "Сессия безопасности обновлена. Войдите снова.",
+            },
+        )
+    return sid
+
+
+@router.get("/messenger/status")
+def messenger_legal_status(user=Depends(get_current_user)):
+    _require_messenger_server_session(user)
+    from app.db.session import SessionLocal
+    from app.services.messenger_legal import acceptance_status
+    db = SessionLocal()
+    try:
+        state = acceptance_status(db, int(user.id))
+        return {"status": "ok", **state}
+    finally:
+        db.close()
+
+
+@router.post("/messenger/accept")
+def messenger_legal_accept(body: MessengerLegalAcceptBody, request: Request,
+                           user=Depends(get_current_user)):
+    """Explicit per-user acceptance of the exact currently-required versions/hashes."""
+    _require_messenger_server_session(user)
+    from app.db.session import SessionLocal
+    from app.services.messenger_legal import accept_current, current_documents
+
+    if body.accepted is not True:
+        raise HTTPException(status_code=400, detail="Для продолжения необходимо явно принять документы")
+
+    expected = {
+        (item["document_type"], item["version"], item["hash"])
+        for item in current_documents(include_text=False)
+    }
+    submitted = {
+        (
+            str(item.get("document_type") or ""),
+            str(item.get("version") or ""),
+            str(item.get("hash") or ""),
+        )
+        for item in (body.documents or [])
+    }
+    if submitted != expected:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "legal_documents_changed",
+                "message": "Документы обновились. Откройте актуальную редакцию и подтвердите её.",
+            },
+        )
+
+    db = SessionLocal()
+    try:
+        state = accept_current(
+            db,
+            int(user.id),
+            ip=(request.client.host if request.client else ""),
+            user_agent=request.headers.get("user-agent", ""),
+            session_id=str(getattr(user, "_auth_session_id", "") or "") or None,
+        )
+        from app.services.messenger_security_audit import append_security_audit
+        append_security_audit(
+            db,
+            action="legal_acceptance",
+            user_id=int(user.id),
+            entity_type="legal_documents",
+            session_id=str(getattr(user, "_auth_session_id", "") or "") or None,
+            request_id=request.headers.get("x-boris-trace-id"),
+            details={"documents": [
+                {"type": item["document_type"], "version": item["version"], "hash": item["hash"]}
+                for item in current_documents(include_text=False)
+            ]},
+        )
+        db.commit()
+        from app.services.messenger_security import audit_security_event
+        audit_security_event(
+            user_id=int(user.id), account_id=None,
+            action="Принял документы BORIS Messenger", object_kind="legal",
+            object_name=", ".join(f"{item['document_type']}:{item['version']}" for item in state.get("documents", [])),
+            after="accepted", reason="explicit_clickwrap",
+        )
+        return {"status": "ok", **state}
+    finally:
+        db.close()
+
+
+def require_messenger_legal_user(user=Depends(get_current_user)):
+    """Authenticated user with a revocable session and current legal acceptance."""
+    _require_messenger_server_session(user)
+    from app.db.session import SessionLocal
+    from app.services.messenger_legal import require_acceptance
+    db = SessionLocal()
+    try:
+        require_acceptance(db, int(user.id))
+    finally:
+        db.close()
+    return user

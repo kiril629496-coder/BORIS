@@ -893,3 +893,45 @@ button.accountFooter { width:calc(100% - 20px); cursor:pointer; font:inherit; te
 .userRole{font-size:12.5px}
 .ghost{font-size:14px}
 .mobileDockItem{font-size:12px}
+
+/* BORIS_ACCOUNT_COMMAND_PICKER_V1_BEGIN */
+.accountPicker{position:relative;display:flex;align-items:center;gap:8px;min-width:0}
+.accountPickerButton{height:42px;min-width:215px;max-width:285px;display:flex;align-items:center;gap:10px;padding:6px 10px 6px 12px;border:1px solid #d9e2ef;border-radius:12px;background:linear-gradient(180deg,#fff,#fbfdff);box-shadow:0 4px 12px rgba(24,55,105,.045);font:inherit;text-align:left;cursor:pointer;color:#17233d;transition:border-color 160ms ease,box-shadow 160ms ease,background 160ms ease}
+.accountPickerButton:hover{border-color:#b9cdf2;box-shadow:0 7px 18px rgba(37,99,235,.09);background:#fff}
+.accountPickerButton:focus-visible{outline:3px solid rgba(47,111,237,.15);outline-offset:2px}
+.accountPickerMain{display:flex;flex-direction:column;min-width:0;flex:1;line-height:1.15}
+.accountPickerName{font-size:12.5px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.accountPickerMeta{margin-top:3px;font-size:10px;color:#7c8ba2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.accountPickerChevron{width:28px;height:28px;display:grid;place-items:center;border-radius:8px;background:#eef4ff;color:#2563eb;font-weight:900;transition:transform 160ms ease}
+.accountPickerChevron[data-open="1"]{transform:rotate(180deg)}
+.accountPickerPopover{position:absolute;right:0;top:calc(100% + 8px);z-index:1300;width:min(430px,calc(100vw - 24px));padding:10px;border:1px solid #dce5f2;border-radius:16px;background:#fff;box-shadow:0 22px 60px rgba(15,23,42,.18)}
+.accountPickerSearchWrap{height:42px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid #dfe6ef;border-radius:11px;background:#f8fafc;color:#70809a}
+.accountPickerSearch{width:100%;border:0;outline:0;background:transparent;color:#17233d;font:inherit;font-size:13px}
+.accountPickerFilters{display:flex;gap:6px;margin-top:9px;padding-bottom:8px;border-bottom:1px solid #edf0f4}
+.accountPickerFilters button{border:1px solid #e2e8f0;border-radius:999px;background:#fff;color:#667085;padding:6px 10px;font:inherit;font-size:11px;font-weight:800;cursor:pointer}
+.accountPickerFilters button[data-active="1"]{border-color:#bfd2fb;background:#eef4ff;color:#2457a6}
+.accountPickerList{display:grid;gap:5px;max-height:min(480px,62vh);overflow:auto;margin-top:7px;padding-right:2px;overscroll-behavior:contain;scrollbar-width:thin}
+.accountPickerItem{width:100%;min-height:58px;display:flex;align-items:center;gap:9px;padding:8px 9px;border:1px solid transparent;border-radius:12px;background:#fff;color:#1b2941;font:inherit;text-align:left;cursor:pointer;transition:background 140ms ease,border-color 140ms ease,transform 140ms ease}
+.accountPickerItem:hover{background:#f7faff;border-color:#dbe8ff;transform:translateY(-1px)}
+.accountPickerItem[data-active="1"]{background:#f2f7ff;border-color:#bcd2ff}.accountPickerItem[data-focused="1"]{outline:2px solid rgba(37,99,235,.16);outline-offset:1px;background:#f7faff;border-color:#c9dafc}
+.accountPickerAvatar{width:34px;height:34px;flex:0 0 34px;display:grid;place-items:center;border-radius:10px;background:linear-gradient(145deg,#edf4ff,#e7efff);color:#2563eb;font-size:13px;font-weight:900}
+.accountPickerItemText{min-width:0;flex:1;display:flex;flex-direction:column}
+.accountPickerItemText strong{font-size:12.5px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.accountPickerItemText small{margin-top:4px;font-size:10.5px;color:#8190a6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.accountPickerBadges{display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.accountPickerBadges em{font-style:normal;font-size:9px;font-weight:900;line-height:1;padding:4px 6px;border-radius:999px}
+.accountPickerBadges em[data-tone="active"]{background:#ecfdf3;color:#18794e}
+.accountPickerBadges em[data-tone="qa"]{background:#fff4e5;color:#9a5a00}
+.accountPickerBadges em[data-tone="avito"]{background:#eef4ff;color:#315bea}
+.accountPickerCheck{color:#2563eb;font-weight:900}
+.accountPickerEmpty{padding:22px 12px;text-align:center;color:#8190a6;font-size:12px}
+@media(max-width:760px){
+  .accountPicker{position:static}
+  .accountPickerButton{min-width:118px;width:132px;max-width:132px;height:44px;padding:6px 8px}
+  .accountPickerMeta{display:none}
+  .accountPickerPopover{position:fixed;left:12px;right:12px;top:70px;width:auto;max-height:calc(100dvh - 92px)}
+  .accountPickerList{max-height:calc(100dvh - 210px)}
+  .accountPickerBadges{display:none}
+}
+@media(prefers-reduced-motion:reduce){.accountPickerButton,.accountPickerChevron,.accountPickerItem{transition:none}.accountPickerItem:hover{transform:none}}
+/* BORIS_ACCOUNT_COMMAND_PICKER_V1_END */

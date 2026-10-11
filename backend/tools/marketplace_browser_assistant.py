@@ -82,6 +82,7 @@ REGISTRATION_URLS = {
     "disc_pbnation_com": "https://www.pbnation.com/register.php",
     "disc_ttforum_co_uk": "https://www.ttforum.co.uk/forum/ucp.php?mode=register",
     "disc_cycleforums_com": "https://www.cycleforums.com/forums/register/",
+    "disc_antiscam_space": "https://antiscam.space/register/",
 }
 
 PLATFORM_URLS = {
@@ -565,7 +566,20 @@ def _account_secret(platform: str, email: str) -> dict:
     return row
 
 def _detect_hard_checkpoint(page) -> str | None:
-    """Detect CAPTCHA/verification widgets by DOM as well as visible text."""
+    """Detect anti-bot/verification widgets without confusing product fields with identity."""
+    # A simple arithmetic challenge is a distinct human checkpoint. It must
+    # never be mislabelled as age/COPPA or silently solved by automation.
+    try:
+        math_field = page.locator(
+            'input[name*="math" i],input[id*="math" i],'
+            'input[name*="challenge" i],input[id*="challenge" i]'
+        ).first
+        if math_field.count() and math_field.is_visible():
+            body = page.locator("body").inner_text(timeout=2000).lower()
+            if re.search(r"(?:what is|сколько(?: будет)?)\s*\d+\s*[+\-×x*]\s*\d+", body, re.I):
+                return "math_antibot_required"
+    except Exception:
+        pass
     selectors = [
         'input[name="cf-turnstile-response"]',
         'iframe[src*="turnstile" i]',
@@ -744,8 +758,13 @@ def _registration_policy_checkpoint(page, email: str, account: dict, platform: s
     try:
         has_birthdate_controls = (
             page.locator(
-                'input[name*="dob" i],input[name*="birth" i],input[type="date"],'
-                'select[name*="dob" i],select[name*="birth" i],'
+                'input[name*="dob" i],input[id*="dob" i],'
+                'input[name*="birth" i],input[id*="birth" i],'
+                'input[name*="birthday" i],input[id*="birthday" i],'
+                'input[name*="age" i],input[id*="age" i],'
+                'select[name*="dob" i],select[id*="dob" i],'
+                'select[name*="birth" i],select[id*="birth" i],'
+                'select[name*="age" i],select[id*="age" i],'
                 'select#regMonth,select#regDay,select#regYear'
             ).count() >= 1
         )
@@ -766,6 +785,54 @@ def _registration_policy_checkpoint(page, email: str, account: dict, platform: s
             "age_declaration_required",
             "Площадка требует дату рождения/возраст. BORIS не заполняет и не подтверждает возрастные данные автоматически.",
         )
+
+    # CAPTCHA + account creation + legal terms is a composite human
+    # checkpoint. Detect it before the generic terms branch so the owner queue
+    # tells the truth about all required actions and the scheduler never treats
+    # a prepared signup form as publication-ready.
+    try:
+        legal_boxes = page.locator(
+            'input[type="checkbox"][id*="agree" i],'
+            'input[type="checkbox"][name*="agree" i],'
+            'input[type="checkbox"][id*="terms" i],'
+            'input[type="checkbox"][name*="terms" i],'
+            'input[type="checkbox"][name*="consent" i],'
+            'input[type="checkbox"][name*="isReadTerms" i]'
+        )
+        has_legal_box = legal_boxes.count() >= 1
+        has_account_fields = (
+            page.locator('input[type="password"]').count() >= 1
+            and page.locator('input[type="email"]').count() >= 1
+        )
+        has_captcha = (
+            page.locator(
+                'iframe[src*="captcha" i],'
+                '[class*="captcha" i],'
+                '[id*="captcha" i],'
+                'textarea[name="g-recaptcha-response"],'
+                'input[name*="captcha" i],'
+                'input[id*="captcha" i]'
+            ).count() >= 1
+        )
+        account_copy = any(
+            token in low
+            for token in (
+                "create an account",
+                "create account",
+                "sign up",
+                "register",
+                "создать аккаунт",
+                "создать учетную запись",
+                "регистрация",
+            )
+        )
+        if has_legal_box and has_account_fields and has_captcha and account_copy:
+            return (
+                "captcha_terms_registration_required",
+                "Площадка требует создать аккаунт, отдельно принять условия и пройти CAPTCHA. BORIS не принимает юридические условия и не обходит CAPTCHA автоматически.",
+            )
+    except Exception:
+        pass
 
     # Generic legal/terms checkbox: do not auto-accept agreements on an
     # unfamiliar platform. Known adapters can have explicit, reviewed handling.
@@ -1208,8 +1275,34 @@ def _registration_http_fallback(platform: str, start_url: str) -> dict | None:
         checkpoint = "age_declaration_required"
         detail = "Площадка требует выбрать возрастной статус (COPPA). BORIS не делает возрастное заявление автоматически."
     elif any(marker in html or marker in text for marker in captcha_markers):
-        checkpoint = "captcha_required"
-        detail = "Регистрационная страница доступна по HTTP и содержит антибот-проверку."
+        http_checkboxes = soup.find_all("input", attrs={"type": "checkbox"})
+        http_terms_markers = [
+            "согласен с правилами", "соглашаюсь с правилами",
+            "принимаю правила", "согласен с условиями", "с условиями и политикой",
+            "terms and rules", "terms of service", "accept terms",
+            "agree to the terms", "terms and conditions",
+        ]
+        http_has_terms = bool(
+            http_checkboxes
+            and any(marker in text for marker in http_terms_markers)
+        )
+        http_has_account_fields = bool(
+            soup.find("input", attrs={"type": "password"})
+            and (
+                soup.find("input", attrs={"type": "email"})
+                or soup.find("input", attrs={"name": re.compile("email", re.I)})
+            )
+        )
+        if http_has_terms and http_has_account_fields:
+            checkpoint = "captcha_terms_registration_required"
+            detail = (
+                "Регистрационная страница требует создание аккаунта, CAPTCHA и отдельное "
+                "принятие условий/политики. BORIS не обходит CAPTCHA и не принимает "
+                "юридические условия автоматически."
+            )
+        else:
+            checkpoint = "captcha_required"
+            detail = "Регистрационная страница доступна по HTTP и содержит антибот-проверку."
     else:
         checkboxes = soup.find_all("input", attrs={"type": "checkbox"})
         terms_markers = [
@@ -1267,7 +1360,7 @@ def _registration_status_for_checkpoint(checkpoint: str | None) -> str:
     }:
         return "blocked"
     if checkpoint in {
-        "captcha_required", "captcha_age_and_terms_required", "captcha_age_declaration_required", "sms_or_verification_code_required",
+        "captcha_required", "captcha_terms_registration_required", "math_antibot_required", "captcha_age_and_terms_required", "captcha_age_declaration_required", "sms_or_verification_code_required",
         "email_verification_required", "age_and_terms_declaration_required", "age_declaration_required",
         "terms_acceptance_required", "registration_agreement_required",
         "external_account_sso_required",
@@ -1538,6 +1631,16 @@ def register(platform: str, email: str | None, *, headless: bool, submit: bool) 
             policy_detail = (
                 "Площадка требует одним регистрационным шагом CAPTCHA и дату рождения/возраст. "
                 "BORIS не решает CAPTCHA и не заполняет возрастные данные автоматически."
+            )
+        elif checkpoint == "captcha_required" and policy_checkpoint in {
+            "terms_acceptance_required",
+            "registration_agreement_required",
+        }:
+            checkpoint = "captcha_terms_registration_required"
+            policy_detail = (
+                "Площадка требует создать/подтвердить аккаунт, пройти CAPTCHA и отдельно "
+                "принять правила/условия. BORIS не решает CAPTCHA и не принимает "
+                "юридические условия автоматически."
             )
         email_filled = bool(filled.get("email"))
         credentials_ready = bool(filled.get("username")) and bool(filled.get("password"))
@@ -2493,6 +2596,17 @@ def verify_registration(platform: str, *, headless: bool = True) -> dict:
         ctx.close()
     return {"ok": status == "ready", "platform": platform, "status": status, "checkpoint": checkpoint, "url": current_url, "error": error}
 
+def _pdfcatalog_receipt_accepted(text: str) -> bool:
+    value = str(text or "").lower()
+    if any(token in value for token in ("такой сайт уже", "ошибка", "не заполнен")):
+        return False
+    return any(token in value for token in (
+        "заявка принята", "сайт добавлен", "успешно добавлен",
+        "отправлен на модерацию", "передан на модерацию",
+        "благодарим за размещение",
+    ))
+
+
 def prepare_post(platform: str, draft_id: str, *, headless: bool, publish: bool) -> dict:
     # Fresh rule audit is mandatory before every prepared publication. If the
     # rules are ambiguous, paid-only, prohibit links/contacts, or the audit
@@ -2506,11 +2620,23 @@ def prepare_post(platform: str, draft_id: str, *, headless: bool, publish: bool)
     # even opens a posting form. Do not special-case only platforms that already
     # have hand-written adapters: generic/discovered forums need the same gate.
     pobj = marketplace_svc.get_platform(platform)
+    platform_row = next(
+        (x for x in marketplace_svc.list_platforms() if x.get("key") == platform),
+        {},
+    )
+    rule_requirements = set((platform_row.get("free_policy") or {}).get("rule_requirements") or [])
+    verified_guest_submission = bool(
+        platform_row.get("autonomous_ready")
+        and "free_guest_submission_verified" in rule_requirements
+    )
     requires_ready_account = bool(
-        platform in REGISTRATION_URLS
-        or platform in POST_URLS
-        or platform.startswith("pubdisc_")
-        or (pobj is not None and marketplace_svc._channel_type(pobj) == "forum")
+        not verified_guest_submission
+        and (
+            platform in REGISTRATION_URLS
+            or platform in POST_URLS
+            or platform.startswith("pubdisc_")
+            or (pobj is not None and marketplace_svc._channel_type(pobj) == "forum")
+        )
     )
     if requires_ready_account:
         reg = next((x for x in marketplace_svc.registration_plan() if x.get("platform") == platform), None)
@@ -2666,6 +2792,84 @@ def prepare_post(platform: str, draft_id: str, *, headless: bool, publish: bool)
                 page.locator('form#postmodify input#tags[name="tags"]').fill(tags[:80])
             except Exception:
                 pass
+        elif platform == "pubdisc_pdfcatalog_ru":
+            # PDFCatalog requires all five factual fields before its review step.
+            title_sel = _fill_first(page, ['input[name="name"]'], draft.get("title", ""))
+            body_sel = _fill_first(page, ['textarea[name="text"]'], draft.get("text", ""))
+            _fill_first(page, ['input[name="siteadd"]'], str(draft.get("target_url") or ""))
+            _fill_first(page, ['input[name="email"]'], _default_email())
+            phrases = list(draft.get("keyword_phrases") or [])
+            _fill_first(page, ['input[name="keyw"]'], ", ".join(phrases[:20]))
+        elif platform == "pubdisc_otsovik_com":
+            # OTSOVIK_COMPANY_CARD_ADAPTER_V1
+            # This surface is a company-card form, not a forum thread. Fill
+            # only factual project fields; city/address/legal details remain
+            # untouched. Do not reuse SEO draft title as the company name.
+            try:
+                name_field = page.locator("#HLBLOCK_6_UF_NAME").first
+                if not (name_field.count() and name_field.is_visible()):
+                    _click_text(page, ["Далее", "Next"])
+                    page.wait_for_timeout(600)
+            except Exception:
+                pass
+
+            target_url = str(draft.get("target_url") or "").strip()
+            parsed_target = urlparse(target_url)
+            target_host = (parsed_target.hostname or "").lower().removeprefix("www.")
+            site_root = (
+                f"{parsed_target.scheme or 'https'}://{target_host}/"
+                if target_host
+                else target_url
+            )
+            profiles = {
+                "systems-ai-oko.ru": (
+                    "SYSTEMS.AI",
+                    "SYSTEMS.AI — разработка программного обеспечения для бизнеса: SaaS, CRM, Telegram-боты, AI-автоматизация, мобильные и веб-приложения, API и интеграции.",
+                ),
+                "boris-ai.pro": (
+                    "BORIS AI",
+                    "BORIS AI — система автоматизации маркетинга и продаж: AI-маркетолог, AI-менеджер продаж, CRM, аналитика и инструменты для работы с Авито.",
+                ),
+                "avito-specialist.ru": (
+                    "Специалист по Авито, авитолог",
+                    "Услуги специалиста по Авито: аудит, настройка, ведение и продвижение объявлений, аналитика и помощь в увеличении продаж.",
+                ),
+            }
+            business_name, business_description = profiles.get(
+                target_host,
+                (target_host or "BORIS", str(draft.get("text") or "")[:900]),
+            )
+            reg_row = next(
+                (
+                    row
+                    for row in marketplace_svc.registration_plan()
+                    if row.get("platform") == platform
+                ),
+                {},
+            )
+            contact_email = str(reg_row.get("email") or "").strip()
+
+            title_sel = _fill_first(
+                page,
+                ['#HLBLOCK_6_UF_NAME', 'input[name="HLBLOCK_6_UF_NAME"]'],
+                business_name,
+            )
+            body_sel = _fill_first(
+                page,
+                ['#HLBLOCK_6_UF_DESCRIPTION', 'textarea[name="HLBLOCK_6_UF_DESCRIPTION"]'],
+                business_description,
+            )
+            _fill_first(
+                page,
+                ['#HLBLOCK_6_UF_SITE', 'input[name="HLBLOCK_6_UF_SITE"]'],
+                site_root,
+            )
+            if contact_email:
+                _fill_first(
+                    page,
+                    ['#HLBLOCK_6_UF_EMAIL', 'input[name="HLBLOCK_6_UF_EMAIL"]'],
+                    contact_email,
+                )
         else:
             if platform in {"talkingcity_services", "freehostforum_webdev"}:
                 # vBulletin 6 exposes the commercial listing before the authoring
@@ -2696,11 +2900,37 @@ def prepare_post(platform: str, draft_id: str, *, headless: bool, publish: bool)
             screenshot_error = f"{type(exc).__name__}: {exc}"
 
         submitted = False
+        submission_accepted = False
+        submission_response_excerpt = None
         publication_verified = False
         if publish and not checkpoint and body_sel:
             if platform == "forum_baza_1c":
                 try:
                     page.locator('form#postmodify input[name="post"]').click(timeout=4000)
+                    submitted = True
+                except Exception:
+                    submitted = False
+            elif platform == "pubdisc_pdfcatalog_ru":
+                try:
+                    fields_ok = page.locator('input[name="siteadd"], input[name="name"], input[name="email"], input[name="keyw"]').evaluate_all("(fields) => fields.length === 4 && fields.every(f => f.value.trim() && f.checkValidity())")
+                    if fields_ok:
+                        page.locator("input#submit_r").click(timeout=4000)
+                        page.wait_for_timeout(1200)
+                        checkpoint = _checkpoint(page)
+                        rubric = page.locator('select[name="rubr"]')
+                        if not checkpoint and rubric.count():
+                            rubric.select_option(label="Компьютеры - Софт")
+                            page.locator('input[type="submit"][name="submit"]').click(timeout=4000)
+                            submitted = True
+                        elif not checkpoint:
+                            checkpoint = "publication_review_form_missing"
+                    else:
+                        checkpoint = "publication_required_fields_missing"
+                except Exception:
+                    checkpoint = "publication_form_validation_failed"
+            elif platform == "pubdisc_otsovik_com":
+                try:
+                    page.locator("#addcompanyformsend").click(timeout=4000)
                     submitted = True
                 except Exception:
                     submitted = False
@@ -2721,10 +2951,36 @@ def prepare_post(platform: str, draft_id: str, *, headless: bool, publish: bool)
                         html_after = ""
                     title_probe = str(draft.get("title") or "").strip()[:80]
                     target_probe = str(draft.get("target_url") or draft.get("site_url") or "").strip()
-                    publication_verified = bool(
-                        (title_probe and title_probe.lower() in body_after.lower())
-                        or (target_probe and target_probe in html_after)
-                    )
+                    if platform == "pubdisc_pdfcatalog_ru":
+                        # A review/receipt page may echo title and URL. It is
+                        # never proof of an externally published backlink.
+                        publication_verified = bool(
+                            current_url != start_url
+                            and "addsite" not in current_url.lower()
+                            and "page=date" not in current_url.lower()
+                            and target_probe
+                            and page.locator(f'a[href="{target_probe}"]').count()
+                        )
+                        if not publication_verified:
+                            receipt = body_after.lower()
+                            submission_response_excerpt = marketplace_svc.redact_sensitive_text(body_after[:1200])
+                            submission_accepted = _pdfcatalog_receipt_accepted(receipt)
+                            if not submission_accepted:
+                                checkpoint = (
+                                    "existing_listing_url_unconfirmed"
+                                    if "такой сайт уже" in receipt
+                                    else "submission_result_unconfirmed"
+                                )
+                    elif platform == "pubdisc_otsovik_com":
+                        publication_verified = bool(
+                            (business_name and business_name.lower() in body_after.lower())
+                            or (site_root and site_root.rstrip("/") in html_after)
+                        )
+                    else:
+                        publication_verified = bool(
+                            (title_probe and title_probe.lower() in body_after.lower())
+                            or (target_probe and target_probe in html_after)
+                        )
                     if publication_verified:
                         try:
                             marketplace_svc.mark_posted(draft_id, current_url)
@@ -2736,12 +2992,18 @@ def prepare_post(platform: str, draft_id: str, *, headless: bool, publish: bool)
 
     log = _log(platform, "post", {
         "draft_id": draft_id, "url": current_url, "title_field": title_sel, "body_field": body_sel,
-        "publish_clicked": submitted, "checkpoint": checkpoint, "screenshot": str(screenshot)
+        "publish_clicked": submitted, "checkpoint": checkpoint, "screenshot": str(screenshot),
+        "submission_accepted": submission_accepted,
+        "submission_response_excerpt": submission_response_excerpt,
     })
     if checkpoint:
         attempt_status = "blocked"
         error_code = checkpoint
-        error_detail = "Площадка потребовала ручное подтверждение; автоматический обход запрещён."
+        error_detail = (
+            "Ответ формы не подтверждает приём заявки; нужен публичный URL или явная квитанция площадки."
+            if checkpoint in {"submission_result_unconfirmed", "existing_listing_url_unconfirmed", "required_submission_fields_missing"}
+            else "Площадка потребовала ручное подтверждение; автоматический обход запрещён."
+        )
     elif not body_sel:
         attempt_status = "failed"
         error_code = "post_form_not_found"
@@ -2758,10 +3020,12 @@ def prepare_post(platform: str, draft_id: str, *, headless: bool, publish: bool)
         attempt_status = "prepared"
         error_code = None
         error_detail = None
-    marketplace_svc.record_attempt(platform=platform, action="publish" if publish else "prepare_post", status_value=attempt_status, draft_id=draft_id, url=current_url if submitted else None, error_code=error_code, error_detail=error_detail, rules_decision=str((audit or {}).get("decision") or ""), screenshot=str(screenshot), meta={"publish_clicked": submitted, "publication_verified": publication_verified, "title_field": title_sel, "body_field": body_sel, "screenshot_error": screenshot_error})
+    marketplace_svc.record_attempt(platform=platform, action="publish" if publish else "prepare_post", status_value=attempt_status, draft_id=draft_id, url=current_url if submitted else None, error_code=error_code, error_detail=error_detail, rules_decision=str((audit or {}).get("decision") or ""), screenshot=str(screenshot), meta={"publish_clicked": submitted, "submission_accepted": submission_accepted, "submission_response_excerpt": submission_response_excerpt, "publication_verified": publication_verified, "title_field": title_sel, "body_field": body_sel, "screenshot_error": screenshot_error})
     return {
         "ok": True, "platform": platform, "draft_id": draft_id, "url": current_url,
         "filled": bool(body_sel), "publish_clicked": submitted, "publication_verified": publication_verified,
+        "submission_accepted": submission_accepted,
+        "submission_response_excerpt": submission_response_excerpt,
         "checkpoint": checkpoint, "log": str(log), "screenshot": str(screenshot),
         "screenshot_error": screenshot_error,
         "next_action": "done" if publication_verified else ("verify_publication_url_and_mark_posted" if submitted and not checkpoint else "manual_checkpoint_or_adapter_needed"),

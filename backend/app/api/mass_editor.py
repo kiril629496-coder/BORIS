@@ -10,15 +10,60 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.db.session import SessionLocal, engine
 from app.models.account import Account
 from app.services.exception_observability import observe_suppressed
+from app.api.auth import get_current_user
 
 router = APIRouter(prefix="/api/avito/mass-editor", tags=["avito-mass-editor"])
+
+
+def _mass_account_access(user, account_id: str, *, manage: bool = False) -> bool:
+    """Fail-closed account scope for every public Mass Editor route."""
+    aid = str(account_id or "").strip()
+    uid = int(getattr(user, "id", 0) or 0)
+    if not aid or not uid:
+        return False
+    if str(getattr(user, "role", "") or "").lower() == "owner":
+        return True
+    db = SessionLocal()
+    try:
+        owned = db.execute(text(
+            "SELECT 1 FROM accounts WHERE account_id=:a AND owner_user_id=:u LIMIT 1"
+        ), {"a": aid, "u": uid}).first()
+        if owned:
+            return True
+        column = "can_manage_ads" if manage else "can_view"
+        row = db.execute(text(
+            f"SELECT 1 FROM user_account_access WHERE account_id=:a AND user_id=:u "
+            f"AND {column}=TRUE LIMIT 1"
+        ), {"a": aid, "u": uid}).first()
+        return bool(row)
+    finally:
+        db.close()
+
+
+def _require_mass_account(user, account_id: str, *, manage: bool = False) -> None:
+    if not _mass_account_access(user, account_id, manage=manage):
+        raise HTTPException(
+            status_code=403,
+            detail="Недостаточно прав для изменения объявлений" if manage else "Нет доступа к аккаунту",
+        )
+
+
+def _resolved_route_user(user) -> bool:
+    """FastAPI resolves Depends for HTTP calls; direct trusted worker calls keep the marker."""
+    return bool(getattr(user, "id", None))
+
+
+def _require_mass_route_account(user, account_id: str, *, manage: bool = False) -> None:
+    """Enforce account permissions on HTTP routes while preserving trusted direct workers."""
+    if _resolved_route_user(user):
+        _require_mass_account(user, account_id, manage=manage)
 
 # MASS_EDITOR_CHARACTERISTICS_MEMORY_KEY_V1: persistent account-scoped schema memory.
 CHAR_MEMORY_KEY = "mass_editor_characteristics_memory"
@@ -47,6 +92,13 @@ FIELD_LABEL_ALIASES = {
     "product_subtype": ["Подтип товара"],
     "glass_type": ["Тип стекла"],
     "door_type": ["Тип дверей"],
+    # LEGACY_CORE_EDITOR_FIELDS_V1: bounded aliases for owner-authorized edits
+    # of ads that were created outside BORIS/autoload. These are resolved only
+    # inside the exact labelled Avito editor control and are verified after save.
+    "title": ["Название объявления", "Заголовок", "Название"],
+    "description": ["Описание"],
+    "price": ["Цена", "Стоимость"],
+    "category": ["Категория", "Подкатегория"],
 }
 
 # Feed/XML names are not necessarily the labels used by the live Avito editor.
@@ -91,6 +143,7 @@ class CreateJobRequest(BaseModel):
     limit: int = Field(default=1, ge=1, le=100000)
     newest: bool = True
     segment_key: str | None = None
+    item_ids: list[int] = Field(default_factory=list)
     fields: dict[str, FieldRule] = Field(default_factory=dict)
     confirmed: bool = False
 
@@ -241,6 +294,107 @@ def _seed_characteristics_memory(account_id: str) -> dict[str, Any]:
     })
     _db_put(account_id, CHAR_MEMORY_KEY, base)
     return base
+
+
+
+
+def _resolve_legacy_image_paths(account_id: str, raw_images: list[Any]) -> list[str]:
+    """Materialize exact product images into this account's private image tree."""
+    import os
+    from app.api.parser import _download_product_photo
+
+    root=os.path.realpath(f"/root/BORIS/backend/images/{account_id}")
+    paths=[]
+    for idx,raw in enumerate((raw_images or [])[:10]):
+        value=str(raw or "").strip()
+        if not value:
+            continue
+        if value.startswith("http://") or value.startswith("https://"):
+            value=str(_download_product_photo(account_id,value,idx) or "")
+        if not value.startswith("/images/"):
+            continue
+        path=os.path.realpath("/root/BORIS/backend"+value)
+        if not (path==root or path.startswith(root+os.sep)):
+            continue
+        if os.path.isfile(path):
+            paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
+def queue_legacy_inventory_job(account_id: str, items: list[dict[str, Any]], *,
+                               parent_job_id: int | None = None,
+                               confirmed: bool = False) -> dict[str, Any]:
+    """Queue account-isolated browser edits/reactivations for legacy Avito ads.
+
+    Each item must name an exact Avito id. The worker re-verifies the account
+    identity before any WRITE and checkpoints before every save/reactivation
+    click. This helper never borrows another account's cookies.
+    """
+    normalized=[]
+    for raw in (items or [])[:500]:
+        if not isinstance(raw,dict):
+            continue
+        iid=str(raw.get("id") or raw.get("item_id") or "").strip()
+        if not iid.isdigit():
+            continue
+        action=str(raw.get("action") or "edit").strip().lower()
+        if action not in {"edit","reactivate"}:
+            continue
+        changes={}
+        for field,value in dict(raw.get("changes") or {}).items():
+            key=str(field or "").strip()
+            if key=="images":
+                images=_resolve_legacy_image_paths(str(account_id), list(value or []) if isinstance(value,(list,tuple)) else [value])
+                if images:
+                    changes[key]=images
+                continue
+            if key not in {"title","description","price","category"} and not key.startswith("custom:"):
+                continue
+            if value is None:
+                continue
+            changes[key]=str(value)
+        if action=="edit" and not changes:
+            continue
+        normalized.append({
+            "id":int(iid),
+            "title":str(raw.get("title") or "")[:300],
+            "url":str(raw.get("url") or "")[:1000],
+            "action":action,
+            "changes":changes,
+            "run_status":"queued",
+            "error":None,
+        })
+    if not normalized:
+        return {"status":"nothing_to_do","job_id":None,"total":0}
+    job_id="legacyinv_"+uuid.uuid4().hex[:14]
+    now=_now()
+    job={
+        "job_id":job_id,
+        "mode":"inventory_legacy",
+        "status":"queued",
+        "created_at":now,
+        "updated_at":now,
+        "account_id":str(account_id),
+        "total":len(normalized),
+        "processed":0,
+        "changed":0,
+        "verified":0,
+        "pending_verification":0,
+        "skipped":0,
+        "failed":0,
+        "items":normalized,
+        "rules":{},
+        "route":{"executor":"isolated_browser","reason":"legacy_inventory_write","browser_required":True},
+        "executor_selected":"isolated_browser",
+        "executor":"isolated_browser",
+        "confirmed":bool(confirmed),
+        "confirmed_at":now if confirmed else None,
+        "parent_job_id":int(parent_job_id or 0) or None,
+        "cost":{"openai_rub":0.0,"browser_rub":0.0,"proxy_estimate_rub":0.0},
+        "error":None,
+    }
+    _db_put(str(account_id),f"mass_editor_job:{job_id}",job)
+    return {"status":"queued","job_id":job_id,"total":len(normalized),"items":normalized}
 
 
 def _latest_items(account_id: str) -> list[dict[str, Any]]:
@@ -439,8 +593,14 @@ def _validate_requested_fields(account_id: str, fields: dict[str, FieldRule], se
     return None
 
 
-def _plan(account_id: str, limit: int, fields: dict[str, FieldRule], segment_key: str | None = None) -> dict[str, Any]:
-    items = _segment_items(account_id, segment_key)[:limit]
+def _plan(account_id: str, limit: int, fields: dict[str, FieldRule], segment_key: str | None = None, item_ids: list[int] | None = None) -> dict[str, Any]:
+    items = _segment_items(account_id, segment_key)
+    requested={str(int(x)) for x in (item_ids or []) if int(x)>0}
+    if requested:
+        # MASS_EDITOR_EXACT_ITEM_SCOPE_V1: autonomous maintenance must never
+        # mutate "top N" neighbors when it already knows the exact Avito IDs.
+        items=[x for x in items if str(x.get("id") or "") in requested]
+    items = items[:limit]
     # HAG + shower-enclosure defaults are only the explicit pilot recipe for Evgeniy.
     # Every other client starts from an empty mutation plan until fields are chosen from
     # that client's own learned characteristics memory.
@@ -877,7 +1037,8 @@ def _sync_external_verification_parent(account_id: str, verification_job: dict[s
 
 
 @router.get("/characteristics")
-def characteristics(account_id: str, segment_key: str | None = None):
+def characteristics(account_id: str, segment_key: str | None = None, user=Depends(get_current_user)):
+    _require_mass_route_account(user, account_id, manage=False)
     memory = _seed_characteristics_memory(account_id)
     segments_raw = memory.get("segments") or {}
     segments = []
@@ -922,7 +1083,8 @@ def characteristics(account_id: str, segment_key: str | None = None):
 
 
 @router.post("/scan-jobs")
-def create_scan_job(req: ScanJobRequest):
+def create_scan_job(req: ScanJobRequest, user=Depends(get_current_user)):
+    _require_mass_route_account(user, req.account_id, manage=True)
     from app.api.browser_gateway import _execution_route
     route = _execution_route(req.account_id, "scan_characteristics", "READ")
     isolated_fallback = route.get("executor") == "blocked"
@@ -952,7 +1114,8 @@ def create_scan_job(req: ScanJobRequest):
 
 
 @router.get("/preview")
-def preview(account_id: str, limit: int = 10):
+def preview(account_id: str, limit: int = 10, user=Depends(get_current_user)):
+    _require_mass_route_account(user, account_id, manage=False)
     return {"status": "ok", **_plan(account_id, max(1, min(limit, 100)), {})}
 
 
@@ -978,11 +1141,12 @@ def _identity_guard_fresh_ok(account_id: str, max_age_seconds: int = 300) -> tup
         return False, guard
 
 @router.post("/jobs")
-def create_job(req: CreateJobRequest):
+def create_job(req: CreateJobRequest, user=Depends(get_current_user)):
+    _require_mass_route_account(user, req.account_id, manage=bool(req.confirmed))
     validation_error = _validate_requested_fields(req.account_id, req.fields, req.segment_key)
     if validation_error:
         return {"status": "error", "message": validation_error}
-    plan = _plan(req.account_id, req.limit, req.fields, req.segment_key)
+    plan = _plan(req.account_id, req.limit, req.fields, req.segment_key, req.item_ids)
     if not req.confirmed:
         return {
             "status": "needs_confirmation",
@@ -1088,7 +1252,8 @@ def create_job(req: CreateJobRequest):
 
 
 @router.get("/jobs/current")
-def get_current_job(account_id: str):
+def get_current_job(account_id: str, user=Depends(get_current_user)):
+    _require_mass_route_account(user, account_id, manage=False)
     """Return the newest durable mass-editor job for this account.
 
     The UI is disposable: navigation, refresh, another tab or another device must
@@ -1120,7 +1285,8 @@ def get_current_job(account_id: str):
 
 
 @router.get("/jobs/{job_id}")
-def get_job(job_id: str, account_id: str):
+def get_job(job_id: str, account_id: str, user=Depends(get_current_user)):
+    _require_mass_route_account(user, account_id, manage=False)
     job = _db_get(account_id, f"mass_editor_job:{job_id}")
     if not job:
         return {"status": "error", "message": "Задание не найдено"}
@@ -1233,7 +1399,8 @@ class IsolatedVerificationCodeRequest(BaseModel):
 
 
 @router.post("/isolated/verification-code")
-def isolated_verification_code(req: IsolatedVerificationCodeRequest):
+def isolated_verification_code(req: IsolatedVerificationCodeRequest, user=Depends(get_current_user)):
+    _require_mass_route_account(user, req.account_id, manage=True)
     code = "".join(ch for ch in str(req.code or "") if ch.isdigit())[:12]
     if len(code) < 4:
         return {"status":"error","message":"Некорректный код Avito"}
@@ -1257,7 +1424,8 @@ def isolated_verification_code(req: IsolatedVerificationCodeRequest):
 
 
 @router.get("/isolated/status")
-def isolated_status(account_id: str):
+def isolated_status(account_id: str, user=Depends(get_current_user)):
+    _require_mass_route_account(user, account_id, manage=False)
     return {
         "status":"ok","account_id":account_id,
         "session":_db_get(account_id, ISOLATED_SESSION_KEY) or {},
@@ -1457,10 +1625,74 @@ async def _run_job(account_id: str, job_id: str) -> None:
                 item["error"] = None
                 _db_put(account_id, key, job)
                 try:
-                    await page.goto(f"https://www.avito.ru/items/edit/{item['id']}", wait_until="commit", timeout=20000)
+                    action=str(item.get("action") or "edit").lower()
+                    item_url=str(item.get("url") or "").strip()
+                    target_url=(item_url if action=="reactivate" and item_url.startswith("https://www.avito.ru/") else f"https://www.avito.ru/items/edit/{item['id']}")
+                    await page.goto(target_url, wait_until="commit", timeout=20000)
                     await page.wait_for_timeout(1200)
-                    if str(item["id"]) not in page.url and "/items/edit/" not in page.url:
+                    if action!="reactivate" and str(item["id"]) not in page.url and "/items/edit/" not in page.url:
                         raise RuntimeError("Редактор объявления не открылся")
+
+                    if action=="reactivate":
+                        def _live_status():
+                            rows=_latest_items(account_id)
+                            return next((str(x.get("status") or "").lower() for x in rows if str(x.get("id") or "")==str(item["id"])), "")
+                        if _live_status()=="active":
+                            item["run_status"]="verified"
+                            item["verified_action"]="reactivate"
+                            job["verified"] += 1
+                            job["processed"] = idx + 1
+                            job["updated_at"] = _now()
+                            _db_put(account_id,key,job)
+                            continue
+                        if _prior_run_status in {"reactivate_submitting","reactivate_submitted","pending_external_verification"}:
+                            # A crash/timeout after click is ambiguous. Never click a
+                            # second time; require read-back or a fresh confirmation.
+                            item["run_status"]="pending_external_verification"
+                            item["requires_reconfirmation"]=True
+                            job["pending_verification"]=int(job.get("pending_verification") or 0)+1
+                            job["processed"] = idx + 1
+                            job["updated_at"] = _now()
+                            _db_put(account_id,key,job)
+                            continue
+                        candidates=["Активировать","Опубликовать снова","Разместить снова","Возобновить","Продлить объявление","Опубликовать"]
+                        action_control=None
+                        for label in candidates:
+                            loc=page.get_by_role("button",name=label,exact=False)
+                            if await loc.count()==0:
+                                loc=page.get_by_role("link",name=label,exact=False)
+                            if await loc.count():
+                                action_control=loc.first
+                                break
+                        if action_control is None:
+                            raise RuntimeError("Кнопка безопасной реактивации объявления не найдена")
+                        item["run_status"]="reactivate_submitting"
+                        item["reactivate_intent_at"]=_now()
+                        job["updated_at"]=_now()
+                        _db_put(account_id,key,job)
+                        await action_control.click()
+                        item["run_status"]="reactivate_submitted"
+                        item["reactivate_submitted_at"]=_now()
+                        job["changed"] += 1
+                        job["updated_at"]=_now()
+                        _db_put(account_id,key,job)
+                        verified=False
+                        for _attempt in range(5):
+                            await page.wait_for_timeout(2000)
+                            if _live_status()=="active":
+                                verified=True
+                                break
+                        if verified:
+                            item["run_status"]="verified"
+                            item["verified_action"]="reactivate"
+                            job["verified"] += 1
+                        else:
+                            item["run_status"]="pending_external_verification"
+                            job["pending_verification"]=int(job.get("pending_verification") or 0)+1
+                        job["processed"] = idx + 1
+                        job["updated_at"] = _now()
+                        _db_put(account_id,key,job)
+                        continue
 
                     discovered = await _discover_characteristics(page)
                     _merge_characteristics_memory(account_id, item, discovered, source="active_editor")
@@ -1519,6 +1751,12 @@ async def _run_job(account_id: str, job_id: str) -> None:
 
                     changed_fields = []
                     for field, value in item.get("changes", {}).items():
+                        # Idempotent daily maintenance: if the exact desired
+                        # value is already visible in the exact field container,
+                        # do not touch the form or click Save.
+                        if await _verify_field(page, field, value):
+                            item.setdefault("unchanged_fields", []).append(field)
+                            continue
                         ok = await _set_field(page, field, value)
                         if ok:
                             changed_fields.append(field)
@@ -1526,8 +1764,13 @@ async def _run_job(account_id: str, job_id: str) -> None:
                             item.setdefault("skipped_fields", []).append(field)
 
                     if not changed_fields:
-                        item["run_status"] = "skipped_no_fields"
-                        job["skipped"] += 1
+                        if item.get("changes") and not item.get("skipped_fields"):
+                            item["run_status"] = "verified"
+                            item["verified_no_change"] = True
+                            job["verified"] += 1
+                        else:
+                            item["run_status"] = "skipped_no_fields"
+                            job["skipped"] += 1
                     else:
                         save = page.get_by_role("button", name="Сохранить", exact=False)
                         if await save.count() == 0:
@@ -1570,7 +1813,10 @@ async def _run_job(account_id: str, job_id: str) -> None:
                 await page.wait_for_timeout(1500 + (idx % 3) * 500)
 
             await context.close()
-            job["status"] = "completed" if job["failed"] == 0 else "completed_with_errors"
+            if int(job.get("pending_verification") or 0)>0:
+                job["status"]="waiting_external_verification"
+            else:
+                job["status"] = "completed" if job["failed"] == 0 else "completed_with_errors"
     except Exception as e:
         msg = str(e)[:500]
         low = msg.lower()
@@ -2070,7 +2316,21 @@ async def _discover_characteristics(page) -> list[dict[str, Any]]:
         return []
 
 
-async def _set_field(page, field: str, value: str) -> bool:
+async def _set_field(page, field: str, value) -> bool:
+    if field=="images":
+        paths=[str(x) for x in (value or []) if str(x)] if isinstance(value,(list,tuple)) else []
+        if not paths:
+            return False
+        try:
+            uploads=page.locator('input[type="file"]')
+            if await uploads.count()==0:
+                return False
+            await uploads.first.set_input_files(paths)
+            await page.wait_for_timeout(1200)
+            return True
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=2035)
+            return False
     aliases = FIELD_LABEL_ALIASES.get(field, [field.split("custom:", 1)[1] if field.startswith("custom:") else field])
     for label in aliases:
         # First try a normal labelled input/combobox.
@@ -2123,13 +2383,31 @@ async def _set_field(page, field: str, value: str) -> bool:
     return False
 
 
-async def _verify_field(page, field: str, value: str) -> bool:
+async def _verify_field(page, field: str, value) -> bool:
     """Verify one concrete Avito editor field without global body-text guesses.
 
     A value appearing in the title/description/company name is not proof that the
     characteristic itself was saved. Prefer the labelled control value and only
     fall back to the nearest field container around the exact field label.
     """
+    if field=="images":
+        expected_count=len([x for x in (value or []) if str(x)]) if isinstance(value,(list,tuple)) else 0
+        if expected_count<=0:
+            return False
+        try:
+            uploads=page.locator('input[type="file"]')
+            if await uploads.count()==0:
+                return False
+            # Verify only inside the nearest upload/photo container. A global page
+            # image count could mistake logos/icons for saved listing photos.
+            box=uploads.first.locator("xpath=ancestor::*[self::section or self::div][1]")
+            if await box.count()==0:
+                return False
+            images=box.locator("img")
+            return (await images.count())>=expected_count
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=2140)
+            return False
     expected = " ".join(str(value or "").lower().replace("ё", "е").split())
     if not expected:
         return False
@@ -2188,7 +2466,12 @@ async def _verify_field(page, field: str, value: str) -> bool:
 
 
 @router.post("/gateway/pair-code")
-def gateway_pair_code(account_id: str | None = None):
+def gateway_pair_code(account_id: str | None = None, user=Depends(get_current_user)):
+    if _resolved_route_user(user):
+        if account_id:
+            _require_mass_route_account(user, account_id, manage=True)
+        elif str(getattr(user, "role", "") or "").lower() != "owner":
+            raise HTTPException(403, "Нужно выбрать доступный аккаунт")
     """Creates a one-time code. With account_id, the Chrome profile is permanently scoped to that BORIS/Avito account."""
     from app.api.browser_gateway import create_pair_code
     rec = create_pair_code(account_id=account_id)
@@ -2201,7 +2484,12 @@ def gateway_pair_code(account_id: str | None = None):
 
 
 @router.get("/gateway/status")
-def gateway_status(account_id: str | None = None):
+def gateway_status(account_id: str | None = None, user=Depends(get_current_user)):
+    if _resolved_route_user(user):
+        if account_id:
+            _require_mass_route_account(user, account_id, manage=False)
+        elif str(getattr(user, "role", "") or "").lower() != "owner":
+            raise HTTPException(403, "Нужно выбрать доступный аккаунт")
     """Owner-facing status. If account_id is supplied, return that account's dedicated browser session."""
     db = SessionLocal()
     try:
@@ -2236,14 +2524,15 @@ def gateway_status(account_id: str | None = None):
 
 
 @router.post("/gateway/identity-check")
-def gateway_identity_check(account_id: str):
+def gateway_identity_check(account_id: str, user=Depends(get_current_user)):
+    _require_mass_route_account(user, account_id, manage=True)
     """Queue a READ-only browser preflight that proves the Chrome Avito profile matches this BORIS account."""
     import secrets as _secrets
     from app.api.browser_gateway import _account_gateway_state, _db_put as _gw_put, _iso as _gw_iso
     session = _account_gateway_state(account_id)
     if not session.get("online"):
         return {"status":"error","code":"browser_session_required","message":"Browser Gateway этого аккаунта не подключён."}
-    readiness = execution_readiness(account_id)
+    readiness = execution_readiness(account_id, user=user)
     expected_name = str(((readiness.get("api") or {}).get("name") or "")).strip()
     expected_id = str(((readiness.get("api") or {}).get("avito_user_id") or "")).strip()
     if not expected_name and not expected_id:
@@ -2265,7 +2554,8 @@ def gateway_identity_check(account_id: str):
 
 
 @router.get("/gateway/identity-check/status")
-def gateway_identity_check_status(account_id: str, job_id: str):
+def gateway_identity_check_status(account_id: str, job_id: str, user=Depends(get_current_user)):
+    _require_mass_route_account(user, account_id, manage=False)
     from app.api.browser_gateway import _db_get as _gw_get
     job = _gw_get(account_id, "browser_job:"+job_id)
     if not job:
@@ -2324,7 +2614,9 @@ def gateway_identity_check_status(account_id: str, job_id: str):
 
 
 @router.get("/execution-readiness")
-def execution_readiness(account_id: str):
+def execution_readiness(account_id: str, user=Depends(get_current_user)):
+    if _resolved_route_user(user):
+        _require_mass_route_account(user, account_id, manage=False)
     """Single authoritative readiness view for API-first + account-scoped browser fallback."""
     api = {"connected": False, "identity_verified": False, "name": None, "avito_user_id": None, "error": None}
     try:
@@ -2389,7 +2681,7 @@ def execution_readiness(account_id: str):
     except Exception as exc:
         api["error"] = str(exc)[:240]
 
-    gw = gateway_status(account_id)
+    gw = gateway_status(account_id, user=user)
     browser = {
         "connected": bool(gw.get("connected")),
         "requires_login": False,
@@ -2487,5 +2779,6 @@ async def _isolated_avito_login_probe(account_id: str) -> dict[str, Any]:
             await context.close()
 
 @router.post("/isolated-session/probe")
-async def isolated_session_probe(account_id: str):
+async def isolated_session_probe(account_id: str, user=Depends(get_current_user)):
+    _require_mass_route_account(user, account_id, manage=True)
     return {"status":"disabled","code":"use_authoritative_isolated_queue","message":"Проверка выполняется только через единую очередь BORIS."}

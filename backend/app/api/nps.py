@@ -175,10 +175,25 @@ def _questions(product: str, day: int, last: bool):
 
 def _db():
     import os, psycopg2
-    p = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
-    for l in open(p):
-        if l.strip().startswith("DATABASE_URL"):
-            return psycopg2.connect(l.split("=", 1)[1].strip().strip('"').strip("'"))
+    # Production releases are immutable and intentionally do not carry .env.
+    # systemd injects DATABASE_URL into the runtime environment; use that first.
+    url = str(os.environ.get("DATABASE_URL") or "").strip()
+    if url:
+        return psycopg2.connect(url)
+    # Legacy/dev fallback only. Prefer the canonical backend env over a path
+    # relative to this module because __file__ points inside release snapshots.
+    candidates = [
+        "/root/BORIS/backend/.env",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")),
+    ]
+    for p in candidates:
+        try:
+            with open(p, encoding="utf-8") as fh:
+                for l in fh:
+                    if l.strip().startswith("DATABASE_URL"):
+                        return psycopg2.connect(l.split("=", 1)[1].strip().strip('"').strip("'"))
+        except FileNotFoundError:
+            continue
     return None
 
 

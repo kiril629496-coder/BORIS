@@ -72,6 +72,21 @@ def _fast_path(text, today=None):
                         "clarify_question": None, "error": None,
                     }
 
+    # Audit Gateway context has its own deterministic help path. This keeps
+    # audit facts server-side and avoids sending raw audit state to the parser.
+    audit_markers = (
+        "мой аудит", "мой score", "мой скор", "результат аудита",
+        "после аудита", "по аудиту", "что нашел boris", "что нашел борис",
+        "что boris нашел", "что борис нашел",
+    )
+    if any(w in s for w in audit_markers):
+        return {
+            "understood": True, "intent": "chit_chat", "confidence": 1.0,
+            "entities": {"topic": "audit_help"},
+            "summary": "Объяснить результаты последнего аудита BORIS",
+            "clarify_question": None, "error": None,
+        }
+
     # Вопросы «что делать дальше / как запустить» — запрос пошагового ведения,
     # а не ошибка парсинга и не случайный переход в один из экранов.
     help_markers = (

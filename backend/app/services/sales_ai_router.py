@@ -241,10 +241,21 @@ def _deepseek_provider_blocked() -> bool:
 
 
 def _mop_provider_order(account_id: str | None = None) -> list[str]:
-    """MOP-specific provider chain: never OpenAI, autonomous by construction."""
-    # MOP_PROVIDER_NO_OPENAI_V1: this provider chain is the canonical proof used
-    # by production acceptance. OpenAI is intentionally absent even when its
-    # account key is configured; MOP uses GigaChat/optional alternates/local.
+    """MOP-specific provider chain.
+
+    PLANETA_OPENAI_MOP_V1: Planeta Mebeli is explicitly pinned to OpenAI-only.
+    If OpenAI is unavailable the live MOP must fail closed instead of silently
+    answering with another model.
+    """
+    if str(account_id or "") == "planetazayavki_65985":
+        if (
+            _truthy("BORIS_SALES_OPENAI_ENABLED", True)
+            and str(os.getenv("OPENAI_API_KEY") or "").strip()
+            and not _openai_billing_blocked()
+            and not _circuit_blocks("openai.text", account_id)
+        ):
+            return ["openai"]
+        return []
     order: list[str] = []
     # Explicit operator opt-in for an alternate remote provider wins over the
     # default GigaChat preference. No opt-in means Russian GigaChat first.
@@ -346,8 +357,18 @@ def _json_value(text_value: str) -> Any:
         raw = raw.replace("```json", "", 1).replace("```", "").strip()
     try:
         return json.loads(raw)
-    except Exception as exc:
-        raise SalesAIOutputInvalid("provider returned invalid JSON") from exc
+    except Exception as first_exc:
+        # SALES_AI_PREFIXED_JSON_V1: providers may prepend a short label such as
+        # **JSON-ОТВЕТ:** before a valid object. Recover the object instead of
+        # wrapping the whole envelope as natural client-facing text.
+        try:
+            start = raw.find("{")
+            if start >= 0:
+                value, _ = json.JSONDecoder().raw_decode(raw[start:])
+                return value
+        except Exception as prefixed_exc:
+            _prefixed_json_error = type(prefixed_exc).__name__
+        raise SalesAIOutputInvalid("provider returned invalid JSON") from first_exc
 
 
 def _provider_error_kind(status: int, code: str = "") -> str:
@@ -410,27 +431,38 @@ def _openai_default_call(
             (str(account_id) + "\n" + str(operation) + "\n" + prompt).encode("utf-8")
         ).hexdigest()
 
-    run_id = "sales-ai:%s:%s" % (
+    base_run_id = "sales-ai:%s:%s" % (
         str(module or "sales"),
         hashlib.sha256((str(account_id) + ":" + intent).encode("utf-8")).hexdigest(),
     )
     estimate = max(1, int(os.getenv("BORIS_SALES_OPENAI_EST_KOPEKS", "300") or 300))
-    token = ai_budget.reserve(
-        account_id=str(account_id),
-        module=str(module or "sales"),
-        operation=str(operation),
-        run_id=run_id,
-        est_kopeks=estimate,
-        calls_planned=1,
-    )
-    state = str((token or {}).get("status") or "") if isinstance(token, dict) else ""
-    if state not in {"reserved", "observe", "exists"}:
-        raise SalesAIBudgetBlocked("openai internal ai budget unavailable")
-
-    allowance = ai_budget.allow_next(run_id)
-    if not bool((allowance or {}).get("allowed") if isinstance(allowance, dict) else allowance):
+    run_id = base_run_id
+    _budget_retryable = {
+        "expired", "run_expired", "run_released", "run_stopped",
+        "calls_exhausted", "reserve_spent",
+    }
+    for _budget_attempt in range(3):
+        token = ai_budget.reserve(
+            account_id=str(account_id),
+            module=str(module or "sales"),
+            operation=str(operation),
+            run_id=run_id,
+            est_kopeks=estimate,
+            calls_planned=1,
+        )
+        state = str((token or {}).get("status") or "") if isinstance(token, dict) else ""
+        if state not in {"reserved", "observe", "exists"}:
+            raise SalesAIBudgetBlocked("openai internal ai budget unavailable")
+        allowance = ai_budget.allow_next(run_id)
+        if bool((allowance or {}).get("allowed") if isinstance(allowance, dict) else allowance):
+            break
         reason = str((allowance or {}).get("reason") or "not_allowed")
+        if reason in _budget_retryable and _budget_attempt < 2:
+            run_id = base_run_id + ":retry%d" % (_budget_attempt + 1)
+            continue
         raise SalesAIBudgetBlocked("openai internal ai budget blocked: " + reason)
+    else:
+        raise SalesAIBudgetBlocked("openai internal ai budget retry exhausted")
 
     provider_idem = "sales-ai:" + hashlib.sha256(
         (str(account_id) + ":" + intent).encode("utf-8")
@@ -438,10 +470,17 @@ def _openai_default_call(
 
     def _post():
         try:
-            # SALES_AI_AMBIENT_PROXY_BYPASS_V1: never let a dead host-wide proxy
-            # disable every sales provider at once.
+            # PLANETA_OPENAI_ROUTE_V1: use BORIS' explicit international
+            # transport pool when configured. Ambient host proxy remains disabled.
             _session = requests.Session()
             _session.trust_env = False
+            try:
+                from proxy_pool import get_intl_requests_proxies
+                _px = get_intl_requests_proxies()
+            except Exception:
+                _px = None
+            if _px:
+                _session.proxies.update(_px)
             response = _session.post(
                 "https://api.openai.com/v1/responses",
                 headers={

@@ -62,8 +62,10 @@ def grant_product_limits(db, account_id, pack_code):
 
     qty = int(extras["reactivation"])
     data["reactivation_purchased"] = qty
-    db.execute(text("UPDATE storage SET value=:v WHERE account_id=:a AND key='billing'"),
-               {"v": json.dumps(data, ensure_ascii=False), "a": account_id})
+    db.execute(text(
+        "UPDATE storage SET value=jsonb_set(coalesce(value::jsonb,'{}'::jsonb),"
+        " '{reactivation_purchased}',to_jsonb(CAST(:q AS integer)),true)::text"
+        " WHERE account_id=:a AND key='billing'"), {"q": qty, "a": account_id})
     log.info("реактивация: аккаунту %s начислено %d касаний на период %s — %s",
              account_id, qty, start, until)
     return {"status": "granted", "pack": pack_code, "account_id": account_id,

@@ -10,6 +10,7 @@ from app.models.user import User
 from app.api.auth import get_current_user
 from app.crypto_utils import encrypt_secret, decrypt_secret
 from app.services.exception_observability import observe_suppressed
+from app.services.ai_costs_private_access import require_ai_costs_private_owner
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -158,6 +159,546 @@ def list_accounts(user: User = Depends(get_current_user)):
             "client_goal": a.client_goal or "",
             "client_goal_text": a.client_goal_text or "",
         } for a in accs]}
+    finally:
+        db.close()
+
+
+def _latest_active_campaign_jobs(rows, active_statuses):
+    """Return only the newest active lane per campaign, never stale predecessors."""
+    latest_by_lane = {}
+    for row in rows:
+        payload = dict(row.payload_json or {})
+        try:
+            campaign_id = int(payload.get("campaign_id") or 0)
+        except (TypeError, ValueError):
+            campaign_id = 0
+        if campaign_id <= 0:
+            continue
+        lane = (str(row.account_id or ""), campaign_id, str(row.kind or ""))
+        if lane not in latest_by_lane:
+            latest_by_lane[lane] = (row, payload, campaign_id)
+
+    active_latest = [
+        value for value in latest_by_lane.values()
+        if str(value[0].status or "") in active_statuses
+    ]
+    active_latest.sort(
+        key=lambda value: (
+            value[0].updated_at or value[0].created_at,
+            int(value[0].id),
+        ),
+        reverse=True,
+    )
+
+    selected = []
+    seen_campaigns = set()
+    for row, payload, campaign_id in active_latest:
+        key = (str(row.account_id or ""), campaign_id)
+        if key in seen_campaigns:
+            continue
+        seen_campaigns.add(key)
+        selected.append((row, payload, campaign_id))
+        if len(selected) >= 50:
+            break
+    return selected
+
+
+@router.get("/active-campaigns")
+def active_campaigns(user: User = Depends(get_current_user)):
+    """Compact cross-account Campaign activity for the owner/client workspace.
+
+    Read-only by design: one latest active durable job per campaign, limited to
+    accounts the authenticated user may already see. Internal QA fixtures stay
+    hidden from the normal owner UI just like AccountContext.
+    """
+    import json as _json
+    import re as _re
+    from datetime import datetime as _dt, timezone as _tz
+    from app.models.background_job import BackgroundJob
+    from app.models.campaign import Campaign
+    from app.models.storage import Storage
+    from app.services.job_execution_clock import summary as _timing_summary
+    from app.services.campaign_runtime_health import classify_campaign_runtime_health as _runtime_health
+
+    db = SessionLocal()
+    try:
+        if user.role == "owner":
+            accs = db.query(Account).order_by(Account.created_at.asc()).all()
+        else:
+            _access_ids = [r[0] for r in db.execute(text(
+                "SELECT account_id FROM user_account_access"
+                " WHERE user_id = :u AND can_view = TRUE"
+            ), {"u": user.id}).fetchall()]
+            accs = db.query(Account).filter(
+                (Account.owner_user_id == user.id) |
+                (Account.account_id == user.account_id) |
+                (Account.account_id.in_(_access_ids))
+            ).order_by(Account.created_at.asc()).all()
+
+        if user.role == "owner":
+            _internal = _re.compile(r"^(?:qa|test|demo|fixture|sandbox|mock)(?:[_-]|$)", _re.I)
+            accs = [a for a in accs if not _internal.search(str(a.account_id or "").strip())]
+
+        account_names = {str(a.account_id): (a.name or a.account_id) for a in accs if a.account_id}
+        account_ids = list(account_names)
+        if not account_ids:
+            return {"status": "ok", "items": [], "total": 0}
+
+        active_statuses = ("queued", "running", "validating", "awaiting_confirmation")
+        relevant_kinds = (
+            "campaign_prepare", "campaign_enhance", "campaign_banners", "campaign_deliver",
+            "campaign_editor", "campaign_inventory_maintain", "campaign_post_publish_watch",
+        )
+        # Read the newest job in every campaign/kind lane, regardless of status.
+        # An older awaiting_confirmation must not remain visible after a newer
+        # editor/prepare of the same lane completed and superseded it.
+        rows = (db.query(BackgroundJob)
+                .filter(BackgroundJob.account_id.in_(account_ids),
+                        BackgroundJob.kind.in_(relevant_kinds))
+                .order_by(BackgroundJob.id.desc())
+                .limit(800).all())
+
+        selected = _latest_active_campaign_jobs(rows, active_statuses)
+
+        campaign_ids = sorted({cid for _, _, cid in selected})
+        campaigns = (db.query(Campaign).filter(Campaign.id.in_(campaign_ids)).all()
+                     if campaign_ids else [])
+        campaign_names = {int(c.id): (c.name or ("Кампания #" + str(c.id))) for c in campaigns}
+
+        clock_keys = [f"job_execution_clock:{int(row.id)}" for row, _, _ in selected]
+        clocks = {}
+        if clock_keys:
+            for storage in db.query(Storage).filter(
+                Storage.account_id.in_(account_ids), Storage.key.in_(clock_keys)
+            ).all():
+                try:
+                    clocks[str(storage.key)] = _json.loads(storage.value or "{}")
+                except Exception:
+                    clocks[str(storage.key)] = None
+
+        items = []
+        _now = _dt.now(_tz.utc)
+        for row, payload, campaign_id in selected:
+            result = dict(row.result_json or {})
+            stage = str(payload.get("stage") or result.get("stage") or "queued")
+            raw_done = result.get("done", result.get("created", row.progress_done))
+            raw_total = result.get("total", result.get("requested", row.progress_total))
+            try:
+                done = max(0, int(raw_done or 0))
+            except (TypeError, ValueError):
+                done = 0
+            try:
+                total = max(0, int(raw_total or 0))
+            except (TypeError, ValueError):
+                total = 0
+            item_progress = bool(total > 8 or (total > 0 and total == done))
+            percent = round(done * 100 / total) if total > 0 else 0
+            clock_state = clocks.get(f"job_execution_clock:{int(row.id)}")
+            clock = _timing_summary(row, state=clock_state)
+            updated_at = row.updated_at
+            if updated_at is not None and updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=_tz.utc)
+            progress_age = max(0.0, (_now - updated_at).total_seconds()) if updated_at else None
+            requires_owner_action = str(row.status or "") == "awaiting_confirmation"
+            health = _runtime_health(
+                timing=clock,
+                status=str(row.status or ""),
+                item_total=total,
+                item_progress=item_progress,
+                last_progress_age_seconds=progress_age,
+                requires_owner_action=requires_owner_action,
+                current_mode=str((clock_state or {}).get("mode") or ""),
+            )
+            items.append({
+                "job_id": int(row.id),
+                "account_id": str(row.account_id or ""),
+                "account_name": account_names.get(str(row.account_id or ""), str(row.account_id or "")),
+                "campaign_id": campaign_id,
+                "campaign_name": campaign_names.get(campaign_id, "Кампания #" + str(campaign_id)),
+                "kind": str(row.kind or ""),
+                "status": str(row.status or ""),
+                "stage": stage,
+                "done": done,
+                "total": total,
+                "item_progress": item_progress,
+                "progress_percent": max(0, min(100, percent)),
+                "last_progress_at": row.updated_at.isoformat() if row.updated_at else None,
+                "requires_owner_action": requires_owner_action,
+                **clock,
+                **health,
+            })
+        return {"status": "ok", "items": items, "total": len(items)}
+    finally:
+        db.close()
+
+
+def _ab_windows_aggregate(snapshots, today):
+    """Pure 7/30/60 reducer for canonical daily_stats snapshots."""
+    from datetime import timedelta as _timedelta
+
+    def _identity(item):
+        ident = item.get("campaign_identity") or {}
+        campaign_item_id = str(ident.get("campaign_item_id") or "").strip()
+        avito_item_id = str(
+            item.get("id") or item.get("item_id") or ident.get("avito_item_id") or ""
+        ).strip()
+        return campaign_item_id, avito_item_id
+
+    result = {}
+    for days in (7, 30, 60):
+        start = today - _timedelta(days=days - 1)
+        by_campaign_item = {}
+        by_avito_item = {}
+        total_views = 0
+        total_contacts = 0
+        data_days = set()
+
+        for day, snap in snapshots:
+            if day < start or day > today:
+                continue
+            data_days.add(day.isoformat())
+            for item in (snap.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    views = max(0, int(item.get("views") or 0))
+                except Exception:
+                    views = 0
+                try:
+                    contacts = max(0, int(item.get("contacts") or 0))
+                except Exception:
+                    contacts = 0
+                campaign_item_id, avito_item_id = _identity(item)
+                total_views += views
+                total_contacts += contacts
+
+                def _accumulate(bucket, key):
+                    if not key:
+                        return
+                    cur = bucket.setdefault(key, {"views": 0, "contacts": 0})
+                    cur["views"] += views
+                    cur["contacts"] += contacts
+
+                _accumulate(by_campaign_item, campaign_item_id)
+                _accumulate(by_avito_item, avito_item_id)
+
+        for bucket in (by_campaign_item, by_avito_item):
+            for value in bucket.values():
+                value["conversion"] = round(
+                    value["contacts"] / value["views"] * 100.0, 2
+                ) if value["views"] else 0.0
+
+        result[str(days)] = {
+            "days": days,
+            "period_from": start.isoformat(),
+            "period_to": today.isoformat(),
+            "days_with_data": len(data_days),
+            "totals": {
+                "views": total_views,
+                "contacts": total_contacts,
+                "conversion": round(total_contacts / total_views * 100.0, 2)
+                if total_views else 0.0,
+            },
+            "by_campaign_item": by_campaign_item,
+            "by_avito_item": by_avito_item,
+        }
+    return result
+
+
+@router.get("/ab-windows")
+def account_ab_windows(account_id: str, user: User = Depends(get_current_user)):
+    """A/B performance windows from canonical daily_stats snapshots: 7/30/60 days."""
+    from datetime import date as _date, timedelta as _timedelta
+    import json as _json
+    from app.models.storage import Storage
+
+    db = SessionLocal()
+    try:
+        _assert_account_access(db, account_id, user)
+        today = _date.today()
+        start60 = today - _timedelta(days=59)
+        rows = (db.query(Storage)
+                .filter(Storage.account_id == account_id,
+                        Storage.key.like("daily_stats:%"),
+                        Storage.key >= "daily_stats:" + start60.isoformat(),
+                        Storage.key <= "daily_stats:" + today.isoformat())
+                .order_by(Storage.id.desc()).all())
+
+        # Only the newest row for a calendar key participates. This mirrors the
+        # existing latest-snapshot semantics and prevents duplicate collection
+        # attempts for the same day from double-counting an A/B window.
+        snapshots = []
+        seen_keys = set()
+        for row in rows:
+            key = str(row.key or "")
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            try:
+                obj = _json.loads(row.value or "{}")
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            try:
+                day = _date.fromisoformat(key.split("daily_stats:", 1)[1])
+            except Exception:
+                continue
+            snapshots.append((day, obj))
+
+        result = _ab_windows_aggregate(snapshots, today)
+        return {
+            "status": "ok",
+            "account_id": account_id,
+            "windows": result,
+            "source": "daily_stats",
+            "window_contract": 1,
+        }
+    finally:
+        db.close()
+
+
+def _campaign_current_banner_cost(payloads):
+    total = 0.0
+    banner_items = 0
+    costed_banner_items = 0
+    per_item = []
+    for item_id, payload in payloads:
+        payload = payload if isinstance(payload, dict) else {}
+        banner_url = str(payload.get("banner_url") or payload.get("banner") or "").strip()
+        if not banner_url:
+            continue
+        banner_items += 1
+        qa = payload.get("banner_qa") or {}
+        raw = qa.get("total_cost_rub") if isinstance(qa, dict) else None
+        known = False
+        cost = None
+        if raw not in (None, ""):
+            try:
+                cost = max(0.0, float(raw))
+                known = True
+            except Exception:
+                cost = None
+        if known:
+            costed_banner_items += 1
+            total += float(cost or 0)
+        per_item.append({
+            "item_id": int(item_id),
+            "cost_rub": round(float(cost or 0), 4) if known else None,
+            "known": bool(known),
+        })
+    coverage = round(costed_banner_items / banner_items * 100.0, 1) if banner_items else 100.0
+    return {
+        "banner_items": banner_items,
+        "costed_banner_items": costed_banner_items,
+        "banner_cost_coverage_pct": coverage,
+        "current_banner_artifact_cost_rub": round(total, 4),
+        "cost_per_costed_banner_item_rub": round(total / costed_banner_items, 4)
+        if costed_banner_items else None,
+        "items": per_item,
+    }
+
+
+def _campaign_cost_bucket(operation: str) -> str:
+    op = str(operation or "").lower()
+    if "banner" in op:
+        return "banners"
+    if "semantic" in op or "vision" in op or "photo" in op or "media" in op:
+        return "media_qa"
+    if any(token in op for token in ("text", "copy", "title", "description")):
+        return "text_copy"
+    return "other"
+
+
+@router.get("/campaign-costs")
+def account_campaign_costs(
+    account_id: str,
+    campaign_id: int,
+    user: User = Depends(require_ai_costs_private_owner),
+):
+    """Private platform-owner economics for one Campaign, with explicit coverage."""
+    import json as _json
+    from app.models.campaign import Campaign
+    from app.models.campaign_item import CampaignItem
+
+    db = SessionLocal()
+    try:
+        campaign = db.query(Campaign).filter(Campaign.id == int(campaign_id)).first()
+        if campaign is None:
+            raise HTTPException(status_code=404, detail="Кампания не найдена")
+
+        rows = (db.query(CampaignItem)
+                .filter(CampaignItem.campaign_id == int(campaign_id),
+                        CampaignItem.account_id == account_id,
+                        CampaignItem.status != "superseded")
+                .order_by(CampaignItem.id.asc()).all())
+        if str(campaign.default_account_id or "") != str(account_id) and not rows:
+            raise HTTPException(status_code=404, detail="Кампания не относится к аккаунту")
+
+        payloads = []
+        titles = {}
+        for row in rows:
+            try:
+                payload = _json.loads(row.payload_json or "{}")
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payloads.append((int(row.id), payload))
+            titles[int(row.id)] = str(payload.get("title") or "")[:180]
+
+        banner = _campaign_current_banner_cost(payloads)
+        for item in banner["items"]:
+            item["title"] = titles.get(int(item["item_id"]), "")
+
+        usage_rows = db.execute(text("""
+            SELECT provider, model, operation,
+                   COUNT(*) AS calls,
+                   COALESCE(SUM(cost_rub),0) AS cost_rub,
+                   MIN(created_at) AS first_at,
+                   MAX(created_at) AS last_at
+              FROM api_usage
+             WHERE account_id=:account_id
+               AND COALESCE(provenance_json->>'campaign_id','')=:campaign_id
+             GROUP BY provider, model, operation
+             ORDER BY cost_rub DESC, calls DESC, operation ASC
+        """), {
+            "account_id": str(account_id),
+            "campaign_id": str(int(campaign_id)),
+        }).mappings().all()
+
+        operations = []
+        buckets = {}
+        attributed_total = 0.0
+        attributed_calls = 0
+        for row in usage_rows:
+            cost = round(float(row.get("cost_rub") or 0), 4)
+            calls = int(row.get("calls") or 0)
+            bucket = _campaign_cost_bucket(str(row.get("operation") or ""))
+            attributed_total += cost
+            attributed_calls += calls
+            acc = buckets.setdefault(bucket, {"calls": 0, "cost_rub": 0.0})
+            acc["calls"] += calls
+            acc["cost_rub"] = round(float(acc["cost_rub"]) + cost, 4)
+            operations.append({
+                "provider": str(row.get("provider") or ""),
+                "model": str(row.get("model") or ""),
+                "operation": str(row.get("operation") or ""),
+                "bucket": bucket,
+                "calls": calls,
+                "cost_rub": cost,
+                "first_at": row.get("first_at").isoformat() if row.get("first_at") else None,
+                "last_at": row.get("last_at").isoformat() if row.get("last_at") else None,
+            })
+
+        return {
+            "status": "ok",
+            "account_id": str(account_id),
+            "campaign_id": int(campaign_id),
+            "campaign_name": str(campaign.name or ""),
+            "current_items": len(rows),
+            "attributed_provider_spend_rub": round(attributed_total, 4),
+            "attributed_provider_calls": attributed_calls,
+            "provider_buckets": buckets,
+            "provider_operations": operations,
+            **banner,
+            "coverage": {
+                "provider_scope": "explicit_campaign_provenance_only",
+                "provider_attribution_is_lower_bound": True,
+                "banner_artifact_cost_source": "current_campaign_item.banner_qa.total_cost_rub",
+                "banner_artifact_complete": bool(
+                    banner["costed_banner_items"] == banner["banner_items"]
+                ),
+                "unattributed_provider_rows_are_not_guessed": True,
+            },
+            "cost_contract": 1,
+        }
+    finally:
+        db.close()
+
+
+@router.get("/campaign-item-timeline")
+def campaign_item_timeline(
+    account_id: str,
+    campaign_id: int,
+    item_id: int,
+    user: User = Depends(get_current_user),
+):
+    """Read-only, evidence-backed lifecycle for one Campaign card."""
+    from app.services.campaign_item_timeline import build_campaign_item_timeline
+    from app.services.platform_roles import is_private_platform_owner
+
+    db = SessionLocal()
+    try:
+        _assert_account_access(db, account_id, user)
+        result = build_campaign_item_timeline(
+            db,
+            account_id=str(account_id),
+            campaign_id=int(campaign_id),
+            item_id=int(item_id),
+            include_technical=bool(is_private_platform_owner(user)),
+        )
+        if result.get("status") == "not_found":
+            raise HTTPException(status_code=404, detail="Объявление не найдено")
+        return result
+    finally:
+        db.close()
+
+
+@router.get("/campaign-preflight")
+def campaign_preflight(
+    account_id: str,
+    campaign_id: int,
+    refresh_avito: bool = False,
+    user: User = Depends(get_current_user),
+):
+    """Authoritative read-only Avito publication preflight for one Campaign."""
+    from collections import Counter
+    from app.api.campaigns import _ff_delivery_snapshot
+    from app.models.campaign import Campaign
+    from app.models.campaign_item import CampaignItem
+    from app.services.campaign_avito_preflight import (
+        build_avito_preflight, latest_wallet_snapshot,
+    )
+    from app.services.reliability import module_blocked
+
+    db = SessionLocal()
+    try:
+        _assert_account_access(db, account_id, user)
+        campaign = db.query(Campaign).filter(Campaign.id == int(campaign_id)).first()
+        if campaign is None:
+            raise HTTPException(status_code=404, detail="Кампания не найдена")
+
+        delivery = _ff_delivery_snapshot(
+            db, campaign, [str(account_id)], str(account_id),
+            refresh_autoload=bool(refresh_avito),
+        )
+        marketing_blocked, marketing_reason = module_blocked(
+            db, "marketing", str(account_id)
+        )
+        wallet = latest_wallet_snapshot(db, str(account_id))
+
+        identity_rows = (db.query(CampaignItem.feed_identity, CampaignItem.avito_item_id)
+                         .filter(CampaignItem.campaign_id == int(campaign_id),
+                                 CampaignItem.account_id == str(account_id),
+                                 CampaignItem.status != "superseded")
+                         .all())
+        feed_ids = [str(feed or "").strip() for feed, _ in identity_rows if str(feed or "").strip()]
+        duplicates = sorted([key for key, count in Counter(feed_ids).items() if count > 1])
+        identity = {
+            "duplicate_feed_identities": duplicates,
+            "existing_avito_items": sum(1 for _, avito_id in identity_rows if str(avito_id or "").strip()),
+        }
+
+        result = build_avito_preflight(
+            delivery,
+            marketing_blocked=bool(marketing_blocked),
+            marketing_reason=str(marketing_reason or ""),
+            wallet=wallet,
+            identity=identity,
+        )
+        result["delivery"] = delivery
+        return result
     finally:
         db.close()
 

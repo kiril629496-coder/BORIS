@@ -356,3 +356,74 @@ def post_connect_sync(account_id: str) -> dict:
         stats = {"status": "error", "reason": str(exc)[:300]}
     return {"status": "ok", "account_id": account_id, "bootstrap": bootstrap,
             "stats_status": (stats or {}).get("status") if isinstance(stats, dict) else None}
+
+
+def reactivate_for_target_deficit(account_id: str, limit: int, *, apply_external: bool = False) -> dict:
+    """Reactivate up to the requested number of proven-demand old ads.
+
+    Unlike bootstrap_zero_active_portfolio this helper is valid when the account
+    already has active ads. It remains fail-closed:
+    - ranks only real old Avito items by contacts/conversion/views;
+    - mutates only exact CampaignItem -> canonical feed mappings;
+    - legacy/external ads are returned separately for isolated-browser handling;
+    - Avito Autoload is triggered only when apply_external=True.
+    """
+    from app.api.avito import get_avito_token, _extract_token, _get_avito_credentials
+
+    limit=max(0,min(MAX_REACTIVATE,int(limit or 0)))
+    if limit<=0:
+        return {"status":"nothing_to_do","requested":0,"queued":0,"external":0,"changed_feed":False,"changed_avito":False}
+
+    remaining=account_throttle_remaining(account_id)
+    if remaining>0:
+        return {"status":"blocked","reason":"avito_account_throttled","retry_after_seconds":remaining,
+                "requested":limit,"queued":0,"external":0,"changed_feed":False,"changed_avito":False}
+
+    token_data=get_avito_token(account_id)
+    token=_extract_token(token_data) if isinstance(token_data,dict) else ""
+    if not token:
+        return {"status":"blocked","reason":"avito_not_connected","requested":limit,
+                "queued":0,"external":0,"changed_feed":False,"changed_avito":False}
+
+    try:
+        old=_fetch_items(account_id,token,"old")
+        _,_,user_id=_get_avito_credentials(account_id)
+        if not user_id:
+            _shared_throttle_guard(account_id)
+            r=httpx.get("https://api.avito.ru/core/v1/accounts/self",
+                        headers={"Authorization":f"Bearer {token}"},timeout=20)
+            if r.status_code==429:
+                record_account_throttle(account_id,_retry_after_seconds(r),source="inventory_maintain_self_429")
+                return {"status":"blocked","reason":"avito_account_throttled","requested":limit,
+                        "queued":0,"external":0,"changed_feed":False,"changed_avito":False}
+            user_id=str((r.json() or {}).get("id") or "") if r.status_code==200 else ""
+        old_ids=[int(x["id"]) for x in old if str(x.get("id") or "").isdigit()]
+        stats=_fetch_stats(account_id,token,str(user_id or ""),old_ids,days=90)
+        selected=_rank_old(old,stats,limit=limit)
+        queued,external=_queue_managed_reactivation(account_id,selected)
+    except Exception as exc:
+        return {"status":"blocked","reason":str(exc)[:160] or type(exc).__name__,"requested":limit,
+                "queued":0,"external":0,"changed_feed":False,"changed_avito":False}
+
+    upload=None
+    changed_avito=False
+    if queued and apply_external:
+        try:
+            from app.api.avito import feed_send_to_avito
+            upload=feed_send_to_avito(account_id=account_id)
+            changed_avito=str((upload or {}).get("status") or "")=="ok"
+        except Exception as exc:
+            upload={"status":"error","message":str(exc)[:180]}
+
+    return {
+        "status":"submitted" if changed_avito else ("feed_updated" if queued else ("legacy_browser_required" if external else "no_effective_old_items")),
+        "requested":limit,
+        "selected":len(selected),
+        "queued":len(queued),
+        "external":len(external),
+        "queued_items":queued,
+        "external_items":external,
+        "changed_feed":bool(queued),
+        "changed_avito":bool(changed_avito),
+        "autoload":upload,
+    }

@@ -34,6 +34,7 @@ export const MENU: MenuGroup[] = [
       { key: "director", label: "ИИ-директолог", icon: "target", href: "/dashboard/director", tone: "blue" },
       { key: "prospecting", label: "Поиск клиентов и Email", icon: "messages", href: "/dashboard/prospecting/manage", tone: "green" },
       { key: "acquisition", label: "Привлечение клиентов", icon: "target", href: "/dashboard/prospecting/acquisition", tone: "teal" },
+      { key: "audit-growth", label: "Audit Growth", icon: "chart", href: "/dashboard/audit-growth", tone: "green" },
       { key: "sales", label: "Продажи", icon: "coins", href: "/dashboard/crm", tone: "violet" },
     ],
   },

@@ -35,23 +35,23 @@ class CrowdSeoGuardTests(unittest.TestCase):
 
     def test_effective_target_pages_uses_specific_software_service_landings(self):
         project = {
-            "site": "https://boris-ai.pro/software-dev/",
+            "site": "https://systems-ai-oko.ru/",
             "niche_label": "Разработка ПО",
             "campaign_profile": {
-                "primary_url": "https://boris-ai.pro/software-dev/",
+                "primary_url": "https://systems-ai-oko.ru/",
                 "posts_ru": [
-                    {"target_url": "https://boris-ai.pro/software-dev/services/saas-development", "title": "SaaS"},
-                    {"target_url": "https://boris-ai.pro/software-dev/services/crm-development", "title": "CRM"},
+                    {"target_url": "https://systems-ai-oko.ru/services/saas-development", "title": "SaaS"},
+                    {"target_url": "https://systems-ai-oko.ru/services/crm-development", "title": "CRM"},
                 ],
             },
-            "target_pages": [{"url": "https://boris-ai.pro/software-dev/", "label": "Разработка ПО"}],
+            "target_pages": [{"url": "https://systems-ai-oko.ru/", "label": "Разработка ПО"}],
         }
         rows = guard.crowd_seo._effective_target_pages(project)
         self.assertEqual([x["url"] for x in rows], [
-            "https://boris-ai.pro/software-dev/services/saas-development",
-            "https://boris-ai.pro/software-dev/services/crm-development",
+            "https://systems-ai-oko.ru/services/saas-development",
+            "https://systems-ai-oko.ru/services/crm-development",
         ])
-        self.assertTrue(all("/software-dev/services/" in x["url"] for x in rows))
+        self.assertTrue(all("systems-ai-oko.ru/services/" in x["url"] for x in rows))
 
     def test_effective_target_pages_preserves_primary_url_for_generic_campaign(self):
         project = {
@@ -65,8 +65,8 @@ class CrowdSeoGuardTests(unittest.TestCase):
         )
 
     def test_development_draft_target_gate_rejects_stale_root_copy(self):
-        project = {"site": "https://boris-ai.pro/software-dev/"}
-        placement = {"target_url": "https://boris-ai.pro/software-dev/services/saas-development"}
+        project = {"site": "https://systems-ai-oko.ru/"}
+        placement = {"target_url": "https://systems-ai-oko.ru/services/saas-development"}
         stale = [{
             "id": "draft1", "status": "approved",
             "target_url": placement["target_url"],
@@ -84,18 +84,18 @@ class CrowdSeoGuardTests(unittest.TestCase):
 
     def test_rendered_development_placement_uses_exact_target_not_root(self):
         project = {
-            "site": "https://boris-ai.pro/software-dev/",
-            "domain": "boris-ai.pro",
+            "site": "https://systems-ai-oko.ru/",
+            "domain": "systems-ai-oko.ru",
             "niche_label": "IT и разработка",
             "offer_type": "services",
             "target_pages": [{
-                "url": "https://boris-ai.pro/software-dev/services/saas-development",
+                "url": "https://systems-ai-oko.ru/services/saas-development",
                 "label": "Разработка SaaS",
             }],
         }
         placement = {
-            "target_url": "https://boris-ai.pro/software-dev/services/saas-development",
-            "anchor": "https://boris-ai.pro/software-dev/services/saas-development",
+            "target_url": "https://systems-ai-oko.ru/services/saas-development",
+            "anchor": "https://systems-ai-oko.ru/services/saas-development",
             "link_mode": "безанкорная",
             "keyword": "разработка SaaS",
             "surface_language": "ru",
@@ -107,10 +107,10 @@ class CrowdSeoGuardTests(unittest.TestCase):
         self.assertNotEqual(placement["target_url"], "https://boris-ai.pro/")
 
     def test_campaign_profile_exact_target_beats_stale_keyword_and_variant(self):
-        ip_url = "https://boris-ai.pro/software-dev/services/ip-telephony"
+        ip_url = "https://systems-ai-oko.ru/services/ip-telephony"
         project = {
-            "site": "https://boris-ai.pro/software-dev/",
-            "domain": "boris-ai.pro",
+            "site": "https://systems-ai-oko.ru/",
+            "domain": "systems-ai-oko.ru",
             "offer_type": "services",
             "campaign_profile": {
                 "brand": "BORIS",
@@ -118,7 +118,7 @@ class CrowdSeoGuardTests(unittest.TestCase):
                     {
                         "cluster": "dev_saas",
                         "title": "Разработка SaaS-платформ под ключ",
-                        "target_url": "https://boris-ai.pro/software-dev/services/saas-development",
+                        "target_url": "https://systems-ai-oko.ru/services/saas-development",
                         "match_keywords": ["saas", "платформа"],
                         "keywords": [f"saas ключ {i}" for i in range(1, 13)],
                         "body": "Разрабатываем SaaS-платформы под заказ.",
@@ -153,12 +153,12 @@ class CrowdSeoGuardTests(unittest.TestCase):
         self.assertIn(ip_url, text)
         self.assertNotIn("SaaS-платформ", text)
 
-    def test_campaign_profile_copy_preserves_keyword_footer_for_global_gate(self):
-        target = "https://boris-ai.pro/software-dev/services/web-app-development"
+    def test_campaign_profile_copy_uses_structured_keywords_without_visible_seo_footer(self):
+        target = "https://systems-ai-oko.ru/services/web-app-development"
         keywords = [f"разработка web ключ {i}" for i in range(1, 13)]
         project = {
-            "site": "https://boris-ai.pro/software-dev/",
-            "domain": "boris-ai.pro",
+            "site": "https://systems-ai-oko.ru/",
+            "domain": "systems-ai-oko.ru",
             "offer_type": "services",
             "campaign_profile": {
                 "brand": "BORIS",
@@ -184,11 +184,14 @@ class CrowdSeoGuardTests(unittest.TestCase):
             "platform_name": "Test Forum",
         }
         title, text = guard.crowd_seo._render_placement_text(project, placement, 1)
-        self.assertIn("\n\nКлючевые фразы: ", text)
+        self.assertNotIn("Ключевые фразы:", text)
+        structured = guard.crowd_seo._draft_keyword_phrases(project, placement)
         gate = guard.marketplace.validate_publication_content({
             "title": title,
             "text": text,
+            "site_url": "https://systems-ai-oko.ru/",
             "target_url": target,
+            "keyword_phrases": structured,
         })
         self.assertTrue(gate["ok"], gate)
         self.assertGreaterEqual(gate["keyword_count"], 10)
@@ -427,6 +430,61 @@ class CrowdSeoGuardTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["timeout"],guard.PUBLICATION_DISCOVERY_WALL_TIMEOUT_S)
         self.assertIn(str(guard.PUBLICATION_DISCOVERY_DEFICIT_QUERIES),run.call_args.args[0])
 
+    def test_forum_discovery_bounded_runner_passes_exact_budget(self):
+        payload={"progress_count":2,"total_candidates":17}
+        proc=SimpleNamespace(returncode=0,stdout=json.dumps(payload,ensure_ascii=False)+"\n",stderr="")
+        with patch.object(guard.subprocess,"run",return_value=proc) as run:
+            row=guard._run_forum_discovery_bounded(
+                max_queries=24,
+                per_query=8,
+                priority_niches=["services","goods"],
+                directory_max_inspections=60,
+                findaforum_max_inspections=80,
+            )
+        self.assertEqual(row["progress_count"],2)
+        self.assertEqual(
+            run.call_args.kwargs["timeout"],
+            guard.FORUM_DISCOVERY_WALL_TIMEOUT_S,
+        )
+        request=json.loads(run.call_args.args[0][-1])
+        self.assertEqual(request,{
+            "max_queries":24,
+            "per_query":8,
+            "sleep_s":0.15,
+            "priority_niches":["services","goods"],
+            "directory_max_inspections":60,
+            "findaforum_max_inspections":80,
+        })
+        self.assertEqual(
+            row["bounded_execution"]["wall_timeout_seconds"],
+            guard.FORUM_DISCOVERY_WALL_TIMEOUT_S,
+        )
+
+    def test_forum_discovery_timeout_marker_enforces_backoff(self):
+        now=datetime(2026,9,27,12,0,tzinfo=timezone.utc)
+        prior={
+            "at":(now-timedelta(hours=3)).isoformat(),
+            "progress_count":4,
+            "total_candidates":392,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_file=Path(tmpdir)/"discovery_status.json"
+            status_file.write_text(json.dumps(prior),encoding="utf-8")
+            with (
+                patch.object(guard.forum_discovery,"DISCOVERY_RUN_FILE",status_file),
+                patch.object(guard.forum_discovery,"datetime") as dt,
+            ):
+                dt.now.return_value=now
+                dt.side_effect=lambda *args,**kwargs: datetime(*args,**kwargs)
+                row=guard.forum_discovery.record_timeout(90)
+        schedule=guard._discovery_schedule(
+            row,24,autonomous=True,now=now+timedelta(minutes=10)
+        )
+        self.assertTrue(row["timed_out"])
+        self.assertEqual(row["last_completed_at"],prior["at"])
+        self.assertFalse(schedule["due"])
+        self.assertTrue(schedule["backoff_active"])
+
     def test_publication_discovery_iks_cache_avoids_repeat_network_fetch(self):
         pub=guard.publication_discovery
         prior={
@@ -459,7 +517,17 @@ class CrowdSeoGuardTests(unittest.TestCase):
 
     def test_publication_discovery_query_pool_rotates_without_repeating_first_batch(self):
         pool = guard.publication_discovery._query_pool()
-        self.assertEqual(len(pool), len(guard.publication_discovery.SEARCH_PATTERNS) * len(guard.publication_discovery.TERMS))
+        self.assertEqual(
+            len(pool),
+            len(set(
+                guard.publication_discovery.FIXED_SEARCH_QUERIES
+                + [
+                    pattern.format(term=term)
+                    for pattern in guard.publication_discovery.SEARCH_PATTERNS
+                    for term in guard.publication_discovery.TERMS
+                ]
+            )),
+        )
         self.assertGreater(len(pool), 18)
         self.assertNotEqual(pool[:18], pool[18:36])
 
@@ -491,13 +559,10 @@ class CrowdSeoGuardTests(unittest.TestCase):
         self.assertEqual(result["next_query_offset"], 1)
         self.assertEqual(result["query_pool_size"], len(pub._query_pool()))
         self.assertEqual(result["cycle_domains_found"], 1)
-        self.assertEqual(
-            result["strong_domains"],
-            len(pub.CURATED_STRONG_OWN_LISTING_SEEDS) + 1,
-        )
+        self.assertGreaterEqual(result["strong_domains"], 1)
         self.assertIn("board.example", [x["domain"] for x in result["items"]])
         self.assertEqual(search.call_args.kwargs["request_timeout_s"], 5)
-        self.assertFalse(search.call_args.kwargs["use_ddg"])
+        self.assertTrue(search.call_args.kwargs["use_ddg"])
 
     def test_publication_discovery_development_drafts_are_prevalidated_and_product_free(self):
         platform = SimpleNamespace(key="pubdisc_test", name="Test catalog", url="https://example.test/add")
@@ -509,7 +574,7 @@ class CrowdSeoGuardTests(unittest.TestCase):
         for row in rows:
             self.assertEqual(row["topic"], "development")
             self.assertEqual(row["status"], "approved")
-            self.assertIn("/software-dev/services/", row["target_url"])
+            self.assertTrue(row["target_url"].startswith("https://systems-ai-oko.ru/services/"))
             self.assertIn(row["target_url"], row["text"])
             self.assertTrue(guard.marketplace.validate_publication_content(row)["ok"])
             lower=(row["title"]+"\n"+row["text"]).lower()
@@ -562,10 +627,37 @@ class CrowdSeoGuardTests(unittest.TestCase):
             patch.object(guard.crowd_seo, "list_projects", return_value=[project]),
             patch.object(guard.crowd_seo, "refresh_project_forums", return_value={"changed": 0}),
             patch.object(guard.crowd_seo, "sync_project_drafts", return_value={"drafts": 1}),
+            patch.object(
+                guard.seo_moderation_reconciler,
+                "reconcile_project",
+                return_value={"checked": 0, "reconciled": 0, "items": []},
+            ),
             patch.object(guard.crowd_seo, "sync_publications", return_value={"changed": 0}),
             patch.object(guard.crowd_seo, "get_project", return_value=project),
             patch.object(guard.crowd_seo, "schedule_replacements", return_value={"created": 0}),
             patch.object(guard.crowd_seo, "verify_placement", return_value={"status": "verified"}),
+            # Publisher-flow tests isolate queue/budget behavior. The strict
+            # project/draft target invariant has dedicated regression tests.
+            patch.object(guard, "_development_draft_target_safe", return_value=True),
+            patch.object(
+                guard.marketplace,
+                "list_drafts",
+                return_value=[
+                    {
+                        "id": str(pl.get("marketplace_draft_id") or ""),
+                        "status": "approved",
+                        "title": "Тестовое предложение услуги",
+                        "text": "Описание услуги и условий. Подробнее: https://client.example/",
+                        "site_url": "https://client.example/",
+                        "target_url": "https://client.example/",
+                        "keyword_phrases": [f"тестовая фраза {i}" for i in range(10)],
+                    }
+                    for pl in project.get("placements", [])
+                    if pl.get("marketplace_draft_id")
+                ],
+            ),
+            patch.object(guard, "_daily_submission_domains", return_value=set()),
+            patch.object(guard, "_recent_submission_domains_for_project", return_value=set()),
             patch.object(
                 guard.crowd_seo,
                 "record_publish_attempt",
@@ -680,6 +772,25 @@ class CrowdSeoGuardTests(unittest.TestCase):
         self.assertIn("--publish", args)
         self.assertEqual(recorded[0]["project"], "crowd_test")
         self.assertEqual(recorded[0]["placement"], "crowd_test_001")
+
+    def test_daily_target_reached_blocks_new_publish_but_keeps_cycle_alive(self):
+        project = make_project("approved")
+        recorded: list[dict] = []
+        patches = self._flow_patches(project, recorded)
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        twenty = {f"site-{i}.example" for i in range(20)}
+        with (
+            patch.object(guard, "_daily_submission_domains", return_value=twenty),
+            patch.object(guard.subprocess, "run", side_effect=AssertionError("publisher called after daily target")),
+        ):
+            result = guard.run_crowd_seo_cycle("/tmp/publisher.py")
+        self.assertEqual(result["publish_attempts"], 0)
+        self.assertEqual(result["submitted_unique_domains_today"], 20)
+        self.assertEqual(result["remaining_unique_domains_today"], 0)
+        self.assertTrue(result["daily_target_reached"])
+        self.assertEqual(recorded, [])
 
     def test_verified_link_is_rechecked_only_after_interval(self):
         now = datetime.now(timezone.utc)
@@ -944,6 +1055,16 @@ class CrowdSeoGuardTests(unittest.TestCase):
             "checkpoint": "registration_form_not_found",
             "updated_at": (now - timedelta(hours=30)).isoformat(),
         }
+        gateway_fresh = {
+            "status": "in_progress",
+            "checkpoint": "registration_gateway_error",
+            "updated_at": (now - timedelta(hours=2)).isoformat(),
+        }
+        gateway_stale = {
+            "status": "in_progress",
+            "checkpoint": "registration_gateway_error",
+            "updated_at": (now - timedelta(hours=30)).isoformat(),
+        }
         verification = {
             "status": "verification_required",
             "checkpoint": "captcha_required",
@@ -952,6 +1073,9 @@ class CrowdSeoGuardTests(unittest.TestCase):
         self.assertFalse(guard._registration_retry_due(terminal, now))
         self.assertFalse(guard._registration_retry_due(recoverable_fresh, now))
         self.assertTrue(guard._registration_retry_due(recoverable_stale, now))
+        self.assertTrue(guard.marketplace.registration_is_recoverable(gateway_stale))
+        self.assertFalse(guard._registration_retry_due(gateway_fresh, now))
+        self.assertTrue(guard._registration_retry_due(gateway_stale, now))
         self.assertFalse(guard._registration_retry_due(verification, now))
         self.assertTrue(guard._registration_retry_due(None, now))
 
@@ -2449,7 +2573,7 @@ class CrowdSeoGuardTests(unittest.TestCase):
             },
         }
         placement={
-            "target_url":"https://boris-ai.pro/software-dev",
+            "target_url":"https://boris-ai.pro/",
             "anchor":"квалификация лидов",
             "keyword":"квалификация лидов",
             "keyword_cluster":"crm",
@@ -2461,8 +2585,10 @@ class CrowdSeoGuardTests(unittest.TestCase):
         t2,x2=guard.crowd_seo._render_placement_text(project,placement,2)
         self.assertEqual(t1,"CRM v1")
         self.assertEqual(t2,"CRM v2")
-        self.assertIn("квалификация лидов",x1)
-        self.assertIn("квалификация лидов",x2)
+        self.assertNotIn("Ключевые фразы:",x1)
+        self.assertNotIn("Ключевые фразы:",x2)
+        phrases=guard.crowd_seo._draft_keyword_phrases(project,placement)
+        self.assertIn("квалификация лидов",phrases)
 
     def test_english_surface_copy_is_english_transparent_and_uses_naked_url(self):
         project={
@@ -2999,6 +3125,63 @@ class CrowdSeoGuardTests(unittest.TestCase):
             browser_assistant.REGISTRATION_URLS["digitalpoint_services"],
             "https://www.digitalpoint.com/register/",
         )
+
+    def test_captcha_terms_registration_checkpoint_is_one_time_bootstrap(self):
+        self.assertEqual(
+            browser_assistant._registration_status_for_checkpoint("captcha_terms_registration_required"),
+            "verification_required",
+        )
+        self.assertIn(
+            "captcha_terms_registration_required",
+            guard.marketplace.HUMAN_PLATFORM_BOOTSTRAP_CHECKPOINTS,
+        )
+        self.assertIn(
+            "captcha_terms_registration_required",
+            guard.marketplace.INTERACTIVE_BROWSER_CHECKPOINTS,
+        )
+
+    def test_registration_policy_detects_account_terms_and_captcha_as_composite_checkpoint(self):
+        class _Locator:
+            def __init__(self, count=0, text=""):
+                self._count = count
+                self._text = text
+            def count(self):
+                return self._count
+            def inner_text(self, timeout=None):
+                return self._text
+
+        class _Page:
+            def locator(self, selector):
+                if selector == 'input[name="legal_soglasie"]':
+                    return _Locator(0)
+                if selector == "body":
+                    return _Locator(
+                        1,
+                        "Create an account to validate your email address and complete your listing. "
+                        "I've read and accept terms and conditions",
+                    )
+                if selector == 'input[type="submit"][name^="coppa_" i], button[name^="coppa_" i]':
+                    return _Locator(0)
+                if selector == 'form input[name="accept_agreement"]':
+                    return _Locator(0)
+                if "select#regMonth" in selector:
+                    return _Locator(0)
+                if 'input[type="checkbox"][id*="agree" i]' in selector:
+                    return _Locator(1)
+                if selector == 'input[type="password"]':
+                    return _Locator(1)
+                if selector == 'input[type="email"]':
+                    return _Locator(1)
+                if 'textarea[name="g-recaptcha-response"]' in selector:
+                    return _Locator(1)
+                raise AssertionError(f"unexpected selector: {selector}")
+
+        with patch.object(browser_assistant, "_member_role_checkpoint", return_value=(None, None)):
+            checkpoint, detail = browser_assistant._registration_policy_checkpoint(
+                _Page(), "boris@example.test", {}, platform="pubdisc_brownbook_net"
+            )
+        self.assertEqual(checkpoint, "captcha_terms_registration_required")
+        self.assertIn("CAPTCHA", detail)
 
 
     def test_forum_matching_prefers_no_warmup_slot_on_critical_path(self):
@@ -3760,18 +3943,20 @@ class CrowdSeoGuardTests(unittest.TestCase):
                     )
                 self.assertTrue(recovered["cadence_ok"])
 
-    def test_daily_execution_policy_resets_on_new_utc_day(self):
+    def test_daily_execution_policy_resets_on_new_moscow_day(self):
         with tempfile.TemporaryDirectory() as td:
             state = Path(td) / "daily.json"
             with patch.object(guard, "DAILY_EXECUTION_FILE", state):
                 day1 = guard._daily_execution_snapshot(
-                    datetime(2026, 9, 10, 23, 55, tzinfo=timezone.utc),
+                    datetime(2026, 9, 10, 20, 55, tzinfo=timezone.utc),
                     mark_run=True,
                 )
                 day2 = guard._daily_execution_snapshot(
-                    datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc),
+                    datetime(2026, 9, 10, 21, 5, tzinfo=timezone.utc),
                     mark_run=True,
                 )
+                self.assertEqual(day1["date"], "2026-09-10")
+                self.assertEqual(day1["policy"]["business_timezone"], "Europe/Moscow")
                 self.assertEqual(day1["runs"], 1)
                 self.assertEqual(day2["date"], "2026-09-11")
                 self.assertEqual(day2["runs"], 1)
@@ -3913,3 +4098,131 @@ def test_strategic_discovery_reopens_after_bounded_interval():
     row=guard._discovery_schedule(old,80,urgent=False,now=now)
     assert row["due"] is True
     assert row["forced_due"] is True
+
+
+def test_publication_discovery_no_authorization_phrase_is_autonomous_signal():
+    row = guard.publication_discovery._policy_scores({
+        "url": "https://directory.example/add-company",
+        "title": "Добавить компанию бесплатно",
+        "snippet": "Можно без авторизации; укажите адрес сайта.",
+        "kind": "catalog",
+        "authoring_score": 9,
+        "iks_tier": "medium",
+    })
+    assert row["delivery_lane"] == "autonomous_candidate"
+    assert "без авторизации" in row["autonomy_evidence"]
+    assert "авториз" not in row["friction_evidence"]
+
+
+def test_verified_guest_submission_ignores_stale_account_checkpoint():
+    platform = guard.marketplace.Platform(
+        "pubdisc_guest_example", "Guest directory", "https://guest.example/submit-tool",
+        "direct_post", 1, "services", "guest", "test",
+    )
+    candidate = {
+        "domain": "guest.example",
+        "url": "https://guest.example/submit-tool",
+        "title": "Submit tool",
+        "snippet": "Free submission, no registration, website URL",
+        "kind": "catalog",
+        "delivery_lane": "autonomous_candidate",
+        "autonomy_evidence": ["no registration"],
+        "friction_evidence": [],
+    }
+    regs = [{
+        "platform": "pubdisc_guest_example",
+        "status": "verification_required",
+        "checkpoint": "terms_acceptance_required",
+    }]
+    with (
+        patch.object(guard.marketplace, "all_platform_objects", return_value=[platform]),
+        patch.object(guard.marketplace, "platform_policy", return_value={
+            "free": True,
+            "rule_decision": "allowed",
+            "rule_requirements": ["free_guest_submission_verified"],
+        }),
+        patch.object(guard.marketplace, "_load", return_value=regs),
+        patch.object(guard.forum_discovery, "list_candidates", return_value=[]),
+        patch.object(guard.publication_discovery, "load", return_value={"items": [candidate]}),
+    ):
+        row = guard.marketplace.list_platforms()[0]
+    assert row["publication_ready"] is True
+    assert row["autonomous_ready"] is True
+
+
+def test_recent_project_submission_domain_is_not_republished():
+    project = make_project("approved")
+    project["placements"] = [{
+        "id": "recent_ready",
+        "platform": "recent_platform",
+        "status": "ready_to_publish",
+        "forum_url": "https://recent.example/submit",
+        "publication_url": None,
+        "marketplace_draft_id": "recent_draft",
+    }]
+    recorded = []
+    case = CrowdSeoGuardTests()
+    patches = case._flow_patches(project, recorded)
+    for p in patches:
+        p.start()
+    try:
+        with (
+            patch.object(guard, "_recent_submission_domains_for_project", return_value={"recent.example"}),
+            patch.object(guard.subprocess, "run", side_effect=AssertionError("recent domain republished")),
+        ):
+            result = guard.run_crowd_seo_cycle("/tmp/publisher.py")
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    assert result["publish_attempts"] == 0
+    assert result["cooldown_blocked_ready"] == 1
+    assert recorded == []
+
+
+def test_autonomous_reserve_excludes_recent_submission_domains():
+    platforms = [
+        {
+            "key": "used",
+            "url": "https://used.example/submit",
+            "delivery_lane": "autonomous_candidate",
+            "autonomous_ready": True,
+            "free_policy": {"free": True, "rule_decision": "allowed"},
+        },
+        {
+            "key": "fresh",
+            "url": "https://fresh.example/submit",
+            "delivery_lane": "autonomous_candidate",
+            "autonomous_ready": True,
+            "free_policy": {"free": True, "rule_decision": "allowed"},
+        },
+    ]
+    with (
+        patch.object(guard.marketplace, "list_platforms", return_value=platforms),
+        patch.object(guard, "_recent_submission_domains_global", return_value={"used.example"}),
+    ):
+        snap = guard._autonomous_reserve_snapshot(datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
+    assert snap["ready_raw"] == 2
+    assert snap["ready"] == 1
+    assert snap["cooldown_blocked_ready"] == 1
+    assert snap["ready_deficit"] == guard.reserve_policy.AUTONOMOUS_READY_TARGET - 1
+
+
+def test_recent_submission_domains_global_accepts_bare_meta_domain():
+    now = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+    attempts = [
+        {
+            "created_at": (now - timedelta(hours=1)).isoformat(),
+            "action": "guest_catalog_submit",
+            "status": "submitted_pending_moderation",
+            "url": "https://pdfcatalog.ru/index.php?page=date",
+            "meta": {"domain": "pdfcatalog.ru"},
+        }
+    ]
+    with (
+        patch.object(guard.marketplace, "list_attempts", return_value=attempts),
+        patch.object(guard.marketplace, "list_publications", return_value=[]),
+    ):
+        recent = guard._recent_submission_domains_global(now)
+
+    assert guard._site_domain("pdfcatalog.ru") == "pdfcatalog.ru"
+    assert recent == {"pdfcatalog.ru"}

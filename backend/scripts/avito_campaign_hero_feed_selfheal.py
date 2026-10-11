@@ -6,6 +6,7 @@ hero_media_id and the corresponding feed item already exists. It changes image[0
 only; it never creates/publishes an item and never calls Avito or paid AI.
 """
 import json
+from urllib.parse import unquote
 from app.db.session import SessionLocal
 from app.models.campaign_item import CampaignItem
 from app.models.storage import Storage
@@ -13,14 +14,19 @@ from app.api.avito import _mutate_feed_items
 
 
 def canon(v):
+    """Canonical identity for a public image URL without changing stored spelling."""
     s=str(v or '').strip()
-    return '/images/'+s.split('/images/',1)[1] if '/images/' in s else s
+    if '/images/' not in s:
+        return s
+    return '/images/'+unquote(s.split('/images/',1)[1].split('?',1)[0])
+
 
 def apply_hero_replacements(current, repl):
-    """Pure in-memory mutation used by production and deterministic tests.
+    """Move the selected hero to index 0 without duplicating or losing gallery media.
 
-    Safety contract: replace image[0] only for identities explicitly present in
-    repl; preserve the rest of every gallery and reject missing/empty targets.
+    If the hero already exists, move its canonical occurrence and retain every
+    other image in relative order. If it is absent, preserve the historical
+    replace-index-zero behavior. Canonical-equivalent URLs count as one image.
     """
     seen=set()
     for x in current:
@@ -30,8 +36,19 @@ def apply_hero_replacements(current, repl):
         gallery=list(getattr(x,'images',None) or [])
         if not gallery:
             raise RuntimeError(f'empty feed gallery {fid}')
-        gallery[0]=repl[fid]['hero']
-        x.images=gallery
+        hero=repl[fid]['hero']
+        hero_key=canon(hero)
+        hero_present=any(canon(value)==hero_key for value in gallery)
+        tail=gallery if hero_present else gallery[1:]
+        normalized=[]
+        used={hero_key}
+        for value in tail:
+            key=canon(value)
+            if not key or key in used:
+                continue
+            used.add(key)
+            normalized.append(value)
+        x.images=[hero]+normalized
         seen.add(fid)
     missing=set(repl)-seen
     if missing:

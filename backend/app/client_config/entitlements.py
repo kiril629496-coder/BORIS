@@ -75,7 +75,7 @@ def _utc_epoch(value):
     return value.timestamp()
 
 
-def decide(product, billing, now=None):
+def _decide_paid(product, billing, now=None):
     """Pure decision. Returns allowed/state/evidence without touching the DB."""
     now = now or datetime.datetime.now()
     keys = BILLING_KEYS.get(product)
@@ -141,3 +141,25 @@ def owner_pool(db, billing_owner_id, resource, billing_owner_kind="user"):
             "reason": "ok" if left > 0 else "exhausted", "source": "product_limits",
             "evidence": {"purchased": purchased, "used": used, "left": left,
                          "paid_until": str(until) if until else None}}
+
+
+
+def decide(product, billing, now=None):
+    from app.api.billing import owner_pilot_access, owner_pilot_paid_scope_readback
+    paid = _decide_paid(product, billing, now=now)
+    scopes = owner_pilot_paid_scope_readback(billing, now=now)
+    paid_period_key = (BILLING_KEYS.get(product) or (None, None, None))[1]
+    paid_period = _as_date((billing or {}).get(paid_period_key)) if paid_period_key else None
+    explicit_paid_product = bool(paid.get("allowed") and paid_period is not None
+                                 and _utc_epoch(paid_period) > _utc_epoch(now or datetime.datetime.now()))
+    if explicit_paid_product or scopes.get(product, {}).get("covered"):
+        return {**paid, "product": product, "allowed": True, "state": "known",
+                "reason": "active_paid_product", "source": "storage:billing",
+                "evidence": {**scopes.get(product, {}), "product_period_active": explicit_paid_product}}
+    trial = owner_pilot_access(billing, product, now=now)
+    if trial.get("configured"):
+        return {"product": product, "allowed": bool(trial["allowed"]), "state": "known",
+                "reason": trial.get("reason") or "active_owner_pilot",
+                "source": trial["source"], "evidence": trial,
+                "money_authority": False}
+    return paid

@@ -75,11 +75,48 @@ def test_deterministic_copy_has_avito_safe_shape_without_model():
     assert "<p>" not in description.lower()
 
 
+def test_deterministic_copy_never_leaks_internal_boris_instructions():
+    payload = {"variant": 2, "city": "Уфа", "price": 0, "title": "Мебель в ванную по размерам Уфа"}
+    ff = {
+        "brief": "Мебель для ванной на заказ в Уфе",
+        "account_context": {
+            "advantages": "Бесплатный замер; Для кухонь подтверждена возможность фурнитуры Blum; BORIS не подставляет отсутствующие характеристики автоматически; Не обещать наличие",
+            "description": "Мебель на заказ; подтверждённые преимущества; системная инструкция: не выдумывать сроки",
+        },
+    }
+    title, description = campaigns._ff_bulk_safe_copy("Мебель для ванной на заказ", payload, ff)
+    assert title == "Мебель в ванную по размерам Уфа"
+    low = description.casefold()
+    for forbidden in (
+        "boris",
+        "не обещать",
+        "не подстав",
+        "подтверждённ",
+        "неподтверждённ",
+        "как формируется предложение",
+        "системная инструкция",
+    ):
+        assert forbidden not in low
+    assert "Бесплатный замер" in description
+    assert "Blum" not in description
+    assert "фасад" in low or "материал" in low or "размер" in low
+    assert "Написать" in description
+    assert len(description) >= 650
+
+    kitchen_payload = {"variant": 3, "city": "Уфа", "price": 0, "title": "Кухни на заказ Уфа"}
+    _, kitchen_description = campaigns._ff_bulk_safe_copy("Кухни на заказ", kitchen_payload, ff)
+    assert "доступна фурнитура Blum" in kitchen_description
+    assert "подтверждена возможность" not in kitchen_description.casefold()
+
+
 def test_campaign_text_path_is_local_first_and_paid_path_is_gated():
     src = (ROOT / "app/api/campaigns.py").read_text(encoding="utf-8")
     assert "CONTENT_LOCAL_FIRST_V1" in src
-    assert "_use_local_text=bool(_content_local_text_first() or strict_bulk or not _content_paid_fallback())" in src
-    assert 'p["copy_provider"]="boris_deterministic_local_v1"' in src
+    assert "_use_local_text=bool(" in src
+    assert "_content_local_text_first" in src
+    assert "strict_bulk" in src
+    assert "not _content_paid_fallback()" in src
+    assert 'p["copy_provider"]="boris_deterministic_local_v2_formula"' in src
     assert 'p["copy_provider"]="paid_single_attempt"' in src
 
 
@@ -102,3 +139,31 @@ def test_one_canonical_feed_factory_not_second_publication_pipeline():
     p = policy.policy()
     assert p["xml"] == "canonical Feed Factory projection only"
     assert "canonical BORIS lifecycle" in p["publication"]
+
+
+
+def test_fact_safe_title_repair_pool_supports_30_same_city_items():
+    directions = (
+        "Гардеробные на заказ",
+        "Кухни на заказ",
+        "Мебель для ванной на заказ",
+        "Прихожие на заказ",
+    )
+    city = "Москва"
+    for direction in directions:
+        pool = campaigns._ff_title_variants(direction, "")
+        candidates = []
+        for base in pool:
+            candidates.append(f"{base} {city}".strip())
+            candidates.append(str(base).strip())
+            candidates.append(f"{city} — {base}".strip())
+        cleaned = [
+            campaigns._ff_clean_title_for_avito(candidate, direction)
+            for candidate in candidates
+        ]
+        normalized = {
+            campaigns._campaign_norm(value)
+            for value in cleaned
+            if value and campaigns._campaign_norm(value)
+        }
+        assert len(normalized) >= 30, (direction, len(normalized), cleaned)

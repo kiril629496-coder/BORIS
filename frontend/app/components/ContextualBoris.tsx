@@ -101,6 +101,7 @@ export default function ContextualBoris() {
   const [supportResult, setSupportResult] = React.useState("");
   const [supportTickets, setSupportTickets] = React.useState<any[]>([]);
   const [supportHistoryOpen, setSupportHistoryOpen] = React.useState(false);
+  const [auditContext, setAuditContext] = React.useState<any>(null);
   const accountId = selectedAccountId || "";
   const hasAccounts = accounts.length > 0;
   const ctx = routeContext(pathname);
@@ -133,6 +134,9 @@ export default function ContextualBoris() {
     fetch(`/api/payments/status?account_id=${encodeURIComponent(accountId)}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {}, cache: "no-store",
     }).then(r => r.json()).then(d => setPayment(d?.payment || null)).catch(() => {});
+    fetch("/api/viral/gateway/context", {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}, cache: "no-store",
+    }).then(r => r.ok ? r.json() : null).then(d => setAuditContext(d?.context || null)).catch(() => setAuditContext(null));
   }, [accountId, pathname]);
 
   React.useEffect(() => {
@@ -285,7 +289,17 @@ export default function ContextualBoris() {
         {showPersonaPicker && <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:7,marginTop:13,padding:9,border:"1px solid rgba(148,163,184,.22)",borderRadius:14,background:"rgba(255,255,255,.78)",boxShadow:"0 8px 24px rgba(15,23,42,.08)"}}>{PERSONAS.map(p=><button key={p.key} onClick={()=>choosePersona(p.key)} title={p.label} style={{minWidth:0,padding:"7px 3px",border:p.key===persona.key?`2px solid ${p.accent}`:"1px solid #e2e8f0",borderRadius:11,background:p.key===persona.key?`${p.accent}0f`:"#fff",cursor:"pointer"}}><div style={{fontSize:25,lineHeight:1}}>{p.emoji}</div><div style={{fontSize:9,fontWeight:750,color:"#475569",marginTop:4,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{p.label.replace("Деловой ","")}</div></button>)}</div>}
       </div>
       <div style={{padding:"14px 16px 16px"}}>
-      {proactive && !open ? <div style={{fontSize:16,lineHeight:1.48,marginBottom:13,fontWeight:720,color:"#172033"}}>{!hasAccounts ? "Добро пожаловать! Я проведу вас по настройке BORIS шаг за шагом — начнём с подключения Avito." : "Я рядом ✨ Хотите, быстро покажу, что сегодня происходит, или подскажу, куда лучше зайти?"}</div> : <div style={{fontSize:14,lineHeight:1.45,marginBottom:11,color:"#344054"}}>{!hasAccounts ? "Помогу настроить кабинет с нуля. Выполняйте шаги по порядку — я буду подсказывать следующий." : ctx.intro}</div>}
+      {proactive && !open ? <div style={{fontSize:16,lineHeight:1.48,marginBottom:13,fontWeight:720,color:"#172033"}}>{auditContext?.score ? `Я уже видел ваш аудит: BORIS Score ${auditContext.score}/100. Могу помочь разобрать найденные проблемы и показать, где это исправить.` : !hasAccounts ? "Добро пожаловать! Я проведу вас по настройке BORIS шаг за шагом — начнём с подключения Avito." : "Я рядом ✨ Хотите, быстро покажу, что сегодня происходит, или подскажу, куда лучше зайти?"}</div> : <div style={{fontSize:14,lineHeight:1.45,marginBottom:11,color:"#344054"}}>{auditContext?.score ? `Ваш последний аудит уже в контексте: Score ${auditContext.score}/100 · ${auditContext.connected ? "на реальных данных BORIS" : "предварительный"}.` : !hasAccounts ? "Помогу настроить кабинет с нуля. Выполняйте шаги по порядку — я буду подсказывать следующий." : ctx.intro}</div>}
+
+      {auditContext?.score && <div style={{marginBottom:12,padding:12,border:"1px solid #dbe7ff",borderRadius:15,background:"linear-gradient(135deg,#eef4ff,#fff)"}}>
+        <div style={{fontSize:11,fontWeight:850,color:"#2563eb",letterSpacing:".06em"}}>ВАШ АУДИТ УЖЕ ЗДЕСЬ</div>
+        <div style={{marginTop:5,fontSize:17,fontWeight:850,color:"#172033"}}>BORIS Score {auditContext.score}/100</div>
+        <div style={{marginTop:4,fontSize:12.5,lineHeight:1.45,color:"#667085"}}>{(auditContext.main_problems||[]).length ? "Главные точки: "+auditContext.main_problems.join(" · ") : "Контекст аудита сохранён и не потеряется при переходах по BORIS."}</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:7,marginTop:9}}>
+          <button onClick={()=>router.push("/audit")} style={{minHeight:40,border:0,borderRadius:999,padding:"0 14px",background:"#2563eb",color:"#fff",fontWeight:800,cursor:"pointer"}}>Вернуться к моему аудиту</button>
+          <button onClick={()=>router.push("/audit/help")} style={{minHeight:40,border:"1px solid #d8deea",borderRadius:999,padding:"0 14px",background:"#fff",color:"#172033",fontWeight:800,cursor:"pointer"}}>Специалист · WhatsApp / MAX</button>
+        </div>
+      </div>}
 
       <div style={{marginBottom:12,padding:12,border:`1px solid ${persona.accent}26`,borderRadius:15,background:`linear-gradient(135deg,${persona.accent}0d,#fff)`}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:9}}><b style={{fontSize:14}}>Настроим BORIS вместе</b><span style={{fontSize:10.5,fontWeight:800,color:persona.accent}}>шаг {guidedStep} из 5</span></div>

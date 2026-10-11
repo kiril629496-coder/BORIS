@@ -689,8 +689,12 @@ def grant_package(acc, pack, p, db, amount=None, source="robokassa", inv_id=None
             recovery = _grant_phone_subscription_from_payment_ledger(
                 acc, p, db, source, payment_ref
             )
+        from app.api.billing import reconcile_owner_pilot_paid_conversion
+        pilot_conversion = reconcile_owner_pilot_paid_conversion(
+            acc, db=db, commit=False, payment_ref=payment_ref, payment_source=source)
         return {
             "status": "duplicate_payment",
+            "pilot_conversion": pilot_conversion,
             "account_id": acc,
             "pack": pack,
             "source": source,
@@ -821,3 +825,10 @@ def grant_package(acc, pack, p, db, amount=None, source="robokassa", inv_id=None
         import logging as _lg
         _lg.getLogger(__name__).error(
             "реактивация: сбой начисления лимита, пакет=%s аккаунт=%s: %s", pack, acc, _e)
+    # Every existing grant has now run. Reconcile only persisted current scopes;
+    # a missing/failed grant remains partial even if the payment ledger exists.
+    from app.api.billing import reconcile_owner_pilot_paid_conversion
+    pilot_conversion = reconcile_owner_pilot_paid_conversion(
+        acc, db=db, commit=False, payment_ref=payment_ref, payment_source=source)
+    return {"status": "granted", "account_id": acc, "pack": pack,
+            "pilot_conversion": pilot_conversion}

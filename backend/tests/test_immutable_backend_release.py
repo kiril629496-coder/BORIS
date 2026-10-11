@@ -42,6 +42,7 @@ def test_release_builder_is_fail_closed_on_source_race_and_seals_artifact():
     assert "SOURCE_CHANGED_DURING_BUILD" in src
     assert "chattr" in src and '"+i"' in src
     assert "_clean_root_python_files" in src
+    assert 'SOURCE / "client_aliases.local.json.example"' in src
     assert "--activate" in src
 
 

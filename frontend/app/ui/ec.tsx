@@ -173,12 +173,12 @@ export function MediaCard({ item, selected, onToggle, onOpen }: any) {
         </div>
       </button>
       <div className="boris-f3-3450ea9893e0c3">
-        <div style={{ ...font.small, color: color.heading, overflow: "hidden",
+        <div title={item.display_name || item.filename || ""} style={{ ...font.small, color: color.heading, fontWeight:700, overflow: "hidden",
                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {item.filename}
+          {item.display_name || item.filename || "Материал"}
         </div>
-        <div style={{ ...font.small, fontSize: 11.5 }}>
-          {TYPE_RU[item.media_type] || item.media_type}
+        <div style={{ ...font.small, fontSize: 11.5, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+          {item.display_context || TYPE_RU[item.media_type] || item.media_type}
         </div>
       </div>
       <button type="button" aria-label={selected ? "Убрать из выбранных" : "Выбрать изображение"}

@@ -9,6 +9,7 @@ from sqlalchemy import (BigInteger, Column, DateTime, ForeignKey, Integer,
                         SmallInteger, String, Text, func)
 
 from app.db.base import Base
+from app.services.campaign_card_revisions import next_version, install as install_card_history
 
 
 class CampaignItem(Base):
@@ -45,3 +46,8 @@ class CampaignItem(Base):
                         server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False,
                         server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": updated_at, "version_id_generator": next_version}
+
+
+install_card_history()

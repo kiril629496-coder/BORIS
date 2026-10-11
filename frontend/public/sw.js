@@ -1,12 +1,13 @@
 /* BORIS PWA service worker: business data is always network-authoritative. */
-const BORIS_SW_VERSION = "boris-pwa-v9-phone-offline-scope";
-const OFFLINE_CACHE = "boris-pwa-static-v9";
+const BORIS_SW_VERSION = "boris-pwa-v10-messenger-offline";
+const OFFLINE_CACHE = "boris-pwa-static-v10";
 const OFFLINE_URL = "/phone-offline.html";
+const MESSENGER_OFFLINE_URL = "/messenger-offline.html";
 
 self.addEventListener("install", event => {
   event.waitUntil((async () => {
     const cache = await caches.open(OFFLINE_CACHE);
-    await cache.add(new Request(OFFLINE_URL, { cache: "reload" }));
+    await cache.addAll([new Request(OFFLINE_URL, { cache: "reload" }), new Request(MESSENGER_OFFLINE_URL, { cache: "reload" })]);
     // Emergency-safe rollout: activate this worker immediately. We intentionally
     // do not claim every existing tab below, so unrelated BORIS pages are not reloaded.
     await self.skipWaiting();
@@ -54,10 +55,12 @@ self.addEventListener("push", event => {
     const title = String(data.title || "BORIS · новый статус лида");
     const body = String(data.body || "Откройте BORIS, чтобы посмотреть обновление.");
     const url = String(data.url || "/messages");
+    const messengerNotification = String(data.event_type || "") === "internal_message" || url.startsWith("/messenger");
+    const notificationIcon = messengerNotification ? "/messenger/icon.svg" : "/boris-icon-192.png";
     await self.registration.showNotification(title, {
       body,
-      icon: "/boris-icon-192.png",
-      badge: "/boris-icon-192.png",
+      icon: notificationIcon,
+      badge: notificationIcon,
       tag: String(data.tag || ("boris-lead-" + Date.now())),
       renotify: true,
       data: { url },
@@ -68,7 +71,11 @@ self.addEventListener("push", event => {
 self.addEventListener("notificationclick", event => {
   event.notification.close();
   event.waitUntil((async () => {
-    const target = new URL(String(event.notification?.data?.url || "/messages"), self.location.origin).toString();
+    const targetUrl = new URL(String(event.notification?.data?.url || "/messages"), self.location.origin);
+    if (targetUrl.origin === self.location.origin && targetUrl.pathname.startsWith("/messenger")) {
+      targetUrl.searchParams.set("push_click", "1");
+    }
+    const target = targetUrl.toString();
     const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     for (const client of windows) {
       try {
@@ -95,9 +102,10 @@ self.addEventListener("fetch", event => {
     // Do not replace /login, /dashboard or other BORIS pages with a phone
     // offline document after a transient navigation failure.
     const isPhoneNavigation = url.pathname === "/phone-app" || url.pathname.startsWith("/phone-app/");
-    if (!isPhoneNavigation) return;
+    const isMessengerNavigation = url.pathname === "/messenger" || url.pathname.startsWith("/messenger/");
+    if (!isPhoneNavigation && !isMessengerNavigation) return;
     event.respondWith(fetch(req).catch(async () => {
-      const fallback = await caches.match(OFFLINE_URL);
+      const fallback = await caches.match(isMessengerNavigation ? MESSENGER_OFFLINE_URL : OFFLINE_URL);
       return fallback || Response.error();
     }));
   }

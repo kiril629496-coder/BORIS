@@ -1,7 +1,11 @@
+import ast
 import hashlib
 import inspect
 import os
 import unittest
+from unittest import mock
+
+from sqlalchemy.exc import StatementError
 
 from app.services import prospect_campaigns as prospect_service
 from app.services.prospect_campaigns import (
@@ -59,8 +63,8 @@ class ProspectOwnerOutreachContractTest(unittest.TestCase):
         self.assertEqual(OWNER_OUTREACH_APPROVED_BODY, variants[0]["body"])
         for v in variants:
             lines=[x.strip() for x in v["body"].splitlines() if x.strip()]
-            self.assertEqual(lines[-1], "https://boris-ai.pro/go/boris")
-            self.assertEqual(v["body"].count("https://boris-ai.pro/go/boris"),1)
+            self.assertEqual(lines[-1], "https://boris-ai.pro/audit")
+            self.assertEqual(v["body"].count("https://boris-ai.pro/audit"),1)
             self.assertNotIn("https://boris-ai.pro/software-dev/",v["body"])
             self.assertLessEqual(len(v["subject"]),60)
         self.assertNotIn("Я создал BORIS — виртуальную команду маркетинга и продаж.", OWNER_OUTREACH_APPROVED_BODY)
@@ -78,7 +82,7 @@ class ProspectOwnerOutreachContractTest(unittest.TestCase):
         html = _html_email(self._good_body(), "")
         low = html.lower()
         self.assertNotIn("<img ", low)
-        self.assertIn('<a href="https://boris-ai.pro/go/boris"', html)
+        self.assertIn('<a href="https://boris-ai.pro/audit"', html)
 
     def test_owner_contract_accepts_approved_shape(self):
         variant,html,attachments=self._good_shape("A")
@@ -209,7 +213,7 @@ class ProspectOwnerOutreachContractTest(unittest.TestCase):
             att,cid,_=prospect_service._owner_outreach_banner(slot)
             html=_html_email(v["body"],"","",brand_subtitle="BORIS AI",brand_note="",marketing_banner_cid=cid)
             self.assertEqual(_owner_outreach_contract(v["subject"],v["body"],html,[att]),[])
-            self.assertGreaterEqual(html.count('<a href="https://boris-ai.pro/go/boris"'),2)
+            self.assertGreaterEqual(html.count('<a href="https://boris-ai.pro/audit"'),2)
 
     def test_owner_outreach_never_uses_paid_ai_copy(self):
         src = inspect.getsource(prospect_service.tick_campaign)
@@ -225,12 +229,12 @@ class ProspectOwnerOutreachContractTest(unittest.TestCase):
         self.assertIn("next scheduler tick retries", owner_guard)
         self.assertNotIn("SET status='paused'", owner_guard)
 
-    def test_owner_ramp_is_10_then_15_then_20(self):
+    def test_owner_ramp_is_10_then_15_then_30(self):
         from app.services import owner_outreach_policy as policy
-        self.assertEqual(prospect_service.OWNER_OUTREACH_MAX_DAILY, 20)
+        self.assertEqual(prospect_service.OWNER_OUTREACH_MAX_DAILY, 30)
         self.assertEqual(
             [policy.canonical_daily_cap(x) for x in range(8)],
-            [10, 10, 10, 10, 10, 10, 15, 20],
+            [10, 10, 10, 10, 10, 10, 15, 30],
         )
         src = inspect.getsource(prospect_service._owner_daily_state)
         self.assertIn("canonical_policy_state(age)", src)
@@ -390,6 +394,35 @@ class ProspectOwnerOutreachContractTest(unittest.TestCase):
         self.assertIn("'critical' in daily_states", src)
         self.assertIn("'critical' in copy_integrity_states", src)
         self.assertIn("'degraded' in daily_states", src)
+
+
+    def test_owner_copy_lock_probe_binds_approved_body_list(self):
+        src = inspect.getsource(prospect_service.owner_copy_integrity_health)
+        tree = ast.parse(src)
+        matches = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr != "execute" or not node.args:
+                continue
+            query = ast.get_source_segment(src, node.args[0]) or ""
+            if ":approved_body_list" not in query:
+                continue
+            matches.append(node)
+            self.assertGreaterEqual(len(node.args), 2)
+            params = ast.get_source_segment(src, node.args[1]) or ""
+            self.assertIn("approved_body_list", params)
+        self.assertEqual(len(matches), 1)
+
+    def test_owner_copy_statement_error_is_bounded_without_database_or_send(self):
+        error = StatementError("owner-copy schema probe failed", "SELECT 1", None, RuntimeError("boom"))
+        with mock.patch("app.services.email_tracking.ensure_schema", side_effect=error):
+            result = prospect_service.owner_copy_integrity_health(owner_id=1, self_heal=False)
+
+        self.assertEqual(result["state"], "critical")
+        self.assertEqual(result["status"], "copy_integrity_exception")
+        self.assertIn("StatementError", result["critical"])
+        self.assertFalse(result["owner_action_required"])
 
 
 if __name__ == "__main__":

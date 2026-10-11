@@ -1,9 +1,11 @@
+from client_aliases import client_id as _client_id, client_text as _client_text
 import os as _os_gc
 from app.services.exception_observability import observe_suppressed
 _GC_MODEL = _os_gc.environ.get("GIGACHAT_MODEL", "GigaChat" + "-Pro")
-from fastapi import UploadFile, File, Form, APIRouter, Depends
+from fastapi import UploadFile, File, Form, APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
+from sqlalchemy import text as _t
 import httpx
 import os
 import random
@@ -2238,26 +2240,111 @@ def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
                     "message":"Avito временно ограничил запросы по аккаунту"}
         return None
 
+    def _feed_send_write_audit(stage: str, *, before_val: str = "", after_val: str = "", reason: str = ""):
+        """Append a secret-free audit receipt for the external Avito write lifecycle."""
+        try:
+            from app.services.action_log import log_action, ACTOR_USER, ACTOR_BORIS_AUTO
+            from app.services.reliability import get_trace_id as _audit_trace_id
+            _uid = getattr(user, "id", None)
+            _actor = ACTOR_USER if _uid else ACTOR_BORIS_AUTO
+            _labels = {
+                "requested": "Подготовил отправку объявлений в Avito",
+                "submitted": "Передал объявления в Avito",
+                "reconciled": "Подтвердил отправку объявлений по отчёту Avito",
+                "unknown": "Проверяет результат отправки в Avito",
+                "scheduled": "Передал обновление на плановую Автозагрузку Avito",
+            }
+            log_action(
+                account_id=account_id,
+                action=_labels.get(stage, "Обновил объявления в Avito"),
+                object_kind="объявления",
+                object_name="Автозагрузка Avito",
+                before_val=str(before_val or "")[:1900],
+                after_val=str(after_val or "")[:1900],
+                reason=str(reason or "")[:900],
+                actor=_actor,
+                user_id=_uid,
+                source="campaign.external_write",
+                request_id=_audit_trace_id(),
+            )
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=2250)
+
+    _feed_rule_context=None
+    _feed_rule_source_sha=None
+    _feed_rule_source_present=False
+
+    def _feed_rule_source_snapshot():
+        import hashlib as _feed_hash, json as _feed_json
+        _items=_load_feed_items(account_id)
+        _data=[x.model_dump(mode="json") if hasattr(x,"model_dump") else x.dict() if hasattr(x,"dict") else dict(x) for x in _items]
+        _raw=_feed_json.dumps(_data,sort_keys=True,ensure_ascii=False,separators=(",",":"),default=str)
+        return _feed_hash.sha256(_raw.encode()).hexdigest(), bool(_data)
+
+    def _feed_rule_return(result):
+        if _feed_rule_context is not None:
+            try:
+                from datetime import datetime as _feed_dt, timezone as _feed_tz
+                from app.services.control_rule_runtime import observe_feed_result
+                _after_sha,_after_present=_feed_rule_source_snapshot()
+                _facts={k:_feed_rule_context.get(k) for k in ("account_id","campaign_id","stage","artifact_sha256","artifact_kind")}
+                _facts.update(event_id=_feed_rule_context.get("source_event_id"),observed_at=_feed_dt.now(_feed_tz.utc).isoformat(),
+                    canonical_publisher="app.api.avito.feed_send_to_avito",result=result,
+                    source_input_unchanged=_after_sha==_feed_rule_source_sha,
+                    source_items_present=_feed_rule_source_present and _after_present,XML_bytes_verified=False)
+                with SessionLocal() as _feed_ledger_db:
+                    observe_feed_result(_feed_ledger_db,_feed_rule_context,_facts)
+                    _feed_ledger_db.commit()
+            except Exception as _feed_evidence_exc:
+                # Evidence failure is observable and never changes the provider result.
+                from app.services.control_rule_runtime import _observe_rule_failure
+                _observe_rule_failure(_feed_evidence_exc)
+        return result
+
     db = SessionLocal()
     try:
         acc = db.query(Account).filter(Account.account_id == account_id).first()
         if not acc or not acc.avito_client_id or not acc.avito_client_secret:
-            return {"status": "error", "message": "У аккаунта нет ключей Avito"}
+            return _feed_rule_return({"status": "error", "message": "У аккаунта нет ключей Avito"})
+        # Direct HTTP calls must carry account-level ad-management authority.
+        # Trusted internal jobs call this Python function without a resolved User
+        # object and are already guarded by their canonical account-scoped workflow.
+        _uid = int(getattr(user, "id", 0) or 0)
+        if _uid and str(getattr(user, "role", "") or "").lower() != "owner":
+            _owned = int(getattr(acc, "owner_user_id", 0) or 0) == _uid
+            _granted = bool(db.execute(_t(
+                "SELECT 1 FROM user_account_access "
+                "WHERE account_id=:a AND user_id=:u AND can_manage_ads=TRUE LIMIT 1"
+            ), {"a": account_id, "u": _uid}).first())
+            if not (_owned or _granted):
+                raise HTTPException(status_code=403, detail="Недостаточно прав для размещения объявлений")
         # ACCOUNT_MASTER_OFF_V1: block before token acquisition or any external
         # Avito request. This protects every caller of feed_send_to_avito,
         # including old UI/routes and future automation paths.
         from app.services.reliability import module_blocked as _module_blocked
         _blocked, _blocked_reason = _module_blocked(db, "feed", account_id)
         if _blocked:
-            return {"status":"blocked","code":"account_disabled","message":_blocked_reason or "Действия BORIS для аккаунта отключены","changed_avito":False}
+            return _feed_rule_return({"status":"blocked","code":"account_disabled","message":_blocked_reason or "Действия BORIS для аккаунта отключены","changed_avito":False})
         client_id_enc=str(acc.avito_client_id); client_secret_enc=str(acc.avito_client_secret)
+        try:
+            from app.services.control_rule_runtime import safe_capture_feed_context
+            _feed_rule_source_sha,_feed_rule_source_present=_feed_rule_source_snapshot()
+            _feed_rule_context=safe_capture_feed_context(db,account_id=account_id,campaign_id=None,
+                stage="publish_submit",event_id="canonical-feed-items:"+_feed_rule_source_sha+":invocation:"+str(__import__("uuid").uuid4()),
+                artifact_sha256=_feed_rule_source_sha,artifact_kind="canonical_feed_items_json")
+            db.commit()
+        except Exception as _feed_evidence_exc:
+            db.rollback()
+            from app.services.control_rule_runtime import _observe_rule_failure
+            _observe_rule_failure(_feed_evidence_exc)
+
     finally:
         db.close()
     try:
         from app.crypto_utils import decrypt_secret
         _block = _feed_send_throttle_block()
         if _block:
-            return _block
+            return _feed_rule_return(_block)
         _tok_resp = _httpx.post("https://api.avito.ru/token/", data={
             "grant_type": "client_credentials",
             "client_id": decrypt_secret(client_id_enc),
@@ -2265,12 +2352,12 @@ def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
         }, timeout=20)
         if _tok_resp.status_code == 429:
             _retry = _feed_send_record_throttle(account_id, _feed_send_retry_after(_tok_resp), source="feed_send_token_429")
-            return {"status":"error","code":"avito_account_throttled","http_status":429,
+            return _feed_rule_return({"status":"error","code":"avito_account_throttled","http_status":429,
                     "retry_after_seconds":int(_retry),"changed_avito":False,
-                    "message":"Avito временно ограничил запросы по аккаунту"}
+                    "message":"Avito временно ограничил запросы по аккаунту"})
         tok = (_tok_resp.json() or {}).get("access_token") if _tok_resp.status_code == 200 else None
         if not tok:
-            return {"status": "error", "message": "Не удалось получить токен Avito"}
+            return _feed_rule_return({"status": "error", "message": "Не удалось получить токен Avito"})
 
         # GLOBAL PUBLICATION GUARD: OAuth keys alone are not enough. Avito can
         # accept credentials while autoload is disabled for the tariff/account.
@@ -2288,33 +2375,33 @@ def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
             # an external wait, not a failed feed. Preserve the publication lifecycle
             # and retry later without regenerating content or asking the owner.
             if _validation_status == "pending":
-                return {"status":"waiting","code":"feed_validation_pending","message":"Официальная проверка Avito ещё формируется; BORIS повторит проверку автоматически.",
-                        "validation_status":"pending","issues":[],"errors":[],"check_id":_vr.get("check_id")}
+                return _feed_rule_return({"status":"waiting","code":"feed_validation_pending","message":"Официальная проверка Avito ещё формируется; BORIS повторит проверку автоматически.",
+                        "validation_status":"pending","issues":[],"errors":[],"check_id":_vr.get("check_id")})
             if _validation_status != "ok":
-                return {"status":"error","code":"feed_validation_failed","message":"Отправка заблокирована: текущий фид не прошёл официальную проверку Avito.",
-                        "validation_status":_vr.get("status"),"issues":_vr.get("issues") or [],"errors":_vr.get("errors") or []}
+                return _feed_rule_return({"status":"error","code":"feed_validation_failed","message":"Отправка заблокирована: текущий фид не прошёл официальную проверку Avito.",
+                        "validation_status":_vr.get("status"),"issues":_vr.get("issues") or [],"errors":_vr.get("errors") or []})
         except Exception as _ve:
-            return {"status":"error","code":"feed_validation_unavailable","message":"Отправка заблокирована: не удалось выполнить обязательную проверку фида Avito.","error":str(_ve)[:200]}
+            return _feed_rule_return({"status":"error","code":"feed_validation_unavailable","message":"Отправка заблокирована: не удалось выполнить обязательную проверку фида Avito.","error":str(_ve)[:200]})
 
         # VALIDATOR -> ATTACH TO AVITO AUTOLOAD PROFILE -> START UPLOAD.
         # The profile update preserves existing schedule/email/other feeds.
         _attach=_ensure_autoload_feed_configured(account_id,token=tok)
         if _attach.get("status")!="ok" or not _attach.get("attached"):
-            return {"status":"error","code":_attach.get("code") or "autoload_attach_failed",
+            return _feed_rule_return({"status":"error","code":_attach.get("code") or "autoload_attach_failed",
                     "http_status":_attach.get("http_status"),"feed_url":_attach.get("feed_url"),
-                    "message":_attach.get("message") or "BORIS не смог прикрепить XML-фид к Автозагрузке Avito."}
+                    "message":_attach.get("message") or "BORIS не смог прикрепить XML-фид к Автозагрузке Avito."})
 
         _before_ids=set()
         try:
             _block = _feed_send_throttle_block()
             if _block:
-                return _block
+                return _feed_rule_return(_block)
             _before=_httpx.get("https://api.avito.ru/autoload/v4/uploads",headers=_head,params={"perPage":20},timeout=20)
             if _before.status_code == 429:
                 _retry = _feed_send_record_throttle(account_id, _feed_send_retry_after(_before), source="feed_send_before_history_429")
-                return {"status":"error","code":"avito_account_throttled","http_status":429,
+                return _feed_rule_return({"status":"error","code":"avito_account_throttled","http_status":429,
                         "retry_after_seconds":int(_retry),"changed_avito":False,
-                        "message":"Avito временно ограничил запросы по аккаунту"}
+                        "message":"Avito временно ограничил запросы по аккаунту"})
             if _before.status_code==200:
                 _before_ids={int(x.get("upload_id") or 0) for x in ((_before.json() or {}).get("uploads") or []) if x.get("upload_id")}
         except Exception:
@@ -2322,11 +2409,17 @@ def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
         # Upload start is an external side effect. A transport timeout after the
         # POST may mean Avito accepted it even though BORIS missed the response.
         # Never classify that as a safe failure or blindly submit again.
+        _feed_send_write_audit(
+            "requested",
+            before_val=f"известных выгрузок до отправки: {len(_before_ids)}",
+            after_val="обязательная проверка XML пройдена; фид прикреплён к Автозагрузке",
+            reason="явный запуск текущего canonical XML-фида BORIS",
+        )
         _upload_transport_error = None
         try:
             _block = _feed_send_throttle_block()
             if _block:
-                return _block
+                return _feed_rule_return(_block)
             r = _httpx.post("https://api.avito.ru/autoload/v1/upload",
                             headers=_head, timeout=25)
         except Exception as _ue:
@@ -2377,17 +2470,14 @@ def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
                             _time_upload.sleep(0.75)
                 except Exception:
                     _upload_id=0
-            try:
-                from app.services.action_log import log_action, ACTOR_USER
-                log_action(account_id=account_id, action="Запустил выгрузку объявлений",
-                           object_kind="объявления", object_name="фид аккаунта",
-                           after_val=("запуск принят Avito, итоговый отчёт ожидается"+(f" · upload_id={_upload_id}" if _upload_id else "")),
-                           reason="обновление объявлений на площадке",
-                           actor=ACTOR_USER, source="avito.upload_feed")
-            except Exception as _suppressed_exc:
-                observe_suppressed(__name__, _suppressed_exc, line=2386)
-            return {"status":"ok","delivery_state":"submitted","upload_id":(_upload_id or None),
-                    "message":"Avito принял запуск. BORIS ждёт итоговый отчёт публикации."}
+            _feed_send_write_audit(
+                "submitted",
+                before_val=f"известных выгрузок до отправки: {len(_before_ids)}",
+                after_val=("Avito принял запуск"+(f"; upload_id={_upload_id}" if _upload_id else "; upload_id ещё не материализован")),
+                reason="внешняя мутация принята; итог публикации ещё не считается успешным",
+            )
+            return _feed_rule_return({"status":"ok","delivery_state":"submitted","upload_id":(_upload_id or None),
+                    "message":"Avito принял запуск. BORIS ждёт итоговый отчёт публикации."})
 
         # Read-only reconciliation after ambiguous transport/5xx. A newly
         # observed OpenAPI upload proves that Avito accepted the launch. If no
@@ -2425,12 +2515,24 @@ def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
             except Exception:
                 _reconciled_id=0
             if _reconciled_id:
-                return {"status":"ok","delivery_state":"submitted_reconciled","upload_id":_reconciled_id,
-                        "message":"BORIS восстановил подтверждение запуска из отчёта Avito после неоднозначного сетевого ответа."}
-            return {"status":"delivery_unknown","delivery_state":"delivery_unknown","upload_id":None,
+                _feed_send_write_audit(
+                    "reconciled",
+                    before_val="ответ POST был неоднозначным",
+                    after_val=f"новая выгрузка подтверждена read-only отчётом Avito; upload_id={_reconciled_id}",
+                    reason="повторная отправка не выполнялась",
+                )
+                return _feed_rule_return({"status":"ok","delivery_state":"submitted_reconciled","upload_id":_reconciled_id,
+                        "message":"BORIS восстановил подтверждение запуска из отчёта Avito после неоднозначного сетевого ответа."})
+            _feed_send_write_audit(
+                "unknown",
+                before_val="внешний POST мог быть принят Avito",
+                after_val="подтверждение новой выгрузки пока не найдено",
+                reason="повторная отправка заблокирована до read-only сверки",
+            )
+            return _feed_rule_return({"status":"delivery_unknown","delivery_state":"delivery_unknown","upload_id":None,
                     "code":"autoload_submit_delivery_unknown",
                     "message":"Результат запуска Автозагрузки пока не доказан. Повторная отправка запрещена до read-only проверки Avito.",
-                    "error_type":type(_upload_transport_error).__name__ if _upload_transport_error is not None else f"http_{getattr(r,'status_code',None)}"}
+                    "error_type":type(_upload_transport_error).__name__ if _upload_transport_error is not None else f"http_{getattr(r,'status_code',None)}"})
         # AUTOLOAD_MANUAL_HOURLY_LIMIT_SCHEDULED_FALLBACK_V1:
         # A 429 here can be Avito's business rule "one manual autoload per hour",
         # not tenant API exhaustion. If the exact BORIS URL feed is already enabled
@@ -2446,13 +2548,13 @@ def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
             try:
                 _block = _feed_send_throttle_block()
                 if _block:
-                    return _block
+                    return _feed_rule_return(_block)
                 _pr=_httpx.get("https://api.avito.ru/autoload/v2/profile",headers=_head,timeout=20)
                 if _pr.status_code == 429:
                     _retry = _feed_send_record_throttle(account_id, _feed_send_retry_after(_pr), source="feed_send_schedule_profile_429")
-                    return {"status":"error","code":"avito_account_throttled","http_status":429,
+                    return _feed_rule_return({"status":"error","code":"avito_account_throttled","http_status":429,
                             "retry_after_seconds":int(_retry),"changed_avito":False,
-                            "message":"Avito временно ограничил запросы по аккаунту"}
+                            "message":"Avito временно ограничил запросы по аккаунту"})
                 _profile=_pr.json() if _pr.status_code==200 else {}
                 _feed_url=f"https://boris-ai.pro/api/avito/feed/{account_id}.xml"
                 from urllib.parse import urlparse as _urlparse_sched
@@ -2471,7 +2573,13 @@ def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
                     except Exception:
                         _retry_seconds=None
                 if bool(_profile.get("autoload_enabled")) and _attached and _schedule:
-                    return {"status":"ok","delivery_state":"scheduled_url","upload_id":None,
+                    _feed_send_write_audit(
+                        "scheduled",
+                        before_val=f"ручной запуск: {_scheduled_fallback_reason}",
+                        after_val="canonical URL-фид прикреплён; ожидается плановый забор Avito",
+                        reason="повторный ручной POST не выполняется",
+                    )
+                    return _feed_rule_return({"status":"ok","delivery_state":"scheduled_url","upload_id":None,
                             "baseline_upload_id":(max(_before_ids) if _before_ids else None),
                             "schedule":_schedule,"feed_url":_attached_url,"canonical_feed_url":_feed_url,
                             "legacy_host_alias":_attached_url!=_feed_url,
@@ -2479,15 +2587,15 @@ def feed_send_to_avito(account_id: str = Form(...), user=Depends(_CurUser)):
                             "retry_after_seconds":_retry_seconds,
                             "message":("Ручной запуск временно ограничен Avito; BORIS автоматически ждёт ближайший плановый забор URL-фида."
                                        if _scheduled_fallback_reason=="manual_hourly_limit" else
-                                       "Фид обновлён и прикреплён. Для этого аккаунта Avito запрещает ручной API-запуск и заберёт URL-фид по своему расписанию.")}
+                                       "Фид обновлён и прикреплён. Для этого аккаунта Avito запрещает ручной API-запуск и заберёт URL-фид по своему расписанию.")})
             except Exception as _suppressed_exc:
                 observe_suppressed(__name__, _suppressed_exc, line=2482)
         if r.status_code == 429:
             _retry = _feed_send_record_throttle(account_id, _feed_send_retry_after(r), source="feed_send_upload_429")
-            return {"status":"error","code":"avito_account_throttled","http_status":429,
+            return _feed_rule_return({"status":"error","code":"avito_account_throttled","http_status":429,
                     "retry_after_seconds":int(_retry),"changed_avito":False,
-                    "message":"Avito временно ограничил запросы по аккаунту"}
-        return {"status": "error", "message": f"Avito ответил {r.status_code}: {r.text[:150]}"}
+                    "message":"Avito временно ограничил запросы по аккаунту"})
+        return _feed_rule_return({"status": "error", "message": f"Avito ответил {r.status_code}: {r.text[:150]}"})
     finally:
         pass
 
@@ -3938,8 +4046,6 @@ def _build_xml(items: list) -> str:
             xml_parts.append(f'    <PriceType>{html.escape(item.price_type)}</PriceType>')
         if item.color:
             xml_parts.append(f'    <Color>{html.escape(item.color)}</Color>')
-        if item.price_type:
-            xml_parts.append(f'    <PriceType>{html.escape(item.price_type)}</PriceType>')
         xml_parts.append(f'    <Address>{address}</Address>')
         if item.phone:
             xml_parts.append(f'    <ContactPhone>{html.escape(item.phone)}</ContactPhone>')
@@ -3947,7 +4053,31 @@ def _build_xml(items: list) -> str:
             xml_parts.append(f'    <ManagerName>{html.escape(item.manager)}</ManagerName>')
         if "ListingFee" not in item.params:
             xml_parts.append('    <ListingFee>PackageSingle</ListingFee>')
+        # AVITO_XML_TOPLEVEL_DEDUP_V1:
+        # Old persisted FeedItems may still carry top-level Avito fields inside
+        # params while the same value is also present in a dedicated FeedItem
+        # attribute. Emit a core tag from params only when its dedicated field
+        # is empty; otherwise XML would contain duplicate nodes.
+        _dedicated_param_tags = {
+            "Category": bool(_cat_feed or item.category),
+            "ServiceType": bool(item.service_type),
+            "ServiceSubtype": bool(item.service_subtype),
+            "WorkExperience": bool(item.work_experience),
+            "Guarantee": bool(item.guarantee),
+            "GoodsType": bool(item.goods_type),
+            "GoodsSubType": bool(item.goods_subtype),
+            "AdType": bool(item.ad_type),
+            "Condition": bool(item.condition),
+            "KitchenType": bool(item.kitchen_type),
+            "PriceType": bool(item.price_type),
+            "Color": bool(item.color),
+            "Address": bool(address),
+            "ContactPhone": bool(item.phone),
+            "ManagerName": bool(item.manager),
+        }
         for k, v in item.params.items():
+            if _dedicated_param_tags.get(str(k), False):
+                continue
             # Avito uses nested <Option> nodes for multi-select parameters
             # (for example Place). Preserve scalar parameters unchanged.
             if isinstance(v, (list, tuple, set)):
@@ -4401,20 +4531,39 @@ def _serialize_generation_idempotency(fn):
         if not key:
             return fn(req, *args, **kwargs)
         import hashlib as _hashlib
-        from sqlalchemy import text as _sql_text
-        from app.db.session import SessionLocal as _SessionLocal
+        import psycopg2 as _psycopg2
+        from app.db.session import engine as _generation_engine
         raw = _hashlib.sha256((str(req.account_id or "") + ":" + key).encode("utf-8")).digest()[:8]
         lock_id = int.from_bytes(raw, byteorder="big", signed=True)
-        lock_db = _SessionLocal()
+
+        # PAID_GENERATION_DEDICATED_LOCK_CONNECTION_V2:
+        # The SQLAlchemy application pool is intentionally tiny. Holding one pooled
+        # SessionLocal connection across a 30-90 second model call starves the AI
+        # usage ledger / provider fallback and makes the paid copywriter fail with
+        # QueuePool timeout. Advisory-lock semantics remain cross-process, but the
+        # lock itself lives on a dedicated psycopg2 connection outside the app pool.
+        _url = _generation_engine.url
+        _lock_conn = _psycopg2.connect(
+            host=_url.host,
+            port=_url.port,
+            dbname=_url.database,
+            user=_url.username,
+            password=_url.password,
+        )
+        _lock_conn.autocommit = True
+        _lock_cur = _lock_conn.cursor()
         try:
-            lock_db.execute(_sql_text("select pg_advisory_lock(:k)"), {"k": lock_id})
+            _lock_cur.execute("select pg_advisory_lock(%s)", (lock_id,))
             return fn(req, *args, **kwargs)
         finally:
             try:
-                lock_db.execute(_sql_text("select pg_advisory_unlock(:k)"), {"k": lock_id})
+                _lock_cur.execute("select pg_advisory_unlock(%s)", (lock_id,))
             except Exception as _suppressed_exc:
                 observe_suppressed(__name__, _suppressed_exc, line=4394)
-            lock_db.close()
+            try:
+                _lock_cur.close()
+            finally:
+                _lock_conn.close()
 
     return wrapped
 
@@ -7234,6 +7383,7 @@ def set_kpi_settings(req: KpiSettingsRequest, user=_DepSec(_CurUser)):
     from datetime import datetime as _kpi_dt, timezone as _kpi_tz
 
     db = SessionLocal()
+    _budget_rule_context = None
     try:
         row = db.query(Storage).filter(Storage.account_id == req.account_id, Storage.key == "kpi_settings").first()
         try:
@@ -7283,6 +7433,17 @@ def set_kpi_settings(req: KpiSettingsRequest, user=_DepSec(_CurUser)):
         settings.setdefault("daily_budget_limit_rub", 0)
         settings.setdefault("bid_autopilot", False)
         settings.setdefault("lead_temperature", "любые")
+        if req.daily_budget_limit_rub is not None:
+            # Freeze actual rule versions before the existing owner's write.
+            from app.services.control_owner_budget_rule_facts import safe_capture_owner_budget_context
+            _budget_rule_context = safe_capture_owner_budget_context(
+                db, account_id=req.account_id,
+                actor_user_id=int(getattr(user, "id", 0) or 0),
+                account_owner_user_id=int(account.owner_user_id or 0),
+                is_platform_owner=bool(is_platform_owner(user)),
+                authorization=settings["daily_budget_authorization"],
+                requested_budget=_budget,
+            )
         if row:
             row.value = _json_kpi.dumps(settings, ensure_ascii=False)
         else:
@@ -7320,6 +7481,15 @@ def set_kpi_settings(req: KpiSettingsRequest, user=_DepSec(_CurUser)):
             )
         except Exception:
             db.rollback(); raise
+        if _budget_rule_context is not None:
+            # Local SQL roundtrip only; no provider spend or whole-rule proof.
+            from app.services.control_owner_budget_rule_facts import observe_owner_budget_result
+            db.flush()
+            db.refresh(row)
+            observe_owner_budget_result(
+                db, _budget_rule_context, stored_settings=_json_kpi.loads(row.value),
+                observed_at=_kpi_dt.now(_kpi_tz.utc).isoformat(),
+            )
         db.commit()
         _budget_audit = settings.get("daily_budget_authorization") or {}
         _audit_log(
@@ -13265,7 +13435,7 @@ def kpi_goal_tick(account_id: str, allow_stale_non_money: bool = False):
                             for _pe in _parallel_entries:
                                 _pd = _pe.get("data") or {}
                                 _ps = str(_pd.get("status") or "")
-                                if _ps not in {"ready_for_ai", "proposal_ready", "apply_in_progress"}:
+                                if _ps not in {"ready_for_ai", "proposal_rejected", "proposal_ready", "apply_in_progress"}:
                                     continue
                                 # KPI_PARALLEL_PENDING_PROPOSAL_SCOPE_V1:
                                 # A prepare task can contain many original items while only
@@ -13298,9 +13468,76 @@ def kpi_goal_tick(account_id: str, allow_stale_non_money: bool = False):
                             _parallel_db.close()
 
                         if _parallel_lifecycle is None and _parallel_candidates:
-                            _rank = {"proposal_ready": 30, "apply_in_progress": 30, "ready_for_ai": 20}
+                            _rank = {"proposal_ready": 30, "apply_in_progress": 30, "proposal_rejected": 25, "ready_for_ai": 20}
                             _ps, _poid = sorted(_parallel_candidates, key=lambda z: (-_rank.get(z[0], 0), z[1]))[0]
-                            if _ps == "ready_for_ai":
+                            if _ps == "proposal_rejected":
+                                # KPI_NON_MONEY_PARALLEL_REJECTED_REPAIR_V1:
+                                # An effect-measurement on one item must not starve
+                                # the single allowed Fact-Guard repair for a disjoint
+                                # content hypothesis. This transition is internal
+                                # queue state only: no AI call, feed write, Avito
+                                # mutation or money action occurs in this tick.
+                                _repair_db = SessionLocal()
+                                try:
+                                    _repair_row = (
+                                        _repair_db.query(Storage)
+                                        .filter(
+                                            Storage.account_id == account_id,
+                                            Storage.key == f"kpi_prepare:{_poid}",
+                                        )
+                                        .order_by(Storage.id.desc())
+                                        .first()
+                                    )
+                                    if not _repair_row:
+                                        _repair_result = {
+                                            "status": "skipped",
+                                            "reason": "prepare_row_missing",
+                                            "changed_avito": False,
+                                            "ai_calls_made": 0,
+                                        }
+                                    else:
+                                        try:
+                                            _repair_data = json.loads(_repair_row.value or "{}")
+                                        except Exception:
+                                            _repair_data = {}
+                                        _repair_attempts = int(_repair_data.get("repair_attempts") or 0)
+                                        if str(_repair_data.get("status") or "") != "proposal_rejected":
+                                            _repair_result = {
+                                                "status": "skipped",
+                                                "reason": "prepare_state_changed",
+                                                "changed_avito": False,
+                                                "ai_calls_made": 0,
+                                            }
+                                        elif _repair_attempts >= 1:
+                                            _repair_result = {
+                                                "status": "waiting",
+                                                "reason": "proposal_rejected_final",
+                                                "changed_avito": False,
+                                                "ai_calls_made": 0,
+                                            }
+                                        else:
+                                            _repair_data["repair_attempts"] = 1
+                                            _repair_data["status"] = "ready_for_ai"
+                                            _repair_data["repair_reason"] = (
+                                                "Исправить неподтверждённые факты из предыдущего Fact Guard"
+                                            )
+                                            _repair_row.value = json.dumps(_repair_data, ensure_ascii=False)
+                                            _repair_db.commit()
+                                            _repair_result = {
+                                                "status": "ok",
+                                                "repair_attempts": 1,
+                                                "next": "ai_prepare_next_tick",
+                                                "changed_avito": False,
+                                                "ai_calls_made": 0,
+                                            }
+                                finally:
+                                    _repair_db.close()
+                                _parallel_lifecycle = {
+                                    "stage": "proposal_repair_scheduled",
+                                    "prepare_operation_id": _poid,
+                                    "result": _repair_result,
+                                }
+                            elif _ps == "ready_for_ai":
                                 # KPI_NON_MONEY_PARALLEL_AI_FENCE_V1:
                                 # allow_stale_non_money=True is a hard paid-AI
                                 # boundary. Preserve the queued preparation for a
@@ -18088,6 +18325,90 @@ def _kpi_enrich_prepare_items_from_feed(
     return enriched
 
 
+def _kpi_fact_guard_alias_payloads(
+    enriched_items: list,
+    proposals: list,
+):
+    """Replace provider item IDs with request-local non-PII aliases.
+
+    Avito item IDs are business identities, but 10-digit values can be mistaken
+    for phone numbers by generic privacy regexes when embedded in JSON text.
+    External AI receives only item_1/item_2/...; real IDs are restored locally
+    before strict Fact Guard validation.
+    """
+    ordered_real_ids=[]
+    for row in (proposals or []):
+        if isinstance(row,dict) and row.get("item_id") is not None:
+            rid=str(row.get("item_id"))
+            if rid not in ordered_real_ids:
+                ordered_real_ids.append(rid)
+    for row in (enriched_items or []):
+        if not isinstance(row,dict):
+            continue
+        raw=row.get("id") if row.get("id") is not None else row.get("item_id")
+        if raw is None:
+            continue
+        rid=str(raw)
+        if rid not in ordered_real_ids:
+            ordered_real_ids.append(rid)
+
+    real_to_alias={rid:f"item_{idx+1}" for idx,rid in enumerate(ordered_real_ids)}
+    alias_to_real={alias:rid for rid,alias in real_to_alias.items()}
+
+    aliased_items=[]
+    for row in (enriched_items or []):
+        if not isinstance(row,dict):
+            aliased_items.append(row)
+            continue
+        item=dict(row)
+        if item.get("id") is not None:
+            rid=str(item.get("id"))
+            if rid in real_to_alias:
+                item["id"]=real_to_alias[rid]
+        if item.get("item_id") is not None:
+            rid=str(item.get("item_id"))
+            if rid in real_to_alias:
+                item["item_id"]=real_to_alias[rid]
+        aliased_items.append(item)
+
+    aliased_proposals=[]
+    for row in (proposals or []):
+        if not isinstance(row,dict):
+            aliased_proposals.append(row)
+            continue
+        item=dict(row)
+        if item.get("item_id") is not None:
+            rid=str(item.get("item_id"))
+            if rid in real_to_alias:
+                item["item_id"]=real_to_alias[rid]
+        aliased_proposals.append(item)
+
+    return aliased_items,aliased_proposals,alias_to_real
+
+
+def _kpi_restore_fact_guard_aliases(parsed: dict, alias_to_real: dict) -> dict:
+    """Restore only exact known aliases; unknown/model-invented IDs stay invalid."""
+    if not isinstance(parsed,dict):
+        return parsed
+    out=dict(parsed)
+    checks=out.get("checks")
+    if not isinstance(checks,list):
+        return out
+    restored=[]
+    for check in checks:
+        if not isinstance(check,dict):
+            restored.append(check)
+            continue
+        row=dict(check)
+        alias=str(row.get("item_id") or "").strip()
+        if alias in (alias_to_real or {}):
+            row["item_id"]=str(alias_to_real[alias])
+            row["restored_from_alias"]=alias
+        restored.append(row)
+    out["checks"]=restored
+    return out
+
+
 def _kpi_build_fact_guard_prompt(
     enriched_items: list,
     proposals: list,
@@ -18302,9 +18623,14 @@ def _kpi_run_title_fact_guard(
         + str(operation_id)
     )
 
-    prompt = _kpi_build_fact_guard_prompt(
+    aliased_enriched,aliased_proposals,alias_to_real = _kpi_fact_guard_alias_payloads(
         enriched,
         proposals,
+    )
+
+    prompt = _kpi_build_fact_guard_prompt(
+        aliased_enriched,
+        aliased_proposals,
     )
 
     raw = chat_with_fallback(
@@ -18336,6 +18662,10 @@ def _kpi_run_title_fact_guard(
 
     parsed = _kpi_extract_json_object(
         raw
+    )
+    parsed = _kpi_restore_fact_guard_aliases(
+        parsed,
+        alias_to_real,
     )
 
     result = _kpi_validate_fact_guard_result(
@@ -19929,10 +20259,10 @@ def kpi_prepare_cycle(
             # failures and other terminal reasons do NOT advance the sequence.
             for _prepare_entry_hist in prepare_entries:
                 _prepare_hist = _prepare_entry_hist.get("data") or {}
-                if (
-                    str(_prepare_hist.get("status") or "") != "terminal_noop_or_unpublishable"
-                    or str(_prepare_hist.get("terminal_reason") or "") != "fact_guard_rejected_twice"
-                ):
+                if str(_prepare_hist.get("status") or "") != "terminal_noop_or_unpublishable":
+                    continue
+                _prepare_terminal_reason = str(_prepare_hist.get("terminal_reason") or "")
+                if _prepare_terminal_reason not in {"fact_guard_rejected_twice", "ai_unchanged_title"}:
                     continue
                 _prepare_action_hist = str(_prepare_hist.get("action") or "")
                 _prepare_item_ids_hist = {
@@ -23672,7 +24002,7 @@ def ai_marketing_daily_workspace(account_id: str):
         # Explicitly expose the known second candidate decision if it exists in current stats.
         second_id = (
             "8253233731"
-            if account_id == "prodazha_bytovok_25677" and _owner_provider_stats_current
+            if account_id == _client_id("client_06") and _owner_provider_stats_current
             else None
         )
         second_candidate = None

@@ -14,8 +14,10 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -33,6 +35,7 @@ HARD_EXCLUDED = {
     "bubble_jobs": "automated_access_not_verified",
 }
 MAX_GUARD_AGE_SEC = max(30 * 60, reserve_policy.GUARD_INTERVAL_MINUTES * 60 * 3)
+DAILY_SUBMISSION_TARGET = reserve_policy.DAILY_UNIQUE_SUBMISSION_TARGET
 
 
 def _iso(value: str | None):
@@ -286,37 +289,296 @@ def _external_submissions_snapshot() -> dict:
         action = str(row.get("action") or "")
         status = str(row.get("status") or "")
         if (
-            action in {"guest_catalog_submit", "guest_catalog_email_submit", "verify_publication"}
+            action in {"guest_catalog_submit", "guest_catalog_email_submit", "guest_tool_submit", "verify_publication"}
             or platform.startswith("guest_")
         ):
             latest[platform] = row
     pending = []
     verified = []
+    historical_redirected = []
     terminal = []
     for platform, row in latest.items():
         status = str(row.get("status") or "")
+        meta = dict(row.get("meta") or {})
         item = {
             "platform": platform,
             "status": status,
             "url": row.get("url"),
             "created_at": row.get("created_at"),
+            "classification": meta.get("classification"),
+            "project_id": meta.get("project_id"),
+            "project": meta.get("project"),
+            "target_url": meta.get("target_url"),
+            "domain": meta.get("domain"),
+            "project_site": meta.get("project_site"),
+            "linked_target": meta.get("linked_target"),
+            "redirect_target": meta.get("redirect_target"),
+            "counts_toward_direct_contract": meta.get("counts_toward_direct_contract"),
+            "counts_toward_new_direct_60": meta.get("counts_toward_new_direct_60"),
         }
         if status.startswith("submitted_pending") or status == "submitted":
             pending.append(item)
         elif status == "verified":
-            verified.append(item)
+            if (
+                str(meta.get("classification") or "") == "historical_redirected"
+                or meta.get("counts_toward_direct_contract") is False
+            ):
+                historical_redirected.append(item)
+            else:
+                verified.append(item)
         elif status in {"blocked", "failed", "rejected", "terminal"}:
             terminal.append(item)
     pending.sort(key=lambda x: str(x.get("platform") or ""))
     verified.sort(key=lambda x: str(x.get("platform") or ""))
+    historical_redirected.sort(key=lambda x: str(x.get("platform") or ""))
     terminal.sort(key=lambda x: str(x.get("platform") or ""))
     return {
         "pending_total": len(pending),
         "verified_total": len(verified),
+        "historical_redirected_total": len(historical_redirected),
         "terminal_total": len(terminal),
         "pending": pending,
         "verified": verified,
+        "historical_redirected": historical_redirected,
         "terminal": terminal,
+    }
+
+
+def _event_domain(row: dict) -> str:
+    host = (urlparse(str(row.get("url") or "")).hostname or "").lower()
+    return host.removeprefix("www.")
+
+
+def _recent_submission_domains(
+    now: datetime | None = None,
+    *,
+    cooldown_days: int = reserve_policy.SUBMISSION_DOMAIN_COOLDOWN_DAYS,
+) -> set[str]:
+    """Domains with an accepted FACT inside the reserve cooldown window."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(days=max(1, int(cooldown_days or 1)))
+    domains: set[str] = set()
+    for row in marketplace.list_attempts(limit=1000):
+        created = _iso(row.get("created_at"))
+        if not created or created.astimezone(timezone.utc) < cutoff:
+            continue
+        action = str(row.get("action") or "")
+        status = str(row.get("status") or "")
+        meta = row.get("meta") or {}
+        accepted = bool(
+            (
+                status in {"submitted_pending_moderation", "submitted_pending_email"}
+                and action in {"guest_catalog_submit", "guest_catalog_email_submit", "guest_tool_submit"}
+            )
+            or (
+                status == "success"
+                and action == "publish"
+                and meta.get("publication_verified")
+            )
+        )
+        if not accepted:
+            continue
+        domain = _event_domain({"url": meta.get("domain") or row.get("url")})
+        if not domain and meta.get("domain"):
+            domain = str(meta.get("domain") or "").lower().removeprefix("www.")
+        if domain:
+            domains.add(domain)
+    for row in marketplace.list_publications():
+        posted = _iso(row.get("posted_at"))
+        if not posted or posted.astimezone(timezone.utc) < cutoff:
+            continue
+        domain = _event_domain(row)
+        if domain:
+            domains.add(domain)
+    return domains
+
+
+def _business_day_context(now: datetime | None = None) -> dict:
+    """Return one canonical Crowd SEO business-day window.
+
+    Ledger timestamps remain UTC. Only day membership is evaluated in the
+    configured IANA timezone so the daily SLO rolls over at local midnight.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    tz = ZoneInfo(reserve_policy.BUSINESS_TIMEZONE)
+    local = current.astimezone(tz)
+    start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    return {
+        "timezone": reserve_policy.BUSINESS_TIMEZONE,
+        "local_date": local.date(),
+        "start_utc": start_local.astimezone(timezone.utc),
+        "end_utc": end_local.astimezone(timezone.utc),
+    }
+
+
+def _same_business_day(value: str | None, context: dict) -> bool:
+    parsed = _iso(value)
+    if parsed is None:
+        return False
+    return bool(context["start_utc"] <= parsed.astimezone(timezone.utc) < context["end_utc"])
+
+
+def _daily_delivery_snapshot(now: datetime | None = None) -> dict:
+    """Count current business-day submission FACTs; verification stays separate."""
+    context = _business_day_context(now)
+    day = context["local_date"]
+    submitted = []
+    verified = []
+
+    for row in marketplace.list_attempts(limit=1000):
+        if not _same_business_day(row.get("created_at"), context):
+            continue
+        action = str(row.get("action") or "")
+        status = str(row.get("status") or "")
+        meta = row.get("meta") or {}
+        domain = _event_domain(row)
+        pending_fact = bool(
+            status in {"submitted_pending_moderation", "submitted_pending_email"}
+            and action in {"guest_catalog_submit", "guest_catalog_email_submit", "guest_tool_submit"}
+        )
+        verified_publish_fact = bool(
+            status == "success"
+            and action == "publish"
+            and meta.get("publication_verified")
+        )
+        if domain and (pending_fact or verified_publish_fact):
+            submitted.append({
+                "id": row.get("id"),
+                "platform": row.get("platform"),
+                "domain": domain,
+                "status": status,
+                "created_at": row.get("created_at"),
+            })
+        if domain and status == "verified" and action == "verify_publication":
+            verified.append({
+                "id": row.get("id"),
+                "platform": row.get("platform"),
+                "domain": domain,
+                "verified_at": row.get("created_at"),
+            })
+
+    for row in marketplace.list_publications():
+        domain = _event_domain(row)
+        if domain and _same_business_day(row.get("posted_at"), context):
+            submitted.append({
+                "id": row.get("draft_id"),
+                "platform": row.get("platform"),
+                "domain": domain,
+                "status": "published",
+                "created_at": row.get("posted_at"),
+            })
+        if domain and bool(row.get("verified")) and _same_business_day(row.get("verified_at"), context):
+            verified.append({
+                "id": row.get("draft_id"),
+                "platform": row.get("platform"),
+                "domain": domain,
+                "verified_at": row.get("verified_at"),
+            })
+
+    submitted_domains = sorted({x["domain"] for x in submitted})
+    verified_domains = sorted({x["domain"] for x in verified})
+    return {
+        "business_timezone": context["timezone"],
+        "business_date": day.isoformat(),
+        "bucket_start_utc": context["start_utc"].isoformat(),
+        "bucket_end_utc": context["end_utc"].isoformat(),
+        "target_unique_domains": DAILY_SUBMISSION_TARGET,
+        "submitted_today": len(submitted),
+        "submitted_unique_domains_today": len(submitted_domains),
+        "submitted_unique_domains": submitted_domains,
+        "remaining_unique_domains": max(0, DAILY_SUBMISSION_TARGET - len(submitted_domains)),
+        "verified_today": len(verified),
+        "verified_unique_domains_today": len(verified_domains),
+        "verified_unique_domains": verified_domains,
+    }
+
+
+def _acquisition_lane_snapshot(
+    external_submissions: dict | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Expose fresh autonomous delivery capacity separately from the human queue."""
+    rows = marketplace.list_platforms()
+    autonomous = [
+        x for x in rows
+        if x.get("delivery_lane") == "autonomous_candidate"
+    ]
+    human = [
+        x for x in rows
+        if x.get("delivery_lane") == "human_assisted"
+        or (
+            not x.get("autonomous_ready")
+            and (
+                x.get("registration_checkpoint")
+                or x.get("registration_terminal_blocked")
+                or x.get("registration_warming")
+            )
+        )
+    ]
+    allowed_autonomous = [
+        x for x in autonomous
+        if bool((x.get("free_policy") or {}).get("free"))
+        and str((x.get("free_policy") or {}).get("rule_decision") or "") == "allowed"
+    ]
+    autonomous_ready_raw = [x for x in autonomous if x.get("autonomous_ready")]
+    cooldown_domains = _recent_submission_domains(now)
+    autonomous_ready = [
+        x for x in autonomous_ready_raw
+        if _event_domain({"url": x.get("url") or x.get("forum_url")}) not in cooldown_domains
+    ]
+    cooldown_blocked_ready = [
+        x for x in autonomous_ready_raw
+        if _event_domain({"url": x.get("url") or x.get("forum_url")}) in cooldown_domains
+    ]
+    human_assisted_ready = [x for x in human if x.get("publication_ready")]
+    warming = [x for x in human if x.get("registration_warming")]
+    human_blocked = [
+        x for x in human
+        if not x.get("registration_warming")
+        and (
+            x.get("registration_checkpoint")
+            or x.get("registration_terminal_blocked")
+        )
+    ]
+    pending_moderation = int(
+        (external_submissions or {}).get("pending_total") or 0
+    )
+    queue = sorted(
+        human,
+        key=lambda x: (
+            -int(x.get("acquisition_score") or 0),
+            str(x.get("key") or ""),
+        ),
+    )[:20]
+    return {
+        "target_autonomous_candidates": reserve_policy.AUTONOMOUS_CANDIDATE_TARGET,
+        "target_allowed_autonomous": reserve_policy.ALLOWED_AUTONOMOUS_TARGET,
+        "target_ready_or_prefill_ready": reserve_policy.AUTONOMOUS_READY_TARGET,
+        "autonomous_candidates": len(autonomous),
+        "allowed_autonomous": len(allowed_autonomous),
+        "autonomous_ready_raw": len(autonomous_ready_raw),
+        "autonomous_ready": len(autonomous_ready),
+        "cooldown_blocked_ready": len(cooldown_blocked_ready),
+        "submission_domain_cooldown_days": reserve_policy.SUBMISSION_DOMAIN_COOLDOWN_DAYS,
+        "human_assisted_candidates": len(human),
+        "human_assisted_ready": len(human_assisted_ready),
+        "human_blocked": len(human_blocked),
+        "warming": len(warming),
+        "pending_moderation": pending_moderation,
+        "human_queue": [
+            {
+                "platform": x.get("key"),
+                "acquisition_score": x.get("acquisition_score"),
+                "checkpoint": x.get("registration_checkpoint"),
+                "warming": bool(x.get("registration_warming")),
+            }
+            for x in queue
+        ],
     }
 
 
@@ -331,6 +593,8 @@ def main() -> int:
     timer = _timer_state()
     bootstrap = marketplace.platform_bootstrap_queue()
     external_submissions = _external_submissions_snapshot()
+    daily_delivery = _daily_delivery_snapshot()
+    acquisition_lanes = _acquisition_lane_snapshot(external_submissions)
 
     infrastructure_ok = bool(
         rows
@@ -360,6 +624,8 @@ def main() -> int:
         "guardian": guardian,
         "guardian_timer": timer,
         "external_submissions": external_submissions,
+        "daily_delivery": daily_delivery,
+        "acquisition_lanes": acquisition_lanes,
         "bootstrap": {
             "needed": bootstrap.get("needed"),
             "human_action_required": bootstrap.get("human_action_required"),

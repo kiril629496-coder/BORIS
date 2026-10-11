@@ -1,21 +1,49 @@
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 import production_contract_runner as c
-ROOT=Path('/root/BORIS/backend')
+ROOT=Path(__file__).resolve().parents[1]
 class T(unittest.TestCase):
  def test_contract_has_dynamic_single_owner_scan(self):
   src=(ROOT/'production_contract_runner.py').read_text()
   self.assertIn('GLOBAL_HA_SINGLE_ROLLOUT_OWNER_SCAN_V1',src)
   self.assertIn('single_backend_rollout_owner_runtime_scan',src)
  def test_active_helpers_have_no_direct_backend_restart(self):
-  bad=[]
-  for base in (ROOT/'run',ROOT/'scripts'):
-   for p in base.rglob('*'):
-    if not p.is_file() or p.suffix not in {'.py','.sh'} or '.bak' in p.name: continue
-    if p.name=='rolling_restart_backend.sh': continue
-    for line in p.read_text(errors='ignore').splitlines():
-     if 'systemctl' in line and 'boris-backend' in line and any(x in line for x in ('restart','try-restart','stop','start')): bad.append(str(p)); break
-  self.assertEqual(bad,[])
+  self.assertTrue(c._single_backend_rollout_owner_runtime_scan(ROOT))
+ def test_run_changes_is_ignored_but_active_run_and_scripts_are_scanned(self):
+  unsafe='systemctl restart boris-backend.service\n'
+  with tempfile.TemporaryDirectory() as tmp:
+   backend=Path(tmp)/'backend'
+   changes=backend/'run/changes'
+   changes.mkdir(parents=True)
+   (backend/'scripts').mkdir()
+   (changes/'archived.py').write_text(unsafe)
+   stage=backend/'run/campaign-price-scope-stage-fixture/tests'
+   stage.mkdir(parents=True)
+   (stage/'test_guard.py').write_text(unsafe)
+   self.assertTrue(c._single_backend_rollout_owner_runtime_scan(backend))
+   active=backend/'run/active.py'
+   active.write_text(unsafe)
+   self.assertFalse(c._single_backend_rollout_owner_runtime_scan(backend))
+   active.unlink()
+   script=backend/'scripts/active.sh'
+   script.write_text(unsafe)
+   self.assertFalse(c._single_backend_rollout_owner_runtime_scan(backend))
+ def test_unreadable_active_helper_fails_closed_without_raising(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   backend=Path(tmp)/'backend'
+   helper=backend/'run/unreadable.py'
+   helper.parent.mkdir(parents=True)
+   (backend/'scripts').mkdir()
+   helper.write_text('safe')
+   original=Path.read_text
+   def guarded(path,*args,**kwargs):
+    if path == helper:
+     raise OSError('unreadable')
+    return original(path,*args,**kwargs)
+   with mock.patch.object(Path,'read_text',guarded):
+    self.assertFalse(c._single_backend_rollout_owner_runtime_scan(backend))
  def test_guardian_delegates_api_heal(self):
   src=(ROOT/'boris_guardian.py').read_text()
   self.assertIn('MOP_RUNTIME_CONVERGENCE_DELEGATED_TO_DEPLOY_V3',src)

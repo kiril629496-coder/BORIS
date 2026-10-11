@@ -9,7 +9,9 @@ export function requireCampaignResult<T extends Record<string, any>>(result: T):
   if (!result || status === "error" || status === "skip" ||
       Number(result?.httpStatus || 0) >= 400 ||
       status.endsWith("_blocked") || status.endsWith("_required")) {
-    throw new Error(result?.message || "Не удалось выполнить действие. Ваши данные сохранены в форме. Повторите попытку.");
+    const error = new Error(result?.message || "Не удалось выполнить действие. Ваши данные сохранены в форме. Повторите попытку.");
+    Object.assign(error, {code: result?.code, httpStatus: result?.httpStatus, raw: result?.raw});
+    throw error;
   }
   return result;
 }

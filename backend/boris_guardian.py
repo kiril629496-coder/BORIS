@@ -58,6 +58,27 @@ def _unique_owner_alert_items(items):
     return list(dict.fromkeys(str(x) for x in (items or []) if str(x).strip()))
 
 
+def _owner_alert_signature(items):
+    """Keep one queue incident stable while its live counters change.
+
+    Counts remain in the evidence/message; they must not reset the two-sample
+    debounce on every tick and silently suppress a continuously growing fault.
+    Normalize only the exact queue diagnostic format; preserve other incidents.
+    """
+    import re
+    if isinstance(items, str):
+        items = items.split('|')
+    normalized = []
+    for raw in items or []:
+        value = str(raw).strip()
+        if not value:
+            continue
+        if re.fullmatch(r'Очередь: готово \d+, старейшая \d+ сек, системных ошибок 24ч \d+', value):
+            value = 'Очередь: критическая ошибка обработки фоновых задач'
+        normalized.append(value)
+    return '|'.join(sorted(set(normalized)))
+
+
 def _owner_warning_transition(state, warnings, threshold=3):
     """Deterministic state transition for owner-facing yellow warnings.
 
@@ -620,25 +641,40 @@ def wallet_capacity_health():
                 or pressure.get('blocked')
                 or presence_rt.get('owner_action_required')
             )
-            low_wallet=bool(contacts < target and real < red)
-            required=bool(low_wallet and not money_guard_blocks_funding)
-            reason=('avito_balance_below_one_red_cpl' if required else
-                    ('budget_or_presence_brake_precedes_funding' if low_wallet and money_guard_blocks_funding else None))
-            # LOW_WALLET_GLOBAL_WORK_PAUSE_V1:
-            # Funding notification and work permission are separate decisions.
-            # A structural presence-budget guard may suppress the contradictory
-            # instruction "top up now", but it must NOT grant permission to keep
-            # generating/publishing/optimizing an account whose real wallet
-            # cannot fund even one red-CPL lead. All KPI mutation lanes pause
-            # until Guardian observes recovery (or the lead goal is already met).
-            data={'version':3,'account_id':account_id,'checked_at':dt.datetime.now(dt.timezone.utc).isoformat(),
+            wallet_low_signal=bool(contacts < target and real < red)
+            # AVITO_ADVANCE_VISIBILITY_TRUTH_V1:
+            # /balance exposes the ordinary wallet but may not expose Avito advance.
+            # Therefore a small/zero wallet value is NOT authoritative evidence that
+            # the account cannot fund advertising. Global work pause is allowed only
+            # after Avito itself proves the funding condition (provider code 2214).
+            provider_hold={}
+            if wallet_low_signal:
+                try:
+                    from app.api.avito import _kpi_account_durable_2214_budget_hold
+                    provider_hold=_kpi_account_durable_2214_budget_hold(account_id) or {}
+                except Exception:
+                    provider_hold={}
+            advance_required=bool(
+                wallet_low_signal
+                and str(provider_hold.get('status') or '')=='avito_advance_required'
+                and int(provider_hold.get('provider_code') or 0)==2214
+            )
+            required=bool(advance_required and not money_guard_blocks_funding)
+            reason=('avito_advance_required_2214' if required else
+                    ('budget_or_presence_brake_precedes_funding' if advance_required and money_guard_blocks_funding else
+                     ('wallet_balance_low_advance_unknown' if wallet_low_signal else None)))
+            data={'version':4,'account_id':account_id,'checked_at':dt.datetime.now(dt.timezone.utc).isoformat(),
                   'service_active':True,'daily_budget_limit_rub':budget,'max_cpl_rub':red,
                   'target_leads_per_day':target,'contacts_today':contacts,'real_balance_rub':round(real,2),
+                  'wallet_balance_signal_low':bool(wallet_low_signal),
+                  'advance_visibility':'provider_2214_confirmed' if advance_required else ('unknown_via_balance_api' if wallet_low_signal else 'not_needed'),
+                  'provider_funding_code':2214 if advance_required else None,
+                  'provider_funding_confirmed_at':provider_hold.get('confirmed_at') if advance_required else None,
                   'owner_action_required':required,'reason':reason,
-                  'work_pause_required':bool(low_wallet),
-                  'work_pause_reason':'avito_wallet_below_one_red_cpl' if low_wallet else None,
-                  'resume_condition':'real_balance_rub_gte_max_cpl_rub_or_goal_met' if low_wallet else None,
-                  'funding_suppressed_by_money_guard':bool(low_wallet and money_guard_blocks_funding),
+                  'work_pause_required':bool(advance_required),
+                  'work_pause_reason':'avito_advance_required_2214' if advance_required else None,
+                  'resume_condition':'provider_2214_clears_or_goal_met' if advance_required else None,
+                  'funding_suppressed_by_money_guard':bool(advance_required and money_guard_blocks_funding),
                   'money_guard_status':str(brake.get('status') or '') or None,
                   'presence_budget_blocked':bool(pressure.get('blocked'))}
             sr=db.query(Storage).filter(Storage.account_id==account_id,Storage.key=='guardian_balance_funding_health').order_by(Storage.id.desc()).first()
@@ -878,6 +914,536 @@ def email_outreach_runtime_health():
                 'integrity':integrity,'healed':healed}
     except Exception as e:
         return {'critical':[f'email runtime health: {type(e).__name__}'],'warnings':[],'queue':{},'owners':[]}
+
+
+def mop_account_runtime_invariants():
+    """Self-heal paid MOP wiring and surface provider blockers per account."""
+    from app.client_config.entitlements import has_entitlement
+    from app.models.storage import Storage
+    from app import mop_core
+    out={"healed":[],"bad":[],"warnings":[],"owner_actions":[],"details":[]}
+    db=SessionLocal()
+    try:
+        rows=db.execute(text("""
+            SELECT DISTINCT ON (s.account_id) s.account_id,s.value
+            FROM storage s
+            WHERE s.key='mop_crm_sales_settings'
+            ORDER BY s.account_id,s.id DESC
+        """)).fetchall()
+        for account_id,raw in rows:
+            aid=str(account_id or '').strip()
+            if not aid:
+                continue
+            try: cfg=json.loads(raw or '{}') if raw else {}
+            except Exception: cfg={}
+            owner_enabled=bool(cfg.get('mop_enabled',cfg.get('enabled',True)))
+            auto_send=bool(cfg.get('auto_send',False))
+            try:
+                ent=has_entitlement(db,aid,'mop') or {}
+                paid=bool(ent.get('allowed'))
+            except Exception:
+                paid=False; ent={}
+            if not (owner_enabled and paid):
+                continue
+
+            bound=bool(db.execute(text(
+                "SELECT 1 FROM ai_bindings WHERE product='mop' AND account_id=:a LIMIT 1"
+            ),{'a':aid}).first())
+            if not bound:
+                db.execute(text("""
+                    INSERT INTO ai_bindings(product,account_id,group_key,memory_shared)
+                    VALUES('mop',:a,:g,false)
+                """),{'a':aid,'g':('mop:'+aid)[:64]})
+                db.commit()
+                bound=True
+                out["healed"].append(f"МОП binding {aid}")
+
+            p402=int(db.execute(text("""
+                SELECT count(*) FROM mop_drafts
+                WHERE account_id=:a AND status='waiting_external'
+                  AND coalesce(send_error,'') LIKE 'Avito 402%'
+                  AND updated_at>now()-interval '6 hours'
+            """),{'a':aid}).scalar() or 0)
+
+            stale_ready=[]
+            stale_external=[]
+            if p402 and auto_send:
+                stale_ready=[int(x[0]) for x in db.execute(text("""
+                    SELECT id FROM mop_drafts
+                    WHERE account_id=:a AND status='draft_ready'
+                      AND sent_at IS NULL
+                      AND created_at<now()-interval '60 minutes'
+                    ORDER BY id
+                    LIMIT 100
+                """),{'a':aid}).fetchall()]
+                stale_external=[int(x[0]) for x in db.execute(text("""
+                    SELECT id FROM mop_drafts
+                    WHERE account_id=:a AND status='waiting_external'
+                      AND coalesce(send_error,'') LIKE 'Avito 402%'
+                      AND sent_at IS NULL
+                      AND created_at<now()-interval '60 minutes'
+                    ORDER BY id
+                    LIMIT 100
+                """),{'a':aid}).fetchall()]
+                # MOP_PROVIDER_402_STALE_GUARD_V3:
+                # Provider/tariff failure is an external dependency, not manager work.
+                # Keep every blocked draft inside the bounded waiting_external lane;
+                # exact-chat reprobe/recovery owns the next transition.
+                for did in stale_ready:
+                    try:
+                        mop_core.set_status(
+                            db,did,'waiting_external',('draft_ready',),
+                            'provider_deferred',channel='mop_guardian',
+                            actor_type='system',actor_id='provider_402_stale_guard',
+                            payload='Avito Messenger API 402; deferred to bounded provider reprobe',
+                            meta={'policy_version':'MOP_PROVIDER_402_STALE_GUARD_V3',
+                                  'external_action':False,'account_id':aid,'stale_after_minutes':60,
+                                  'dependency_state':'waiting_external','auto_reprobe':True},
+                            extra_sql=", send_error='Avito 402 — provider wait; auto-reprobe active', locked_at=NULL, locked_by=NULL",
+                        )
+                    except Exception:
+                        db.rollback()
+                # waiting_external is already the correct fail-closed state.
+                # Do not convert it to human_required merely because 402 persists.
+                if stale_external:
+                    db.execute(text("""
+                        UPDATE mop_drafts
+                           SET send_error='Avito 402 — provider wait; auto-reprobe active',
+                               locked_at=NULL,locked_by=NULL,updated_at=now()
+                         WHERE id = ANY(:ids) AND status='waiting_external'
+                    """),{'ids':stale_external})
+                    db.commit()
+                if stale_ready or stale_external:
+                    out["healed"].append(
+                        f"МОП {aid}: stale auto-send suppressed "
+                        f"(draft_ready={len(stale_ready)}, waiting_external={len(stale_external)})"
+                    )
+                p402=int(db.execute(text("""
+                    SELECT count(*) FROM mop_drafts
+                    WHERE account_id=:a AND status='waiting_external'
+                      AND coalesce(send_error,'') LIKE 'Avito 402%'
+                      AND updated_at>now()-interval '6 hours'
+                """),{'a':aid}).scalar() or 0)
+
+            # MOP_PROVIDER_HEALTH_CANONICAL_POLL_V1:
+            # Queue depth is NOT provider health. A stale queue can be safely
+            # drained to human_required while Avito Messenger remains partially
+            # or fully blocked. Use the minute inbox capability fact whenever it
+            # is fresh; it records provider 402 per chat without message bodies.
+            inbox_cap={}
+            caprow=db.query(Storage).filter(
+                Storage.account_id==aid,
+                Storage.key=='reactivation_inbox_capability_v1',
+            ).order_by(Storage.id.desc()).first()
+            if caprow and caprow.value:
+                try: inbox_cap=json.loads(caprow.value or '{}')
+                except Exception: inbox_cap={}
+            cap_fresh=False
+            try:
+                cap_checked=dt.datetime.fromisoformat(
+                    str(inbox_cap.get('checked_at') or '').replace('Z','+00:00')
+                )
+                if cap_checked.tzinfo is None:
+                    cap_checked=cap_checked.replace(tzinfo=dt.timezone.utc)
+                cap_age=(dt.datetime.now(dt.timezone.utc)-cap_checked.astimezone(dt.timezone.utc)).total_seconds()
+                cap_fresh=bool(-60 <= cap_age <= 600)
+            except Exception:
+                cap_age=None
+            cap_402=sum(
+                int((x or {}).get('count') or 0)
+                for x in (inbox_cap.get('transport_error_classes') or [])
+                if str((x or {}).get('classification') or '')=='avito_messenger_subscription_required'
+            )
+            cap_state=str(inbox_cap.get('state') or '')
+            cap_class=str(inbox_cap.get('classification') or '')
+            cap_synced=int(inbox_cap.get('synced') or 0)
+            provider_402=bool(
+                cap_fresh and (
+                    cap_402>0
+                    or '402' in cap_class
+                    or 'subscription_required' in cap_class
+                )
+            )
+            recent_402=int(db.execute(text("""
+                SELECT count(*) FROM mop_drafts
+                WHERE account_id=:a
+                  AND coalesce(send_error,'') LIKE 'Avito 402%'
+                  AND updated_at>now()-interval '6 hours'
+            """),{'a':aid}).scalar() or 0)
+            if provider_402:
+                provider_status='blocked_provider' if cap_state=='waiting_external' and cap_synced<=0 else 'degraded_provider'
+            elif cap_fresh and cap_state=='healthy':
+                provider_status='ok'
+            elif recent_402:
+                provider_status='degraded_provider'
+            else:
+                provider_status='unknown' if not cap_fresh else ('degraded_provider' if cap_state=='degraded' else 'ok')
+            provider_action_required=bool(provider_402 or (not cap_fresh and recent_402))
+            health={
+                'status':provider_status,
+                'provider_code':402 if provider_action_required else None,
+                'owner_action_required':provider_action_required,
+                'waiting_external':p402,
+                'recent_402_drafts':recent_402,
+                'provider_blocked_chats':cap_402 if cap_fresh else None,
+                'provider_synced_chats':cap_synced if cap_fresh else None,
+                'provider_fact_state':cap_state or None,
+                'provider_fact_classification':cap_class or None,
+                'provider_fact_fresh':cap_fresh,
+                'binding':bound,
+                'checked_at':dt.datetime.now(dt.timezone.utc).isoformat(),
+                'action':('Включить тариф/доступ Avito Messenger API для аккаунта' if provider_action_required else None),
+            }
+            hrow=db.query(Storage).filter(
+                Storage.account_id==aid,Storage.key=='mop_provider_health'
+            ).order_by(Storage.id.desc()).first()
+            hraw=json.dumps(health,ensure_ascii=False)
+            if hrow: hrow.value=hraw
+            else: db.add(Storage(account_id=aid,key='mop_provider_health',value=hraw))
+            db.commit()
+            if provider_action_required:
+                out["owner_actions"].append({
+                    'account_id':aid,'provider_code':402,'waiting_external':p402,
+                    'blocked_chats':cap_402 if cap_fresh else None,
+                    'synced_chats':cap_synced if cap_fresh else None,
+                    'status':provider_status,
+                    'action':'Включить тариф/доступ Avito Messenger API',
+                })
+            out["details"].append({
+                'account_id':aid,'paid':paid,'owner_enabled':owner_enabled,
+                'auto_send':auto_send,'binding':bound,
+                'provider_status':provider_status,
+                'provider_402_waiting':p402,
+                'provider_402_blocked_chats':cap_402 if cap_fresh else None,
+                'provider_synced_chats':cap_synced if cap_fresh else None,
+                'stale_ready_handed_off':len(stale_ready),
+                'stale_external_handed_off':len(stale_external),
+            })
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        out["bad"].append('МОП runtime invariant: '+type(exc).__name__)
+    finally:
+        db.close()
+    return out
+
+
+def mop_ai_route_invariant_health():
+    """Detect impossible no-AI routing when paid MOP is fully wired."""
+    import uuid
+    from app.client_config.entitlements import has_entitlement
+    from app.models.control_plane import ControlIncident
+    out={"critical":[],"healed":[],"accounts":[]}
+    db=SessionLocal()
+    try:
+        rows=db.execute(text("""
+            SELECT DISTINCT d.account_id,e.id,e.event,e.at,d.id AS draft_id
+            FROM mop_draft_events e
+            JOIN mop_drafts d ON d.id=e.draft_id
+            WHERE e.at>=now()-interval '30 minutes'
+              AND e.event IN ('card_no_ai','route_missing')
+            ORDER BY e.at DESC
+        """)).mappings().all()
+        bad_accounts=set()
+        for r in rows:
+            aid=str(r.get('account_id') or '')
+            if not aid: continue
+            try:
+                paid=bool((has_entitlement(db,aid,'mop') or {}).get('allowed'))
+            except Exception:
+                paid=False
+            cfgrow=db.execute(text("""
+                SELECT value FROM storage
+                WHERE account_id=:a AND key='mop_crm_sales_settings'
+                ORDER BY id DESC LIMIT 1
+            """),{'a':aid}).scalar()
+            try: cfg=json.loads(cfgrow or '{}')
+            except Exception: cfg={}
+            enabled=bool(cfg.get('mop_enabled',cfg.get('enabled',True)))
+            auto_send=bool(cfg.get('auto_send',False))
+            binding=bool(db.execute(text(
+                "SELECT 1 FROM ai_bindings WHERE product='mop' AND account_id=:a LIMIT 1"
+            ),{'a':aid}).first())
+            if not (paid and enabled and auto_send and binding):
+                continue
+            bad_accounts.add(aid)
+            existing=db.query(ControlIncident).filter(
+                ControlIncident.state=='open',
+                ControlIncident.incident_type=='MOP_AI_ROUTE_INVARIANT_FAILED',
+                ControlIncident.account_id==aid,
+            ).first()
+            if not existing:
+                db.add(ControlIncident(
+                    id=str(uuid.uuid4()),
+                    incident_type='MOP_AI_ROUTE_INVARIANT_FAILED',
+                    priority='P1',state='open',module='mop',account_id=aid,
+                    symptom='Paid/bound auto-send MOP produced card_no_ai or route_missing',
+                    root_cause='runtime_route_invariant_broken',
+                    remediation='Self-heal binding/config then verify next inbound through AI route',
+                    prevention='Guardian post-inbound invariant',
+                    details_json={
+                        'draft_id':int(r.get('draft_id') or 0),
+                        'event':str(r.get('event') or ''),
+                        'event_id':int(r.get('id') or 0),
+                        'detected_at':dt.datetime.now(dt.timezone.utc).isoformat(),
+                    },
+                ))
+            out["critical"].append(f"МОП {aid}: AI route invariant failed ({r.get('event')})")
+        # Resolve stale incidents automatically once a clean window passes.
+        open_rows=db.query(ControlIncident).filter(
+            ControlIncident.state=='open',
+            ControlIncident.incident_type=='MOP_AI_ROUTE_INVARIANT_FAILED',
+        ).all()
+        for inc in open_rows:
+            if str(inc.account_id or '') not in bad_accounts:
+                inc.state='resolved'; inc.resolved_at=dt.datetime.now(dt.timezone.utc)
+                inc.updated_at=dt.datetime.now(dt.timezone.utc)
+                out["healed"].append(f"МОП {inc.account_id}: AI route invariant clean")
+        db.commit()
+        out["accounts"]=sorted(bad_accounts)
+    except Exception as exc:
+        db.rollback()
+        out["critical"].append('MOP AI route invariant: '+type(exc).__name__)
+    finally:
+        db.close()
+    return out
+
+
+def _module_watch_account_order(canonical_ids, priority_csv=''):
+    """Configured names affect order only; canonical discovery defines coverage."""
+    canonical={str(a).strip() for a in canonical_ids or [] if str(a).strip()}
+    priority=[a.strip() for a in str(priority_csv or '').split(',') if a.strip() in canonical]
+    return list(dict.fromkeys(priority+sorted(canonical)))
+
+
+def _module_watch_lock_key(account_id):
+    """Use the same logical singleton lock as Storage reconciliation."""
+    import hashlib
+    data=hashlib.blake2b((str(account_id)+'|active_module_watch_v1').encode(),digest_size=8).digest()
+    return int.from_bytes(data,'big',signed=True)
+
+
+def active_client_module_watch():
+    """10-minute evidence for every canonical client, not a hardcoded shortlist."""
+    import uuid
+    from app.services.client_supervisor import build_client_state, candidate_accounts
+    from app.models.control_plane import ControlIncident
+
+    raw=os.environ.get(
+        'OWNER_DAILY_REPORT_ACCOUNT_IDS',
+        'mbroker_27859,albertardashov_79016,pbi_artashes_plitka_mo_83993,7473337_04122'
+    )
+    # OWNER_DAILY_REPORT_ACCOUNT_IDS is a display-priority list, never a fleet filter.
+    family_map={
+        'marketing':'marketing',
+        'feed_factory':'feed_factory',
+        'crm':'crm',
+        'mop':'messages',
+        'reactivation':'messages',
+    }
+    now=dt.datetime.now(dt.timezone.utc)
+    bucket=int(now.timestamp()//600)
+    day_start=now.astimezone(dt.timezone(dt.timedelta(hours=3))).replace(
+        hour=0,minute=0,second=0,microsecond=0
+    ).astimezone(dt.timezone.utc)
+    out={'warnings':[],'healed':[],'snapshots':[],'coverage_gaps':[],'deferred_accounts':[]}
+    db=SessionLocal()
+    try:
+        accounts=_module_watch_account_order(candidate_accounts(db),raw)
+        out['discovery']={'source':'client_supervisor.candidate_accounts','account_count':len(accounts)}
+        for aid in accounts:
+            locked=db.execute(text('SELECT pg_try_advisory_xact_lock(:k)'),
+                              {'k':_module_watch_lock_key(aid)}).scalar()
+            if not locked:
+                out['deferred_accounts'].append(aid)
+                continue
+            existing=db.execute(text("""
+                SELECT id,value FROM storage
+                WHERE account_id=:a AND key='active_module_watch_v1'
+                ORDER BY id DESC LIMIT 1
+            """),{'a':aid}).mappings().first()
+            previous={}
+            if existing and existing.get('value'):
+                try: previous=json.loads(existing['value'] or '{}')
+                except Exception: previous={}
+            # ACTIVE_MODULE_WATCH_SCOPE_AWARE_LEDGER_V2: a v1 snapshot counted
+            # only account-scoped executions and therefore falsely reported 0%
+            # for globally-scoped business rules. Recompute v1 in the same bucket.
+            if int(previous.get('version') or 0)>=2 and int(previous.get('bucket') or -1)==bucket:
+                out['snapshots'].append(previous)
+                continue
+
+            state=build_client_state(db,aid)
+            expected=sorted(set(state.get('expected_modules') or []))
+            modules=[]
+            module_by_name={str(m.get('module')):m for m in (state.get('modules') or [])}
+            provider_row=db.execute(text("""
+                SELECT value FROM storage
+                WHERE account_id=:a AND key='mop_provider_health'
+                ORDER BY id DESC LIMIT 1
+            """),{'a':aid}).scalar()
+            try: provider=json.loads(provider_row or '{}')
+            except Exception: provider={}
+
+            for name in expected:
+                m=module_by_name.get(name) or {}
+                health=str(m.get('health') or 'unknown')
+                classification=str(m.get('classification') or '')
+                owner_action_required=bool(m.get('owner_action_required'))
+                safe_action=m.get('safe_action')
+                if name=='mop' and str(provider.get('status') or '') in {'degraded_provider','blocked_provider'}:
+                    _provider_blocked=str(provider.get('status') or '')=='blocked_provider'
+                    health='blocked' if _provider_blocked else 'degraded'
+                    classification='MOP_PROVIDER_BLOCKED_402' if _provider_blocked else 'MOP_PROVIDER_PARTIAL_402'
+                    owner_action_required=True
+                    safe_action='restore_avito_messenger_api_access'
+                modules.append({
+                    'module':name,'health':health,'classification':classification,
+                    'owner_action_required':owner_action_required,
+                    'safe_action':safe_action,
+                })
+
+            coverage=[]
+            seen_families=set()
+            for name in expected:
+                family=family_map.get(name)
+                if not family or family in seen_families:
+                    continue
+                seen_families.add(family)
+                # RULE_COVERAGE_SCOPE_AWARE_V2:
+                # Global business-rule contracts are evaluated once by the
+                # canonical control-plane runner and apply to every tenant.
+                # Account-scoped requirements still require exact account proof.
+                expected_row=db.execute(text("""
+                    SELECT
+                      count(*) FILTER (
+                        WHERE scope_type='global' AND coalesce(scope_id,'*')='*'
+                      ) AS global_expected,
+                      count(*) FILTER (
+                        WHERE scope_type='account' AND scope_id=:a
+                      ) AS account_expected
+                    FROM control_requirements
+                    WHERE status='active' AND requirement_type='business_rule'
+                      AND module=:m
+                """),{'a':aid,'m':family}).mappings().first() or {}
+                global_expected=int(expected_row.get('global_expected') or 0)
+                account_expected=int(expected_row.get('account_expected') or 0)
+                global_evaluated=int(db.execute(text("""
+                    SELECT count(DISTINCT e.requirement_id)
+                    FROM control_executions e
+                    JOIN control_requirements r ON r.id=e.requirement_id
+                    WHERE r.module=:m AND r.status='active'
+                      AND r.requirement_type='business_rule'
+                      AND r.scope_type='global' AND coalesce(r.scope_id,'*')='*'
+                      AND e.account_id IS NULL AND e.created_at>=:start
+                """),{'m':family,'start':day_start}).scalar() or 0)
+                account_evaluated=int(db.execute(text("""
+                    SELECT count(DISTINCT e.requirement_id)
+                    FROM control_executions e
+                    JOIN control_requirements r ON r.id=e.requirement_id
+                    WHERE r.module=:m AND r.status='active'
+                      AND r.requirement_type='business_rule'
+                      AND r.scope_type='account' AND r.scope_id=:a
+                      AND e.account_id=:a AND e.created_at>=:start
+                """),{'a':aid,'m':family,'start':day_start}).scalar() or 0)
+                outcome_rows=db.execute(text("""
+                    WITH ranked AS (
+                      SELECT e.status,e.requirement_id,e.account_id,
+                             row_number() OVER (
+                               PARTITION BY e.requirement_id,coalesce(e.account_id,'')
+                               ORDER BY e.created_at DESC,e.updated_at DESC,e.id DESC
+                             ) AS rn
+                      FROM control_executions e
+                      JOIN control_requirements r ON r.id=e.requirement_id
+                      WHERE r.module=:m AND r.status='active'
+                        AND r.requirement_type='business_rule'
+                        AND e.created_at>=:start
+                        AND (
+                          (r.scope_type='global' AND coalesce(r.scope_id,'*')='*'
+                           AND e.account_id IS NULL)
+                          OR
+                          (r.scope_type='account' AND r.scope_id=:a
+                           AND e.account_id=:a)
+                        )
+                    )
+                    SELECT status,count(*) AS n
+                    FROM ranked WHERE rn=1 GROUP BY status ORDER BY status
+                """),{'a':aid,'m':family,'start':day_start}).mappings().all()
+                outcomes={str(x.get('status') or 'unknown'):int(x.get('n') or 0) for x in outcome_rows}
+                expected_rules=global_expected+account_expected
+                evaluated=global_evaluated+account_evaluated
+                pct=round((evaluated*100.0/expected_rules),1) if expected_rules else 100.0
+                cov={
+                    'module':family,
+                    'expected':expected_rules,
+                    'evaluated':evaluated,
+                    'global_expected':global_expected,
+                    'global_evaluated':global_evaluated,
+                    'account_expected':account_expected,
+                    'account_evaluated':account_evaluated,
+                    'evaluation_outcomes':outcomes,
+                    'rule_coverage_pct':pct,
+                    'status':'pass' if evaluated>=expected_rules else 'instrumentation_gap',
+                    'evidence_model':'global_contract_plus_exact_account_scope_v2',
+                }
+                coverage.append(cov)
+                inc=db.query(ControlIncident).filter(
+                    ControlIncident.state=='open',
+                    ControlIncident.incident_type=='MODULE_RULE_COVERAGE_GAP',
+                    ControlIncident.account_id==aid,
+                    ControlIncident.module==family,
+                ).first()
+                if expected_rules and evaluated<expected_rules:
+                    out['coverage_gaps'].append({
+                        'account_id':aid,'module':family,'expected':expected_rules,
+                        'evaluated':evaluated,'rule_coverage_pct':pct,
+                        'global_expected':global_expected,
+                        'global_evaluated':global_evaluated,
+                        'account_expected':account_expected,
+                        'account_evaluated':account_evaluated,
+                    })
+                    if not inc:
+                        db.add(ControlIncident(
+                            id=str(uuid.uuid4()),
+                            incident_type='MODULE_RULE_COVERAGE_GAP',
+                            priority='P2',state='open',module=family,account_id=aid,
+                            symptom=f'Runtime ledger proves {evaluated}/{expected_rules} applicable business rules evaluated today',
+                            root_cause='rule_execution_instrumentation_or_scheduler_coverage_gap',
+                            remediation='Record missing global contract or exact account-scoped rule evaluation evidence',
+                            prevention='active_client_module_watch_v2',
+                            details_json=cov,
+                        ))
+                    else:
+                        inc.details_json=cov; inc.updated_at=now
+                elif inc:
+                    inc.state='resolved'; inc.resolved_at=now; inc.updated_at=now
+                    out['healed'].append(f"{aid}/{family}: rule coverage 100%")
+
+            snapshot={
+                'version':2,'account_id':aid,'bucket':bucket,'checked_at':now.isoformat(),
+                'expected_modules':expected,'modules':modules,'rule_coverage':coverage,
+                'client_state':state.get('client_state'),'overall':state.get('overall'),
+            }
+            raw_snapshot=json.dumps(snapshot,ensure_ascii=False)
+            if existing:
+                db.execute(text("UPDATE storage SET value=:v WHERE id=:i"),
+                           {'v':raw_snapshot,'i':int(existing['id'])})
+            else:
+                db.execute(text(
+                    "INSERT INTO storage(account_id,key,value) VALUES(:a,'active_module_watch_v1',:v)"
+                ),{'a':aid,'v':raw_snapshot})
+            out['snapshots'].append(snapshot)
+        db.commit()
+        if out['coverage_gaps']:
+            out['warnings'].append(
+                f"Rule coverage ledger incomplete: {len(out['coverage_gaps'])} account/module scopes"
+            )
+    except Exception as exc:
+        db.rollback()
+        out['warnings'].append('active module watch: '+type(exc).__name__)
+    finally:
+        db.close()
+    return out
 
 def mop_training_contract_health():
     """Read-only smoke contract for the client-facing MOP training contour.
@@ -1996,6 +2562,16 @@ def quick(send_ok=False):
                 r=requests.get(url,timeout=10)
                 if r.status_code>=500: bad.append(f'{name} HTTP {r.status_code}')
             except Exception as e2: bad.append(f'{name}: {str(e2)[:70]}')
+    mop_runtime_health=mop_account_runtime_invariants()
+    healed.extend(mop_runtime_health.get('healed') or [])
+    bad.extend(mop_runtime_health.get('bad') or [])
+    warnings.extend(mop_runtime_health.get('warnings') or [])
+    mop_route_health=mop_ai_route_invariant_health()
+    bad.extend(mop_route_health.get('critical') or [])
+    healed.extend(mop_route_health.get('healed') or [])
+    active_watch=active_client_module_watch()
+    warnings.extend(active_watch.get('warnings') or [])
+    healed.extend(active_watch.get('healed') or [])
     mop_training_health=mop_training_contract_health()
     _mop_generation=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H')
     _mop_critical,_mop_warnings=classify_mop_training_health(
@@ -2278,13 +2854,14 @@ def quick(send_ok=False):
             tg('✅ BORIS — внешнее ограничение больше не блокирует активные задачи. Старые ожидания закрыты безопасно; основной контур работает.')
         else:
             tg('✅ BORIS — временное ограничение снято. От вас действий не требуется.')
-    sig='|'.join(sorted(bad)); prev=s.get('last_alert_sig','')
-    # OWNER_ALERT_DEBOUNCE_V2: do not turn transient deploy/restart races into
-    # alternating red/green Telegram spam. A new incident and its recovery must
-    # both be observed twice before the owner is notified.
+    sig=_owner_alert_signature(bad)
+    prev=_owner_alert_signature(s.get('last_alert_sig',''))
+    # OWNER_ALERT_DEBOUNCE_V3: a growing queue counter is the SAME incident.
+    # Preserve two-sample incident/recovery confirmation and the original live
+    # evidence; normalize persisted V2 signatures for a non-spamming upgrade.
     if bad:
         s['healthy_confirmations']=0
-        pending=str(s.get('pending_alert_sig') or '')
+        pending=_owner_alert_signature(s.get('pending_alert_sig') or '')
         count=int(s.get('pending_alert_count',0) or 0)+1 if pending==sig else 1
         s['pending_alert_sig']=sig; s['pending_alert_count']=count
         if sig!=prev and count>=2:
@@ -2319,6 +2896,15 @@ def quick(send_ok=False):
                 s['last_alert_sig']=''; s['healthy_confirmations']=0
         elif send_ok:
             tg('✅ BORIS — критический контур работает нормально.')
+    # GUARDIAN_QUICK_EVIDENCE_V1: persist the exact verdict independently of
+    # notification debounce, so monitoring can inspect this tick, not an old alert.
+    s['last_quick_result']={
+        'checked_at':dt.datetime.now(dt.timezone.utc).isoformat(),
+        'ok':not bool(bad), 'critical':list(bad),
+        'warnings':list(warnings), 'healed':list(healed),
+        'incident_signature':sig,
+    }
+    print('GUARDIAN_QUICK_RESULT '+json.dumps(s['last_quick_result'],ensure_ascii=False),flush=True)
     save(s); return not bad,bad,healed
 def login_ok():
     try:

@@ -774,11 +774,47 @@ def record_observation(row: CampaignItem, snapshot: dict) -> dict:
                 return {"status": "waiting_complete_day"}
         except Exception as _suppressed_exc:
             observe_suppressed(__name__, _suppressed_exc, line=774)
+    layout=str(payload.get("banner_layout") or "").strip()
+    family=str(
+        payload.get("banner_creative_family")
+        or payload.get("creative_family")
+        or ""
+    ).strip()
+    if not family and layout.startswith("premium_photo_") and layout.endswith("_adaptive_v7"):
+        family=layout[len("premium_photo_"):-len("_adaptive_v7")]
     obs = {
         "snapshot_date": snap_date,
         "views": int(snapshot.get("views") or 0),
         "contacts": int(snapshot.get("contacts") or 0),
         "conversion": float(snapshot.get("conversion") or 0),
+        "creative_evidence": {
+            "banner_family": family or None,
+            "banner_layout": layout or None,
+            "banner_engine": str(payload.get("banner_engine") or "").strip() or None,
+            "banner_model": str(payload.get("banner_model") or "").strip() or None,
+            "formula_id": str(
+                version.get("formula_id")
+                or version.get("copy_formula_id")
+                or payload.get("copy_formula_id")
+                or ""
+            ).strip() or None,
+            "hypothesis_type": str(
+                version.get("hypothesis_type")
+                or payload.get("hypothesis_type")
+                or ""
+            ).strip() or None,
+            "hypothesis": str(
+                version.get("hypothesis")
+                or payload.get("hypothesis")
+                or ""
+            ).strip() or None,
+            "creative_angle": str(
+                version.get("creative_angle")
+                or payload.get("creative_angle")
+                or payload.get("angle")
+                or ""
+            ).strip() or None,
+        },
     }
     observations = version.setdefault("observations", [])
     observations[:] = [x for x in observations if x.get("snapshot_date") != snap_date]

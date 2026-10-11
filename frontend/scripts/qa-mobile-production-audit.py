@@ -30,6 +30,7 @@ QA_CRED = qa_suite.CLIENT
 # Canonical web routes. Native phone/PBX routes are deliberately excluded: they
 # belong to telephony_core, not frontend_mobile_ui.
 ROUTES = [
+    "/messenger",
     "/dashboard/command-center",
     "/dashboard/campaign",
     "/messages",
@@ -49,6 +50,7 @@ VIEWPORTS = [
     (360, 800, "phone-360"),
     (390, 844, "phone-390"),
     (768, 900, "tablet-768"),
+    (1280, 900, "desktop-1280"),
     (1440, 1000, "desktop-1440"),
 ]
 ROUTE_PACE_SEC=float(os.environ.get("BORIS_QA_ROUTE_PACE_SEC","0.75"))
@@ -238,10 +240,11 @@ def route_contract(page, route, metrics, expected_account):
         problems.append(f"empty:{metrics['bodyText']}")
     if metrics["offenders"]:
         problems.append(f"offscreen:{len(metrics['offenders'])}")
-    if metrics["width"] <= 900 and metrics["dockDisplay"] == "none":
-        problems.append("mobile-dock-hidden")
-    if metrics["width"] > 900 and metrics["dockDisplay"] not in (None, "none"):
-        problems.append("mobile-dock-on-desktop")
+    if route != "/messenger":
+        if metrics["width"] <= 900 and metrics["dockDisplay"] == "none":
+            problems.append("mobile-dock-hidden")
+        if metrics["width"] > 900 and metrics["dockDisplay"] not in (None, "none"):
+            problems.append("mobile-dock-on-desktop")
     if metrics.get("account") != expected_account:
         problems.append("account-state-lost")
     if metrics["width"] <= 900 and metrics.get("dockOverlap"):
@@ -251,6 +254,16 @@ def route_contract(page, route, metrics, expected_account):
     if metrics["width"] <= 390 and metrics.get("tinyText"):
         problems.append(f"tiny-text:{len(metrics['tinyText'])}")
 
+    if route == "/messenger":
+        nav=page.locator('nav[aria-label="Навигация Messenger"]')
+        if nav.count()!=1:
+            problems.append("messenger-nav-missing")
+        body=page.locator("body").inner_text()
+        for marker in ("BORIS Messenger","Чат команды","Клиенты","Работа","CRM"):
+            if marker not in body:
+                problems.append("messenger-missing:"+marker)
+        if metrics["width"] <= 390 and "Ещё" not in body:
+            problems.append("messenger-mobile-more-missing")
     if route == "/dashboard/campaign" and metrics["width"] <= 390:
         q=page.locator('[data-testid="campaign-quantity-row"]')
         if q.count():

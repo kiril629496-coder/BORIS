@@ -12,6 +12,7 @@ from sqlalchemy import text
 from app.db.session import SessionLocal
 from app.services import prospect_discovery, prospecting
 from app.services.email_queue import enqueue_email
+from app.services.outreach_discovery_policy import (OWNER_BORIS_DISCOVERY_LABEL, OWNER_BORIS_DISCOVERY_NICHES, company_noise_reason, niche_company_relevant, DEVELOPMENT_QUERY_SUFFIXES)
 from app.services.owner_outreach_policy import (
     OWNER_OUTREACH_HARD_MAX_DAILY,
     canonical_policy_state,
@@ -34,201 +35,181 @@ BAD_SEARCH_DOMAINS = prospect_discovery.BAD_DOMAINS | {
 # limit is allowed; no code/config/schema drift may raise owner outreach above 20.
 OWNER_OUTREACH_MAX_DAILY = OWNER_OUTREACH_HARD_MAX_DAILY
 
-# OWNER_OUTREACH_COPY_ROTATION_V3
-# Ten owner-approved BORIS test-first cold-email copies. They rotate strictly A→J.
-# Every body ends with the single tracked BORIS URL. Suppression, pacing and daily caps remain unchanged.
+# OWNER_OUTREACH_COPY_ROTATION_V4
+# Короткий холодный заход: разрыв шаблона → бесплатный аудит → тест только после пользы.
+# Десять тем вращаются A→J; тело намеренно одно и короткое, чтобы тестировать тему, а не разную обещанную ценность.
 OWNER_OUTREACH_COPY_VARIANTS = (
     {
         "label": "A",
-        "subject": "Попробовать AI-маркетолога на своём Avito?",
-        "body": """Добрый день!
+        "subject": "Не буду продавать вам продвижение",
+        "body": """Добрый день! Это Кирилл.
 
-Если вы продаёте через Avito, предлагаю не обсуждать BORIS в теории, а проверить его на вашем аккаунте.
+Не буду продавать вам продвижение в письме.
 
-На 4 дня бесплатно подключается AI-маркетолог: он анализирует объявления, находит точки роста, даёт рекомендации и следит за KPI.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-Дополнительно на 2 дня можно включить AI-менеджера по продажам — он помогает обрабатывать реальные обращения и не терять клиентов.
-
-Регистрация занимает около минуты. Оплата для старта теста не нужна.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
     {
         "label": "B",
-        "subject": "4 дня теста на вашем Avito",
-        "body": """Добрый день!
+        "subject": "Проверьте свой Avito бесплатно",
+        "body": """Добрый день! Это Кирилл.
 
-Предлагаю проверить BORIS прямо на вашем Avito.
+Не буду продавать вам продвижение в письме.
 
-4 дня бесплатно работает AI-маркетолог: смотрит объявления, статистику и KPI, показывает, что мешает получать больше обращений, и формирует конкретные действия.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-Если нужно, на 2 дня бесплатно подключается AI-менеджер по продажам для работы с входящими диалогами.
-
-Можно зайти, зарегистрироваться примерно за минуту и посмотреть систему на своих данных.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
     {
         "label": "C",
-        "subject": "Что можно улучшить в ваших объявлениях",
-        "body": """Добрый день!
+        "subject": "Где Avito теряет ваши заявки?",
+        "body": """Добрый день! Это Кирилл.
 
-Если Avito уже приносит просмотры и обращения, BORIS может показать, где именно остаётся рост.
+Не буду продавать вам продвижение в письме.
 
-AI-маркетолог анализирует ваши объявления, тексты, фото, цены, продвижение и результат по KPI.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-Сейчас можно проверить это бесплатно 4 дня на своём аккаунте. А AI-менеджера по продажам при необходимости включить ещё на 2 дня бесплатно.
-
-Без длинной презентации: регистрация занимает около минуты, дальше смотрите систему на реальном аккаунте.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
     {
         "label": "D",
-        "subject": "Можно проверить на вашем аккаунте бесплатно",
-        "body": """Добрый день!
+        "subject": "Что не так с вашим Avito?",
+        "body": """Добрый день! Это Кирилл.
 
-Мы сделали BORIS для бизнеса, который продаёт через Avito и хочет меньше ручной работы и больше контроля результата.
+Не буду продавать вам продвижение в письме.
 
-На бесплатном тесте AI-маркетолог 4 дня анализирует аккаунт, объявления и KPI, находит проблемы и подсказывает конкретные действия.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-На 2 дня можно дополнительно включить AI-менеджера по продажам, чтобы проверить работу с реальными обращениями.
-
-Для старта достаточно регистрации — около минуты.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
     {
         "label": "E",
-        "subject": "Avito без постоянной ручной рутины",
-        "body": """Добрый день!
+        "subject": "Бесплатный разбор вашего Avito",
+        "body": """Добрый день! Это Кирилл.
 
-Если приходится постоянно вручную смотреть статистику, объявления, обращения и решать, что менять дальше, часть этой работы можно отдать BORIS.
+Не буду продавать вам продвижение в письме.
 
-AI-маркетолог анализирует аккаунт и следит за KPI. AI-менеджер помогает отвечать на обращения и вести клиента дальше.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-Сейчас AI-маркетолога можно бесплатно проверить 4 дня, а AI-менеджера — 2 дня.
-
-Регистрация занимает около минуты. Можно просто зайти и посмотреть, как система работает на вашем бизнесе.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
     {
         "label": "F",
-        "subject": "Где теряются обращения с Avito",
-        "body": """Добрый день!
+        "subject": "Сколько заявок теряется на Avito?",
+        "body": """Добрый день! Это Кирилл.
 
-Часто проблема не только в количестве просмотров, а в том, что происходит после первого обращения.
+Не буду продавать вам продвижение в письме.
 
-BORIS связывает работу с объявлениями, KPI и обработку диалогов: AI-маркетолог ищет точки роста, AI-менеджер помогает быстрее отвечать клиентам.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-Предлагаю проверить без обязательств: 4 дня бесплатно AI-маркетолог и до 2 дней бесплатно AI-менеджер по продажам.
-
-Старт — через простую регистрацию примерно за минуту.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
     {
         "label": "G",
-        "subject": "Проверить точки роста на Avito",
-        "body": """Добрый день!
+        "subject": "Посмотрите цифры своего Avito",
+        "body": """Добрый день! Это Кирилл.
 
-Можно быстро проверить, какие точки роста BORIS увидит именно в вашем Avito-аккаунте.
+Не буду продавать вам продвижение в письме.
 
-Он анализирует объявления и показатели, показывает проблемные места и помогает контролировать KPI каждый день.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-Тест AI-маркетолога — 4 дня бесплатно. Если хотите проверить и обработку обращений, AI-менеджер по продажам доступен ещё на 2 дня бесплатно.
-
-Регистрация занимает около минуты.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
     {
         "label": "H",
-        "subject": "AI для Avito можно проверить без оплаты",
-        "body": """Добрый день!
+        "subject": "Что можно исправить на Avito?",
+        "body": """Добрый день! Это Кирилл.
 
-Не предлагаю покупать систему вслепую.
+Не буду продавать вам продвижение в письме.
 
-Сначала можно дать BORIS доступ к своему рабочему сценарию и посмотреть результат: AI-маркетолог 4 дня бесплатно анализирует Avito, объявления и KPI.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-Дополнительно на 2 дня бесплатно можно включить AI-менеджера, который помогает работать с входящими обращениями.
-
-Регистрация занимает около минуты, после этого можно сразу переходить к тесту.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
     {
         "label": "I",
-        "subject": "Больше контроля над продажами с Avito",
-        "body": """Добрый день!
+        "subject": "Аудит Avito за 0 ₽",
+        "body": """Добрый день! Это Кирилл.
 
-BORIS создан для ситуации, когда Avito есть, но собственнику всё равно приходится вручную контролировать объявления, обращения и результат.
+Не буду продавать вам продвижение в письме.
 
-AI-маркетолог следит за показателями и точками роста. AI-менеджер помогает не оставлять входящие обращения без нормальной обработки.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-Сейчас доступен бесплатный тест: 4 дня AI-маркетолога и до 2 дней AI-менеджера по продажам.
-
-Можно зарегистрироваться примерно за минуту и проверить на своём аккаунте.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
     {
         "label": "J",
-        "subject": "Один короткий тест вместо презентации",
-        "body": """Добрый день!
+        "subject": "Проверим ваш Avito на цифрах?",
+        "body": """Добрый день! Это Кирилл.
 
-Вместо длинного коммерческого предложения предлагаю короткий тест BORIS на вашем Avito.
+Не буду продавать вам продвижение в письме.
 
-4 дня бесплатно работает AI-маркетолог: анализирует объявления, показатели и KPI и показывает, что можно улучшить.
+Проверьте сами: BORIS бесплатно разберёт вашу нишу, конкурентов и покажет, где вы теряете заявки на Avito.
 
-На 2 дня можно дополнительно включить AI-менеджера по продажам и проверить обработку реальных обращений.
-
-Если интересно, регистрация занимает около минуты — после неё можно сразу начать знакомство с системой.
+Если увидите смысл — там же можно запустить бесплатный тест.
 
 Кирилл
 BORIS AI
 MAX / WhatsApp: 8 981 967-37-87
 
-https://boris-ai.pro/go/boris""",
+https://boris-ai.pro/audit""",
     },
-)
+) 
 OWNER_OUTREACH_APPROVED_BODY = OWNER_OUTREACH_COPY_VARIANTS[0]["body"]
 OWNER_OUTREACH_APPROVED_BODIES = tuple(x["body"] for x in OWNER_OUTREACH_COPY_VARIANTS)
 OWNER_OUTREACH_APPROVED_VARIANTS_JSON = json.dumps(
@@ -558,6 +539,10 @@ def _parse_bing_rss_results(xml_text: str, max_results: int, *, root_domain, bad
 
 def _ensure_owner_copy_db_locks(db):
     """Self-heal DB-level fail-closed locks for the ten approved owner copies."""
+    # Serialize copy-revision DDL across the minute queue runner, refillers
+    # and any manual repair. Without this, two healthy workers can both decide
+    # the revision is stale and deadlock while replacing the CHECK/trigger.
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtext('boris_owner_outreach_copy_revision_v1'))"))
     body=OWNER_OUTREACH_APPROVED_BODY
     body_literal="'" + body.replace("'", "''") + "'"
     variants_json=OWNER_OUTREACH_APPROVED_VARIANTS_JSON
@@ -566,6 +551,11 @@ def _ensure_owner_copy_db_locks(db):
 
     db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
 
+    # COPY_REVISION_LOCK_SELF_HEAL_V1: the exact-body CHECK protects live
+    # owner outreach, but it must be rotated atomically when the owner approves
+    # a new canonical message. Drop the old revision lock inside this same DB
+    # transaction, update all owner campaigns, then install+validate the new one.
+    db.execute(text("ALTER TABLE prospect_campaigns DROP CONSTRAINT IF EXISTS prospect_campaigns_owner_body_exact_v1"))
     db.execute(text("""
       UPDATE prospect_campaigns
       SET body_template=:body,
@@ -582,6 +572,17 @@ def _ensure_owner_copy_db_locks(db):
           OR ab_variants IS DISTINCT FROM CAST(:variants AS jsonb)
         )
     """),{"body":body,"variants":variants_json})
+    db.execute(text(f"""ALTER TABLE prospect_campaigns
+      ADD CONSTRAINT prospect_campaigns_owner_body_exact_v1
+      CHECK (
+        account_id IS DISTINCT FROM '__owner_outreach__'
+        OR (
+          body_template={body_literal}
+          AND attachment_path IS NULL
+          AND ab_variants={variants_literal}
+        )
+      ) NOT VALID"""))
+    db.execute(text("ALTER TABLE prospect_campaigns VALIDATE CONSTRAINT prospect_campaigns_owner_body_exact_v1"))
 
     db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
     db.execute(text('SELECT 1 /* BORIS_SCHEMA_MIGRATION_049_OWNED */'))
@@ -640,9 +641,12 @@ def _ensure_owner_copy_db_locks(db):
             THEN
               RAISE EXCEPTION 'OWNER_OUTREACH_SUBJECT_LOCK_V1';
             END IF;
-            IF position('href="https://boris-ai.pro/go/boris"' in COALESCE(NEW.html_body,''))=0
+            IF (
+                 position('href="https://boris-ai.pro/audit"' in COALESCE(NEW.html_body,''))=0
+                 AND position('href="https://boris-ai.pro/api/prospecting/scale/click/' in COALESCE(NEW.html_body,''))=0
+               )
                OR position('cid:boris-owner-banner-' in COALESCE(NEW.html_body,''))=0
-               OR position('https://boris-ai.pro/software-dev/' in COALESCE(NEW.html_body,''))>0
+               OR position('https://systems-ai-oko.ru/' in COALESCE(NEW.html_body,''))>0
             THEN
               RAISE EXCEPTION 'OWNER_OUTREACH_LINK_LOCK_V2';
             END IF;
@@ -716,6 +720,15 @@ def ensure_schema(db):
           AND pg_get_functiondef(p.oid) LIKE '%OWNER_OUTREACH_LINK_LOCK_V2%'
           AND pg_get_functiondef(p.oid) LIKE '%OWNER_OUTREACH_ATTACHMENTS_LOCK_V1%'
           AND pg_get_functiondef(p.oid) LIKE '%boris_routine_email650.jpg%'
+          AND position(:approved_body_list in pg_get_functiondef(p.oid)) > 0
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(CAST(:approved_variants AS jsonb)) approved_variant
+            WHERE position(
+              COALESCE(approved_variant->>'body','')
+              in pg_get_functiondef(p.oid)
+            ) = 0
+          )
       )
       AND NOT EXISTS(
         SELECT 1 FROM prospect_campaigns
@@ -730,6 +743,7 @@ def ensure_schema(db):
         'cap':OWNER_OUTREACH_MAX_DAILY,
         'approved_body':OWNER_OUTREACH_APPROVED_BODY,
         'approved_variants':OWNER_OUTREACH_APPROVED_VARIANTS_JSON,
+        'approved_body_list': "NOT IN (" + ",".join("'" + b.replace("'", "''") + "'" for b in OWNER_OUTREACH_APPROVED_BODIES) + ")",
     }).scalar()
     if ready:
         return
@@ -947,7 +961,7 @@ def _orgpage_bulk_directory_results(niche: str, regions: list[str], *, max_resul
             continue
         # DIRECTORY_POSITIVE_SEMANTIC_BUDGET_V1: broad directory rubrics are
         # discovery-only; irrelevant cards cannot consume bounded result slots.
-        if not _niche_search_result_relevant(niche,item):
+        if not relevant(item):
             continue
         domain=str(item.get('domain') or '').lower()
         if not domain or domain in seen_domains or _search_domain_blocked(domain):
@@ -1153,11 +1167,11 @@ def _raw_search(query, max_results=25):
 def _niche_search_result_relevant(niche:str,item:dict)->bool:
     """Fail closed for directories/content and obvious semantic noise."""
     domain=str(item.get('domain') or '')
-    if _search_domain_blocked(domain):
+    if _search_domain_blocked(domain) or company_noise_reason(item):
         return False
     low=(niche or '').lower().replace('ё','е')
     if not ('сыпуч' in low and ('материал' in low or 'строит' in low)):
-        return True
+        return niche_company_relevant(niche, item)
     hay=' '.join(str(item.get(k) or '') for k in ('title','snippet','domain')).lower().replace('ё','е')
     directory_noise=(
         'ваканси','резюме','тендер','госзакуп','закупки.моск','закупки моск',
@@ -1187,6 +1201,9 @@ def _niche_search_result_relevant(niche:str,item:dict)->bool:
 
 def _company_outreach_block_reason(niche:str,item:dict)->str|None:
     """High-confidence final gate for already discovered companies."""
+    noise = company_noise_reason(item)
+    if noise:
+        return noise
     domain=str(item.get('domain') or item.get('company_domain') or '')
     if _search_domain_blocked(domain):
         return 'blocked_domain'
@@ -1208,7 +1225,7 @@ def _campaign_search_query_patterns(niche:str)->list[str]:
     contacts only for equivalent historical search phrases.
     """
     base=(niche or '').strip()
-    terms=[base] if base else []
+    terms=list(OWNER_BORIS_DISCOVERY_NICHES) + ['Сыпучие материалы', 'сыпучие строительные материалы'] if base == OWNER_BORIS_DISCOVERY_LABEL else ([base] if base else [])
     low=base.lower().replace('ё','е')
     if 'сыпуч' in low and ('материал' in low or 'строит' in low):
         terms.append('сыпучие строительные материалы')
@@ -1231,7 +1248,7 @@ def _niche_discovery_terms(niche:str)->list[str]:
     return list(dict.fromkeys(x for x in terms if x))
 
 
-def discover_niche(owner_id:int, niche:str, regions:list[str], target:int=100, max_queries:int|None=None, query_offset:int=0)->dict:
+def discover_niche(owner_id:int, niche:str, regions:list[str], target:int=100, max_queries:int|None=None, query_offset:int=0, discovery_family:str="boris", buyer_vertical:str="")->dict:
     """Discover public company websites without holding DB transactions during network search."""
     db=SessionLocal()
     try:
@@ -1258,6 +1275,15 @@ def discover_niche(owner_id:int, niche:str, regions:list[str], target:int=100, m
         "цены официальный сайт",
         "компания контакты официальный сайт",
     )
+    if discovery_family == 'development':
+        primary_variants = expansion_variants = DEVELOPMENT_QUERY_SUFFIXES
+    elif discovery_family != 'boris':
+        raise ValueError('unknown discovery family')
+    def relevant(item):
+        if discovery_family == 'development':
+            from app.services.development_lead_radar import _company_fit_relevant
+            return _company_fit_relevant(item, buyer_vertical)
+        return _niche_search_result_relevant(niche, item)
     query_plan=[]
     for region in regions:
         for term in _niche_discovery_terms(niche):
@@ -1286,7 +1312,7 @@ def discover_niche(owner_id:int, niche:str, regions:list[str], target:int=100, m
         try:
             for item in results:
                 if len(inserted)>=target: break
-                if not _niche_search_result_relevant(niche,item):
+                if not relevant(item):
                     semantic_rejected+=1
                     continue
                 provider=str(item.get("search_provider") or "unknown")
@@ -1332,7 +1358,7 @@ def discover_niche(owner_id:int, niche:str, regions:list[str], target:int=100, m
         for item in directory_items:
             if len(inserted)>=target:
                 break
-            if not _niche_search_result_relevant(niche,item):
+            if not relevant(item):
                 semantic_rejected+=1
                 continue
             db=SessionLocal()
@@ -1727,7 +1753,7 @@ def _ab_variant_by_label(campaign:dict,label:str|None)->dict|None:
 
 
 def _owner_next_rotation_variant(db,campaign:dict)->dict:
-    """Strict A→F rotation based on successful sends, not contact ids."""
+    """Strict A→J rotation based on successful sends, not contact ids."""
     sent=int(db.execute(text("""SELECT count(*)
       FROM prospect_campaign_members
       WHERE campaign_id=:c AND sent_at IS NOT NULL
@@ -1735,6 +1761,12 @@ def _owner_next_rotation_variant(db,campaign:dict)->dict:
       {'c':int(campaign['id'])}).scalar() or 0)
     variants=list(OWNER_OUTREACH_COPY_VARIANTS)
     return dict(variants[sent % len(variants)])
+
+
+def _owner_next_banner_slot(db, campaign:dict)->int:
+    """Independent four-banner cycle; ten-copy wrap does not reset it."""
+    sent=int(db.execute(text("SELECT count(*) FROM prospect_campaign_members WHERE campaign_id=:c AND sent_at IS NOT NULL"), {'c':int(campaign['id'])}).scalar() or 0)
+    return sent % len(OWNER_OUTREACH_BANNERS) + 1
 
 
 def _owner_banner_slot_for_label(label:str|None)->int:
@@ -1874,8 +1906,8 @@ def owner_queue_pre_send_guard(db, member_id:int, queue_id:int, subject:str, bod
     expected,ab=_expected_owner_copy_version(c,int(member_id),member.get("ab_variant"))
     actual=str(member.get("copy_version") or "")
     errors=_owner_outreach_contract(str(subject or ""),str(body or ""),str(html or ""),attachments or [])
-    # Final A→F / banner 1→4→1→2 invariant immediately before SMTP.
-    expected_slot=_owner_banner_slot_for_label(member.get("ab_variant"))
+    # Independent banner sequence, checked against successful sends before SMTP.
+    expected_slot=_owner_next_banner_slot(db,c)
     expected_banner,_,_= _owner_outreach_banner(expected_slot)
     actual_filename=str(((attachments or [{}])[0] or {}).get('filename') or '') if attachments else ''
     if not expected_banner or actual_filename != str(expected_banner.get('filename') or ''):
@@ -1909,11 +1941,12 @@ def owner_queue_pre_send_guard(db, member_id:int, queue_id:int, subject:str, bod
 
 def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
     """Production truth for the locked owner email copy."""
-    from app.services import email_tracking as _tracking
-    _tracking.ensure_schema()
-    db=SessionLocal()
+    db=None
     healed=[]
     try:
+        from app.services import email_tracking as _tracking
+        _tracking.ensure_schema()
+        db=SessionLocal()
         # DETECT + schema/campaign SELF-HEAL.
         ensure_schema(db)
 
@@ -1951,9 +1984,9 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
                       WHERE v->>'body' = q.text_body
                     )
                   )
-                  OR position('href="https://boris-ai.pro/go/boris"' in COALESCE(q.html_body,''))=0
+                  OR (position('href="https://boris-ai.pro/audit"' in COALESCE(q.html_body,''))=0 AND position('href="https://boris-ai.pro/api/prospecting/scale/click/' in COALESCE(q.html_body,''))=0)
                   OR position('cid:boris-owner-banner-' in COALESCE(q.html_body,''))=0
-                  OR position('https://boris-ai.pro/software-dev/' in COALESCE(q.html_body,''))>0
+                  OR position('https://systems-ai-oko.ru/' in COALESCE(q.html_body,''))>0
                   OR CASE WHEN jsonb_typeof(q.attachments)='array' THEN jsonb_array_length(q.attachments) ELSE -1 END <> 1
                   OR COALESCE(q.attachments->0->>'inline','false') <> 'true'
                   OR COALESCE(q.attachments->0->>'mime','') <> 'image/jpeg'
@@ -2023,8 +2056,11 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
                 AND pg_get_functiondef(p.oid) LIKE '%OWNER_OUTREACH_LINK_LOCK_V2%'
                 AND pg_get_functiondef(p.oid) LIKE '%OWNER_OUTREACH_ATTACHMENTS_LOCK_V1%'
                 AND pg_get_functiondef(p.oid) LIKE '%boris_routine_email650.jpg%'
+          AND position(:approved_body_list in pg_get_functiondef(p.oid)) > 0
             ) AS queue_lock_ok
-        """)).mappings().one())
+        """),{
+            "approved_body_list": "NOT IN (" + ",".join("'" + b.replace("'", "''") + "'" for b in OWNER_OUTREACH_APPROVED_BODIES) + ")",
+        }).mappings().one())
 
         campaign_drift=int(db.execute(text("""
           SELECT count(*)
@@ -2053,9 +2089,9 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
                     WHERE v->>'body' = q.text_body
                   )
                 )
-                OR position('href="https://boris-ai.pro/go/boris"' in COALESCE(q.html_body,''))=0
+                OR (position('href="https://boris-ai.pro/audit"' in COALESCE(q.html_body,''))=0 AND position('href="https://boris-ai.pro/api/prospecting/scale/click/' in COALESCE(q.html_body,''))=0)
                 OR position('cid:boris-owner-banner-' in COALESCE(q.html_body,''))=0
-                OR position('https://boris-ai.pro/software-dev/' in COALESCE(q.html_body,''))>0
+                OR position('https://systems-ai-oko.ru/' in COALESCE(q.html_body,''))>0
                 OR CASE WHEN jsonb_typeof(q.attachments)='array' THEN jsonb_array_length(q.attachments) ELSE -1 END <> 1
                 OR COALESCE(q.attachments->0->>'inline','false') <> 'true'
                 OR COALESCE(q.attachments->0->>'mime','') <> 'image/jpeg'
@@ -2101,9 +2137,9 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
             )
             AND t.id IS NOT NULL
             AND position('data-boris-open-tracking="1"' in COALESCE(q.html_body,''))>0
-            AND position('href="https://boris-ai.pro/go/boris"' in COALESCE(q.html_body,''))>0
+            AND (position('href="https://boris-ai.pro/audit"' in COALESCE(q.html_body,''))>0 OR position('href="https://boris-ai.pro/api/prospecting/scale/click/' in COALESCE(q.html_body,''))>0)
             AND position('cid:boris-owner-banner-' in COALESCE(q.html_body,''))>0
-            AND position('https://boris-ai.pro/software-dev/' in COALESCE(q.html_body,''))=0
+            AND position('https://systems-ai-oko.ru/' in COALESCE(q.html_body,''))=0
             AND CASE WHEN jsonb_typeof(q.attachments)='array' THEN jsonb_array_length(q.attachments) ELSE -1 END=1
             AND COALESCE(q.attachments->0->>'filename','') IN ('boris_routine_email650.jpg','boris_scale_email650.jpg','boris_complex_email650.jpg','boris_competitors_email650.jpg')
         """),{"o":int(owner_id)}).scalar()
@@ -2122,9 +2158,9 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
                         WHERE v->>'body'=q.text_body
                       )
                     )
-                    AND position('href="https://boris-ai.pro/go/boris"' in COALESCE(q.html_body,''))>0
+                    AND (position('href="https://boris-ai.pro/audit"' in COALESCE(q.html_body,''))>0 OR position('href="https://boris-ai.pro/api/prospecting/scale/click/' in COALESCE(q.html_body,''))>0)
                     AND position('cid:boris-owner-banner-' in COALESCE(q.html_body,''))>0
-                    AND position('https://boris-ai.pro/software-dev/' in COALESCE(q.html_body,''))=0
+                    AND position('https://systems-ai-oko.ru/' in COALESCE(q.html_body,''))=0
                     AND CASE WHEN jsonb_typeof(q.attachments)='array' THEN jsonb_array_length(q.attachments) ELSE -1 END=1
                     AND COALESCE(q.attachments->0->>'filename','') IN ('boris_routine_email650.jpg','boris_scale_email650.jpg','boris_complex_email650.jpg','boris_competitors_email650.jpg')
                   )
@@ -2230,7 +2266,8 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
             "self_heal":"DB locks + safe queued-row requeue + final pre-SMTP guard",
         }
     except Exception as exc:
-        db.rollback()
+        if db is not None:
+            db.rollback()
         return {
             "state":"critical","status":"copy_integrity_exception",
             "owner_id":int(owner_id),"active_campaigns":0,
@@ -2238,7 +2275,8 @@ def owner_copy_integrity_health(owner_id:int, *, self_heal:bool=True)->dict:
             "owner_action_required":False,
         }
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 def _generate_openai_email_copy(*, company:str, niche:str, city:str='', website:str='', account_id:str='', idempotency_key:str='')->tuple[str,str]:
@@ -2507,7 +2545,7 @@ def owner_daily_delivery_health(owner_id:int)->dict:
 
     lag=max(0,expected-successful)
     remaining=max(0,cap-successful)
-    over_cap=max(0,successful-cap)
+    over_cap=max(0,shared_successful-cap)
     attempts_exhausted=bool(
         attempt_cap>0 and attempts>=attempt_cap and remaining>0 and queued_now==0
     )
@@ -2672,14 +2710,14 @@ def _brand_icon_attachment()->dict|None:
     }
 
 
-def _html_email(body:str, banner_cid:str='', footer:str='', brand_subtitle:str='Виртуальная команда маркетинга и продаж', brand_note:str='Настройка и сопровождение первого месяца бесплатно', marketing_banner_cid:str='', marketing_banner_href:str='https://boris-ai.pro/go/boris', marketing_banner_alt:str='BORIS AI — автоматизация маркетинга и продаж')->str:
+def _html_email(body:str, banner_cid:str='', footer:str='', brand_subtitle:str='Виртуальная команда маркетинга и продаж', brand_note:str='Настройка и сопровождение первого месяца бесплатно', marketing_banner_cid:str='', marketing_banner_href:str='https://boris-ai.pro/audit', marketing_banner_alt:str='BORIS AI — автоматизация маркетинга и продаж')->str:
     import html as _h
 
     def _approved_linkify(value:str)->str:
         escaped=_h.escape(value)
         for url in (
-            'https://boris-ai.pro/go/boris',
-            'https://boris-ai.pro/software-dev/',
+            'https://boris-ai.pro/audit',
+            'https://systems-ai-oko.ru/',
         ):
             safe=_h.escape(url)
             escaped=escaped.replace(
@@ -2772,24 +2810,27 @@ def _owner_outreach_contract(subject:str, body:str, html:str, attachments:list|N
     if body_locked not in approved_locked:
         errors.append('body_not_owner_approved')
 
-    approved_url='https://boris-ai.pro/go/boris'
+    approved_url='https://boris-ai.pro/audit'
     lines=[x.strip() for x in body_locked.split('\n') if x.strip()]
     if not lines or lines[-1] != approved_url:
         errors.append('owner_link_not_last_line')
     if body_locked.count(approved_url) != 1:
         errors.append('owner_link_count_invalid')
-    if 'https://boris-ai.pro/software-dev/' in body_locked:
+    if 'https://systems-ai-oko.ru/' in body_locked:
         errors.append('software_url_forbidden_owner_outreach')
 
     from app.services import email_tracking as _email_tracking
     policy_html=_email_tracking.strip_approved_tracking_pixel(html)
-    if '<a href="https://boris-ai.pro/go/boris"' not in policy_html:
+    click_prefix='https://boris-ai.pro/api/prospecting/scale/click/'
+    if ('<a href="https://boris-ai.pro/audit"' not in policy_html
+            and f'<a href="{click_prefix}' not in policy_html):
         errors.append('owner_link_not_clickable')
-    if 'href="https://boris-ai.pro/software-dev/"' in policy_html:
+    if 'href="https://systems-ai-oko.ru/"' in policy_html:
         errors.append('software_link_forbidden_owner_outreach')
 
     combined=(subject_text+'\n'+body_locked+'\n'+policy_html).lower()
     combined=combined.replace(approved_url,'')
+    combined=re.sub(re.escape(click_prefix)+r'[a-z0-9_-]{24,96}','',combined,flags=re.I)
     if re.search(r'https?://|www\.|boris-ai\.pro|youtu\.be|youtube\.com|rutube\.ru', combined):
         errors.append('url_forbidden')
 
@@ -3021,7 +3062,7 @@ def _reconcile_existing_queue(db,campaign_id:int,row,*,key:str,copy_version:str|
     db.execute(text("""UPDATE prospect_campaign_members SET status=:st,email_queue_id=:q,
       queued_at=COALESCE(queued_at,:qa),sent_at=COALESCE(sent_at,:sa),
       skip_reason=COALESCE(skip_reason,:sr),copy_version=:cv,ab_variant=:ab,updated_at=NOW()
-      WHERE id=:id AND status='ready'"""),
+      WHERE id=:id AND status IN ('ready','queued','failed')"""),
       {"st":member_status,"q":int(existing["id"]),"qa":existing.get("created_at"),
        "sa":existing.get("sent_at"),"sr":skip_reason,"cv":copy_version,
        "ab":ab_label,"id":row["id"]})
@@ -3306,9 +3347,11 @@ def _development_personalized_body(company_id:int, company_name:str, fallback_bo
     if not first:
         return fallback_body,False
     parts=[first]
-    parts.append('Занимаюсь заказной разработкой SaaS, мобильных приложений, CRM, личных кабинетов и интеграций. Здесь предлагаю не «внедрять всё», а сначала проверить именно эту гипотезу на вашем текущем процессе.')
-    parts.append('Если попадание есть, ответьте буквально одной фразой — пришлю структуру первого MVP, этапы и ориентир по срокам. Если нет, тоже полезно: не буду придумывать вам несуществующую проблему.')
-    parts.append('Подробнее: https://boris-ai.pro/software-dev/')
+    parts.append('У нас есть практический опыт разработки крупных продуктов под ключ: городской маркетплейс УАСАААП и рекламный SaaS BORIS AI, а также мобильные приложения, корпоративные мессенджеры, звонилки и внутренние сервисы для сотрудников.')
+    parts.append('Разрабатываем сайты и интернет-магазины с корзиной и онлайн-оплатой, SaaS-сервисы, CRM и личные кабинеты, AI-агентов и AI-интеграции, API/1С-интеграции, автоматизацию продаж, телефонию, панели управления и мобильные/PWA-приложения.')
+    parts.append('Работаем по договору: проект делим на понятные этапы, каждый этап отдельно принимается и оплачивается. Можно начать с MVP и не оплачивать весь проект заранее.')
+    parts.append('Если задача актуальна, ответьте буквально одной фразой — пришлю структуру решения, этапы, сроки и ориентир по стоимости именно под ваш процесс.')
+    parts.append('Примеры работ и направления: https://systems-ai-oko.ru/')
     parts.append('Если предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.')
     parts.append('Кирилл')
     body='\n\n'.join(x for x in parts if x).strip()
@@ -3320,7 +3363,7 @@ def _development_outreach_contract(subject:str,body:str,html:str,attachments:lis
     errors=[]; low=(str(subject or '')+'\n'+str(body or '')+'\n'+str(html or '')).lower().replace('ё','е')
     for token in ('я создал boris','виртуальную команду маркетинга','ai-авитолог','виртуальный роп','/go/boris'):
         if token in low: errors.append('development_forbidden_boris_copy:'+token)
-    if 'boris-ai.pro/software-dev/' not in low:
+    if 'systems-ai-oko.ru/' not in low:
         errors.append('development_software_link_required')
     if 'разработ' not in low:
         errors.append('development_offer_required')
@@ -3465,9 +3508,21 @@ def tick_campaign(campaign_id:int,max_enqueue:int=10)->dict:
                     AND lower(COALESCE(zc.domain,''))=lower(pc.domain)
                     AND (z.sent_at IS NOT NULL OR z.status IN ('queued','sent'))
                 ))
-                AND (SELECT count(*) FROM prospect_campaign_members x WHERE x.campaign_id=:c AND x.email_domain=m.email_domain
-                     AND x.status IN ('queued','sent')
-                     AND timezone(:tz,x.queued_at)::date=:d) < :pd
+                AND (
+                  SELECT count(*)
+                  FROM prospect_campaign_members x
+                  JOIN prospect_companies xc ON xc.id=x.company_id
+                  WHERE x.campaign_id=:c
+                    AND (
+                      CASE
+                        WHEN COALESCE(NULLIF(lower(pc.domain),''),'') <> ''
+                          THEN COALESCE(NULLIF(lower(xc.domain),''),'') = lower(pc.domain)
+                        ELSE lower(x.email_domain) = lower(m.email_domain)
+                      END
+                    )
+                    AND x.status IN ('queued','sent')
+                    AND timezone(:tz,x.queued_at)::date=:d
+                ) < :pd
               ORDER BY m.quality_score DESC,m.id LIMIT :lim"""),
               {'c':campaign_id,'pd':int(c['per_domain_daily_limit']),'minq':int(c['min_quality_score']),'lim':allowance,'tz':tz_name,'d':today}).mappings().all()]
             db.rollback()
@@ -3493,45 +3548,24 @@ def tick_campaign(campaign_id:int,max_enqueue:int=10)->dict:
             is_owner=str(c.get('account_id') or '') == '__owner_outreach__'
             is_development=str(c.get('name') or '') == 'Кирилл · разработка SaaS/App'
             if is_owner:
-                # Strict send-order rotation A→F. Owner allowance is one queued
+                # Strict send-order rotation A→J. Owner allowance is one queued
                 # message per pacing window, so successful sent count is the
                 # canonical sequence cursor and retries keep their stored label.
                 vdb=SessionLocal()
                 try:
                     ab=_owner_next_rotation_variant(vdb,c)
+                    next_banner_slot=_owner_next_banner_slot(vdb,c)
                 finally:
                     vdb.close()
             else:
                 ab=_ab_variant(c,int(r['id']))
             copy_subject_src=str((ab or {}).get('subject') or c.get('subject_template') or '')
             copy_body_src=str((ab or {}).get('body') or c.get('body_template') or '')
+            # Development outreach deliberately uses one short approved offer
+            # for verified public business emails. The goal is to open a low-friction
+            # conversation about one measurable zone of growth, not to manufacture
+            # pseudo-personalised claims from weak site evidence.
             personalized_development=False
-            if is_development:
-                # A/B in the development funnel controls the subject/analytics,
-                # not whether the recipient gets a generic body. Every company
-                # email must use its latest Lead Radar brief when available.
-                rendered_fallback=_render(copy_body_src,row_ctx).strip()
-                copy_body_src,personalized_development=_development_personalized_body(
-                    int(r.get('company_id') or 0),str(r.get('company') or ''),rendered_fallback
-                )
-                if not personalized_development:
-                    # Final independent guard: a development email without two
-                    # site-backed signals must never fall back to generic copy.
-                    gdb=SessionLocal()
-                    try:
-                        gdb.execute(text("""UPDATE prospect_campaign_members
-                          SET status='skipped',skip_reason='pain_evidence_required',updated_at=NOW()
-                          WHERE id=:m AND campaign_id=:c AND status='ready'"""),
-                          {'m':int(r['id']),'c':campaign_id})
-                        gdb.execute(text("""UPDATE development_lead_shortlist
-                          SET outreach_status='analysis_required',updated_at=NOW()
-                          WHERE owner_user_id=2 AND company_id=:co AND outreach_status NOT IN ('sent','queued')"""),
-                          {'co':int(r.get('company_id') or 0)})
-                        gdb.commit()
-                    finally:
-                        gdb.close()
-                    gated+=1
-                    continue
             copy_version=_copy_version(copy_subject_src,copy_body_src,str((ab or {}).get('label') or ('personalized' if personalized_development else 'base')))
             key=f"prospect_campaign:{campaign_id}:{r['contact_id']}:{copy_version}"
             # Phase 2a: reconcile only the exact same copy version.
@@ -3605,9 +3639,9 @@ def tick_campaign(campaign_id:int,max_enqueue:int=10)->dict:
                 attachments.append({'path':c['attachment_path'],'filename':c['attachment_path'].rsplit('/',1)[-1],'mime':'application/pdf'})
             if is_owner:
                 # BORIS owner outreach carries exactly one approved banner.
-                # Banner order is tied to the A→F copy slot: 1→2→3→4→1→2.
+                # Banner order cycles independently of the ten-copy rotation.
                 attachments=[]
-                _banner_slot=_owner_banner_slot_for_label((ab or {}).get('label'))
+                _banner_slot=next_banner_slot
                 approved_banner,cid,_banner_label=_owner_outreach_banner(_banner_slot)
                 if approved_banner:
                     attachments=[approved_banner]
@@ -3625,7 +3659,7 @@ def tick_campaign(campaign_id:int,max_enqueue:int=10)->dict:
                 html=_html_email(
                     body,'','',brand_subtitle='Разработка программных продуктов',brand_note='',
                     marketing_banner_cid=cid,
-                    marketing_banner_href='https://boris-ai.pro/software-dev/',
+                    marketing_banner_href='https://systems-ai-oko.ru/',
                     marketing_banner_alt='Разработка программных продуктов под бизнес',
                 )
             else:
@@ -3662,7 +3696,7 @@ def tick_campaign(campaign_id:int,max_enqueue:int=10)->dict:
 
             q=enqueue_email(
                 r['email'],subject,body,html=html,source='prospect_campaign',idempotency_key=key,
-                send_now=False,attachments=attachments,mailbox_id=c.get('mailbox_id'),reply_to=None,
+                send_now=False,attachments=attachments,mailbox_id=c.get('mailbox_id'),reply_to=None,campaign_id=campaign_id,
                 from_name=('Кирилл' if is_development else None),
                 ref_type='prospect_campaign_member',ref_id=str(r['id']),
             )

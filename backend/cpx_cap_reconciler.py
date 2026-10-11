@@ -616,7 +616,9 @@ def main() -> int:
                 except Exception as close_exc:
                     print(f"CPX_CAP_DB_CLOSE_WARN account={account_id} {type(close_exc).__name__}:{str(close_exc)[:160]}", flush=True)
             print(json.dumps(out, ensure_ascii=False), flush=True)
-            if out.get("status") not in {"pass", "would_fix", "deferred"}:
+            if out.get("status") not in {"pass", "would_fix", "deferred"} and not (
+                out.get("status") == "blocked" and (out.get("errors") or []) == ["no_avito_token"]
+            ):
                 failures.append(account_id)
             # CPX_CAP_FLEET_TRANSPORT_BREAKER_V1: repeated connect/read timeouts
             # across different tenants are systemic transport evidence, not a

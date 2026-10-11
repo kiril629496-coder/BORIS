@@ -12,7 +12,7 @@ from app.ext_api import watchdog, queuefix, master
 class OwnerNotificationContractTest(unittest.TestCase):
     def test_guardian_deduplicates_transient_failures(self):
         src = inspect.getsource(guardian.quick)
-        self.assertIn("OWNER_ALERT_DEBOUNCE_V2", src)
+        self.assertIn("OWNER_ALERT_DEBOUNCE_V3", src)
         self.assertIn("pending_alert_count", src)
         self.assertIn("healthy_confirmations", src)
         self.assertNotIn("API HA: работает только одна реплика", src)
@@ -1097,6 +1097,51 @@ class OwnerNotificationContractTest(unittest.TestCase):
         })
         self.assertIn("последние сохранённые данные", text)
         self.assertIn("повторит обновление автоматически", text)
+
+    def test_owner_daily_refresh_degrades_on_auth_failure_with_previous_snapshot(self):
+        import datetime as real_dt
+        from unittest.mock import patch
+        from app.ext_api import owner_daily_job
+
+        class DummyDB:
+            def close(self):
+                pass
+
+        failed_auth = {
+            "status": "error",
+            "message": "Не удалось авторизоваться в Avito API",
+            "retryable": False,
+            "provider_status": None,
+        }
+        with (
+            patch.object(owner_daily_job, "SessionLocal", return_value=DummyDB()),
+            patch.object(
+                owner_daily_job,
+                "_active_owner_accounts",
+                return_value=[{"account_id": "client_with_stale_snapshot"}],
+            ),
+            patch.object(owner_daily_job, "_has_previous_daily_stats", return_value=True),
+            patch("app.api.avito.collect_stats", return_value=failed_auth),
+        ):
+            out = owner_daily_job._refresh_avito_sources(real_dt.date(2026, 10, 7))
+        self.assertEqual(out["status"], "degraded")
+        self.assertEqual(out["warning_count"], 1)
+        self.assertTrue(out["errors"][0]["preserved_previous"])
+
+    def test_owner_daily_report_routes_to_boris_messenger(self):
+        import inspect
+        from app.api import inbox_daily
+
+        src = inspect.getsource(inbox_daily.send_owner_daily_report)
+        self.assertIn("_send_owner_report_to_messenger", src)
+        self.assertLess(
+            src.index("_send_owner_report_to_messenger"),
+            src.index("send_telegram_message(OWNER_REPORT_CHAT_ID"),
+        )
+        helper = inspect.getsource(inbox_daily._send_owner_report_to_messenger)
+        self.assertIn("KPI / AI-маркетолог", inbox_daily.OWNER_REPORT_MESSENGER_TITLE)
+        self.assertIn("uuid5", helper)
+        self.assertIn("send_message", helper)
 
 
 class QueueGoalTerminalContractTest(unittest.TestCase):

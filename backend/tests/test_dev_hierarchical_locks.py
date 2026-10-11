@@ -735,6 +735,23 @@ class DevHierarchicalLocksTest(unittest.TestCase):
         self.assertEqual(out["healed"][0]["depends_on"],[30])
         self.assertEqual(json.loads(setter.call_args.kwargs["depends_on_json"]),[30])
 
+    def test_canonical_owner_superseded_dependency_is_rewired(self):
+        active={"id":10,"current_phase":"PLANNING","depends_on_json":"[20]"}
+        cancelled={
+            "id":20,
+            "status":"cancelled",
+            "blocked_reason":"SUPERSEDED_BY_CANONICAL_OWNER_dev_993",
+            "wait_reason":None,
+        }
+        with patch.object(dev.db,"rows",return_value=[active]), \
+             patch.object(dev.db,"one",return_value=cancelled), \
+             patch.object(dev,"_set") as setter, \
+             patch.object(dev,"event"):
+            out=dev.reconcile_superseded_dependencies(100)
+        self.assertEqual(out["count"],1,out)
+        self.assertEqual(out["healed"][0]["depends_on"],[993])
+        self.assertEqual(json.loads(setter.call_args.kwargs["depends_on_json"]),[993])
+
     def test_production_convergence_gate_blocks_only_fresh_healthy_runtime_drift(self):
         class FakeAcceptance:
             def __init__(self, payload):

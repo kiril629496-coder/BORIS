@@ -1,6 +1,8 @@
 from typing import List, Optional
+import json
 from pathlib import Path
 from fastapi import APIRouter,Depends,HTTPException,Query,Request,Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel,Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -165,6 +167,23 @@ def open_pixel(token:str,request:Request):
    "Cache-Control":"no-store, no-cache, must-revalidate, max-age=0",
    "Pragma":"no-cache",
    "Expires":"0",
+   "X-Robots-Tag":"noindex, nofollow, noarchive",
+  },
+ )
+
+@public_router.get("/click/{token}",include_in_schema=False)
+def email_click(token:str,request:Request):
+ try:
+  target=open_tracking.record_click(token,request.headers.get("user-agent",""))
+ except Exception as _suppressed_exc:
+  observe_suppressed(__name__,_suppressed_exc,line=172)
+  target=None
+ return RedirectResponse(
+  url=target or "https://boris-ai.pro/",
+  status_code=302,
+  headers={
+   "Cache-Control":"no-store, no-cache, must-revalidate, max-age=0",
+   "Pragma":"no-cache",
    "X-Robots-Tag":"noindex, nofollow, noarchive",
   },
  )
@@ -364,6 +383,16 @@ def campaign_copy(campaign_id:int,body:CampaignCopyBody,db:Session=Depends(get_d
 def tick(campaign_id:int,db:Session=Depends(get_db),user=Depends(get_current_user)):
  campaign_scope(db,user,campaign_id)
  return {"ok":True,**svc.tick_campaign(campaign_id,10)}
+@router.get("/owner-sla")
+def owner_outreach_sla(db:Session=Depends(get_db),user=Depends(get_current_user)):
+ if getattr(user,"role","")!="owner": raise HTTPException(403,"owner access denied")
+ row=db.execute(text("SELECT value FROM storage WHERE account_id='owner_outreach_sla' AND key='current' ORDER BY id DESC LIMIT 1")).scalar()
+ if not row: return {"ok":True,"sla":None}
+ try: payload=json.loads(str(row))
+ except Exception: payload=None
+ return {"ok":True,"sla":payload}
+
+
 @router.get("/owner-development")
 def owner_development_campaign(db:Session=Depends(get_db),user=Depends(get_current_user)):
  if getattr(user,"role","")!="owner": raise HTTPException(403,"owner access denied")
@@ -396,6 +425,7 @@ def owner_development_campaign(db:Session=Depends(get_db),user=Depends(get_curre
    WHERE owner_user_id=:o AND service_date=timezone('Europe/Moscow',now())::date
  """),{"o":owner}).mappings().one()
  item=dict(row); item["shortlist"]=dict(shortlist)
+ item["tracking"]=open_tracking.campaign_tracking_stats(db,int(item["id"]),include_subjects=True)
  return {"ok":True,"campaign":item}
 
 @router.get("/owner-development/leads")

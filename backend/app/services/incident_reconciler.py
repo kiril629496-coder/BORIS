@@ -190,6 +190,29 @@ def _sync_daily_outcome_incidents(db, now) -> dict:
                 and str(daily.get("state") or "")=="critical"
                 and not external_delivery_wait
             )
+            # SOCIAL_HISTORICAL_EXTERNAL_RECLASS_V1:
+            # Historical missed-day incidents remain open for auditability, but
+            # fresh canonical transport evidence must keep them out of the
+            # internal-defect gate while the same project is waiting on an
+            # external provider. Do not rewrite the historical daily payload.
+            if external_delivery_wait:
+                historical_rows=db.query(ControlIncident).filter(
+                    ControlIncident.incident_type=="OWNER_SOCIAL_DAILY_PLAN_FAILED",
+                    ControlIncident.module=="social",
+                    ControlIncident.account_id==incident_account_id,
+                    ControlIncident.state=="open",
+                ).all()
+                for historical in historical_rows:
+                    payload=dict(historical.details_json or {})
+                    payload.update({
+                        "dependency_state":"waiting_external",
+                        "owner_action_required":False,
+                        "external_reason":str(vk.get("reason") or "external_transport_wait"),
+                        "dependency_verified_at":now.isoformat(),
+                    })
+                    historical.details_json=payload
+                    historical.updated_at=now
+                    updated+=1
             if service_date:
                 sync_one(
                     incident_type="OWNER_SOCIAL_DAILY_PLAN_FAILED",

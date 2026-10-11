@@ -220,4 +220,16 @@ def record_required_snapshots(db, *, bucket: str | None = None) -> dict:
                 rows[module] = {"execution_id": row.id, "status": row.status, "actual": row.actual_state_json or {}}
         except Exception as exc:
             errors[module] = type(exc).__name__
-    return {"ok": not errors, "modules": rows, "errors": errors, "required_modules": list(REQUIRED_LEDGER_MODULES)}
+    # Use this existing Guardian tick for event receipts and their due checks.
+    # Domain actions/providers are never invoked by this evidence adapter.
+    event_rules = None
+    try:
+        from app.services.control_rule_runtime import reconcile_rule_events
+        with db.begin_nested():
+            event_rules = reconcile_rule_events(db, limit=100)
+        if event_rules.get("errors"):
+            errors["event_rules"] = event_rules["errors"]
+    except Exception as exc:
+        errors["event_rules"] = type(exc).__name__
+    return {"ok": not errors, "modules": rows, "errors": errors, "required_modules": list(REQUIRED_LEDGER_MODULES),
+            "event_rules": event_rules}

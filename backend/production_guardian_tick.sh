@@ -21,6 +21,24 @@ for s in boris-backend.service boris-backend-replica.service; do
 done
 curl -fsS http://127.0.0.1:8000/health >> "$LOG" 2>&1 || true; echo >> "$LOG"
 curl -fsS http://127.0.0.1:8001/health >> "$LOG" 2>&1 || true; echo >> "$LOG"
+
+# PRODUCTION_CONTRACT_NO_PARALLEL_DEPLOY_V2:
+# A global contract is expensive and must never compete with canonical rollout.
+# Defer this guardian tick when ANY other contract, scoped deploy or HA rolling
+# owner is active; the timer will verify the finished generation on the next tick.
+DEFER_REASON=""
+if pgrep -f 'production_contract_runner.py' >/dev/null 2>&1; then
+  DEFER_REASON="contract_active"
+elif pgrep -f '^/bin/bash /root/BORIS/backend/rolling_restart_backend.sh$' >/dev/null 2>&1; then
+  DEFER_REASON="rolling_active"
+elif pgrep -f 'boris-backend-scoped-deploy[^ ]*\.py .*/scoped-release-requests/' >/dev/null 2>&1; then
+  DEFER_REASON="scoped_deploy_active"
+fi
+if [ -n "$DEFER_REASON" ]; then
+  log "PRODUCTION_CONTRACT_DEFERRED=$DEFER_REASON"
+  exit 0
+fi
+
 CONTRACT_TMP="$(mktemp /tmp/boris_guardian_contract.XXXXXX)"
 FINAL_CONTRACT_TMP="$(mktemp /tmp/boris_guardian_contract_final.XXXXXX)"
 trap 'rm -f "$CONTRACT_TMP" "$FINAL_CONTRACT_TMP"' EXIT
@@ -68,9 +86,15 @@ fi
 # acceptance state. Convergence during source churn is not an incident. If the
 # source is quiet and no canonical roll exists for three ticks, restart only
 # boris-deploy.service; never raw-restart API replicas here.
-BORIS_POLICY_NOTIFY=0 BORIS_POLICY_SELF_HEAL=0 ./venv/bin/python production_contract_runner.py > "$FINAL_CONTRACT_TMP" 2>&1
-FINAL_CONTRACT_RC=$?
-cat "$FINAL_CONTRACT_TMP" >> "$LOG"
+if [ "$CONTRACT_RC" -eq 0 ]; then
+  cp "$CONTRACT_TMP" "$FINAL_CONTRACT_TMP"
+  FINAL_CONTRACT_RC="$CONTRACT_RC"
+  log "FINAL_CONTRACT_REUSED=first_pass"
+else
+  BORIS_POLICY_NOTIFY=0 BORIS_POLICY_SELF_HEAL=0 ./venv/bin/python production_contract_runner.py > "$FINAL_CONTRACT_TMP" 2>&1
+  FINAL_CONTRACT_RC=$?
+  cat "$FINAL_CONTRACT_TMP" >> "$LOG"
+fi
 ACCEPTANCE_JSON="$(./venv/bin/python global_production_acceptance.py --contract-file "$FINAL_CONTRACT_TMP" --contract-rc "$FINAL_CONTRACT_RC" 2>>"$LOG" || true)"
 [ -n "$ACCEPTANCE_JSON" ] && log "$ACCEPTANCE_JSON"
 if printf '%s' "$ACCEPTANCE_JSON" | grep -q '"self_heal_action": "restart_boris_deploy"'; then

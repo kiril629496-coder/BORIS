@@ -98,6 +98,26 @@ class MediaSemanticCacheTests(unittest.TestCase):
             V.validate_campaign_banner_vision({"title":"Вариант 2","description":"Текст 2"},banner,None,"acc-a")
         self.assertEqual(paid.call_count,2)
 
+    def test_banner_qa_keeps_owner_reference_private_but_checks_public_artifact_sharp(self):
+        import os, tempfile
+        payload={"title":"Гардеробные на заказ","description":"Мебель на заказ"}
+        banner=SimpleNamespace(id=20,account_id="acc-a",storage_key="acc-a/banner.png")
+        reference=SimpleNamespace(id=21,account_id="acc-a",storage_key="acc-a/private-reference.jpg")
+        verdict={"pass":True,"identity_ok":True,"text_ok":True,"mobile_ok":True,"claims_ok":True,"plate_ok":True,
+                 "composition_ok":True,"professional_ok":True,"visual_hierarchy_ok":True,"issues":[]}
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ,{"BORIS_VISION_QA_CACHE_DIR":td}), \
+             patch.object(V,"_image_data_uri",return_value="data:image/jpeg;base64,AA==") as image_data, \
+             patch.object(V,"_vision_chat_json",return_value=dict(verdict)):
+            out=V.validate_campaign_banner_vision(payload,banner,reference,"acc-a")
+        self.assertTrue(out["pass"])
+        self.assertGreaterEqual(len(image_data.call_args_list),2)
+        ref_call=image_data.call_args_list[0]
+        banner_call=image_data.call_args_list[1]
+        self.assertIs(ref_call.args[0],reference)
+        self.assertEqual(ref_call.kwargs,{})
+        self.assertIs(banner_call.args[0],banner)
+        self.assertEqual(banner_call.kwargs,{"max_side":768,"blur_radius":0.0})
+
     def test_stamp_preserves_cache_checker(self):
         payload={"title":"Кухни на заказ", "description":"Кухня", "direction":"Кухни на заказ"}
         link=SimpleNamespace(position=0)
@@ -229,3 +249,40 @@ class MediaSemanticCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+def test_full_ai_premium_banner_uses_stricter_banner_qa_without_duplicate_generic_proof():
+    payload={
+        "title":"Кухни на заказ",
+        "description":"Изготовление кухни по размерам",
+        "direction":"Кухни на заказ",
+        "feed_factory":True,
+        "media_semantic_guard":{"mode":"universal_text_image","min_confidence":0.8},
+        "banner_url":"/images/acc-a/banners/premium_v1.png",
+        "banner_qa":{
+            "passed":True,
+            "source":"premium_full_ai_vision_qa",
+            "vision_qa":{
+                "passed":True,
+                "semantic_match":True,
+                "exact_text_ok":True,
+                "composition_ok":True,
+                "professional_ok":True,
+                "mobile_ok":True,
+            },
+        },
+        "images":["/images/acc-a/banners/premium_v1.png"],
+        "media_semantic_evidence":[],
+    }
+    link=SimpleNamespace(position=0)
+    asset=SimpleNamespace(
+        id=501,
+        storage_key="acc-a/banners/premium_v1.png",
+        source_provider="openai_full_ai_premium",
+        source_ref="premium:test:v1",
+        tags=[],
+    )
+    with patch.object(V,"_linked_media",return_value=[(link,asset)]):
+        errs=V.validate_linked_media_semantics(SimpleNamespace(),SimpleNamespace(id=1),payload)
+    assert errs == []

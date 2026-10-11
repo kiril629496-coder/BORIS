@@ -128,6 +128,156 @@ def _save_runtime(cur, conn, account_id, payload):
         print(f"    runtime heartbeat error: {str(exc)[:120]}")
 
 
+
+def _content_rescue_snapshot(cur, conn, account_id: str, *, advice=None, diagnostics=None):
+    """Materialize zero-cost content diagnosis from already collected provider facts."""
+    try:
+        cur.execute(
+            "SELECT value FROM storage WHERE account_id=%s AND key LIKE 'daily_stats:%%' "
+            "ORDER BY id DESC LIMIT 1",
+            (account_id,),
+        )
+        row=cur.fetchone()
+        snap=json.loads(row[0] or "{}") if row and row[0] else {}
+        items=[x for x in (snap.get("items") or []) if isinstance(x,dict) and str(x.get("status") or "")=="active"]
+        if not items:
+            return {"status":"no_items"}
+
+        def _num(v, default=0.0):
+            try: return float(v or 0)
+            except Exception: return float(default)
+
+        normalized=[]
+        for it in items:
+            iid=it.get("id") or it.get("item_id")
+            if iid is None: continue
+            views=int(_num(it.get("views"),0))
+            contacts=int(_num(it.get("contacts"),0))
+            conv=_num(it.get("conversion"), (contacts*100.0/views if views else 0))
+            normalized.append({
+                "item_id":int(iid),
+                "views":views,
+                "contacts":contacts,
+                "conversion_pct":round(conv,3),
+                "write_capability":str(it.get("write_capability") or ""),
+                "origin":str(it.get("origin") or ""),
+                "category":str(it.get("category") or "")[:120],
+            })
+
+        cur.execute(
+            "SELECT DISTINCT item_id FROM cpx_execution_receipts "
+            "WHERE account_id=%s AND updated_at>=now()-interval '24 hours' AND item_id IS NOT NULL",
+            (account_id,),
+        )
+        recently_changed={int(x[0]) for x in cur.fetchall() if x and x[0] is not None}
+        cur.execute(
+            "SELECT key FROM storage WHERE account_id=%s AND key LIKE 'cpx_measure:%%' "
+            "AND value::jsonb->>'status'='waiting_measurement'",
+            (account_id,),
+        )
+        waiting=set()
+        for (key,) in cur.fetchall():
+            try: waiting.add(int(str(key).split(":")[1]))
+            except Exception: pass
+
+        top=[x for x in normalized if x["contacts"]>0]
+        top.sort(key=lambda x:(x["contacts"],x["conversion_pct"],x["views"]), reverse=True)
+        zero=[x for x in normalized if x["contacts"]==0]
+        low=[x for x in zero if x["views"]<5]
+        high_no=[x for x in zero if x["views"]>=20]
+        middle=[x for x in zero if 5<=x["views"]<20]
+        writable=[x for x in normalized if x["write_capability"]=="canonical"]
+        read_only=[x for x in normalized if x["write_capability"]!="canonical"]
+
+        groups={
+            "top_performers":{"count":len(top),"top_item_ids":[x["item_id"] for x in top[:20]]},
+            "zero_contact":{"count":len(zero),"top_item_ids":[x["item_id"] for x in sorted(zero,key=lambda x:x["views"],reverse=True)[:20]]},
+            "low_view":{"count":len(low),"top_item_ids":[x["item_id"] for x in low[:20]]},
+            "high_view_low_contact":{"count":len(high_no),"top_item_ids":[x["item_id"] for x in sorted(high_no,key=lambda x:x["views"],reverse=True)[:20]]},
+            "middle":{"count":len(middle),"top_item_ids":[x["item_id"] for x in sorted(middle,key=lambda x:x["views"],reverse=True)[:20]]},
+            "recently_changed":{"count":len(recently_changed),"top_item_ids":sorted(recently_changed)[:20]},
+            "waiting_measurement":{"count":len(waiting),"top_item_ids":sorted(waiting)[:20]},
+            "canonical_write":{"count":len(writable)},
+            "read_only_until_mapped":{"count":len(read_only)},
+        }
+        diagnostics_actions=[]
+        if top:
+            diagnostics_actions.append({
+                "priority":1,"kind":"protect_and_compare_winners",
+                "item_ids":[x["item_id"] for x in top[:10]],
+                "reason":"existing_contact_signal",
+                "external_write":False,
+            })
+        if high_no:
+            diagnostics_actions.append({
+                "priority":1,"kind":"conversion_rescue",
+                "item_ids":[x["item_id"] for x in sorted(high_no,key=lambda x:x["views"],reverse=True)[:20]],
+                "checks":["title_offer","hero_media","price","category","geo","cta"],
+                "reason":"views_without_contacts",
+                "external_write":False,
+            })
+        if low:
+            _low_writable=[x["item_id"] for x in low if x["write_capability"]=="canonical"][:20]
+            diagnostics_actions.append({
+                "priority":2,"kind":"reach_rescue",
+                "item_ids":_low_writable or [x["item_id"] for x in low[:20]],
+                "checks":["title_relevance","hero_media","category","geo","search_fit"],
+                "reason":"low_views",
+                "external_write":False,
+            })
+        if read_only:
+            diagnostics_actions.append({
+                "priority":1,"kind":"mapping_required",
+                "item_ids":[x["item_id"] for x in read_only[:20]],
+                "reason":"read_only_until_mapped",
+                "external_write":False,
+            })
+        if waiting:
+            diagnostics_actions.append({
+                "priority":3,"kind":"wait_measurement",
+                "item_ids":sorted(waiting)[:20],
+                "reason":"causal_measurement_open",
+                "external_write":False,
+            })
+        payload={
+            "version":1,
+            "account_id":account_id,
+            "checked_at":datetime.now().isoformat(),
+            "stats_date":snap.get("stats_date"),
+            "items_count":len(normalized),
+            "why_no_action":(
+                "NO_PROFITABLE_SIGNAL"
+                if str((diagnostics or {}).get("reason") or "") in {
+                    "no_proven_eligible_converter","no_proven_converter"
+                }
+                else str((diagnostics or {}).get("reason") or "NO_PROFITABLE_SIGNAL").upper()
+            ),
+            "next_action":str((diagnostics or {}).get("next_action") or "content_rescue_and_collect_more_signal"),
+            "measurement_cycle":(advice or {}).get("measurement_cycle") or {},
+            "groups":groups,
+            "zero_cost":True,
+            "external_write":False,
+            "ai_provider_calls":0,
+        }
+        value=json.dumps(payload,ensure_ascii=False)
+        cur.execute(
+            "SELECT id FROM storage WHERE account_id=%s AND key='content_rescue_snapshot_v1' ORDER BY id DESC LIMIT 1",
+            (account_id,),
+        )
+        old=cur.fetchone()
+        if old:
+            cur.execute("UPDATE storage SET value=%s WHERE id=%s",(value,old[0]))
+        else:
+            cur.execute(
+                "INSERT INTO storage(account_id,key,value) VALUES(%s,'content_rescue_snapshot_v1',%s)",
+                (account_id,value),
+            )
+        conn.commit()
+        return payload
+    except Exception as exc:
+        conn.rollback()
+        return {"status":"error","error":type(exc).__name__+":"+str(exc)[:160]}
+
 def _request_with_retry(method, url, *, attempts=3, **kwargs):
     """Local HA request with bounded retries and money-write uncertainty guard.
 
@@ -200,6 +350,15 @@ def _build_plan(acc, recs, advice=None):
         "status_counts": status_counts,
         "position_signal_required": True,
     }
+    # MARKETER_KPI_MET_REASON_SINGLE_TRUTH_V1: plan/fact is evaluated once and
+    # reused by every branch. When today's target is already met, do not emit
+    # CONTENT_RESCUE or MEASUREMENT_WAIT unless a proven red-CPL lower action is
+    # available. Zero money actions must be explained as KPI_MET.
+    pace_data = r.get("kpi_pace") or {}
+    target = float(pace_data.get("target") or 0)
+    actual = float(pace_data.get("actual") or 0)
+    expected = float(pace_data.get("expected_by_now") or 0)
+    elapsed_share = float(pace_data.get("elapsed_share") or 0)
     # MARKETER_RUNNER_PROVIDER_DAY_LAG_HOLD_V1:
     # Advisor exposes whether Avito item counters already belong to the current
     # Moscow marketing day. A fresh new-day spend snapshot plus yesterday's item
@@ -220,6 +379,28 @@ def _build_plan(acc, recs, advice=None):
             "BORIS ничего не повышает и повторит проверку автоматически"
         ), diagnostics
 
+    # MARKETER_ZERO_LEAD_ECONOMIC_EMERGENCY_PLAN_TRUTH_V1:
+    _advice_target = (advice or {}).get("target") if isinstance(advice, dict) else {}
+    _advice_target = _advice_target if isinstance(_advice_target, dict) else {}
+    try:
+        _fact_contacts_today = int(_advice_fact.get("contacts_today") or 0)
+        _fact_spent_today = float(_advice_fact.get("spent_today_rub") or 0)
+        _fact_red_cpl = float(_advice_target.get("max_cpl_rub") or 0)
+    except Exception:
+        _fact_contacts_today, _fact_spent_today, _fact_red_cpl = 0, 0.0, 0.0
+    if _fact_contacts_today <= 0 and _fact_red_cpl > 0 and _fact_spent_today >= 1.10 * _fact_red_cpl:
+        diagnostics.update({
+            "planned_after_guard": 0,
+            "proven_after_guard": 0,
+            "micro_proven_after_guard": 0,
+            "reason": "zero_lead_economic_emergency",
+            "next_action": "run_nonmoney_content_rescue_and_collect_signal",
+        })
+        return [], (
+            f"ZERO_LEAD_ECONOMIC_EMERGENCY: 0 лидов при расходе {_fact_spent_today:.0f} ₽; "
+            "денежный разгон запрещён, BORIS продолжает безденежный content rescue"
+        ), diagnostics
+
     # MARKETER_ACCOUNT_MEASUREMENT_BACKLOG_PLAN_HOLD_V1:
     # Final apply_one is the authority, but planner truth should stop earlier:
     # when both causal measurement slots are occupied, do not advertise a PUSH
@@ -229,7 +410,16 @@ def _build_plan(acc, recs, advice=None):
     _compaction = _measurement_cycle.get("backlog_compaction") if isinstance(_measurement_cycle.get("backlog_compaction"), dict) else {}
     try:
         _measurement_waiting = int(_measurement_cycle.get("waiting") or 0)
-        _measurement_cap = int(_compaction.get("cap") or 2)
+        # MARKETER_MEASUREMENT_CAP_SINGLE_TRUTH_V2:
+        # Advisor's measurement_cycle.cap is the canonical account-size-aware
+        # evidence ceiling. backlog_compaction.cap may be a temporary pressure-
+        # relief cap and must never override the normal execution ceiling.
+        _measurement_cap = int(
+            _measurement_cycle.get("cap")
+            or _compaction.get("normal_cap")
+            or _compaction.get("cap")
+            or 2
+        )
     except Exception:
         _measurement_waiting, _measurement_cap = 0, 2
     if _measurement_waiting >= max(1, _measurement_cap):
@@ -246,6 +436,7 @@ def _build_plan(acc, recs, advice=None):
             and bool(it.get("promotion_active"))
             and str(it.get("reason_code") or "") == "red_cpl_paid_zero_contact_waste"
             and str(it.get("boris_measure_status") or "") != "waiting_measurement"
+        and not (str(it.get("boris_measure_status") or "") == "measured" and str(it.get("boris_measure_effect") or "") == "worsened")
         ]
         if _red_cpl_lower:
             _chosen = _red_cpl_lower[0]
@@ -262,6 +453,20 @@ def _build_plan(acc, recs, advice=None):
                 f"RED_CPL_RECOVERY: заняты {_measurement_waiting}/{_measurement_cap} "
                 "слотов измерения повышений; новые повышения запрещены, BORIS "
                 "снижает одну доказанно неэффективную платную ставку"
+            ), diagnostics
+        if target > 0 and actual >= target:
+            diagnostics.update({
+                "planned_after_guard": 0,
+                "proven_after_guard": 0,
+                "micro_proven_after_guard": 0,
+                "reason": "kpi_met",
+                "measurement_waiting": _measurement_waiting,
+                "measurement_cap": _measurement_cap,
+                "next_action": "observe_kpi_and_preserve_budget",
+            })
+            return [], (
+                f"KPI_MET: факт {actual:g}/{target:g}; новые повышения ставок не нужны, "
+                "BORIS сохраняет бюджет и продолжает наблюдение"
             ), diagnostics
         diagnostics.update({
             "planned_after_guard": 0,
@@ -294,6 +499,7 @@ def _build_plan(acc, recs, advice=None):
         and bool(it.get("promotion_active"))
         and str(it.get("reason_code") or "") == "red_cpl_paid_zero_contact_waste"
         and str(it.get("boris_measure_status") or "") != "waiting_measurement"
+        and not (str(it.get("boris_measure_status") or "") == "measured" and str(it.get("boris_measure_effect") or "") == "worsened")
     ]
     if _red_cpl_lower_general:
         _chosen = _red_cpl_lower_general[0]
@@ -312,16 +518,27 @@ def _build_plan(acc, recs, advice=None):
             "доказанно неэффективную платную ставку и затем измеряет эффект"
         ), diagnostics
 
+    if target > 0 and actual >= target:
+        diagnostics.update({
+            "planned_after_guard": 0,
+            "proven_after_guard": 0,
+            "micro_proven_after_guard": 0,
+            "reason": "kpi_met",
+            "measurement_waiting": _measurement_waiting,
+            "measurement_cap": _measurement_cap,
+            "next_action": "observe_kpi_and_preserve_budget",
+        })
+        return [], (
+            f"KPI_MET: факт {actual:g}/{target:g}; дневной план выполнен, "
+            "BORIS не увеличивает расход и продолжает наблюдение"
+        ), diagnostics
+
     cap = int((r.get("mandate") or {}).get("max_actions_run") or MAX_ITEMS_PER_CYCLE)
     if r.get("decision") == "RAISE_CANDIDATES":
         top = [c for c in (r.get("top") or []) if c.get("status") == "eligible"]
         n = int(r.get("selected_for_execution") or 0) or cap
         headroom = (r.get("cpl_headroom") or {})
-        pace_data = r.get("kpi_pace") or {}
-        target = float(pace_data.get("target") or 0)
-        actual = float(pace_data.get("actual") or 0)
-        expected = float(pace_data.get("expected_by_now") or 0)
-        elapsed_share = float(pace_data.get("elapsed_share") or 0)
+        # Canonical pace values were computed once before provider/measurement guards.
         # KPI_EMERGENCY_REANIMATION_V1: when the account is materially behind
         # the time-weighted daily plan, use the full available proven-converter
         # set this hour instead of a conservative partial batch. Execution still
@@ -610,6 +827,17 @@ def main():
                     runtime["mode"] = mode
                     runtime["plan_diagnostics"] = plan_diagnostics
                     runtime["planned"] = len(plan)
+                    if APPLY and str(mode or "").startswith("CONTENT_RESCUE"):
+                        rescue=_content_rescue_snapshot(
+                            cur,conn,acc,advice=advice,diagnostics=plan_diagnostics
+                        )
+                        runtime["content_rescue"]={
+                            "status":rescue.get("status","ok"),
+                            "items_count":rescue.get("items_count"),
+                            "why_no_action":rescue.get("why_no_action"),
+                            "groups":rescue.get("groups"),
+                            "zero_cost":rescue.get("zero_cost",True),
+                        }
                     budget = len(plan)
                     print(f"    режим: {mode}, разрешено={sorted(allowed_ops)}, к исполнению {len(plan)}")
                     for it, act in plan:
@@ -648,6 +876,21 @@ def main():
                                 failed += 1
                                 print(f"    apply {it.get('id')}: ошибка {str(e)[:80]}")
                     runtime.update({"applied": applied, "skipped": skipped, "blocked": blocked, "failed": failed, "would_apply": would_apply, "block_reasons": block_reasons})
+                    if (
+                        APPLY
+                        and len(plan) > 0
+                        and applied == 0
+                        and (blocked + failed + skipped) >= len(plan)
+                    ):
+                        runtime["status"] = "degraded"
+                        runtime["execution_gap"] = {
+                            "planned": len(plan),
+                            "applied": applied,
+                            "blocked": blocked,
+                            "failed": failed,
+                            "skipped": skipped,
+                            "reason": "planned_actions_not_applied",
+                        }
                     archive_n = len(recs.get("archive_candidates")
                                     or recs.get("lower_or_archive") or [])
                     print(f"    considered={considered} would_apply={would_apply} "
@@ -669,7 +912,13 @@ def main():
                     }
                     runtime["planned"]=0
                     print(f"    режим: {runtime['mode']}, к исполнению 0")
-                runtime["status"] = "ok"
+                if int(runtime.get("failed") or 0) > 0:
+                    runtime["status"] = "error"
+                elif int(runtime.get("planned") or 0) > 0 and int(runtime.get("applied") or 0) == 0 and int(runtime.get("blocked") or 0) > 0:
+                    runtime["status"] = "degraded"
+                    runtime["execution_gap"] = "planned_actions_fully_blocked"
+                else:
+                    runtime["status"] = "ok"
             except Exception as e:
                 runtime["status"] = "error"
                 runtime["error"] = str(e)[:200]

@@ -29,7 +29,7 @@ class OceanAutopostContractTest(unittest.TestCase):
         self.assertLessEqual(len(text), 1000)
         self.assertIn("Большой экспертный разбор", text)
         self.assertIn(self.signature, text)
-        self.assertIn("Подробнее: https://boris-ai.pro/?utm_source=tg&utm_medium=social&utm_campaign=ocean&utm_content=p001", text)
+        self.assertIn("🎁 Получите бесплатно аудит за пару минут + тест BORIS для повышения эффективности рекламы: https://boris-ai.pro/audit?utm_source=tg&utm_medium=social&utm_campaign=ocean&utm_content=p001", text)
         self.assertEqual(text.count("https://boris-ai.pro/"), 1)
         self.assertNotIn("software-dev", text)
         self.assertNotIn("utm_campaign=dev", text)
@@ -126,15 +126,15 @@ class OceanAutopostContractTest(unittest.TestCase):
 
     def test_ocean_media_safety_floor_forces_reuse(self):
         src = inspect.getsource(pr.ensure_ocean_media_reuse)
-        self.assertIn('project["image_source"] = "reuse"', src)
-        self.assertIn('"image_source": "reuse"', src)
+        self.assertIn('project["image_source"] = "ai"', src)
+        self.assertIn('"image_source": "ai"', src)
         self.assertNotIn("generate_post(", src)
 
     def test_social_worker_blocks_generation_without_media_floor(self):
         src = inspect.getsource(bw._social_posting_loop)
         self.assertIn('ensure_ocean_media_reuse("u2")', src)
         self.assertIn('details["ocean_media_safety_floor"]', src)
-        self.assertIn('media_floor.get("image_source") == "reuse"', src)
+        self.assertIn('media_floor.get("image_source") == "ai"', src)
 
     def test_runner_counts_by_project_local_day_and_passes_project_id(self):
         src = inspect.getsource(pr._autopost_projects_impl)

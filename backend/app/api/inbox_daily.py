@@ -443,6 +443,270 @@ def save_settings(req: DailySettings, user=Depends(get_current_user)):
 # ==========================================================================
 OWNER_REPORT_CHAT_ID = os.environ.get("OWNER_DAILY_REPORT_CHAT_ID", "-1003952038222")
 OWNER_REPORT_THREAD_ID = int(os.environ.get("OWNER_DAILY_REPORT_THREAD_ID", "1759") or 1759)
+OWNER_REPORT_MESSENGER_ACCOUNT_ID = os.environ.get(
+    "OWNER_DAILY_REPORT_MESSENGER_ACCOUNT_ID", "marketing_pod_klyuch_20035"
+)
+OWNER_REPORT_MESSENGER_TITLE = os.environ.get(
+    "OWNER_DAILY_REPORT_MESSENGER_TITLE", "KPI / AI-маркетолог"
+)
+
+
+def _owner_messenger_text(value: str) -> str:
+    """Convert Telegram HTML into readable BORIS Messenger plain text."""
+    import html as _html
+    cleaned = str(value or "").replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    cleaned = re.sub(r"</?b>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    return _html.unescape(cleaned).strip()
+
+
+def _owner_report_part_message_id(report_date, slot: str, conversation_id: int, part: int) -> str:
+    from uuid import NAMESPACE_URL, uuid5
+
+    # Reuse the legacy first-message identity. An old worker and a new worker
+    # cannot both create a different first message during a rolling release.
+    identity = (
+        f"boris-owner-report:auto:v1:{report_date.isoformat()}:{slot}:"
+        f"conversation:{int(conversation_id)}"
+    )
+    if part > 1:
+        identity += f":part:{part}"
+    return str(uuid5(NAMESPACE_URL, identity))
+
+
+def _owner_report_chunk_plan(body: str, report_date, slot: str, conversation_id: int, owner_id: int) -> dict:
+    from hashlib import sha256
+
+    plain = _owner_messenger_text(body)
+    if not plain:
+        raise ValueError("owner_report_body_empty")
+    slot_label = "утро" if slot == "morning" else "вечер" if slot == "evening" else "контрольный"
+    prefix = f"📊 KPI / AI-маркетолог · {report_date.strftime('%d.%m.%Y')} · {slot_label}"
+    truth = "Только подтверждённый факт; queued/prepared не считаются выполнением."
+    single_header = prefix + "\n" + truth + "\n\n"
+    limit = 18000
+    if len(single_header + plain) <= limit:
+        contents = [plain]
+    else:
+        # Reserve the largest possible part numbering before splitting. Every
+        # actual MessageCreate body, including its envelope, stays below limit.
+        largest_number = len(plain)
+        reserve = len(
+            f"Часть {largest_number} из {largest_number}\n" + prefix + "\n" + truth + "\n\n"
+            + f"\n\nКонец части {largest_number} из {largest_number}."
+        )
+        capacity = limit - reserve
+        if capacity <= 0:
+            raise ValueError("owner_report_envelope_too_large")
+        contents = []
+        start = 0
+        while start < len(plain):
+            end = min(start + capacity, len(plain))
+            if end < len(plain):
+                boundary = plain.rfind("\n", start + capacity // 2, end)
+                if boundary >= 0:
+                    end = boundary + 1
+            contents.append(plain[start:end])
+            start = end
+    parts = []
+    total = len(contents)
+    for index, content in enumerate(contents, 1):
+        header = single_header if total == 1 else (
+            f"Часть {index} из {total}\n" + prefix + "\n" + truth + "\n\n"
+        )
+        # The canonical sender strips the whole message. A footer preserves
+        # every whitespace character at a multi-part content boundary.
+        footer = "" if total == 1 else f"\n\nКонец части {index} из {total}."
+        message = header + content + footer
+        if len(message) > limit:
+            raise ValueError("owner_report_part_too_large")
+        parts.append({
+            "part": index,
+            "client_message_id": _owner_report_part_message_id(report_date, slot, conversation_id, index),
+            "header": header, "content": content, "footer": footer, "body": message,
+            "body_sha256": sha256(message.encode("utf-8")).hexdigest(),
+        })
+    return {
+        "version": 1, "report_date": report_date.isoformat(), "slot": slot,
+        "conversation_id": int(conversation_id), "sender_user_id": int(owner_id),
+        "report_prefix": prefix, "plain_body": plain,
+        "body_sha256": sha256(plain.encode("utf-8")).hexdigest(), "parts": parts,
+        "frozen_at": datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
+    }
+
+
+def _owner_report_validate_chunk_plan(plan, report_date, slot: str, conversation_id: int, owner_id: int) -> None:
+    from hashlib import sha256
+
+    if not isinstance(plan, dict) or plan.get("version") != 1:
+        raise ValueError("owner_report_frozen_plan_version")
+    expected = {
+        "report_date": report_date.isoformat(), "slot": slot,
+        "conversation_id": int(conversation_id), "sender_user_id": int(owner_id),
+    }
+    if any(plan.get(key) != value for key, value in expected.items()):
+        raise ValueError("owner_report_frozen_plan_identity")
+    plain, parts = plan.get("plain_body"), plan.get("parts")
+    if not isinstance(plain, str) or not plain or not isinstance(parts, list) or not parts:
+        raise ValueError("owner_report_frozen_plan_empty")
+    if plan.get("body_sha256") != sha256(plain.encode("utf-8")).hexdigest():
+        raise ValueError("owner_report_frozen_body_hash")
+    contents = []
+    for index, part in enumerate(parts, 1):
+        if not isinstance(part, dict) or part.get("part") != index:
+            raise ValueError("owner_report_frozen_part_index")
+        if part.get("client_message_id") != _owner_report_part_message_id(report_date, slot, conversation_id, index):
+            raise ValueError("owner_report_frozen_part_identity")
+        if not all(isinstance(part.get(key), str) for key in ("header", "content", "footer", "body")):
+            raise ValueError("owner_report_frozen_part_type")
+        message = part["body"]
+        if message != part["header"] + part["content"] + part["footer"]:
+            raise ValueError("owner_report_frozen_part_content")
+        if not message or len(message) > 18000 or message != message.strip():
+            raise ValueError("owner_report_frozen_part_length")
+        if part.get("body_sha256") != sha256(message.encode("utf-8")).hexdigest():
+            raise ValueError("owner_report_frozen_part_hash")
+        contents.append(part["content"])
+    if "".join(contents) != plain:
+        raise ValueError("owner_report_frozen_body_incomplete")
+
+
+def _owner_report_private_members(db, conversation_id: int, owner_id: int) -> bool:
+    members = db.execute(text(
+        "SELECT user_id FROM internal_conversation_members WHERE conversation_id=:c ORDER BY user_id"
+    ), {"c": int(conversation_id)}).scalars().all()
+    return [int(value) for value in members] == [int(owner_id)]
+
+
+def _send_owner_report_to_messenger(body: str, report_date, slot: str) -> dict:
+    """Resume one frozen owner report using the canonical Messenger receipts."""
+    from app.api.internal_messenger import MessageCreate, send_message
+    from app.models.user import User
+    from app.services import messenger_idempotency
+    from app.services.platform_roles import PLATFORM_OWNER_ID
+
+    db = SessionLocal()
+    conversation_id, plan_key = None, None
+    delivered_ids, plan = [], None
+    sent_now = 0
+    try:
+        owner_id = int(PLATFORM_OWNER_ID)
+        conversation_id = db.execute(text(
+            "SELECT c.id FROM internal_conversations c "
+            "JOIN internal_conversation_members m ON m.conversation_id=c.id "
+            "WHERE c.account_id=:a AND c.kind='GROUP' AND c.title=:t AND m.user_id=:u "
+            "ORDER BY c.id DESC LIMIT 1"
+        ), {
+            "a": OWNER_REPORT_MESSENGER_ACCOUNT_ID,
+            "t": OWNER_REPORT_MESSENGER_TITLE, "u": owner_id,
+        }).scalar()
+        owner = db.query(User).filter(User.id == owner_id).first()
+        if not conversation_id or owner is None or int(owner.id) != owner_id:
+            return {"status": "error", "code": "owner_messenger_channel_missing",
+                    "conversation_id": conversation_id}
+        conversation_id = int(conversation_id)
+        if not _owner_report_private_members(db, conversation_id, owner_id):
+            return {"status": "error", "code": "owner_messenger_channel_not_private",
+                    "conversation_id": conversation_id}
+
+        plan_key = (
+            f"owner_report_messenger_parts:v1:{report_date.isoformat()}:{slot}:"
+            f"conversation:{conversation_id}"
+        )
+        # Storage has no account/key uniqueness constraint. The existing
+        # transaction lock prevents concurrent workers freezing different bodies.
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
+                   {"key": f"owner-report-freeze:{OWNER_REPORT_MESSENGER_ACCOUNT_ID}:{plan_key}"})
+        slot_label = "утро" if slot == "morning" else "вечер" if slot == "evening" else "контрольный"
+        prefix = f"📊 KPI / AI-маркетолог · {report_date.strftime('%d.%m.%Y')} · {slot_label}"
+        # Only the old one-message envelope qualifies. Multi-part bodies begin
+        # with the part label BEFORE the legacy prefix, so an old worker's
+        # broader prefix lookup cannot mistake part one for the whole report.
+        legacy_id = db.execute(text(
+            "SELECT id FROM internal_messages "
+            "WHERE conversation_id=:c AND sender_user_id=:u AND deleted_at IS NULL "
+            "AND body LIKE :prefix ORDER BY id DESC LIMIT 1"
+        ), {
+            "c": conversation_id, "u": owner_id,
+            "prefix": prefix + "\nТолько подтверждённый факт; queued/prepared не считаются выполнением.\n\n%",
+        }).scalar()
+        if legacy_id:
+            return {"status": "ok", "conversation_id": conversation_id,
+                    "message_id": int(legacy_id), "message_ids": [int(legacy_id)],
+                    "parts_total": 1, "parts_delivered": 1, "already_sent": True,
+                    "legacy_unchunked": True}
+        stored = db.execute(text(
+            "SELECT value FROM storage WHERE account_id=:a AND key=:k ORDER BY id DESC LIMIT 1 FOR UPDATE"
+        ), {"a": OWNER_REPORT_MESSENGER_ACCOUNT_ID, "k": plan_key}).scalar()
+        if stored is not None:
+            try:
+                plan = json.loads(stored) if isinstance(stored, str) else stored
+                _owner_report_validate_chunk_plan(plan, report_date, slot, conversation_id, owner_id)
+            except (TypeError, ValueError, KeyError, OverflowError):
+                return {"status": "error", "code": "owner_messenger_frozen_plan_invalid",
+                        "conversation_id": conversation_id, "frozen_plan_key": plan_key}
+        else:
+            plan = _owner_report_chunk_plan(body, report_date, slot, conversation_id, owner_id)
+            _owner_report_validate_chunk_plan(plan, report_date, slot, conversation_id, owner_id)
+            db.execute(text(
+                "INSERT INTO storage(account_id,key,value) VALUES(:a,:k,:v)"
+            ), {"a": OWNER_REPORT_MESSENGER_ACCOUNT_ID,
+                "k": plan_key, "v": json.dumps(plan, ensure_ascii=False)})
+        # The original text and every exact part become durable BEFORE the first
+        # send. Retries never re-plan from the new live statistics.
+        db.commit()
+
+        for part in plan["parts"]:
+            index = int(part["part"])
+            if not _owner_report_private_members(db, conversation_id, owner_id):
+                return {"status": "error", "code": "owner_messenger_channel_not_private",
+                        "conversation_id": conversation_id, "message_id": delivered_ids[-1] if delivered_ids else None,
+                        "message_ids": delivered_ids, "parts_total": len(plan["parts"]),
+                        "parts_delivered": len(delivered_ids), "partial": bool(delivered_ids),
+                        "failed_part": index, "frozen_plan_key": plan_key}
+            request = MessageCreate(
+                client_message_id=part["client_message_id"], message_type="text", body=part["body"],
+            )
+            # Reuse canonical payload hashing and receipt scope. No independent
+            # delivery ledger or guessed "sent" marker is created here.
+            _receipt, replay = messenger_idempotency.begin(db, conversation_id, owner_id, request)
+            db.commit()
+            if replay is None:
+                result = send_message(conversation_id, request, user=owner)
+                if not isinstance(result, dict) or result.get("status") != "ok":
+                    return {"status": "error", "code": "owner_messenger_part_failed",
+                            "conversation_id": conversation_id, "message_id": delivered_ids[-1] if delivered_ids else None,
+                            "message_ids": delivered_ids, "parts_total": len(plan["parts"]),
+                            "parts_delivered": len(delivered_ids), "failed_part": index,
+                            "partial": bool(delivered_ids), "frozen_plan_key": plan_key}
+                _receipt, replay = messenger_idempotency.begin(db, conversation_id, owner_id, request)
+                db.commit()
+                sent_now += 1
+            message = replay.get("message") if isinstance(replay, dict) else None
+            if not isinstance(replay, dict) or replay.get("status") != "ok" or not isinstance(message, dict) or not message.get("id") or message.get("conversation_id") != conversation_id or message.get("sender_user_id") != owner_id or message.get("delivery_status") != "DELIVERED":
+                return {"status": "error", "code": "owner_messenger_receipt_not_complete",
+                        "conversation_id": conversation_id, "message_id": delivered_ids[-1] if delivered_ids else None,
+                        "message_ids": delivered_ids, "parts_total": len(plan["parts"]),
+                        "parts_delivered": len(delivered_ids), "failed_part": index,
+                        "partial": bool(delivered_ids), "frozen_plan_key": plan_key}
+            delivered_ids.append(int(message["id"]))
+        return {"status": "ok", "conversation_id": conversation_id,
+                "message_id": delivered_ids[-1], "message_ids": delivered_ids,
+                "parts_total": len(plan["parts"]), "parts_delivered": len(delivered_ids),
+                "already_sent": sent_now == 0, "frozen_plan_key": plan_key,
+                "frozen_body_sha256": plan["body_sha256"]}
+    except Exception as exc:
+        db.rollback()
+        return {"status": "error", "code": "owner_messenger_delivery_failed",
+                "error_type": type(exc).__name__, "conversation_id": conversation_id,
+                "message_id": delivered_ids[-1] if delivered_ids else None, "message_ids": delivered_ids,
+                "parts_total": len(plan["parts"]) if isinstance(plan, dict) and isinstance(plan.get("parts"), list) else None,
+                "parts_delivered": len(delivered_ids), "partial": bool(delivered_ids),
+                "frozen_plan_key": plan_key}
+    finally:
+        db.close()
+
+
 
 
 def _owner_report_schema(db):
@@ -451,43 +715,202 @@ def _owner_report_schema(db):
     db.commit()
 
 
-def _active_owner_accounts(db):
-    """Production client accounts only. QA/test fixtures are never owner-report clients.
+def _owner_report_watch_ids():
+    """The requested watch is a minimum; it never limits paid-client discovery."""
+    default = (
+        "mbroker_27859,albertardashov_79016,pbi_artashes_plitka_mo_83993,"
+        "7473337_04122,planetazayavki_65985,greench84_48016,"
+        "evgeniy_peregorodki_12447"
+    )
+    raw = os.environ.get("OWNER_DAILY_REPORT_WATCH_ACCOUNT_IDS", default)
+    return list(dict.fromkeys(x.strip() for x in str(raw or "").split(",") if x.strip()))
 
-    Billing is authoritative for a renewed paid tariff. `account_slots.paid_until`
-    is an operational slot expiry and can lag behind a real subscription renewal;
-    using it alone silently dropped active clients from owner reports.
-    Legacy connected slots with no expiry remain reportable for compatibility.
-    """
-    return db.execute(text("""
-        SELECT DISTINCT a.account_id, COALESCE(NULLIF(a.name,''), s.account_name, a.account_id) account_name,
-               COALESCE(s.owner_user_id, a.owner_user_id) owner_user_id
-          FROM account_slots s
-          JOIN accounts a ON a.account_id=s.account_id
-          LEFT JOIN LATERAL (
-              SELECT CASE
-                       WHEN (st.value::jsonb->>'tier') IN ('trial','tariff_1','tariff_2')
-                        AND COALESCE(NULLIF(st.value::jsonb->>'paid_until','')::timestamptz,
-                                     NULLIF(st.value::jsonb->>'period_end','')::timestamptz) > now()
-                       THEN true ELSE false
-                     END AS billing_active
-                FROM storage st
-               WHERE st.account_id=s.account_id AND st.key='billing'
-               ORDER BY st.id DESC LIMIT 1
-          ) bill ON true
-         WHERE s.status='connected'
-           AND s.account_id IS NOT NULL
-           AND (s.paid_until IS NULL OR s.paid_until > now() OR COALESCE(bill.billing_active,false))
-           AND a.avito_client_id IS NOT NULL AND a.avito_client_secret IS NOT NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM reliability_kill_switches r
-                WHERE r.account_id=a.account_id AND r.blocked=true
-                  AND r.module IN ('actions','background','reports')
-           )
-           AND lower(a.account_id) NOT LIKE 'qa%%'
-           AND lower(COALESCE(a.name,'')) NOT LIKE 'qa%%'
-         ORDER BY account_name
+
+def _owner_report_entitlements(db, account_id, now):
+    """Read existing gates; reporting never grants, renews or changes a service."""
+    from app.services.subscription_gate import base_subscription_access
+    from app.client_config.entitlements import has_entitlement
+    from app.services.control_plane_adapters_ext import marketing_service_entitlement
+    from app.services.client_supervisor import _paid_inbox
+    from app.services.social_entitlement import normalize_posting_subscription, posting_subscription_active
+
+    raw = db.execute(text(
+        "SELECT value FROM storage WHERE account_id=:a AND key='posting_subscription' "
+        "ORDER BY id DESC LIMIT 1"
+    ), {"a": account_id}).scalar()
+    social, _ = normalize_posting_subscription(_safe_json(raw))
+    result = {
+        "base": base_subscription_access(db, account_id, now=now),
+        "messages": _paid_inbox(db, account_id, now),
+        "marketing": marketing_service_entitlement(db, account_id, now=now),
+        "mop": has_entitlement(db, account_id, "mop"),
+        "rop": has_entitlement(db, account_id, "rop"),
+        "ecs": has_entitlement(db, account_id, "ecs"),
+        "social": {
+            "state": "active" if posting_subscription_active(social, today=now.date()) else "inactive",
+            "source": "storage:posting_subscription",
+        },
+    }
+    trial_raw = db.execute(text(
+        "SELECT value FROM storage WHERE account_id=:a AND key='autopilot_settings' "
+        "ORDER BY id DESC LIMIT 1"
+    ), {"a": account_id}).scalar()
+    result["marketing_trial"] = _owner_report_trial_evidence(_safe_json(trial_raw), result["marketing"], now)
+    return result
+
+
+def _owner_report_trial_evidence(settings, marketing, now):
+    """Expose a recorded trial/gate conflict; this is not an entitlement grant."""
+    settings = settings if isinstance(settings, dict) else {}
+    until = None
+    try:
+        until = datetime.datetime.fromisoformat(str(settings.get("full_ai_marketer_trial_until") or "").replace("Z", "+00:00"))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=datetime.timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        until = None
+    recorded = bool(settings.get("full_ai_marketer") is True
+                    and settings.get("trial_scope") == "ai_marketer_only" and until is not None)
+    current = bool(recorded and until > now)
+    return {
+        "state": "recorded_trial" if recorded else "not_recorded",
+        "source": "storage:autopilot_settings",
+        "trial_source": settings.get("trial_source") if recorded else None,
+        "trial_scope": settings.get("trial_scope") if recorded else None,
+        "trial_until": until.isoformat() if until is not None else None,
+        "report_watch": current,
+        "runtime_entitlement_state": marketing.get("state"),
+        "entitlement_conflict": bool(current and marketing.get("state") != "active"),
+        "permission_granted_by_report": False,
+    }
+
+
+def _owner_report_right_active(right):
+    return bool(isinstance(right, dict) and (
+        right.get("state") == "active"
+        or (right.get("state") == "known" and right.get("allowed") is True)
+    ))
+
+
+def _select_owner_report_registry(rows, watch_ids, priority_ids=()):
+    """Pure report projection, deduplicated by the real Avito provider identity."""
+    watch_ids = list(dict.fromkeys(str(x) for x in watch_ids))
+    priorities = {aid: i for i, aid in enumerate(dict.fromkeys([*priority_ids, *watch_ids]))}
+    watch = set(watch_ids)
+    groups, excluded = {}, []
+    for raw in rows:
+        row = dict(raw)
+        aid = str(row.get("account_id") or "").strip()
+        row["account_id"] = aid
+        row["account_name"] = str(row.get("account_name") or row.get("name") or aid)
+        if not aid:
+            excluded.append({"account_id": aid, "reason": "invalid_account_id"})
+            continue
+        if row.get("policy_excluded") or "reports" in (row.get("blocked_modules") or []):
+            excluded.append({"account_id": aid, "reason": "reports_disabled_by_policy"})
+            continue
+        if aid.lower().startswith(("qa_", "qa-", "__qa", "test_", "test-", "testref_", "demo_", "sandbox_")) or str(row.get("billing_mode") or "") == "test":
+            excluded.append({"account_id": aid, "reason": "test_account"})
+            continue
+        provider = str(row.get("avito_user_id") or "").strip()
+        identity = ("internal" if row.get("is_own") else "client", provider or "account:" + aid)
+        groups.setdefault(identity, []).append(row)
+
+    clients, internal, linked = [], [], []
+    for members in groups.values():
+        active = any(_owner_report_right_active(right)
+                     for row in members for right in (row.get("rights") or {}).values())
+        recorded_trial = any((row.get("rights") or {}).get("marketing_trial", {}).get("report_watch") is True for row in members)
+        selected = active or recorded_trial or any(row["account_id"] in watch or row.get("is_own") or row.get("read_error") for row in members)
+        if not selected:
+            excluded.extend({"account_id": row["account_id"], "reason": "no_current_paid_service_or_watch"} for row in members)
+            continue
+        members.sort(key=lambda row: (
+            priorities.get(row["account_id"], len(priorities)),
+            0 if row.get("billing_mode") == "auto" else 1,
+            0 if row.get("avito_configured") else 1,
+            row["account_id"],
+        ))
+        primary = dict(members[0])
+        primary["related_accounts"] = [dict(row) for row in members[1:]]
+        primary["watch_account_ids"] = [row["account_id"] for row in members if row["account_id"] in watch]
+        primary["selection_reason"] = "explicit_watch" if primary["watch_account_ids"] else "active_service" if active else "recorded_trial_watch" if recorded_trial else "internal_account" if primary.get("is_own") else "entitlement_read_error"
+        blocked = set(primary.get("blocked_modules") or [])
+        primary["avito_refresh_allowed"] = bool(primary.get("avito_configured")) and not bool(blocked & {"actions", "background", "reports"})
+        primary["avito_reporting_reason"] = (
+            "available" if primary["avito_refresh_allowed"]
+            else "actions_or_background_blocked" if blocked & {"actions", "background", "reports"}
+            else "avito_credentials_not_configured"
+        )
+        for alias in primary["related_accounts"]:
+            linked.append({"account_id": alias["account_id"], "canonical_account_id": primary["account_id"],
+                           "reason": "same_avito_provider_account", "rights": alias.get("rights") or {}})
+        (internal if primary.get("is_own") else clients).append(primary)
+
+    order = lambda row: (priorities.get(row["account_id"], len(priorities)), row["account_name"], row["account_id"])
+    clients.sort(key=order); internal.sort(key=order)
+    represented = {row["account_id"] for row in [*clients, *internal, *linked]}
+    missing = [aid for aid in watch_ids if aid not in represented]
+    return {
+        "accounts": clients, "internal_accounts": internal, "linked_accounts": linked, "excluded": excluded,
+        "coverage": {
+            "registry_accounts_checked": len(rows),
+            "canonical_clients": len(clients),
+            "internal_accounts": len(internal),
+            "linked_accounts": len(linked),
+            "excluded_accounts": len(excluded),
+            "watched_expected": len(watch_ids),
+            "watched_covered": len(watch_ids) - len(missing),
+            "missing_watched_accounts": missing,
+            "entitlement_read_errors": [row["account_id"] for row in rows if row.get("read_error")],
+            "scope_is_dynamic": True,
+            "module_e2e_verified": False,
+        },
+    }
+
+
+def _owner_report_registry(db):
+    """Read every account, then select current services plus the minimum watch."""
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    excluded = {x.strip().lower() for x in os.environ.get(
+        "BORIS_POLICY_EXCLUDED_ACCOUNTS", "grant_kaluzhskaya_oblast_beton_plity_77392"
+    ).split(",") if x.strip()}
+    rows = db.execute(text("""
+        SELECT a.account_id, COALESCE(NULLIF(a.name,''), a.account_id) AS account_name,
+               a.owner_user_id, a.billing_mode, COALESCE(a.is_own,false) AS is_own,
+               a.avito_user_id,
+               (NULLIF(btrim(coalesce(a.avito_client_id,'')),'') IS NOT NULL
+                AND NULLIF(btrim(coalesce(a.avito_client_secret,'')),'') IS NOT NULL) AS avito_configured,
+               ARRAY(SELECT r.module FROM reliability_kill_switches r
+                     WHERE r.account_id=a.account_id AND r.blocked=true) AS blocked_modules
+          FROM accounts a ORDER BY a.account_id
     """)).mappings().all()
+    evidence = []
+    for raw in rows:
+        row = dict(raw)
+        aid = str(row.get("account_id") or "")
+        row["policy_excluded"] = aid.lower() in excluded
+        try:
+            with db.begin_nested():
+                row["rights"] = _owner_report_entitlements(db, aid, now)
+        except Exception as exc:
+            row["rights"] = {}
+            row["read_error"] = type(exc).__name__
+        evidence.append(row)
+    priority = [x.strip() for x in os.environ.get("OWNER_DAILY_REPORT_ACCOUNT_IDS", "").split(",") if x.strip()]
+    registry = _select_owner_report_registry(evidence, _owner_report_watch_ids(), priority)
+    registry["checked_at"] = now.isoformat()
+    registry["coverage"]["checked_at"] = now.isoformat()
+    return registry
+
+
+def _active_owner_accounts(db):
+    """Avito-capable daily KPI scope; the full module registry is reported separately.
+
+    The existing refresh scheduler may only call Avito for configured/unblocked
+    accounts. Module-only or suspended clients remain visible in the registry.
+    """
+    return [row for row in _owner_report_registry(db)["accounts"] if row["avito_refresh_allowed"]]
 
 
 def _safe_json(raw, fallback=None):
@@ -506,46 +929,89 @@ def _day_bounds(report_date):
     return start, end, int(start.timestamp()), int(end.timestamp())
 
 
+def _owner_report_timestamp(value):
+    if value is None:
+        return None
+    try:
+        parsed = value if isinstance(value, datetime.datetime) else datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=datetime.timezone.utc) if parsed.tzinfo is None else parsed
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _owner_report_time(value):
+    parsed = _owner_report_timestamp(value)
+    return parsed.astimezone(MSK).strftime("%d.%m.%Y %H:%M МСК") if parsed else "время не подтверждено"
+
+
 def _daily_avito_snapshot(db, account_id: str, report_date):
     raw = db.execute(text("SELECT value FROM storage WHERE account_id=:a AND key=:k ORDER BY id DESC LIMIT 1"),
                      {"a": account_id, "k": f"daily_stats:{report_date.isoformat()}"}).scalar()
     data = _safe_json(raw)
-    if not data:
-        return {"status": "no_data", "views": None, "contacts": None, "view_to_contact_pct": None,
-                "active_items": None, "balance_rub": None, "stats_date": None,
-                "spending_status": "no_data", "ad_spend_rub": None, "all_spend_rub": None,
-                "spending_date": None, "spending_breakdown": {}}
+    if not isinstance(data, dict):
+        data = {}
     spending = data.get("spending") if isinstance(data.get("spending"), dict) else {}
-    spending_status = str(spending.get("status") or "no_data")
-    spending_date = str(spending.get("date") or "") or None
-    try: ad_spend_rub = float(spending.get("ad_spend_rub")) if spending.get("ad_spend_rub") is not None else None
-    except Exception: ad_spend_rub = None
-    try: all_spend_rub = float(spending.get("all_spend_rub")) if spending.get("all_spend_rub") is not None else None
-    except Exception: all_spend_rub = None
-    spending_breakdown = spending.get("breakdown") if isinstance(spending.get("breakdown"), dict) else {}
-    stats_date = str(data.get("stats_date") or data.get("date") or "")
-    # Нельзя выдавать статистику соседнего дня за факт отчётной даты.
-    # Некоторые Avito-ответы при лаге источника сохраняются под сегодняшним ключом,
-    # но явно несут stats_date предыдущего дня. Такой snapshot считаем stale.
-    if stats_date and stats_date != report_date.isoformat():
-        return {"status": "stale", "views": None, "contacts": None, "view_to_contact_pct": None,
-                "active_items": None, "balance_rub": None, "stats_date": stats_date,
-                "spending_status": spending_status, "ad_spend_rub": ad_spend_rub,
-                "all_spend_rub": all_spend_rub, "spending_date": spending_date,
-                "spending_breakdown": spending_breakdown}
+
+    def number(value):
+        import math
+        try:
+            parsed = float(value) if value is not None else None
+            return parsed if parsed is not None and math.isfinite(parsed) else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    # The storage key/date identifies our cache, not the provider's statistics
+    # day. In particular an inventory with zero statistics batches does not
+    # establish zero contacts or views.
+    stats_date = str(data.get("stats_date") or "").strip() or None
+    spending_date = str(spending.get("date") or "").strip() or None
+    completeness = data.get("completeness") if isinstance(data.get("completeness"), dict) else {}
     items = data.get("items") if isinstance(data.get("items"), list) else []
-    views = sum(int(x.get("views") or 0) for x in items if isinstance(x, dict))
-    contacts = sum(int(x.get("contacts") or 0) for x in items if isinstance(x, dict))
-    active_items = sum(1 for x in items if isinstance(x, dict) and str(x.get("status") or "").lower() == "active")
+    result = {
+        "status": "no_data" if not data else "not_proven",
+        "views": None, "contacts": None, "view_to_contact_pct": None,
+        "active_items": None, "balance_rub": None,
+        "stats_date": stats_date, "stats_date_proven": False,
+        "cached_report_date": data.get("date"), "collected_at": data.get("collected_at"),
+        "stats_batches_total": completeness.get("stats_batches_total"),
+        "spending_status": str(spending.get("status") or "no_data"),
+        "ad_spend_rub": number(spending.get("ad_spend_rub")),
+        "all_spend_rub": number(spending.get("all_spend_rub")),
+        "spending_date": spending_date, "spending_confirmed_at": spending.get("confirmed_at"),
+        "spending_breakdown": spending.get("breakdown") if isinstance(spending.get("breakdown"), dict) else {},
+        "stats_unavailable_reason": None,
+    }
+    if not data:
+        result["stats_unavailable_reason"] = "daily_cache_missing"
+        return result
+    if not stats_date:
+        result["stats_unavailable_reason"] = "provider_stats_date_missing"
+        return result
+    if stats_date != report_date.isoformat():
+        result.update(status="stale", stats_unavailable_reason="provider_returned_other_day")
+        return result
+    if completeness.get("complete") is False or completeness.get("stats_batches_total") == 0:
+        result["stats_unavailable_reason"] = "provider_statistics_incomplete"
+        return result
+    result["stats_date_proven"] = True
+    valid = [item for item in items if isinstance(item, dict)]
+    for field in ("views", "contacts"):
+        values = [number(item.get(field)) for item in valid]
+        if len(valid) == len(items) and all(value is not None and value >= 0 and value.is_integer() for value in values):
+            result[field] = sum(int(value) for value in values)
+    if result["views"] is None or result["contacts"] is None:
+        result["stats_unavailable_reason"] = "provider_counters_incomplete"
+        return result
+    views, contacts = result["views"], result["contacts"]
     balance = data.get("balance") if isinstance(data.get("balance"), dict) else {}
-    return {"status": "ok", "views": views, "contacts": contacts,
-            "view_to_contact_pct": round(contacts * 100.0 / views, 2) if views else (0.0 if contacts == 0 and views == 0 else None),
-            "active_items": active_items,
-            "balance_rub": float(balance.get("real")) if balance.get("real") is not None else None,
-            "stats_date": stats_date or report_date.isoformat(),
-            "spending_status": spending_status, "ad_spend_rub": ad_spend_rub,
-            "all_spend_rub": all_spend_rub, "spending_date": spending_date,
-            "spending_breakdown": spending_breakdown}
+    result.update(
+        status="ok",
+        view_to_contact_pct=round(contacts * 100.0 / views, 2) if views else (0.0 if contacts == 0 else None),
+        active_items=sum(1 for item in valid if str(item.get("status") or "").lower() == "active"),
+        balance_rub=number(balance.get("real")),
+    )
+    return result
+
 
 
 def _daily_message_funnel(db, account_id: str, report_date):
@@ -818,86 +1284,186 @@ def _kpi_snapshot(db, account_id: str, report_date, avito: dict, messages: dict 
             actual_spend = None
             actual_cpl = None
             spend_source = "unavailable"
+    import math
+    try:
+        budget_raw = cfg.get("daily_budget_limit_rub")
+        budget = float(budget_raw) if budget_raw is not None else None
+        if budget is not None and not math.isfinite(budget):
+            budget = None
+    except (TypeError, ValueError, OverflowError):
+        budget = None
     return {"target_leads": target, "actual_leads": actual, "completion_pct": completion,
+            "daily_budget_limit_rub": budget,
             "target_cpl": max_cpl, "actual_cpl": actual_cpl,
             "actual_spend_rub": actual_spend, "actual_spend_source": spend_source,
             "actual_leads_source": actual_source, "actual_leads_complete": actual_complete}
 
 
-def _account_recommendations(kpi: dict, avito: dict, messages: dict, qual: dict, calls: dict):
-    """Deterministic per-account actions from real daily facts; no cross-account KPI."""
-    actions = []
-    target = kpi.get('target_leads')
-    actual = kpi.get('actual_leads')
-    completion = kpi.get('completion_pct')
-    target_cpl = kpi.get('target_cpl')
-    actual_cpl = kpi.get('actual_cpl')
-    views = avito.get('views')
-    contacts = avito.get('contacts')
-    conv = avito.get('view_to_contact_pct')
-    dialogs = int(messages.get('dialogs') or 0)
-    replied = int(messages.get('replied_dialogs') or 0)
-    advanced = int(messages.get('advanced') or 0)
-    missed = int(calls.get('calls_missed') or 0)
-    hot = int(((qual.get('temperatures') or {}).get('hot')) or 0)
-    warm = int(((qual.get('temperatures') or {}).get('warm')) or 0)
-    unclassified = int(qual.get('unclassified') or 0)
+def _owner_report_marketing_access(kpi: dict, rights: dict | None = None) -> dict:
+    rights = rights or {}
+    marketing = rights.get("marketing") or {}
+    trial = rights.get("marketing_trial") or {}
+    active = _owner_report_right_active(marketing)
+    if trial.get("entitlement_conflict"):
+        status = "trial_conflict"
+        label = (
+            "Текущий доступ маркетинга: тест записан до "
+            + _owner_report_time(trial.get("trial_until"))
+            + ", но исполнитель видит завершённый или неизвестный период; расхождение не устранено"
+        )
+    elif str(marketing.get("state") or "") == "expired":
+        status = "expired"
+        label = "Текущий доступ маркетинга: срок услуги завершён"
+    elif active:
+        status = "active"
+        label = "Текущий доступ маркетинга: пакет действует"
+    else:
+        status = "not_proven"
+        label = "Текущий доступ маркетинга: право на услугу не подтверждено"
+    budget = kpi.get("daily_budget_limit_rub")
+    if budget is None:
+        label += "; дневной рекламный лимит не подтверждён"
+    elif float(budget) <= 0:
+        label += "; дневной рекламный лимит 0 ₽, разрешение на платные изменения не подтверждено"
+    else:
+        label += f"; дневной рекламный лимит {_fmt_num(budget, ' ₽')}"
+    return {
+        "state": status, "text": label,
+        "may_consider_paid_change": bool(active and not trial.get("entitlement_conflict") and budget is not None and float(budget) > 0),
+    }
 
+
+def _account_recommendations(kpi: dict, avito: dict, messages: dict, qual: dict, calls: dict, rights: dict | None = None):
+    """Recommendations only. Existing rights/limits are read, never changed."""
+    actions = []
+    access = _owner_report_marketing_access(kpi, rights)
+    if access["state"] == "trial_conflict":
+        actions.append("Согласовать учёт уже назначенного маркетингового теста с проверкой исполнителя; до устранения расхождения платное масштабирование не рекомендовано.")
+    elif access["state"] == "expired":
+        actions.append("Сначала подтвердить действующее право на маркетинговую услугу: по текущей проверке срок завершён.")
+    elif access["state"] != "active":
+        actions.append("Подтвердить право на маркетинговую услугу до рассмотрения платных изменений.")
+    budget = kpi.get("daily_budget_limit_rub")
+    if budget is None or float(budget) <= 0:
+        actions.append("Для рассмотрения платных изменений требуется подтверждённый положительный рекламный лимит; текущий лимит отсутствует или равен нулю.")
+
+    target, actual = kpi.get("target_leads"), kpi.get("actual_leads")
+    completion = kpi.get("completion_pct")
+    complete = kpi.get("actual_leads_complete") is not False
+    target_cpl, actual_cpl = kpi.get("target_cpl"), kpi.get("actual_cpl")
+    views, contacts, conv = avito.get("views"), avito.get("contacts"), avito.get("view_to_contact_pct")
     if target is None:
-        actions.append('Нужно ваше решение: задать персональный план лидов в день. Без бизнес-цели BORIS не может честно оценить выполнение плана этого аккаунта.')
-    elif actual is None:
-        actions.append('BORIS восстанавливает источник факта лидов: пока факт не подтверждён, система не делает вывод о выполнении KPI.')
+        actions.append("Задать персональный план лидов в день; без заданной цели выполнение плана не оценивается.")
+    elif actual is None or not complete:
+        actions.append("Подтвердить полный факт лидов за отчётную дату; сохранённый минимум входящих не определяет окончательное выполнение плана.")
     elif completion is not None and completion < 100:
         gap = max(int(round(float(target) - float(actual))), 0)
-        actions.append(f'Отставание от дневного плана: {gap}. BORIS увеличивает поток. Целевой уровень: {target:g} {_lead_word(target)} в день.')
+        actions.append(f"Отставание от дневного плана: {gap}; цель {target:g} {_lead_word(target)} в день. Разобрать причину отставания.")
         if views is not None and views < 30:
-            actions.append('BORIS увеличивает охват: проверяет активность объявлений, позиции, продвижение, ставки, географию и количество работающих объявлений.')
+            actions.append("Проверить активность объявлений, доступный охват, географию и состав опубликованных объявлений.")
         elif conv is not None and conv < 2:
-            actions.append(f'BORIS улучшает конверсию просмотров в контакт: сейчас {conv:g}%. Проверяются первое фото, заголовок, цена/оффер, УТП, призыв к действию и качество трафика.')
-        elif contacts is not None and contacts > 0:
-            actions.append('Контакты уже идут. BORIS масштабирует лучшие объявления и связки только при сохранении допустимого CPL.')
+            actions.append(f"Проверить причины конверсии {conv:g}%: первое фото, заголовок, предложение, цену и качество трафика.")
+        elif contacts and access["may_consider_paid_change"] and avito.get("status") == "ok":
+            actions.append("Рассмотреть усиление результативных объявлений после проверки текущих мандата, баланса, лимитов и периода наблюдения; это рекомендация, не выполненное действие.")
     elif completion is not None and completion >= 100:
-        actions.append('План по лидам выполнен. BORIS сохраняет рабочую связку и масштабирует её только при контроле CPL и качества лидов.')
+        actions.append("План по лидам за отчётный день выполнен по доступным данным; отдельно проверить качество лидов и допустимость дальнейших действий.")
 
     if target_cpl is not None and actual_cpl is not None and actual_cpl > target_cpl:
-        actions.append(f'CPL выше цели: {actual_cpl:g} ₽ при лимите {target_cpl:g} ₽. BORIS не наращивает слабые объявления и перераспределяет расход в объявления с лучшей конверсией.')
+        actions.append(f"CPL по всем списаниям выше цели: {actual_cpl:g} ₽ против {target_cpl:g} ₽. Разобрать состав расходов и конверсию; факт перераспределения бюджета здесь не установлен.")
     elif target_cpl is not None and actual_cpl is not None and actual_cpl <= target_cpl and completion is not None and completion < 100:
-        actions.append(f'CPL {actual_cpl:g} ₽ укладывается в цель {target_cpl:g} ₽. BORIS может активнее продвигать рабочие объявления в пределах бюджетных ограничений.')
+        actions.append(f"CPL по всем списаниям {actual_cpl:g} ₽ в пределах цели {target_cpl:g} ₽; возможность роста проверить отдельно по действующим ограничениям.")
 
+    dialogs, replied = int(messages.get("dialogs") or 0), int(messages.get("replied_dialogs") or 0)
+    advanced = int(messages.get("advanced") or 0)
     if dialogs and replied < dialogs:
-        actions.append(f'Диалогов без ответа: {dialogs-replied}. BORIS закрывает пропуски и контролирует скорость реакции МОПа.')
+        actions.append(f"Проверить {dialogs-replied} диалогов без подтверждённого ответа и доступность ответственного сотрудника или МОПа.")
     if dialogs and advanced < dialogs:
-        actions.append(f'Диалогов без следующего шага: {dialogs-advanced}. BORIS усиливает квалификацию и фиксирует следующее действие.')
-    if hot or warm:
-        actions.append(f'Горячих лидов: {hot}; тёплых: {warm}. BORIS приоритетно ведёт их к звонку, замеру, расчёту или сделке.')
+        actions.append(f"Проверить следующий шаг по {dialogs-advanced} диалогам; выполнение квалификации не следует из этой рекомендации.")
+    unclassified = int(qual.get("unclassified") or 0)
     if unclassified:
-        actions.append(f'Входящих диалогов без классификации: {unclassified}. BORIS определяет температуру и следующий шаг.')
+        actions.append(f"Квалифицировать {unclassified} входящих диалогов, для которых классификация не записана.")
+    missed = int(calls.get("calls_missed") or 0)
     if missed:
-        actions.append(f'Пропущено звонков: {missed}. BORIS ставит быстрый обратный звонок и контролирует создание CRM-карточки/задачи.')
-    if avito.get('status') == 'stale':
-        actions.append(f'Статистика Avito устарела ({avito.get("stats_date") or "другая дата"}). BORIS сначала обновляет данные и не принимает рекламные решения по старым цифрам.')
+        actions.append(f"Проверить обратный звонок и CRM-задачу по {missed} пропущенным звонкам.")
+    if avito.get("status") != "ok":
+        actions.insert(0, "Получить подтверждённую статистику Avito именно за отчётную дату; отсутствие статистики не равно нулю просмотров или контактов.")
     return actions[:7]
 
 
+
 def _marketer_actions_snapshot(db, account_id: str, report_date):
-    """Полная account-scoped память действий AI-маркетолога за бизнес-сутки MSK."""
+    """Read confirmed bid effects and separate observations for this MSK day."""
+    from decimal import Decimal, InvalidOperation
     start, end, _, _ = _day_bounds(report_date)
-    rows = db.execute(text("""
-        SELECT ts,actor,source,action,object_kind,object_name,before_val,after_val,reason,guard_reason
+    receipts = db.execute(text("""
+        SELECT id,account_id,request_key,item_id,action,source,status,
+               old_bid_penny,intended_bid_penny,observed_bid_penny,provider_http_status,finished_at
+        FROM cpx_execution_receipts
+        WHERE account_id=:a AND finished_at>=:s AND finished_at<:e
+        ORDER BY finished_at ASC,id ASC
+    """), {"a": account_id, "s": start, "e": end}).mappings().all()
+    actions = []
+    for raw in receipts:
+        row = dict(raw)
+        finished = _owner_report_timestamp(row.get("finished_at"))
+        try:
+            old = Decimal(str(row.get("old_bid_penny")))
+            intended = Decimal(str(row.get("intended_bid_penny")))
+            observed = Decimal(str(row.get("observed_bid_penny")))
+            values_valid = all(value.is_finite() and value == value.to_integral_value() for value in (old, intended, observed))
+        except (InvalidOperation, ValueError, TypeError):
+            values_valid = False
+        if (
+            not values_valid or str(row.get("status")) != "succeeded"
+            or row.get("provider_http_status") != 200
+            or intended != observed or old == observed
+            or str(row.get("account_id")) != str(account_id)
+            or finished is None or not (start <= finished < end)
+        ):
+            continue
+        actions.append({
+            "receipt_id": int(row["id"]), "request_key": row.get("request_key"),
+            "ts": finished.isoformat(), "finished_at": finished.isoformat(), "source": row.get("source"),
+            "action": "Повысил ставку" if observed > old else "Снизил ставку",
+            "object_kind": "объявление", "object_name": str(row.get("item_id")),
+            "before_val": f"{old / 100:g} ₽", "after_val": f"{observed / 100:g} ₽",
+            "provider_http_status": 200, "status": "succeeded", "readback_matches": True,
+        })
+    log_rows = db.execute(text("""
+        SELECT id,ts,source,action,object_kind,object_name,before_val,after_val
         FROM action_log
         WHERE account_id=:a AND ts>=:s AND ts<:e
-          AND (actor IN ('boris_auto','system','boris')
-               OR source LIKE 'cpx_%' OR source LIKE 'boris_kpi%')
+          AND source='cpx_daily_learning'
         ORDER BY ts ASC,id ASC
-    """), {"a":account_id,"s":start,"e":end}).mappings().all()
-    actions=[]
-    for r in rows:
-        actions.append({k:(v.isoformat() if k=='ts' and v else v) for k,v in dict(r).items()})
-    bid=[x for x in actions if 'ставк' in str(x.get('action') or '').lower()]
-    return {"count":len(actions),"bid_changes":len(bid),"unique_bid_items":len(set(str(x.get('object_name') or '') for x in bid)),"actions":actions}
+    """), {
+        "a": account_id,
+        "s": start.astimezone(datetime.timezone.utc).replace(tzinfo=None),
+        "e": end.astimezone(datetime.timezone.utc).replace(tzinfo=None),
+    }).mappings().all()
+    measurements = []
+    for raw in log_rows:
+        row = dict(raw)
+        # action_log.ts is stored as UTC without a time-zone column.
+        timestamp = _owner_report_timestamp(row.get("ts"))
+        after = _safe_json(row.get("after_val"))
+        measurements.append({
+            "event_id": row.get("id"), "ts": timestamp.isoformat() if timestamp else None,
+            "source": row.get("source"), "object_name": row.get("object_name"),
+            "result": after.get("эффект") if isinstance(after, dict) else None,
+            "timestamp_source": "action_log.ts_utc",
+        })
+    return {
+        "count": len(actions), "bid_changes": len(actions),
+        "unique_bid_items": len({action["object_name"] for action in actions}),
+        "actions": actions, "measurement_count": len(measurements), "measurements": measurements,
+        "receipt_source": "cpx_execution_receipts",
+        "confirmation": "succeeded + HTTP 200 + observed bid equals intended and differs from old bid",
+        "business_date": report_date.isoformat(), "timezone": "Europe/Moscow",
+    }
 
 
-def build_owner_account_snapshot(db, account_id: str, account_name: str, owner_user_id, report_date=None):
+
+def build_owner_account_snapshot(db, account_id: str, account_name: str, owner_user_id, report_date=None, rights: dict | None = None):
     report_date = report_date or (datetime.datetime.now(tz=MSK) - datetime.timedelta(days=1)).date()
     avito = _daily_avito_snapshot(db, account_id, report_date)
     messages = _daily_message_funnel(db, account_id, report_date)
@@ -919,12 +1485,12 @@ def build_owner_account_snapshot(db, account_id: str, account_name: str, owner_u
     calls = _call_crm_snapshot(db, account_id, report_date)
     rop_quality = _rop_quality_snapshot(db, account_id, report_date)
     kpi = _kpi_snapshot(db, account_id, report_date, avito, messages=messages, calls=calls)
-    recommendations = _account_recommendations(kpi, avito, messages, qual, calls)
+    recommendations = _account_recommendations(kpi, avito, messages, qual, calls, rights=rights)
     marketer = _marketer_actions_snapshot(db, account_id, report_date)
     return {"report_date": report_date.isoformat(), "account_id": account_id, "account_name": account_name,
             "owner_user_id": owner_user_id, "kpi": kpi, "avito": avito, "messages": messages,
             "qualification": qual, "calls_crm": calls, "rop_quality": rop_quality, "recommendations": recommendations,
-            "ai_marketer": marketer,
+            "ai_marketer": marketer, "current_service_rights": rights or {}, "report_contract_version": 2,
             "real_data_only": True, "generated_at": datetime.datetime.now(tz=MSK).isoformat()}
 
 
@@ -937,7 +1503,7 @@ def save_owner_daily_snapshots(report_date=None):
         _owner_report_schema(db)
         for row in _active_owner_accounts(db):
             try:
-                payload = build_owner_account_snapshot(db, row['account_id'], row['account_name'], row['owner_user_id'], report_date)
+                payload = build_owner_account_snapshot(db, row['account_id'], row['account_name'], row['owner_user_id'], report_date, rights=row.get('rights'))
                 db.execute(text("""
                     INSERT INTO owner_daily_report_snapshots(report_date,account_id,account_name,owner_user_id,payload_json,created_at)
                     VALUES(:d,:a,:n,:o,CAST(:p AS jsonb),now())
@@ -973,8 +1539,26 @@ def render_owner_daily_report(report_date=None):
     db = SessionLocal()
     try:
         _owner_report_schema(db)
-        rows = db.execute(text("SELECT payload_json FROM owner_daily_report_snapshots WHERE report_date=:d ORDER BY account_name"), {"d": report_date}).scalars().all()
+        scope_rows = _active_owner_accounts(db)
+        current_rights = {row["account_id"]: row.get("rights") or {} for row in scope_rows}
+        account_scope = [row["account_id"] for row in scope_rows]
+        rows = db.execute(text(
+            "SELECT payload_json FROM owner_daily_report_snapshots "
+            "WHERE report_date=:d AND account_id=ANY(:ids) ORDER BY account_name"
+        ), {"d": report_date, "ids": account_scope}).scalars().all()
         payloads = [r if isinstance(r, dict) else _safe_json(r) for r in rows]
+        for payload in payloads:
+            payload["current_service_rights"] = current_rights.get(payload.get("account_id"), {})
+            avito = payload.get("avito") or {}
+            kpi = payload.get("kpi") or {}
+            # Old snapshots did not retain whether stats_date came from Avito
+            # or our cache key. They cannot prove a zero or a complete lead fact.
+            if avito.get("stats_date_proven") is not True:
+                avito.update(views=None, contacts=None, view_to_contact_pct=None)
+                if avito.get("status") == "ok":
+                    avito.update(status="not_proven", stats_unavailable_reason="legacy_provider_date_not_proven")
+                if kpi.get("actual_leads_source") == "avito_contacts":
+                    kpi.update(actual_leads=None, actual_leads_complete=False, actual_leads_source="unavailable", completion_pct=None, actual_cpl=None)
     finally:
         db.close()
     if not payloads:
@@ -985,16 +1569,16 @@ def render_owner_daily_report(report_date=None):
     for _p in payloads:
         _k=_p.get('kpi') or {}; _name=_p.get('account_name') or _p.get('account_id') or 'аккаунт'
         _t=_k.get('target_leads'); _a=_k.get('actual_leads')
-        if _t is None or _a is None:
+        if _t is None or _a is None or _k.get("actual_leads_complete") is False:
             unknown_names.append(_name)
         elif float(_a) >= float(_t):
             ok_names.append(_name)
         else:
             gap_names.append(_name)
     _generated = sorted(str(p.get('generated_at') or '') for p in payloads if p.get('generated_at'))
-    _cut = (_generated[-1][11:16] + ' МСК') if _generated and len(_generated[-1]) >= 16 else 'время не записано'
+    _cut = _owner_report_time(_generated[-1]) if _generated else 'время не записано'
     lines = [f"📊 <b>BORIS · отчёты по аккаунтам · {report_date.strftime('%d.%m.%Y')}</b>",
-             f"Срез данных: <b>{_cut}</b>.",
+             f"Отчёт сформирован: <b>{_cut}</b>. Даты и время источников указаны по аккаунтам.",
              f"Аккаунтов в отчёте: <b>{len(payloads)}</b>. План, факт, CPL, воронка и рекомендации ниже считаются отдельно для каждого аккаунта.",
              f"Коротко: ✅ план выполнен — {len(ok_names)} · 🔴 ниже плана — {len(gap_names)} · ⚪ план/факт не определён — {len(unknown_names)}."]
     if gap_names:
@@ -1009,84 +1593,105 @@ def render_owner_daily_report(report_date=None):
             account_result="⚪ План лидов не задан"
         elif _actual is None:
             account_result="⚪ Факт лидов не подтверждён — сравнивать с планом нельзя"
+        elif k.get("actual_leads_complete") is False:
+            account_result=f"⚪ Подтверждённый минимум {_fmt_num(_actual)}; полный факт лидов не установлен, итог плана не определён"
         elif float(_actual) >= float(_target):
             account_result=f"✅ План выполнен: факт {_fmt_num(_actual)} · план {_fmt_num(_target)} {_lead_word(_target)}"
         else:
             _gap=max(int(round(float(_target)-float(_actual))),0)
             account_result=f"🔴 Ниже плана: факт {_fmt_num(_actual)} · план {_fmt_num(_target)} {_lead_word(_target)} · отставание {_gap}"
         kpi_line = f"План/факт лидов: {_fmt_num(_target)} / {_fmt_num(_actual)}"
-        if k.get('completion_pct') is not None: kpi_line += f" · выполнено {k['completion_pct']}%"
+        if k.get('completion_pct') is not None and k.get("actual_leads_complete") is not False: kpi_line += f" · выполнено {k['completion_pct']}%"
         target_cpl = k.get('target_cpl')
         actual_cpl = k.get('actual_cpl')
         actual_leads = k.get('actual_leads')
         target_cpl_text = _fmt_num(target_cpl, ' ₽') if target_cpl is not None else 'не задана'
         if actual_cpl is not None:
             actual_cpl_text = _fmt_num(actual_cpl, ' ₽')
+        elif actual_leads is None or k.get("actual_leads_complete") is False:
+            actual_cpl_text = 'не определён: полный факт контактов не подтверждён'
         elif actual_leads == 0:
-            actual_cpl_text = '— лидов нет'
+            actual_cpl_text = '— контактов нет'
         else:
-            actual_cpl_text = '— нет полного расхода за день'
-        cpl_line = f"CPL (стоимость лида): цель {target_cpl_text} · факт {actual_cpl_text}"
-        if k.get('actual_spend_rub') is not None:
-            cpl_line += f" · расход Avito всего {_fmt_num(k.get('actual_spend_rub'), ' ₽')}"
-        # Owner-facing money safety: show whether autonomous raises are allowed
-        # under the same daily-budget contract used by the live marketer.
-        budget_limit = None
-        try:
-            from app.models.storage import Storage as _BudgetStorage
-            _bdb = SessionLocal()
-            _br = _bdb.query(_BudgetStorage).filter(_BudgetStorage.account_id==p.get('account_id'), _BudgetStorage.key=='kpi_settings').first()
-            _bk = json.loads(_br.value or '{}') if _br else {}
-            budget_limit = float(_bk.get('daily_budget_limit_rub') or 0)
-        except Exception:
-            budget_limit = None
-        finally:
-            try: _bdb.close()
-            except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=1054)
-        if budget_limit and k.get('actual_spend_rub') is not None:
-            _sp=float(k.get('actual_spend_rub') or 0)
-            if _sp >= budget_limit:
-                cpl_line += f" · ⛔ дневной лимит {budget_limit:g} ₽ превышен, повышение ставок остановлено"
-            elif _sp >= budget_limit*0.90:
-                cpl_line += f" · 🛡️ достигнуто 90% лимита {budget_limit:g} ₽, повышение ставок остановлено"
+            actual_cpl_text = '— расход за день не подтверждён'
+        cpl_line = f"CPL по всем списаниям Avito: цель {target_cpl_text} · факт {actual_cpl_text}"
+        spend_line = "API списаний: подтверждённого ответа за отчётную дату нет"
+        if a.get("spending_status") == "ok" and a.get("spending_date") == report_date.isoformat():
+            spend_line = (
+                f"API списаний за {report_date.strftime('%d.%m.%Y')}: рекламный расход отдельно {_fmt_num(a.get('ad_spend_rub'), ' ₽')}"
+                f" · расход Avito всего {_fmt_num(a.get('all_spend_rub'), ' ₽')}"
+                f" · ответ {_owner_report_time(a.get('spending_confirmed_at'))}"
+            )
+        if k.get("actual_leads_source") == "avito_contacts":
+            kpi_line += " · источник: контакты Avito, квалификация показана отдельно"
+        elif k.get("actual_leads_source") == "verified_inbound_floor":
+            kpi_line += " · подтверждённый минимум входящих, полный факт Avito недоступен"
+        
         conv = a.get('view_to_contact_pct')
         avito_line = f"Avito: просмотры {_fmt_num(a.get('views'))} → контакты {_fmt_num(a.get('contacts'))} · конверсия {_fmt_num(conv,'%')}"
         if a.get('status') == 'stale':
             avito_line = f"Avito: нет точных данных за день · источник вернул статистику за {a.get('stats_date') or 'другую дату'}"
+        elif a.get('status') != 'ok':
+            avito_line = "Avito: просмотры и контакты не подтверждены; дата статистики провайдера или полнота ответа не установлена"
+        avito_line += f" · дата провайдера {a.get('stats_date') or 'не установлена'} · кэш получен {_owner_report_time(a.get('collected_at'))}"
+        rights = p.get("current_service_rights") or {}
+        access = _owner_report_marketing_access(k, rights)
+        rop_active = _owner_report_right_active(rights.get("rop"))
+        analyzed = int(rq.get('calls_analyzed') or 0) + int(rq.get('chats_analyzed') or 0)
+        if not rop_active:
+            rop_line = f"РОП: текущий пакет не подтверждён; сохранённых разборов взаимодействий дня {analyzed}. Подключение и работа модуля не доказаны."
+        elif not int(rq.get('calls_total') or 0) and not int(rq.get('chats_total') or 0):
+            rop_line = "РОП: пакет действует; за отчётный день нет сохранённых взаимодействий для разбора. Работа модуля по 0/0 не подтверждается."
+        else:
+            rop_line = (f"РОП: пакет действует; на момент среза разобрано звонков {rq.get('calls_analyzed',0)} из {rq.get('calls_total',0)}, "
+                        f"переписок {rq.get('chats_analyzed',0)} из {rq.get('chats_total',0)} · средняя оценка {_fmt_num(rq.get('avg_score'),'/100')} "
+                        f"· требуют внимания {rq.get('attention_low_score',0)}")
         q_unclassified = int(q.get('unclassified') or 0)
         lines += ["", f"<b>{p.get('account_name')}</b>",
                   account_result,
-                  kpi_line, cpl_line,
+                  access["text"],
+                  kpi_line, cpl_line, spend_line,
                   avito_line,
-                  f"МОП: диалогов {m.get('dialogs',0)} · входящих сообщений {m.get('incoming_messages',0)} · отвечено диалогов {m.get('replied_dialogs',0)} · дальше по воронке {m.get('advanced',0)} · оценка {_fmt_num(m.get('mop_operational_score'),'/100')}",
+                  f"Диалоги Avito / ответы канала за день (включая ручные): диалогов {m.get('dialogs',0)} · входящих сообщений {m.get('incoming_messages',0)} · отвечено диалогов {m.get('replied_dialogs',0)} · дальше по воронке {m.get('advanced',0)} · оценка воронки {_fmt_num(m.get('mop_operational_score'),'/100')}; автор ответа здесь не классифицирован. Отправки МОПа за последние 24 часа показаны отдельно в текущей матрице модулей.",
                   f"Квалификация за день: 🔥 {temps.get('hot',0)} · 🟡 {temps.get('warm',0)} · ❄️ {temps.get('cold',0)} · не классифицировано {q_unclassified} · квалифицировано {stages.get('QUALIFIED',0)} · целевое действие {stages.get('TARGET_ACTION',0)}",
                   f"Звонки: {c.get('calls_total',0)} · отвечено {c.get('calls_answered',0)} · пропущено {c.get('calls_missed',0)} · CRM-карточек со звонков {c.get('crm_cards_from_calls',0)}",
-                  f"CRM: диалогов со сделкой {m.get('crm_chats_with_deal',m.get('deals_created',0))} · успешных {m.get('won_deals',0)}",
-                  f"РОП: звонков разобрано {rq.get('calls_analyzed',0)}/{rq.get('calls_total',0)} · переписок {rq.get('chats_analyzed',0)}/{rq.get('chats_total',0)} · средняя оценка {_fmt_num(rq.get('avg_score'),'/100')} · требуют внимания {rq.get('attention_low_score',0)}"]
+                  f"CRM · сохранённые факты дня: диалогов со сделкой {m.get('crm_chats_with_deal',m.get('deals_created',0))} · успешных {m.get('won_deals',0)}",
+                  rop_line]
         rq_recs=list(rq.get('recommendations') or [])[:3]
         if rq_recs:
             lines.append("<b>РОП рекомендует:</b>")
             lines.extend([f"• {x}" for x in rq_recs])
         mk=p.get('ai_marketer') or {}; mk_actions=mk.get('actions') or []
-        lines.append(f"ИИ-маркетолог: действий {mk.get('count',0)} · изменений ставок {mk.get('bid_changes',0)} · объявлений со ставкой {mk.get('unique_bid_items',0)}")
-        if mk_actions:
-            lines.append("<b>Что конкретно сделал ИИ-маркетолог:</b>")
-            # В Telegram не вываливаем сотни однотипных строк: показываем
-            # последние 20 конкретных шагов, полный журнал остаётся в snapshot.
-            visible = mk_actions[-20:]
-            if len(mk_actions) > len(visible):
-                lines.append(f"• Полный журнал: {len(mk_actions)} действий сохранено; ниже последние {len(visible)}.")
-            for x in visible:
-                when=str(x.get('ts') or '')[11:16]
-                change=(f" · {x.get('before_val')} → {x.get('after_val')}" if (x.get('before_val') or x.get('after_val')) else '')
-                why=(f" · причина: {x.get('reason')}" if x.get('reason') else '')
-                lines.append(f"• {when} · {x.get('action') or 'действие'} · {x.get('object_name') or x.get('object_kind') or 'аккаунт'}{change}{why}")
+        if mk.get("receipt_source") == "cpx_execution_receipts":
+            lines.append(
+                f"ИИ-маркетолог за {report_date.strftime('%d.%m.%Y')}: подтверждённых изменений ставок {mk.get('bid_changes',0)} "
+                f"· затронуто объявлений {mk.get('unique_bid_items',0)} · оценок прошлых изменений {mk.get('measurement_count',0)}"
+            )
+            if mk_actions:
+                lines.append("<b>Изменения с успешным ответом провайдера и совпавшей проверкой ставки:</b>")
+                visible = mk_actions[-20:]
+                if len(mk_actions) > len(visible):
+                    lines.append(f"• Полный журнал: {len(mk_actions)} подтверждённых изменений; ниже последние {len(visible)}.")
+                for x in visible:
+                    lines.append(
+                        f"• {_owner_report_time(x.get('finished_at') or x.get('ts'))} · {x.get('action')} · объявление {x.get('object_name')} "
+                        f"· {x.get('before_val')} → {x.get('after_val')} · подтверждение #{x.get('receipt_id')}"
+                    )
+            for x in (mk.get("measurements") or [])[-10:]:
+                effect = {
+                    "inconclusive_first_bid_no_signal": "недостаточно нового сигнала",
+                    "worsened": "результат ухудшился", "improved": "результат улучшился",
+                    "unchanged": "заметного изменения не установлено",
+                }.get(str(x.get("result") or ""), "оценка записана; итог требует отдельной интерпретации")
+                lines.append(f"• {_owner_report_time(x.get('ts'))} · оценка прошлого изменения по объявлению {x.get('object_name')}: {effect}; это не новая смена ставки.")
+        else:
+            lines.append("ИИ-маркетолог: сохранённый снимок не содержит сверки с реестром исполнения; число выполненных изменений ставок не подтверждено.")
         # Recommendations are deterministic from the stored daily facts. Rebuild
         # them at render time so old snapshots do not keep obsolete machine-like
         # phrasing after the owner-report contract is improved.
-        recs = _account_recommendations(k, a, m, q, c)
+        recs = _account_recommendations(k, a, m, q, c, rights=rights)
         if recs:
-            lines.append("<b>Следующие действия:</b>")
+            lines.append("<b>Рекомендации по данным дня — выполнение не подтверждено:</b>")
             lines.extend([f"• {r}" for r in recs])
     lines += ["", "Периоды в BORIS: 1 / 7 / 30 дней. История хранится по дням; если источник не дал данные, BORIS прямо пишет «нет данных», а не подставляет ноль."]
     return {"status": "ok", "report_date": report_date.isoformat(), "text": "\n".join(lines), "accounts": payloads,
@@ -1255,6 +1860,8 @@ def _verification_signature(payload: dict):
         'rop_chats_analyzed': rq.get('chats_analyzed'), 'rop_chats_total': rq.get('chats_total'),
         'rop_avg_score': rq.get('avg_score'), 'rop_attention': rq.get('attention_low_score'),
         'marketer_actions': mk.get('count'), 'marketer_bid_changes': mk.get('bid_changes'),
+        'marketer_measurements': mk.get('measurement_count'),
+        'marketer_receipt_ids': [row.get('receipt_id') for row in mk.get('actions') or []],
         'marketer_bid_items': mk.get('unique_bid_items')}
 
 
@@ -1270,7 +1877,7 @@ def verify_owner_daily_numbers(report_date=None, required_stable_passes: int = 3
         accounts=_active_owner_accounts(db)
         previous=None; stable=0; last_payloads=None; mismatches=[]
         for attempt in range(1, max(1, int(max_passes))+1):
-            payloads=[build_owner_account_snapshot(db, r['account_id'], r['account_name'], r['owner_user_id'], report_date) for r in accounts]
+            payloads=[build_owner_account_snapshot(db, r['account_id'], r['account_name'], r['owner_user_id'], report_date, rights=r.get('rights')) for r in accounts]
             sig=[_verification_signature(p) for p in payloads]
             arithmetic=[]
             for p in payloads:
@@ -1298,6 +1905,676 @@ def verify_owner_daily_numbers(report_date=None, required_stable_passes: int = 3
             if stable >= max(2, int(required_stable_passes)):
                 return {'status':'ok','verified':True,'stable_passes':stable,'attempts':attempt,'payloads':last_payloads,'mismatches':mismatches}
         return {'status':'error','verified':False,'reason':'numbers_not_stable','attempts':max_passes,'mismatches':mismatches}
+    finally:
+        db.close()
+
+
+
+_OWNER_MODULE_LABELS = {
+    "messages": "Сообщения", "mop": "МОП", "crm": "CRM", "rop": "РОП", "ecs": "ЕЦС",
+    "marketing": "AI-маркетолог", "feed_factory": "Объявления", "analytics": "Аналитика",
+    "reactivation": "Реактивация", "social": "Соцсети", "telephony": "Телефония",
+}
+_OWNER_MODULE_HEALTH = {
+    "pass": "проверка состояния пройдена", "healthy": "проверка состояния пройдена",
+    "working": "в работе", "degraded": "есть ограничение", "blocked": "заблокирован",
+    "fail": "ошибка", "error": "ошибка", "warning": "требует проверки", "off": "выключен",
+    "inactive": "нет действующего доступа", "not_checked": "работа не подтверждена", "not_proven": "работа не подтверждена",
+    "unknown": "работа не подтверждена",
+    "waiting_owner": "ожидает решения владельца", "waiting_external": "ожидает внешний сервис",
+    "human_required": "передан сотруднику", "needs_self_heal": "требует внутреннего исправления",
+}
+
+
+def _owner_report_module_matrix(state, rights):
+    """Project every configured/expected/purchased module without inventing health."""
+    adapters = {str(row.get("module")): row for row in (state.get("modules") or []) if row.get("module")}
+    expected = set(state.get("expected_modules") or [])
+    configured = set(state.get("bindings") or [])
+    purchased = {name for name, right in rights.items() if name != "base" and _owner_report_right_active(right)}
+    trial = rights.get("marketing_trial") or {}
+    trial_modules = {"marketing"} if trial.get("report_watch") is True else set()
+    rows = []
+    safe_actual_keys = {
+        "sent_24h", "sent_today", "incoming_24h", "incoming_today", "queued", "overdue_tasks",
+        "target_leads_per_day", "actual_leads", "runtime_mode", "stats_date", "business_date",
+        "provider_stats_lagging", "daily_budget_limit_rub", "active_items",
+    }
+    for name in sorted(expected | configured | purchased | set(adapters) | trial_modules):
+        adapter = adapters.get(name) or {}
+        actual = adapter.get("actual_state") or {}
+        fact = {key: actual[key] for key in safe_actual_keys if key in actual}
+        provider = actual.get("provider_health") or {}
+        if isinstance(provider, dict):
+            fact["provider_health"] = {key: provider[key] for key in (
+                "status", "checked_at", "provider_code", "provider_synced_chats", "provider_ok_chats", "provider_blocked_chats"
+            ) if key in provider}
+        rows.append({
+            "module": name, "expected": name in expected, "configured": name in configured,
+            "purchased": name in purchased, "entitlement": rights.get(name),
+            "health": str(adapter.get("health") or "not_proven"),
+            "classification": adapter.get("classification") or ("NOT_PROVEN" if not adapter else None),
+            "owner_action_required": bool(adapter.get("owner_action_required")),
+            "safe_action": adapter.get("safe_action"),
+            "freshness": adapter.get("freshness") or {},
+            "actual_state": fact,
+            "runtime_evidence_present": bool(adapter),
+            "source": "client_supervisor",
+            "e2e_verified": False,
+        })
+        if name == "marketing" and trial.get("entitlement_conflict"):
+            rows[-1].update({
+                "health": "not_proven", "classification": "MARKETING_TRIAL_ENTITLEMENT_CONFLICT",
+                "trial_evidence": trial,
+                "safe_action": "reconcile_existing_marketing_trial_entitlement",
+            })
+    return rows
+
+
+def _owner_report_rule_evidence(watch, now):
+    """Malformed or old evidence is local to one client, never a fleet failure."""
+    unproven = {"status": "not_proven", "checked_at": None, "age_seconds": None,
+                "entries": [], "coverage_is_not_success": True}
+    if not isinstance(watch, dict):
+        return dict(unproven, reason="invalid_watch_payload")
+    checked = None
+    try:
+        raw_version = watch.get("version")
+        version = int(raw_version or 0)
+        raw_entries = watch.get("rule_coverage") or []
+        if not isinstance(raw_entries, list):
+            return dict(unproven, reason="invalid_rule_coverage")
+        entries = []
+        for value in raw_entries:
+            if not isinstance(value, dict):
+                return dict(unproven, reason="invalid_rule_coverage")
+            row = {key: value.get(key) for key in (
+                "module", "expected", "evaluated", "global_expected", "global_evaluated",
+                "account_expected", "account_evaluated", "evidence_model"
+            )}
+            for key in ("expected", "evaluated", "global_expected", "global_evaluated", "account_expected", "account_evaluated"):
+                row[key] = int(row.get(key) or 0)
+                if row[key] < 0:
+                    return dict(unproven, reason="negative_rule_count")
+            outcomes = value.get("evaluation_outcomes") or {}
+            if not isinstance(outcomes, dict):
+                return dict(unproven, reason="invalid_evaluation_outcomes")
+            row["evaluation_outcomes"] = {str(key): int(count) for key, count in outcomes.items()}
+            if any(count < 0 for count in row["evaluation_outcomes"].values()):
+                return dict(unproven, reason="negative_outcome_count")
+            entries.append(row)
+    except (ValueError, TypeError, OverflowError):
+        return dict(unproven, reason="invalid_rule_coverage")
+    try:
+        checked = datetime.datetime.fromisoformat(str(watch.get("checked_at") or "").replace("Z", "+00:00"))
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=datetime.timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        checked = None
+    age = (now - checked).total_seconds() if checked is not None else None
+    fresh = bool(checked is not None and -60 <= age <= 1200
+                 and checked.astimezone(MSK).date() == now.astimezone(MSK).date() and version >= 2)
+    for row in entries:
+        row["evaluation_coverage_complete"] = bool(
+            fresh and row["expected"] > 0 and row["evaluated"] >= row["expected"]
+        )
+    return {
+        "status": "current" if fresh else "stale" if checked is not None else "not_proven",
+        "checked_at": checked.isoformat() if checked is not None else None,
+        "age_seconds": round(age, 1) if age is not None else None,
+        "entries": entries, "coverage_is_not_success": True,
+    }
+
+
+
+def _owner_report_kpi_rule_ledger(db, account_id, now):
+    """Project existing exact-account, current-version evidence; never execute rules."""
+    day_start = now.astimezone(MSK).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(datetime.timezone.utc)
+    day_end = day_start + datetime.timedelta(days=1)
+    rows = db.execute(text("""
+        /* OWNER_REPORT_ACCOUNT_KPI_LEDGER_V1 */
+        SELECT r.id::text AS requirement_id, r.key AS rule_key, r.title, r.version,
+               r.verification_json,
+               latest.id::text AS execution_id, latest.status AS execution_status,
+               latest.created_at AS execution_created_at, latest.idempotency_key,
+               proof.positive_levels, proof.l5_settings_readback, proof.l6_effect,
+               proof.l5_observed_at, proof.l6_observed_at,
+               proof.observed_at AS evidence_observed_at,
+               today.record_count AS records_today
+        FROM control_requirements r
+        LEFT JOIN LATERAL (
+            SELECT e.id, e.status, e.created_at, e.updated_at, e.idempotency_key
+            FROM control_executions e
+            WHERE e.requirement_id=r.id AND e.account_id=:a
+              AND EXISTS (
+                  SELECT 1 FROM control_evidence v
+                  WHERE v.execution_id=e.id AND v.requirement_id=r.id
+                    AND v.payload_json->>'requirement_version'=r.version::text
+              )
+            ORDER BY e.created_at DESC, e.updated_at DESC, e.id DESC LIMIT 1
+        ) latest ON true
+        LEFT JOIN LATERAL (
+            SELECT array_agg(DISTINCT v.level) FILTER (WHERE v.passed=true) AS positive_levels,
+                   bool_or(v.passed=true AND v.level='L5'
+                           AND v.evidence_type='actual_state_readback') AS l5_settings_readback,
+                   bool_or(v.passed=true AND v.level='L6') AS l6_effect,
+                   max(v.observed_at) FILTER (
+                       WHERE v.passed=true AND v.level='L5'
+                         AND v.evidence_type='actual_state_readback'
+                   ) AS l5_observed_at,
+                   max(v.observed_at) FILTER (
+                       WHERE v.passed=true AND v.level='L6'
+                   ) AS l6_observed_at,
+                   max(v.observed_at) AS observed_at
+            FROM control_evidence v
+            WHERE v.execution_id=latest.id AND v.requirement_id=r.id
+              AND v.payload_json->>'requirement_version'=r.version::text
+        ) proof ON true
+        LEFT JOIN LATERAL (
+            SELECT count(DISTINCT e.id) AS record_count
+            FROM control_executions e
+            WHERE e.requirement_id=r.id AND e.account_id=:a
+              AND e.created_at>=:day_start AND e.created_at<:day_end
+              AND EXISTS (
+                  SELECT 1 FROM control_evidence v
+                  WHERE v.execution_id=e.id AND v.requirement_id=r.id
+                    AND v.payload_json->>'requirement_version'=r.version::text
+              )
+        ) today ON true
+        WHERE r.status='active' AND r.requirement_type='kpi_rule'
+          AND r.scope_type='account' AND r.scope_id=:a
+        ORDER BY r.key, r.id
+    """), {"a": str(account_id), "day_start": day_start, "day_end": day_end}).mappings().all()
+
+    def timestamp(value):
+        if value is None:
+            return None
+        try:
+            parsed = value if isinstance(value, datetime.datetime) else datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=datetime.timezone.utc) if parsed.tzinfo is None else parsed.astimezone(datetime.timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def proof_state(present, observed_at):
+        if not present or observed_at is None or (observed_at - now).total_seconds() > 60:
+            return "not_proven"
+        return (
+            "report_day_observed"
+            if observed_at.astimezone(MSK).date() == day_start.astimezone(MSK).date()
+            else "historical"
+        )
+
+    entries = []
+    for raw in rows:
+        row = dict(raw)
+        verification = row.get("verification_json") or []
+        levels = row.get("positive_levels") or []
+        if not isinstance(verification, list) or not isinstance(levels, list):
+            raise ValueError("invalid_account_kpi_evidence")
+        created = timestamp(row.get("execution_created_at"))
+        observed = timestamp(row.get("evidence_observed_at"))
+        l5_observed = timestamp(row.get("l5_observed_at"))
+        l6_observed = timestamp(row.get("l6_observed_at"))
+        l5_state = proof_state(row.get("execution_id") and row.get("l5_settings_readback"), l5_observed)
+        l6_state = proof_state(row.get("execution_id") and row.get("l6_effect"), l6_observed)
+        l5 = l5_state == "report_day_observed"
+        l6 = l6_state == "report_day_observed"
+        required_l6 = any(
+            isinstance(value, dict) and value.get("required") is not False
+            and (value.get("level") == "L6" or value.get("type") == "kpi_effect")
+            for value in verification
+        )
+        entries.append({
+            "requirement_id": str(row["requirement_id"]), "rule_key": str(row.get("rule_key") or ""),
+            "title": str(row.get("title") or row.get("rule_key") or ""), "rule_version": int(row.get("version") or 0),
+            "account_id": str(account_id), "execution_id": row.get("execution_id"),
+            "execution_status": str(row.get("execution_status") or "not_proven"),
+            "execution_created_at": created.isoformat() if created else None,
+            "evidence_observed_at": observed.isoformat() if observed else None,
+            "positive_levels": [str(value) for value in levels if value is not None],
+            "records_today": int(row.get("records_today") or 0),
+            "l5_settings_readback_proven": l5, "l6_effect_proven": l6,
+            "l5_positive_observed_at": l5_observed.isoformat() if l5_observed else None,
+            "l6_positive_observed_at": l6_observed.isoformat() if l6_observed else None,
+            "l5_evidence_status": l5_state, "l6_evidence_status": l6_state,
+            "l5_historical_evidence_present": l5_state == "historical",
+            "l6_historical_evidence_present": l6_state == "historical",
+            "proof_date_scope": "report_day_observation_not_scheduler_freshness",
+            "required_l6_effect": required_l6,
+            "l6_status": "proven" if l6 else l6_state,
+            "current_hour_observation": bool(created and created.replace(minute=0, second=0, microsecond=0) == now.replace(minute=0, second=0, microsecond=0)),
+            "schedule_evidence": "not_proven_from_execution_ledger",
+            "status": "observed" if row.get("execution_id") else "not_proven",
+        })
+    return {
+        "status": "observed" if entries else "not_registered", "entries": entries,
+        "checked_at": now.isoformat(), "report_date": day_start.astimezone(MSK).date().isoformat(),
+        "source": "control_requirements/control_executions/control_evidence",
+        "scope": "exact_account_and_current_requirement_version",
+        "settings_verification_is_not_kpi_effect": True,
+        "missing_schedule_is_not_pass": True,
+    }
+
+
+def _owner_report_mop_provider_fact(provider, now):
+    """Read-only evidence projection; queue freshness is not provider freshness."""
+    try:
+        from app.services.client_supervisor import MOP_PROVIDER_HEALTH_TTL_SECONDS
+    except ImportError:
+        MOP_PROVIDER_HEALTH_TTL_SECONDS = 900
+
+    provider = provider if isinstance(provider, dict) else {}
+    checked = _owner_report_timestamp(provider.get("checked_at"))
+    age = (now - checked).total_seconds() if checked else None
+    clock_fresh = age is not None and -60 <= age <= MOP_PROVIDER_HEALTH_TTL_SECONDS
+    fact_fresh = clock_fresh and provider.get("provider_fact_fresh") is True
+    status = str(provider.get("status") or "")
+    if fact_fresh and status in {"degraded_provider", "blocked_provider"}:
+        state = "blocked" if status == "blocked_provider" else "degraded"
+    elif fact_fresh and status == "ok" and provider.get("provider_fact_state") == "healthy" and provider.get("binding") is True:
+        state = "healthy"
+    elif checked and (not clock_fresh or provider.get("provider_fact_fresh") is False):
+        state = "stale"
+    else:
+        state = "not_proven"
+    safe = {key: provider[key] for key in (
+        "status", "checked_at", "provider_code", "provider_synced_chats",
+        "provider_ok_chats", "provider_blocked_chats", "provider_fact_state",
+        "provider_fact_fresh", "binding"
+    ) if key in provider}
+    return {
+        "state": state, "source": "storage:mop_provider_health",
+        "checked_at": checked.isoformat() if checked else None,
+        "age_seconds": round(age, 1) if age is not None else None,
+        "ttl_seconds": MOP_PROVIDER_HEALTH_TTL_SECONDS,
+        "provider_health": safe,
+        "provider_pass_is_not_end_to_end_delivery": True,
+    }
+
+
+
+def _owner_report_apply_mop_provider(matrix, provider, now, error_type=None):
+    try:
+        from app.services.client_supervisor import _mop_provider_health_override
+    except ImportError:
+        def _mop_provider_health_override(provider, now=None, ttl_seconds=900):
+            if not isinstance(provider, dict):
+                return None
+            status = str(provider.get("status") or "").strip().lower()
+            if status not in {"degraded_provider", "blocked_provider"}:
+                return None
+            try:
+                checked = datetime.datetime.fromisoformat(
+                    str(provider.get("checked_at") or "").replace("Z", "+00:00")
+                )
+                if checked.tzinfo is None:
+                    checked = checked.replace(tzinfo=datetime.timezone.utc)
+                current = now or datetime.datetime.now(datetime.timezone.utc)
+                if current.tzinfo is None:
+                    current = current.replace(tzinfo=datetime.timezone.utc)
+                age = (
+                    current.astimezone(datetime.timezone.utc)
+                    - checked.astimezone(datetime.timezone.utc)
+                ).total_seconds()
+                if age < -60 or age > max(60, int(ttl_seconds)):
+                    return None
+            except Exception:
+                return None
+            blocked = status == "blocked_provider"
+            return {
+                "health": "blocked" if blocked else "degraded",
+                "classification": (
+                    "MOP_PROVIDER_BLOCKED_402"
+                    if blocked else "MOP_PROVIDER_PARTIAL_402"
+                ),
+                "owner_action_required": True,
+                "safe_action": "restore_avito_messenger_api_access",
+                "dependency_state": "waiting_owner",
+                "provider_health": provider,
+            }
+
+    row = next((item for item in matrix if item["module"] == "mop"), None)
+    if row is None:
+        return
+    fact = _owner_report_mop_provider_fact(provider, now)
+    if error_type:
+        fact.update({"state": "not_proven", "error_type": error_type})
+    row["supervisor_evidence"] = {
+        "health": row["health"], "classification": row["classification"],
+        "freshness": row["freshness"],
+    }
+    row["provider_evidence"] = fact
+    row["actual_state"]["provider_health"] = fact["provider_health"]
+    was_provider_override = str(row.get("classification") or "").startswith("MOP_PROVIDER_")
+    if fact["state"] in {"degraded", "blocked"}:
+        override = _mop_provider_health_override(provider, now=now)
+        if override:
+            for key in ("health", "classification", "owner_action_required", "safe_action"):
+                row[key] = override[key]
+    elif fact["state"] == "healthy" and was_provider_override:
+        # A new positive provider observation cannot reconstruct queue evidence
+        # that an older provider override replaced in the supervisor snapshot.
+        row.update({"health": "not_proven", "classification": "MOP_SUPERVISOR_RECHECK_REQUIRED",
+                    "owner_action_required": False, "safe_action": "refresh_existing_mop_supervisor"})
+    elif fact["state"] != "healthy":
+        if row["health"] in {"pass", "healthy"} or was_provider_override:
+            row.update({"health": "not_proven", "classification": "MOP_PROVIDER_OBSERVATION_NOT_PROVEN"})
+        if was_provider_override:
+            row["owner_action_required"] = False
+        if not row.get("safe_action") or was_provider_override:
+            row["safe_action"] = "wait_for_existing_mop_provider_sync"
+
+
+
+def _owner_report_event_rules(db, account_id, now, modules):
+    from app.services.control_rule_runtime import account_rule_projection
+    start = now.astimezone(MSK).replace(hour=0, minute=0, second=0, microsecond=0)
+    return account_rule_projection(db, account_id, since=start, until=now, modules=modules)
+
+
+def _owner_event_rule_lines(ledger):
+    """Small factual projection; event coverage is not business success."""
+    from html import escape
+    if ledger.get("state") == "READ_ERROR":
+        return ["Журнал событий и правил: данные не прочитаны; выполнение не подтверждено."]
+    entries = ledger.get("rules") or []
+    current = [row for row in entries if row.get("current_version") is True]
+    evaluated = sum((row.get("actual") or {}).get("evaluation_status") == "EVALUATED" for row in current)
+    pending = sum((row.get("actual") or {}).get("evaluation_status") == "PENDING" for row in current)
+    unproven = sum((row.get("actual") or {}).get("evaluation_status") == "NOT_PROVEN" for row in current)
+    gaps = ledger.get("gaps") or []
+    waiting = sum((row.get("actual") or {}).get("evaluation_status") == "WAITING_EVENT" for row in current)
+    if ledger.get("aggregate_complete") is True:
+        aggregate = [row for row in (ledger.get("rule_coverage_counts") or []) if row.get("current_version") is True]
+        evaluated = sum(int(row.get("evaluated") or 0) for row in aggregate)
+        pending = sum(int(row.get("pending") or 0) for row in aggregate)
+        unproven = sum(int(row.get("not_proven") or 0) for row in aggregate)
+        waiting = sum(int(row.get("waiting_event") or 0) for row in aggregate)
+    lines = [f"Журнал событий и правил: решений текущих версий {evaluated}; ожидают оценки {pending}; недостаточно доказательств {unproven}; ожидают внешнего события {waiting}; открытых пробелов в выборке {len(gaps)}."]
+    if ledger.get("aggregate_complete") is True and "due_rule_versions" in ledger:
+        due_count = int(ledger.get("due_rule_versions") or 0)
+        covered_count = int(ledger.get("evaluated_due_rule_versions") or 0)
+        lines.append(f"Уникальные применимые версии правил с наступившим сроком за окно: оценены {covered_count} из {due_count}. Повторы событий не увеличивают покрытие; любая пропущенная оценка этой версии оставляет её непокрытой.")
+        if due_count == 0:
+            lines.append("Подтверждённых применимых проверок с наступившим сроком за окно нет; это не означает успешное выполнение правил.")
+    if ledger.get("state") == "NO_EVENT":
+        lines.append("В сохранённом входящем потоке за окно событий нет; полнота внешнего потока отдельно не подтверждена.")
+    elif ledger.get("state") == "NOT_PROVEN":
+        lines.append("Входящие события есть, но связь с проверкой правила не подтверждена.")
+    if not ledger.get("source_complete"):
+        lines.append("Подробности журнала показаны частично; сводные количества охватывают все сохранённые проверки за окно." if ledger.get("aggregate_complete") is True else "Показана ограниченная часть журнала; полное покрытие не подтверждено.")
+    coverage = ledger.get("binding_coverage") or {}
+    absent = sorted({str(row.get("module")) for row in coverage.get("entries", []) if row.get("binding_status") != "IMPLEMENTED" or row.get("protected_writer_capture_missing") is True or row.get("protected_feed_writer_branches_missing") is True})
+    if absent:
+        names = ", ".join(_OWNER_MODULE_LABELS.get(name, name) for name in absent)
+        lines.append("Часть правил ещё не связана с событиями модулей: " + escape(names) + ". Общий реестр не считается проверками этого клиента.")
+    for row in current:
+        actual = row.get("actual") or {}
+        if actual.get("delivery_proven") is True:
+            lines.append("МОП: доставка точного ответа подтверждена чтением у провайдера (" + escape(str(row.get("verified_at") or "время не подтверждено")) + "); статус дальнейшей работы: " + escape(str(row.get("status") or "неизвестен")) + ".")
+    unknown = [row for row in current if (row.get("actual") or {}).get("evaluation_status") == "NOT_PROVEN"]
+    if unknown:
+        lines.append("Не подтверждены проверки: " + ", ".join(escape(str(row.get("rule_id") or (row.get("identity") or {}).get("requirement_key") or "неизвестно")) for row in unknown[:8]) + ". Нужны доказательства результата; запись действия сама по себе не считается успехом.")
+    for gap in gaps[:5]:
+        detail = gap.get("details") or {}
+        if gap.get("type") == "RULE_NOT_EVALUATED":
+            lines.append("⚠️ Срок проверки события прошёл, решение не записано; срок: " + escape(str(detail.get("verification_due_at") or "не подтверждён")) + ". Повтор клиентского действия не разрешён.")
+        else:
+            lines.append("⚠️ Не подтверждена связь события с правилом: " + escape(str(detail.get("rule_key") or detail.get("reason") or "неизвестно")) + ".")
+    return lines
+
+
+def _owner_active_client_module_summary():
+    """One dynamic owner projection of the canonical client supervisor."""
+    from html import escape
+    from app.services.client_supervisor import build_client_state, load_supervisor_snapshot
+
+    db = SessionLocal()
+    try:
+        registry = _owner_report_registry(db)
+        coverage = registry["coverage"]
+        current_cut = datetime.datetime.now(tz=MSK)
+        lines = [
+            "👥 <b>Клиенты и подключённые модули</b>",
+            f"Реестр проверен: {coverage['registry_accounts_checked']} аккаунтов. "
+            f"Внешних клиентов под контролем: {coverage['canonical_clients']}. "
+            f"Обязательный контроль: {coverage['watched_covered']}/{coverage['watched_expected']}.",
+            f"Текущий срез модулей и правил: {_owner_report_time(current_cut)}; бизнес-показатели за выбранный день приведены отдельным блоком.",
+            "Права на пакет, проверка состояния и подтверждённый результат — отдельные факты.",
+            "Счётчики бизнес-правил и KPI-журнал показаны отдельно. Сверка настроек (L5) и подтверждённый эффект (L6) — разные доказательства.",
+            f"L5/L6 относятся к положительным доказательствам за день текущего среза {current_cut.strftime('%d.%m.%Y')}; прошлые дни показаны как история.",
+        ]
+        if coverage["missing_watched_accounts"]:
+            lines.append("⚠️ Не найдены в доступном реестре: " + ", ".join(escape(x) for x in coverage["missing_watched_accounts"]))
+        if coverage["entitlement_read_errors"]:
+            lines.append("⚠️ Не удалось проверить права: " + ", ".join(escape(x) for x in coverage["entitlement_read_errors"]))
+        details, internal_details, owner_actions = [], [], []
+        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        for internal, accounts in ((False, registry["accounts"]), (True, registry["internal_accounts"])):
+            if internal and accounts:
+                lines += ["", "<b>Внутренние аккаунты платформы</b>"]
+            for account in accounts:
+                aid = account["account_id"]
+                label = escape(account["account_name"])
+                state_error = None
+                try:
+                    with db.begin_nested():
+                        state = load_supervisor_snapshot(db, aid) or build_client_state(db, aid)
+                except Exception as exc:
+                    state_error = type(exc).__name__
+                    state = {"account_id": aid, "overall": "read_error", "modules": [], "expected_modules": []}
+                matrix = _owner_report_module_matrix(state, account.get("rights") or {})
+                if any(row["module"] == "mop" for row in matrix):
+                    provider_error = None
+                    try:
+                        with db.begin_nested():
+                            provider_raw = db.execute(text(
+                                "SELECT value FROM storage WHERE account_id=:a AND key='mop_provider_health' "
+                                "ORDER BY id DESC LIMIT 1"
+                            ), {"a": aid}).scalar()
+                        provider = _safe_json(provider_raw)
+                    except Exception as exc:
+                        provider_error, provider = type(exc).__name__, {}
+                    _owner_report_apply_mop_provider(matrix, provider, now, provider_error)
+                try:
+                    with db.begin_nested():
+                        watch_raw = db.execute(text(
+                            "SELECT value FROM storage WHERE account_id=:a AND key='active_module_watch_v1' "
+                            "ORDER BY id DESC LIMIT 1"
+                        ), {"a": aid}).scalar()
+                    rules = _owner_report_rule_evidence(_safe_json(watch_raw), now)
+                except Exception as exc:
+                    rules = {"status": "not_proven", "checked_at": None, "age_seconds": None,
+                             "entries": [], "coverage_is_not_success": True, "error_type": type(exc).__name__}
+                kpi_ledger = {"status": "not_applicable", "entries": []}
+                event_rule_ledger = {"state": "NOT_APPLICABLE", "rules": [], "gaps": []}
+                if not internal:
+                    try:
+                        with db.begin_nested():
+                            event_rule_ledger = _owner_report_event_rules(db, aid, now, [row["module"] for row in matrix])
+                    except Exception as exc:
+                        event_rule_ledger = {"state": "READ_ERROR", "rules": [], "gaps": [], "error_type": type(exc).__name__}
+                    try:
+                        with db.begin_nested():
+                            kpi_ledger = _owner_report_kpi_rule_ledger(db, aid, now)
+                    except Exception as exc:
+                        kpi_ledger = {"status": "not_proven", "entries": [], "error_type": type(exc).__name__,
+                                      "settings_verification_is_not_kpi_effect": True,
+                                      "missing_schedule_is_not_pass": True}
+                base = (account.get("rights") or {}).get("base") or {}
+                base_text = {
+                    "active": "действует", "expired": "срок завершён", "platform_owned": "внутренний аккаунт",
+                }.get(str(base.get("state") or ""), "период не подтверждён")
+                lines += ["", f"<b>{label}</b> · основной доступ: {base_text}"
+                          + (f" · до {escape(str(base['paid_until']))}" if base.get("paid_until") else "")]
+                if account.get("avito_reporting_reason") != "available":
+                    why = "не настроено подключение" if account.get("avito_reporting_reason") == "avito_credentials_not_configured" else "действует ограничение фоновых действий"
+                    lines.append(f"Avito: {why}; обновление KPI недоступно, модули остаются в отчёте.")
+                if state_error:
+                    lines.append("⚠️ Текущее состояние модулей не прочитано; исправность не подтверждена.")
+                if not matrix:
+                    lines.append("Ожидаемых или приобретённых модулей с подтверждённым текущим периодом не найдено.")
+                for row in matrix:
+                    name = _OWNER_MODULE_LABELS.get(row["module"], row["module"])
+                    health = _OWNER_MODULE_HEALTH.get(row["health"], "требует проверки")
+                    suffix = ""
+                    if row["module"] == "mop":
+                        if row["health"] in {"pass", "healthy"}:
+                            health = "проверка очереди пройдена"
+                        provider_fact = row.get("provider_evidence") or {}
+                        provider_state = provider_fact.get("state")
+                        provider_when = _owner_report_time(provider_fact.get("checked_at"))
+                        if provider_state == "healthy":
+                            suffix += f"; API переписок: свежая сверка без ограничений ({provider_when})"
+                        elif provider_state in {"degraded", "blocked"}:
+                            suffix += f"; API переписок: свежая сверка ({provider_when})"
+                        elif provider_state == "stale":
+                            suffix += f"; API переписок: прежняя сверка устарела ({provider_when}); текущее состояние не подтверждено"
+                        else:
+                            suffix += "; API переписок: свежая проверка не подтверждена"
+                        if provider_state not in {"healthy", "degraded", "blocked"}:
+                            last_provider = provider_fact.get("provider_health") or {}
+                            if last_provider.get("provider_code") == 402:
+                                suffix += "; последняя запись — ограничение 402, восстановление не подтверждено"
+                        if "sent_24h" in row["actual_state"]:
+                            suffix += f"; отправок за 24 часа {row['actual_state']['sent_24h']}"
+                    if row["module"] == "crm" and "overdue_tasks" in row["actual_state"]:
+                        suffix += f"; просроченных задач {row['actual_state']['overdue_tasks']} (включая исторические)"
+                    if row["purchased"] and not row["runtime_evidence_present"]:
+                        suffix += "; пакет действует, сквозная работа не проверена"
+                    reason = {
+                        "MOP_PROVIDER_PARTIAL_402": "API Авито вернул 402 для части переписок",
+                        "MOP_PROVIDER_BLOCKED_402": "API Авито не предоставляет доступ к перепискам (402)",
+                        "PAID_PERIOD_EVIDENCE_MISSING": "не подтверждён период обслуживания",
+                        "NOT_PROVEN": "нет подтверждения работы модуля",
+                        "MARKETING_TRIAL_ENTITLEMENT_CONFLICT": "согласованный тестовый период ещё действует, но исполнитель видит завершённый или неизвестный период",
+                        "MOP_SUPERVISOR_RECHECK_REQUIRED": "новая сверка API есть; состояние очереди требует обновления штатного снимка",
+                    }.get(str(row.get("classification") or ""))
+                    if reason:
+                        suffix += "; " + reason
+                    if row.get("trial_evidence"):
+                        suffix += "; тест записан до " + escape(str(row["trial_evidence"].get("trial_until") or "неизвестно"))
+                    provider = row["actual_state"].get("provider_health") or {}
+                    synced = provider.get("provider_synced_chats", provider.get("provider_ok_chats"))
+                    blocked_chats = provider.get("provider_blocked_chats")
+                    if synced is not None or blocked_chats is not None:
+                        suffix += f"; синхронизировано {synced if synced is not None else 'неизвестно'}, недоступно {blocked_chats if blocked_chats is not None else 'неизвестно'}"
+                    next_action = {
+                        "restore_avito_messenger_api_access": "проверить и восстановить доступ к API переписок Авито",
+                        "surface_in_manager_workspaces": "обработать обращение в кабинете сотрудника",
+                        "wait_for_existing_mop_provider_sync": "дождаться штатной синхронизации переписок и повторно проверить доступ",
+                        "refresh_existing_mop_supervisor": "обновить состояние через штатный клиентский контроллер",
+                        "reconcile_existing_marketing_trial_entitlement": "согласовать проверку уже назначенного теста с ограничениями исполнителя",
+                    }.get(str(row.get("safe_action") or ""))
+                    if next_action:
+                        suffix += "; следующее действие: " + next_action
+                    if row["owner_action_required"]:
+                        suffix += "; требуется решение владельца"
+                    lines.append(f"• {escape(str(name))}: {health}{suffix}")
+                for item in state.get("needs_owner") or []:
+                    owner_actions.append({"account_id": aid, "module": item.get("module"),
+                                          "reason": item.get("reason"), "safe_action": item.get("safe_action")})
+                for row in matrix:
+                    if row["owner_action_required"] and not any(
+                        x["account_id"] == aid and x.get("module") == row["module"] for x in owner_actions
+                    ):
+                        owner_actions.append({"account_id": aid, "module": row["module"],
+                                              "reason": row["classification"], "safe_action": row["safe_action"]})
+                if rules["status"] != "current":
+                    lines.append("Проверки правил: свежих подтверждений нет.")
+                elif not rules["entries"]:
+                    lines.append("Проверки правил: применимые правила в снимке не перечислены.")
+                else:
+                    for rule in rules["entries"]:
+                        expected, evaluated = int(rule.get("expected") or 0), int(rule.get("evaluated") or 0)
+                        name = _OWNER_MODULE_LABELS.get(rule.get("module"), rule.get("module") or "модуль")
+                        if not expected:
+                            lines.append(f"Правила · {escape(str(name))}: применимые правила не заданы.")
+                            continue
+                        outcomes = ", ".join(f"{escape(str(key))}: {int(value)}" for key, value in (rule.get("evaluation_outcomes") or {}).items())
+                        if rule.get("evidence_model") == "global_contract_plus_exact_account_scope_v2":
+                            global_expected = int(rule.get("global_expected") or 0)
+                            global_evaluated = int(rule.get("global_evaluated") or 0)
+                            account_expected = int(rule.get("account_expected") or 0)
+                            account_evaluated = int(rule.get("account_evaluated") or 0)
+                            account_scope = (
+                                f"проверки именно этого клиента {account_evaluated}/{account_expected}"
+                                if account_expected else "проверки именно этого клиента не заданы"
+                            )
+                            scope_text = f"общие контракты {global_evaluated}/{global_expected}; {account_scope}"
+                        else:
+                            scope_text = f"записи {evaluated}/{expected}; область проверок не подтверждена"
+                        lines.append(f"Бизнес-правила · {escape(str(name))}: {scope_text}; итоги журнала: {outcomes or 'не записаны'}.")
+                if not internal:
+                    lines.extend(_owner_event_rule_lines(event_rule_ledger))
+                    if kpi_ledger["status"] == "not_proven":
+                        lines.append("KPI-журнал: прочитать доказательства не удалось; сверка настроек и эффект не подтверждены.")
+                    elif kpi_ledger["status"] == "not_registered":
+                        lines.append("KPI-журнал: индивидуальное правило не зарегистрировано; проверка не подтверждена.")
+                    for check in kpi_ledger["entries"]:
+                        rule_name = escape(check["title"])
+                        if not check["execution_id"]:
+                            lines.append(f"KPI · {rule_name}, v{check['rule_version']}: записи этой версии не найдены; проверка не подтверждена.")
+                            continue
+                        when = escape(check["evidence_observed_at"] or check["execution_created_at"] or "время не подтверждено")
+                        l5_text = (
+                            "подтверждена" if check["l5_settings_readback_proven"]
+                            else "историческая запись; текущий день не подтверждён" if check["l5_historical_evidence_present"]
+                            else "не подтверждена"
+                        )
+                        l6_text = (
+                            "подтверждён" if check["l6_effect_proven"]
+                            else "историческая запись; текущий день не подтверждён" if check["l6_historical_evidence_present"]
+                            else "не подтверждён"
+                        )
+                        lines.append(
+                            f"KPI · {rule_name}, v{check['rule_version']}: записей за день {check['records_today']}; "
+                            f"последняя {when}; статус журнала {escape(check['execution_status'])}; "
+                            f"L5 (сверка настроек) {l5_text}; L6 (эффект) {l6_text}. "
+                            f"Даты положительных доказательств: L5 {escape(check['l5_positive_observed_at'] or 'нет')}; "
+                            f"L6 {escape(check['l6_positive_observed_at'] or 'нет')}."
+                        )
+                related = []
+                for alias in account.get("related_accounts") or []:
+                    paid = [name for name, value in (alias.get("rights") or {}).items()
+                            if name != "base" and _owner_report_right_active(value)]
+                    related.append({"account_id": alias["account_id"], "rights": alias.get("rights") or {},
+                                    "runtime_status": "NOT_PROVEN", "runtime_evidence_present": False})
+                    if paid:
+                        lines.append("Связанная подписка " + escape(alias["account_id"]) + ": "
+                                     + ", ".join(escape(_OWNER_MODULE_LABELS.get(name, name)) for name in paid)
+                                     + "; отдельная проверка работы не выполнена; клиент и расходы повторно не считаются.")
+                entry = {
+                    "account_id": aid, "name": account["account_name"], "internal": internal,
+                    "client_state": state.get("client_state"), "overall": state.get("overall"),
+                    "checked_at": state.get("checked_at"), "read_error": state_error or account.get("read_error"),
+                    "expected_modules": state.get("expected_modules") or [],
+                    "rights": account.get("rights") or {}, "modules": matrix,
+                    "rule_evidence": rules, "kpi_rule_ledger": kpi_ledger, "event_rule_ledger": event_rule_ledger, "related_accounts": related,
+                    "avito_reporting_reason": account.get("avito_reporting_reason"),
+                }
+                # Preserve existing machine consumers while extending the complete matrix.
+                entry.update({name: next((row for row in matrix if row["module"] == name), {})
+                              for name in ("marketing", "mop", "crm", "reactivation")})
+                (internal_details if internal else details).append(entry)
+        coverage["kpi_accounts_registered"] = sum(bool(row["kpi_rule_ledger"]["entries"]) for row in details)
+        coverage["kpi_accounts_with_l5_readback"] = sum(
+            any(check["l5_settings_readback_proven"] for check in row["kpi_rule_ledger"]["entries"]) for row in details
+        )
+        coverage["kpi_accounts_with_l6_effect"] = sum(
+            any(check["l6_effect_proven"] for check in row["kpi_rule_ledger"]["entries"]) for row in details
+        )
+        coverage["external_module_rows"] = sum(len(row["modules"]) for row in details)
+        coverage["internal_module_rows"] = sum(len(row["modules"]) for row in internal_details)
+        coverage["module_rows"] = sum(len(row["modules"]) for row in [*details, *internal_details])
+        coverage["runtime_evidence_missing"] = sum(
+            1 for row in [*details, *internal_details] for module in row["modules"] if not module["runtime_evidence_present"]
+        )
+        return {
+            "text": "\n".join(lines), "clients": details, "internal_clients": internal_details,
+            "coverage": coverage, "linked_accounts": registry["linked_accounts"], "excluded_accounts": registry["excluded"],
+            "owner_actions": owner_actions, "owner_action_required": bool(owner_actions),
+        }
     finally:
         db.close()
 
@@ -1341,6 +2618,7 @@ def _owner_runtime_outcome_summary():
             f"legacy без версии {int(primary.get('quality_untracked_sent') or 0)}, "
             f"нарушений после включения контроля {int(primary.get('quality_unversioned_after_enforcement') or 0)}"
         )
+    client_modules=_owner_active_client_module_summary()
     social_lines=[]
     for item in social_projects:
         name=str(item.get('project_name') or item.get('project_id') or 'Social')
@@ -1353,21 +2631,31 @@ def _owner_runtime_outcome_summary():
             f"{int(item.get('due_by_now') or 0)} наступивших слотов "
             f"(план дня {int(item.get('planned_total') or 0)})"
         )
+    client_owner_actions=list(client_modules.get('owner_actions') or [])
+    total_owner_actions=len(incidents)+len(client_owner_actions)
     action=(
-        f"⚠️ Действие владельца требуется: открыто P1-инцидентов {len(incidents)}"
-        if incidents else "✅ Действие владельца: не требуется"
+        f"⚠️ Действие владельца требуется: "
+        f"клиентских blockers {len(client_owner_actions)}, P1-инцидентов {len(incidents)}"
+        if total_owner_actions
+        else "✅ Действие владельца: не требуется"
     )
-    text_lines=["🧭 <b>Автоконтроль BORIS</b>",email_line]
+    text_lines=["🧭 <b>Автоконтроль BORIS</b>",client_modules.get('text') or '',email_line]
     if email_quality_line:
         text_lines.append(email_quality_line)
     text_lines.extend([*social_lines,action])
+    text_lines=[x for x in text_lines if x]
     return {
         'text':"\n".join(text_lines),
+        'clients':client_modules.get('clients') or [],
+        'internal_clients':client_modules.get('internal_clients') or [],
+        'client_coverage':client_modules.get('coverage') or {},
+        'linked_accounts':client_modules.get('linked_accounts') or [],
         'email':primary,
         'social':social_projects[0] if social_projects else {},
         'social_projects':social_projects,
+        'client_owner_actions':client_owner_actions,
         'owner_incidents':len(incidents),
-        'owner_action_required':bool(incidents),
+        'owner_action_required':bool(total_owner_actions),
     }
 
 
@@ -1375,11 +2663,31 @@ def _owner_source_refresh_warning(source_refresh=None):
     source_refresh = source_refresh or {}
     if source_refresh.get('status') != 'degraded':
         return ''
-    count = int(source_refresh.get('warning_count') or len(source_refresh.get('errors') or []))
+    errors = list(source_refresh.get('errors') or [])
+    count = int(source_refresh.get('warning_count') or len(errors))
+    auth_count = sum(
+        1 for item in errors
+        if 'авториз' in str(item.get('reason') or '').lower()
+        or str(item.get('provider_status') or '') in {'401', '403'}
+    )
+    rate_count = sum(
+        1 for item in errors
+        if int(item.get('provider_status') or 0) == 429
+    )
+    details = []
+    if auth_count:
+        details.append(f"авторизация — {auth_count}")
+    if rate_count:
+        details.append(f"лимит API — {rate_count}")
+    known = auth_count + rate_count
+    if count > known:
+        details.append(f"другое — {count-known}")
+    why = (" Причины: " + "; ".join(details) + ".") if details else ""
     return (
-        f"⚠️ <b>Avito временно ограничил обновление по {count} аккаунт(ам).</b> "
+        f"⚠️ <b>По {count} аккаунт(ам) Avito не дал свежий срез.</b> "
         "В отчёте использованы последние сохранённые данные; "
         "BORIS повторит обновление автоматически."
+        + why
     )
 
 
@@ -1432,6 +2740,12 @@ def send_owner_daily_report(report_date=None, force: bool = False, slot: str = '
             + runtime_outcome['text'] + "\n\n"
             + rep['text']
         )
+        messenger_delivery = _send_owner_report_to_messenger(body, report_date, slot)
+        if messenger_delivery.get('status') != 'ok':
+            raise RuntimeError(
+                'owner_messenger_delivery_failed:'
+                + str(messenger_delivery.get('code') or messenger_delivery.get('status') or 'unknown')
+            )
         chunks=_telegram_chunks(body)
         for chunk in chunks: send_telegram_message(OWNER_REPORT_CHAT_ID, chunk, thread_id=OWNER_REPORT_THREAD_ID)
         db=SessionLocal()
@@ -1441,6 +2755,7 @@ def send_owner_daily_report(report_date=None, force: bool = False, slot: str = '
         return {
             'status':'ok','report_date':report_date.isoformat(),'slot':slot,
             'sent':True,'message_count':len(chunks),'snapshot':snap,
+            'messenger_delivery':messenger_delivery,
             'verification':{'verified':True,'stable_passes':verification.get('stable_passes'),'attempts':verification.get('attempts')},
             'runtime_outcome':{
                 'owner_action_required':bool(runtime_outcome.get('owner_action_required')),

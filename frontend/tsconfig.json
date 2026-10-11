@@ -130,7 +130,9 @@
     ".next-sitebilling-final4/types/**/*.ts",
     ".next-sitebilling-final4/dev/types/**/*.ts",
     ".next-navui-final2/types/**/*.ts",
-    ".next-navui-final2/dev/types/**/*.ts"
+    ".next-navui-final2/dev/types/**/*.ts",
+    ".seo-next-preview/types/**/*.ts",
+    ".seo-next-preview/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

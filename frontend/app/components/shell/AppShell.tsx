@@ -33,6 +33,7 @@ const ACTIVE_ICON: Record<string, IconName> = {
   marketing: "ads",
   prospecting: "messages",
   acquisition: "target",
+  "audit-growth": "chart",
   sales: "analytics",
   "revenue-analytics": "target",
   phone: "support",

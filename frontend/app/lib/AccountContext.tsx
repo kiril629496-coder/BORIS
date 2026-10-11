@@ -12,6 +12,7 @@
  * account_id=all не существует, такие разделы и так собирают все аккаунты.
  */
 import React from "react";
+import { resolveAccountSelection } from "./accountSelection";
 
 export const LS_ACCOUNT = "boris_currentAccount";
 
@@ -84,6 +85,16 @@ function readSaved(): string {
   }
 }
 
+function readLinked(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("account_id") || params.get("accountId") || "";
+  } catch (e) {
+    return "";
+  }
+}
+
 function writeSaved(id: string): void {
   if (typeof window === "undefined") return;
   try {
@@ -140,10 +151,16 @@ export function AccountProvider(props: { children: React.ReactNode }) {
         });
         setAccounts(list);
 
-        // сохранённый аккаунт годится, только если он в списке доступных
+        // Единственный приоритет выбора для ссылок, reload и первого входа:
+        // link -> current -> saved -> first. Каждый кандидат обязан входить
+        // в доступный backend-список, поэтому query string не расширяет доступ.
         const saved = readSaved();
-        const ok = list.some(function (a) { return a.account_id === saved; });
-        const next = ok ? saved : (list.length ? list[0].account_id : null);
+        const next = resolveAccountSelection(
+          list,
+          readLinked(),
+          selectedAccountId,
+          saved,
+        );
         setSelected(next);
         if (next && next !== saved) writeSaved(next);
         setLoading(false);

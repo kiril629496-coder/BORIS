@@ -405,7 +405,9 @@ def _load(path: Path, default):
 
 def _save(path: Path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 def _normalize_domain(value: str | None) -> str:
     raw=str(value or "").strip().lower()
@@ -1742,6 +1744,29 @@ def discover(max_queries: int = 24, per_query: int = 8, sleep_s: float = 0.3, pr
     }
     _save(DISCOVERY_RUN_FILE, status)
     return status
+
+def record_timeout(wall_timeout_seconds: int) -> dict:
+    """Persist a bounded failed attempt so scheduling applies normal backoff."""
+    previous = _load(DISCOVERY_RUN_FILE, {})
+    previous_at = previous.get("at")
+    row = {
+        **previous,
+        "at": datetime.now(timezone.utc).isoformat(),
+        "attempt_outcome": "timeout",
+        "timed_out": True,
+        "wall_timeout_seconds": int(wall_timeout_seconds),
+        "error": "forum_discovery_timeout",
+        "progress_count": 0,
+        "new_or_refreshed": 0,
+        "new_candidates": 0,
+        "improved_candidates": 0,
+        "errors": [{"error": "forum_discovery_timeout"}],
+    }
+    if previous_at:
+        row["last_completed_at"] = previous.get("last_completed_at") or previous_at
+    _save(DISCOVERY_RUN_FILE, row)
+    return row
+
 
 def list_candidates(min_score: int = 8) -> list[dict]:
     out = []

@@ -72,3 +72,39 @@ def test_mop_generate_routes_with_module_specific_order():
     assert out["provider"] == "gigachat"
     assert out["json"]["reply_text"] == "По делу."
     assert seen["operation"] == "mop_messenger_reply"
+
+
+def test_planeta_mop_is_exact_openai_only_exception(monkeypatch):
+    env = {
+        "OPENAI_API_KEY": "configured",
+        "BORIS_SALES_OPENAI_ENABLED": "1",
+        "GIGACHAT_KEY": "configured-but-must-not-fallback",
+        "BORIS_MOP_GIGACHAT_ENABLED": "1",
+        "BORIS_SALES_GEMINI_ENABLED": "1",
+        "BORIS_SALES_LOCAL_ENABLED": "1",
+    }
+    with patch.dict("os.environ", env, clear=False),          patch.object(sales_ai_router, "_openai_billing_blocked", return_value=False),          patch.object(sales_ai_router, "_circuit_blocks", return_value=False):
+        order = sales_ai_router._mop_provider_order("planetazayavki_65985")
+    assert order == ["openai"]
+
+
+def test_planeta_mop_fails_closed_instead_of_falling_back_when_openai_unavailable(monkeypatch):
+    env = {
+        "OPENAI_API_KEY": "configured",
+        "BORIS_SALES_OPENAI_ENABLED": "1",
+        "GIGACHAT_KEY": "configured",
+        "BORIS_MOP_GIGACHAT_ENABLED": "1",
+        "BORIS_SALES_GEMINI_ENABLED": "1",
+        "BORIS_SALES_LOCAL_ENABLED": "1",
+    }
+    with patch.dict("os.environ", env, clear=False),          patch.object(sales_ai_router, "_openai_billing_blocked", return_value=True),          patch.object(sales_ai_router, "_circuit_blocks", return_value=False):
+        order = sales_ai_router._mop_provider_order("planetazayavki_65985")
+    assert order == []
+
+
+def test_global_production_contract_requires_scoped_planeta_openai_policy_marker():
+    from pathlib import Path
+    source = Path("/root/BORIS/backend/production_contract_runner.py").read_text(encoding="utf-8")
+    assert '"mop_router_scoped_openai_policy"' in source
+    assert '"PLANETA_OPENAI_MOP_V1"' in source
+    assert '"mop_router_no_openai"' not in source

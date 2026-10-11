@@ -191,3 +191,10 @@ backend/outreach_runs/
 backend/rop_reports/
 backend/incident_*/
 boris_ops/OPERATIONS_ACCEPTANCE_MATRIX.json
+
+# --- local client alias values; canonical repo contains placeholders only ---
+backend/client_aliases.local.json
+
+# --- client-specific QA artifacts kept only on production host ---
+backend/scripts/max150_staged_soak.sh
+frontend/scripts/qa-crm-dynamic-existing.py

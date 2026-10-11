@@ -6,9 +6,12 @@ Open signals are approximate because mail clients may proxy or prefetch images.
 """
 
 import html as html_lib
+import json
 import os
 import secrets
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlencode
 
 from sqlalchemy import text
 
@@ -105,6 +108,81 @@ def _strip_any_tracking_marker_img(raw: str) -> str:
     )
 
 
+CLICK_MARKER = 'data-boris-click-tracking="1"'
+
+def _click_context_by_queue(db, queue_id: int) -> dict[str, Any] | None:
+    row = db.execute(text("""
+      SELECT q.id AS queue_id,q.subject,
+             m.id AS member_id,COALESCE(m.ab_variant,'base') AS ab_variant,
+             c.id AS campaign_id,c.name,c.account_id
+      FROM email_queue q
+      JOIN prospect_campaign_members m
+        ON q.ref_type='prospect_campaign_member'
+       AND q.ref_id ~ '^[0-9]+$'
+       AND m.id=q.ref_id::bigint
+      JOIN prospect_campaigns c ON c.id=m.campaign_id
+      WHERE q.id=:q
+      LIMIT 1
+    """), {"q": int(queue_id)}).mappings().first()
+    if not row:
+        return None
+    item=dict(row)
+    if str(item.get("account_id") or "") == "__owner_outreach__":
+        item["target_url"]="https://boris-ai.pro/audit"
+        item["utm_campaign"]="boris_audit"
+    elif str(item.get("name") or "") == "Кирилл · разработка SaaS/App":
+        item["target_url"]="https://systems-ai-oko.ru/"
+        item["utm_campaign"]="software_development"
+    else:
+        return None
+    item["utm_source"]="email"
+    item["utm_medium"]="outreach"
+    item["utm_content"]=f"email_c{int(item['campaign_id'])}_q{int(item['queue_id'])}_{str(item.get('ab_variant') or 'base')[:16]}"
+    item["utm_term"]=f"m{int(item['member_id'])}"
+    return item
+
+
+def _inject_click_tracking(db, queue_id: int, token: str, html: str) -> str:
+    raw=str(html or "")
+    try:
+        ctx=_click_context_by_queue(db,int(queue_id))
+    except Exception:
+        # Unit-test/minimal DB adapters and non-campaign queue rows may not
+        # expose the campaign joins. Open tracking must still work normally.
+        return raw
+    if not ctx:
+        return raw
+    click_url=f"{PUBLIC_BASE_URL()}/api/prospecting/scale/click/{token}"
+    if click_url in raw and CLICK_MARKER in raw:
+        return raw
+    target=str(ctx["target_url"])
+    direct=f'href="{target}"'
+    tracked=f'href="{click_url}" {CLICK_MARKER}'
+    return raw.replace(direct,tracked)
+
+def render_text_click_tracking(db, queue_id: int, body: str | None) -> str:
+    """Render a tracked plain-text landing URL without mutating queue copy truth."""
+    raw=str(body or "")
+    try:
+        ctx=_click_context_by_queue(db,int(queue_id))
+        row=db.execute(
+            text("SELECT token FROM email_open_trackers WHERE email_queue_id=:q"),
+            {"q":int(queue_id)},
+        ).first()
+    except Exception:
+        return raw
+    if not ctx or not row:
+        return raw
+    token=str(row[0] or "")
+    if not token:
+        return raw
+    click_url=f"{PUBLIC_BASE_URL()}/api/prospecting/scale/click/{token}"
+    if click_url in raw:
+        return raw
+    target=str(ctx["target_url"])
+    return raw.replace(target,click_url)
+
+
 def ensure_tracker_and_inject(db, queue_id: int, html: str | None, body: str | None = None) -> str:
     """Create/reuse one tracker for queue row and inject exactly one pixel.
 
@@ -136,7 +214,7 @@ def ensure_tracker_and_inject(db, queue_id: int, html: str | None, body: str | N
     expected_url = f"{PUBLIC_BASE_URL()}/api/prospecting/scale/open/{token}.gif"
     if TRACKING_MARKER in result:
         if result.count(TRACKING_MARKER) == 1 and expected_url in result:
-            return result
+            return _inject_click_tracking(db,int(queue_id),token,result)
         # Wrong token or duplicate markers: normalize to exactly one correct
         # tracker for this durable queue row.
         result = _strip_any_tracking_marker_img(result)
@@ -144,8 +222,10 @@ def ensure_tracker_and_inject(db, queue_id: int, html: str | None, body: str | N
     low = result.lower()
     pos = low.rfind("</body>")
     if pos >= 0:
-        return result[:pos] + tag + result[pos:]
-    return result + tag
+        result = result[:pos] + tag + result[pos:]
+    else:
+        result = result + tag
+    return _inject_click_tracking(db,int(queue_id),token,result)
 
 
 def tracking_ready(db, queue_id: int, html: str | None) -> bool:
@@ -223,6 +303,303 @@ def record_open(token: str, user_agent: str = "") -> bool:
         return True
     finally:
         db.close()
+
+
+def _click_proxy_hint(user_agent: str) -> bool:
+    low=(user_agent or "").lower()
+    scanner_hints=(
+        "proofpoint","mimecast","barracuda","safelinks","microsoft office",
+        "urlscan","linkpreview","crawler","spider","bot","scanner","security",
+    )
+    return _proxy_hint(user_agent) or any(x in low for x in scanner_hints)
+
+
+def record_click(token: str, user_agent: str = "") -> str | None:
+    """Record a first-party email click and return the UTM-decorated destination."""
+    ensure_schema()
+    token=str(token or "").strip()
+    if len(token)<24 or len(token)>96:
+        return None
+    ua=str(user_agent or "")[:1000]
+    db=SessionLocal()
+    try:
+        tracker=db.execute(text(
+            "SELECT id,email_queue_id FROM email_open_trackers WHERE token=:t"
+        ),{"t":token}).mappings().first()
+        if not tracker:
+            return None
+        ctx=_click_context_by_queue(db,int(tracker["email_queue_id"]))
+        if not ctx:
+            return None
+        params={
+            "utm_source":ctx["utm_source"],
+            "utm_medium":ctx["utm_medium"],
+            "utm_campaign":ctx["utm_campaign"],
+            "utm_content":ctx["utm_content"],
+            "utm_term":ctx["utm_term"],
+        }
+        target=str(ctx["target_url"])
+        separator="&" if "?" in target else "?"
+        destination=target+separator+urlencode(params)
+        payload={
+            "event":"email_click",
+            "tracker_id":int(tracker["id"]),
+            "queue_id":int(ctx["queue_id"]),
+            "campaign_id":int(ctx["campaign_id"]),
+            "member_id":int(ctx["member_id"]),
+            "subject":str(ctx.get("subject") or "")[:300],
+            "ab_variant":str(ctx.get("ab_variant") or "base")[:16],
+            "proxy_hint":bool(_click_proxy_hint(ua)),
+            **params,
+            "created_at":datetime.now(timezone.utc).isoformat(),
+        }
+        db.execute(text("""
+          INSERT INTO storage(account_id,key,value)
+          VALUES('email_click_event',:k,:v)
+        """),{
+            "k":"click:"+secrets.token_hex(16),
+            "v":json.dumps(payload,ensure_ascii=False,separators=(",",":")),
+        })
+        db.commit()
+        return destination
+    finally:
+        db.close()
+
+
+def campaign_period_stats(db, campaign_id: int, days: int) -> dict[str, Any]:
+    """Rolling period funnel for one outreach campaign."""
+    from datetime import timedelta
+    cutoff=datetime.now(timezone.utc)-timedelta(days=max(1,int(days)))
+    pattern=f"email_c{int(campaign_id)}_q%"
+    sent=int(db.execute(text("""
+      SELECT count(*) FROM prospect_campaign_members
+      WHERE campaign_id=:c AND sent_at IS NOT NULL AND sent_at>=:cutoff
+    """),{"c":int(campaign_id),"cutoff":cutoff}).scalar() or 0)
+    opened=int(db.execute(text("""
+      SELECT count(DISTINCT q.id)
+      FROM email_open_events e
+      JOIN email_open_trackers t ON t.id=e.tracker_id
+      JOIN email_queue q ON q.id=t.email_queue_id
+      JOIN prospect_campaign_members m
+        ON q.ref_type='prospect_campaign_member'
+       AND q.ref_id ~ '^[0-9]+$'
+       AND m.id=q.ref_id::bigint
+      WHERE m.campaign_id=:c
+        AND e.opened_at>=:cutoff
+        AND COALESCE(e.proxy_hint,false)=false
+    """),{"c":int(campaign_id),"cutoff":cutoff}).scalar() or 0)
+    clicked=int(db.execute(text("""
+      SELECT count(DISTINCT NULLIF(value::jsonb->>'queue_id',''))
+      FROM storage
+      WHERE account_id='email_click_event'
+        AND value::jsonb->>'campaign_id'=:campaign
+        AND COALESCE((value::jsonb->>'proxy_hint')::boolean,false)=false
+        AND NULLIF(value::jsonb->>'created_at','')::timestamptz>=:cutoff
+    """),{"campaign":str(int(campaign_id)),"cutoff":cutoff}).scalar() or 0)
+    regs=int(db.execute(text("""
+      SELECT count(DISTINCT account_id)
+      FROM storage
+      WHERE key='viral_gateway_state'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_source','')='email'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_medium','')='outreach'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_content','') LIKE :pattern
+        AND NULLIF(value::jsonb->>'registered_at','')::timestamptz>=:cutoff
+    """),{"pattern":pattern,"cutoff":cutoff}).scalar() or 0)
+    trials=int(db.execute(text("""
+      SELECT count(DISTINCT account_id)
+      FROM storage
+      WHERE key='viral_gateway_state'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_source','')='email'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_medium','')='outreach'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_content','') LIKE :pattern
+        AND COALESCE((value::jsonb->>'trial_started')::boolean,false)=true
+        AND NULLIF(value::jsonb->>'trial_started_at','')::timestamptz>=:cutoff
+    """),{"pattern":pattern,"cutoff":cutoff}).scalar() or 0)
+    dev_leads=int(db.execute(text("""
+      SELECT count(DISTINCT NULLIF(value::jsonb->>'lead_id',''))
+      FROM storage
+      WHERE account_id='software_site_event'
+        AND value::jsonb->>'event'='development_lead_created'
+        AND COALESCE(value::jsonb->>'utm_source','')='email'
+        AND COALESCE(value::jsonb->>'utm_medium','')='outreach'
+        AND COALESCE(value::jsonb->>'utm_content','') LIKE :pattern
+        AND NULLIF(value::jsonb->>'created_at','')::timestamptz>=:cutoff
+    """),{"pattern":pattern,"cutoff":cutoff}).scalar() or 0)
+    return {
+        "days":int(days),"sent":sent,"likely_human_opened_unique":opened,
+        "likely_human_clicked_unique":clicked,"registrations_unique":regs,
+        "trial_started_unique":trials,"development_leads_created":dev_leads,
+    }
+
+
+def campaign_conversion_stats(db, campaign_id: int) -> dict[str, Any]:
+    """First-party click → registration attribution for one email campaign."""
+    pattern=f"email_c{int(campaign_id)}_q%"
+    click=db.execute(text("""
+      SELECT
+        count(*)::int AS click_hits,
+        count(DISTINCT NULLIF(value::jsonb->>'queue_id',''))::int AS clicked_unique,
+        count(DISTINCT NULLIF(value::jsonb->>'queue_id',''))
+          FILTER (WHERE COALESCE((value::jsonb->>'proxy_hint')::boolean,false)=false)::int
+          AS likely_human_clicked_unique
+      FROM storage
+      WHERE account_id='email_click_event'
+        AND value::jsonb->>'campaign_id'=:campaign
+    """),{"campaign":str(int(campaign_id))}).mappings().one()
+    funnel=db.execute(text("""
+      SELECT
+        count(DISTINCT NULLIF(value::jsonb->>'session_id','')) FILTER (
+          WHERE value::jsonb->>'event'='viral_page_view'
+        )::int AS attributed_page_views,
+        count(DISTINCT NULLIF(value::jsonb->>'session_id','')) FILTER (
+          WHERE value::jsonb->>'event'='registration_completed'
+        )::int AS registrations,
+        count(DISTINCT COALESCE(
+          NULLIF(value::jsonb->>'session_id',''),
+          NULLIF(value::jsonb->>'account_id','')
+        )) FILTER (
+          WHERE value::jsonb->>'event' IN ('trial_started','viral_trial_started')
+             OR (value::jsonb->>'event'='gateway_stage' AND value::jsonb->>'stage'='TRIAL_STARTED')
+        )::int AS trials
+      FROM storage
+      WHERE account_id='viral_event'
+        AND COALESCE(value::jsonb->>'utm_source','')='email'
+        AND COALESCE(value::jsonb->>'utm_medium','')='outreach'
+        AND COALESCE(value::jsonb->>'utm_content','') LIKE :pattern
+    """),{"pattern":pattern}).mappings().one()
+    gateway_trials=int(db.execute(text("""
+      SELECT count(DISTINCT account_id)
+      FROM storage
+      WHERE key='viral_gateway_state'
+        AND COALESCE(value::jsonb->>'stage','')='TRIAL_STARTED'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_source','')='email'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_medium','')='outreach'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_content','') LIKE :pattern
+    """),{"pattern":pattern}).scalar() or 0)
+    gateway_stages=db.execute(text("""
+      SELECT
+        count(DISTINCT NULLIF(e.value::jsonb->>'account_id','')) FILTER (
+          WHERE e.value::jsonb->>'stage'='AUDIT_STARTED'
+        )::int AS audit_started,
+        count(DISTINCT NULLIF(e.value::jsonb->>'account_id','')) FILTER (
+          WHERE e.value::jsonb->>'stage'='TRIAL_INTEREST'
+        )::int AS trial_interest,
+        count(DISTINCT NULLIF(e.value::jsonb->>'account_id','')) FILTER (
+          WHERE e.value::jsonb->>'stage'='TRIAL_STARTED'
+        )::int AS trial_started
+      FROM storage e
+      JOIN storage s
+        ON s.key='viral_gateway_state'
+       AND s.account_id=e.value::jsonb->>'account_id'
+      WHERE e.account_id='viral_event'
+        AND e.value::jsonb->>'event'='gateway_stage'
+        AND COALESCE(s.value::jsonb->'first_touch'->>'utm_source','')='email'
+        AND COALESCE(s.value::jsonb->'first_touch'->>'utm_medium','')='outreach'
+        AND COALESCE(s.value::jsonb->'first_touch'->>'utm_content','') LIKE :pattern
+    """),{"pattern":pattern}).mappings().one()
+    gateway_state=db.execute(text("""
+      SELECT
+        count(DISTINCT account_id)::int AS registered_accounts,
+        count(DISTINCT account_id) FILTER (
+          WHERE COALESCE((value::jsonb->>'audit_completed')::boolean,false)=true
+        )::int AS audit_completed,
+        count(DISTINCT account_id) FILTER (
+          WHERE COALESCE((value::jsonb->>'market_audit_completed')::boolean,false)=true
+        )::int AS market_completed,
+        count(DISTINCT account_id) FILTER (
+          WHERE COALESCE((value::jsonb->>'audit_completed')::boolean,false)=true
+            AND COALESCE((value::jsonb->>'market_audit_completed')::boolean,false)=true
+        )::int AS full_audit_completed,
+        count(DISTINCT account_id) FILTER (
+          WHERE COALESCE((value::jsonb->>'trial_started')::boolean,false)=true
+        )::int AS trial_started
+      FROM storage
+      WHERE key='viral_gateway_state'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_source','')='email'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_medium','')='outreach'
+        AND COALESCE(value::jsonb->'first_touch'->>'utm_content','') LIKE :pattern
+    """),{"pattern":pattern}).mappings().one()
+    software=db.execute(text("""
+      SELECT
+        count(DISTINCT NULLIF(value::jsonb->>'session_id','')) FILTER (
+          WHERE value::jsonb->>'event'='development_landing_view'
+        )::int AS landing_views,
+        count(*) FILTER (
+          WHERE value::jsonb->>'event'='development_contact_click'
+        )::int AS contact_clicks,
+        count(*) FILTER (
+          WHERE value::jsonb->>'event'='development_contact_click'
+            AND value::jsonb->>'channel'='whatsapp'
+        )::int AS whatsapp_clicks,
+        count(*) FILTER (
+          WHERE value::jsonb->>'event'='development_contact_click'
+            AND value::jsonb->>'channel'='max'
+        )::int AS max_clicks,
+        count(*) FILTER (
+          WHERE value::jsonb->>'event'='development_contact_click'
+            AND value::jsonb->>'channel'='phone'
+        )::int AS phone_clicks,
+        count(*) FILTER (
+          WHERE value::jsonb->>'event'='development_form_submit'
+        )::int AS form_submits,
+        count(DISTINCT NULLIF(value::jsonb->>'lead_id','')) FILTER (
+          WHERE value::jsonb->>'event'='development_lead_created'
+        )::int AS leads_created,
+        count(DISTINCT NULLIF(value::jsonb->>'lead_id','')) FILTER (
+          WHERE value::jsonb->>'event'='development_lead_created'
+            AND COALESCE(value::jsonb->>'crm_lead_id','') ~ '^[0-9]+$'
+            AND EXISTS (
+              SELECT 1 FROM manager_leads ml
+              WHERE ml.id=(value::jsonb->>'crm_lead_id')::bigint
+                AND lower(COALESCE(ml.status,'')) IN (
+                  'квалифицирован','квалифицирована',
+                  'целевое действие','оценка','кп','переговоры',
+                  'пробный','оплатил','оплачено','сделка'
+                )
+            )
+        )::int AS qualified_leads
+      FROM storage
+      WHERE account_id='software_site_event'
+        AND COALESCE(value::jsonb->>'utm_source','')='email'
+        AND COALESCE(value::jsonb->>'utm_medium','')='outreach'
+        AND COALESCE(value::jsonb->>'utm_content','') LIKE :pattern
+    """),{"pattern":pattern}).mappings().one()
+    clicks=int(click.get("clicked_unique") or 0)
+    human_clicks=int(click.get("likely_human_clicked_unique") or 0)
+    registrations=max(
+        int(funnel.get("registrations") or 0),
+        int(gateway_state.get("registered_accounts") or 0),
+    )
+    return {
+        "click_hits":int(click.get("click_hits") or 0),
+        "clicked_unique":clicks,
+        "likely_human_clicked_unique":human_clicks,
+        "attributed_page_views":int(funnel.get("attributed_page_views") or 0),
+        "registrations_unique":registrations,
+        "audit_started_unique":int(gateway_stages.get("audit_started") or 0),
+        "audit_completed_unique":int(gateway_state.get("audit_completed") or 0),
+        "market_audit_completed_unique":int(gateway_state.get("market_completed") or 0),
+        "full_audit_completed_unique":int(gateway_state.get("full_audit_completed") or 0),
+        "trial_interest_unique":int(gateway_stages.get("trial_interest") or 0),
+        "trial_started_unique":max(
+            int(funnel.get("trials") or 0),
+            gateway_trials,
+            int(gateway_stages.get("trial_started") or 0),
+            int(gateway_state.get("trial_started") or 0),
+        ),
+        "click_to_registration_rate_pct":round(registrations*100/human_clicks,1) if human_clicks else 0.0,
+        "development_landing_views":int(software.get("landing_views") or 0),
+        "development_contact_clicks":int(software.get("contact_clicks") or 0),
+        "development_whatsapp_clicks":int(software.get("whatsapp_clicks") or 0),
+        "development_max_clicks":int(software.get("max_clicks") or 0),
+        "development_phone_clicks":int(software.get("phone_clicks") or 0),
+        "development_form_submits":int(software.get("form_submits") or 0),
+        "development_leads_created":int(software.get("leads_created") or 0),
+        "development_qualified_leads":int(software.get("qualified_leads") or 0),
+        "period_7d":campaign_period_stats(db,int(campaign_id),7),
+        "period_30d":campaign_period_stats(db,int(campaign_id),30),
+    }
+
 
 
 def campaign_tracking_stats(db, campaign_id: int, include_subjects: bool = True) -> dict[str, Any]:
@@ -507,6 +884,7 @@ def campaign_tracking_stats(db, campaign_id: int, include_subjects: bool = True)
         "median_first_reply_minutes": _minutes(summary["median_first_reply_minutes"]),
         "open_metric_note": "Открытие — приблизительный сигнал. BORIS отдельно показывает технические загрузки изображения и более консервативную оценку вероятных человеческих открытий.",
     }
+    result.update(campaign_conversion_stats(db,int(campaign_id)))
     if not include_subjects:
         return result
 

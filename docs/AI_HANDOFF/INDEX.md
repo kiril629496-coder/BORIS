@@ -1,8 +1,8 @@
-# ChatGPT ↔ Codex shared handoff for BORIS
+# Universal AI shared handoff for BORIS
 
 Master SentinelX context: `sentinelx_context_sxc_EHE399B0`
 
-This directory is the repository-visible continuity layer. SentinelX contexts are the cross-chat/model state layer.
+This directory is the repository-visible continuity layer for Codex, ChatGPT, Manus and any subsequent AI agent. SentinelX contexts are the cross-chat/model state layer. Every agent must also read `UNIVERSAL_PROTOCOL.md`, `MASTER_HANDOFF.md`, `NEXT_AI_TASK.md`, and `CROSS_AI_SYNC.md`. For the 2026-09-26 Codex -> Manus 1/2 handoff of sidebar chats #1 and #6–10, also read `MANUS_BRIDGE.md`.
 
 ## Mandatory protocol
 
@@ -29,8 +29,15 @@ This directory is the repository-visible continuity layer. SentinelX contexts ar
 
 ## Handoff direction
 
-Codex stops/limit reached → ChatGPT resumes latest context → ChatGPT checkpoints → Codex resumes same context.
+Codex stops/limit reached → checkpoint → Manus/ChatGPT/next authorized AI resumes latest context → checkpoint → next agent resumes.
 
-ChatGPT stops → Codex resumes latest context → Codex checkpoints → ChatGPT resumes same context.
+Any AI stops → checkpoint first → next AI revalidates volatile facts and continues NEXT_ACTION.
+
+Provider/model chat history is never the canonical state.
 
 Never create a second independent implementation for the same production behavior.
+
+- Clients510 execution 2026-10-08: `sentinelx_context_sxc_CBWCVS36` — file `WORKSTREAM_CLIENTS510_EXECUTION_20261008.md`
+- Social reliability — Ocean / Маникюр / От Души: `sentinelx_context_sxc_EN8PA8XY` — file `WORKSTREAM_SOCIAL_RELIABILITY.md`
+
+- Crowd SEO delivery recovery: `sentinelx_context_sxc_WVA36AZZ` — file `WORKSTREAM_CROWD_SEO.md`

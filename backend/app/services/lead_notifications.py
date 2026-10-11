@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from typing import Any
 
 import requests
+from urllib.parse import urlsplit
 from sqlalchemy import text
 from app.db.session import SessionLocal
 from app.crypto_utils import encrypt_secret, decrypt_secret
@@ -215,20 +216,21 @@ def queue_mop_events(db, draft_id: int, analysis: dict | None) -> list[dict[str,
     incoming = " ".join(str(d.get("incoming_text") or "").split())[:500]
     suffix = (" · " + item[:100]) if item else ""
     url = "/messages?account_id=%s&chat_id=%s" % (account_id, d["avito_chat_id"])
+    messenger_url = "/messenger?account_id=%s&client_chat_id=%s" % (account_id, d["avito_chat_id"])
     out = []
     if prior == 0:
         out.append(queue_event(
             account_id, f"mop:new:{draft_id}", "new_lead",
             f"🆕 Новый лид · {name}",
             f"{client}{suffix}\n{incoming}" if incoming else f"{client}{suffix}",
-            url=url, payload={"draft_id": draft_id, "chat_id": d["avito_chat_id"]},
+            url=url, payload={"draft_id": draft_id, "chat_id": d["avito_chat_id"], "messenger_url": messenger_url},
         ))
     if analysis.get("phone_received") is True and not prior_phone:
         out.append(queue_event(
             account_id, f"mop:phone:{draft_id}", "hot_lead",
             f"🔥 Горячий лид · {name}",
             f"{client}: контакт получен. Нужна быстрая обработка.{suffix}\n{incoming}" if incoming else f"{client}: контакт получен. Нужна быстрая обработка.{suffix}",
-            severity="critical", url=url, payload={"draft_id": draft_id, "chat_id": d["avito_chat_id"]},
+            severity="critical", url=url, payload={"draft_id": draft_id, "chat_id": d["avito_chat_id"], "messenger_url": messenger_url},
         ))
     if analysis.get("human_handoff") is True:
         reason = str(analysis.get("handoff_reason") or "нужен сотрудник")[:300]
@@ -236,7 +238,7 @@ def queue_mop_events(db, draft_id: int, analysis: dict | None) -> list[dict[str,
             account_id, f"mop:human:{draft_id}", "human_required",
             f"👤 Нужен сотрудник · {name}",
             f"{client}: {reason}.{suffix}\n{incoming}" if incoming else f"{client}: {reason}.{suffix}",
-            severity="critical", url=url, payload={"draft_id": draft_id, "chat_id": d["avito_chat_id"]},
+            severity="critical", url=url, payload={"draft_id": draft_id, "chat_id": d["avito_chat_id"], "messenger_url": messenger_url},
         ))
     return out
 
@@ -753,6 +755,26 @@ def _out_payload(out: dict) -> dict[str, Any]:
         return {}
 
 
+def _webpush_requests_session(subscription_info: dict[str, Any]) -> requests.Session | None:
+    """Bypass BORIS outbound proxy only for Apple Web Push POST requests.
+
+    The shared HTTP/HTTPS proxy is needed by other BORIS integrations, but
+    Apple's Web Push endpoint can reject/fail CONNECT/POST through that proxy.
+    Direct HTTPS to web.push.apple.com is healthy and VAPID/TLS verification
+    remains fully enabled.
+    """
+    endpoint = str((subscription_info or {}).get("endpoint") or "").strip()
+    try:
+        host = str(urlsplit(endpoint).hostname or "").lower()
+    except Exception:
+        host = ""
+    if host == "web.push.apple.com" or host.endswith(".push.apple.com"):
+        session = requests.Session()
+        session.trust_env = False
+        return session
+    return None
+
+
 def _send_webpush(out: dict, settings: dict) -> tuple[int, int]:
     if _out_payload(out).get("delivery_scope") == "max_only":
         return 0, 0
@@ -768,7 +790,7 @@ def _send_webpush(out: dict, settings: dict) -> tuple[int, int]:
     db = SessionLocal()
     try:
         rows = [dict(x) for x in db.execute(text("""
-          SELECT s.id,s.endpoint_hash,s.subscription_enc
+          SELECT s.id,s.user_id,s.endpoint_hash,s.subscription_enc
           FROM lead_push_subscriptions s
           JOIN users u ON u.id=s.user_id AND u.is_active=true AND coalesce(u.status,'active')<>'blocked'
           LEFT JOIN accounts a ON a.account_id=s.account_id
@@ -785,17 +807,33 @@ def _send_webpush(out: dict, settings: dict) -> tuple[int, int]:
         """), {"a": out["account_id"]}).mappings().all()]
     finally:
         db.close()
+    payload = _out_payload(out)
+    if "target_user_ids" in payload:
+        raw_targets = payload.get("target_user_ids") or []
+        target_user_ids = {int(value) for value in raw_targets if str(value).isdigit()}
+        rows = [row for row in rows if int(row.get("user_id") or 0) in target_user_ids]
     ok = fail = 0
+    messenger_private = str(out.get("event_type") or "") in {"internal_message", "client_assignment", "crm_task_reminder"} or str(payload.get("messenger_url") or "").startswith("/messenger")
+    safe_body = "Откройте BORIS Messenger, чтобы посмотреть обновление." if messenger_private else out["body"]
     wire = json.dumps({
-        "title": out["title"], "body": out["body"], "url": out.get("url") or "/messages",
+        "title": out["title"], "body": safe_body, "url": payload.get("messenger_url") or out.get("url") or "/messages",
         "tag": "boris-lead-" + str(out["id"]), "event_type": out["event_type"],
-        "severity": out["severity"],
+        "severity": out["severity"], "privacy_mode": "private" if messenger_private else "standard",
     }, ensure_ascii=False)
     for sub in rows:
         target = str(sub["endpoint_hash"])[:16]
+        session = None
         try:
             info = json.loads(decrypt_secret(str(sub["subscription_enc"])))
-            webpush(subscription_info=info, data=wire, vapid_private_key=keyfile, vapid_claims={"sub": WEBPUSH_SUBJECT}, timeout=10)
+            session = _webpush_requests_session(info)
+            webpush(
+                subscription_info=info,
+                data=wire,
+                vapid_private_key=keyfile,
+                vapid_claims={"sub": WEBPUSH_SUBJECT},
+                timeout=10,
+                requests_session=session,
+            )
             _record_delivery(out["id"], "webpush", target, "sent")
             udb = SessionLocal()
             try:
@@ -814,6 +852,9 @@ def _send_webpush(out: dict, settings: dict) -> tuple[int, int]:
                 """), {"gone": status_code in {404,410}, "e": err[:300], "i": sub["id"]}); udb.commit()
             finally: udb.close()
             fail += 1
+        finally:
+            if session is not None:
+                session.close()
     return ok, fail
 
 
@@ -1493,7 +1534,7 @@ def queue_operational_notifications() -> dict[str, Any]:
                 f"{title}{when}",
                 severity=severity,
                 url=f"/messages?account_id={account_id}&chat_id={r.get('avito_chat_id') or ''}",
-                payload={"task_id": int(r["id"]), "task_type": task_type},
+                payload={"task_id": int(r["id"]), "task_type": task_type, "messenger_url": f"/messenger?account_id={account_id}&client_chat_id={r.get('avito_chat_id') or ''}&task_id={int(r['id'])}"},
             )
             queued += int(result.get("status") == "queued")
 

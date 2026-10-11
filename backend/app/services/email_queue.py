@@ -15,6 +15,7 @@ enqueue_email() кладёт письмо в email_queue и (по умолчан
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 
 from sqlalchemy import text
@@ -133,10 +134,31 @@ def _log_event(db, queue_id, event_type, message_id=None, details=None):
         "mid": message_id or None, "det": details or None})
 
 
+def _enqueue_error_fields(exc):
+    """Only known DB markers and identifier-shaped diagnostics; never exception SQL/params."""
+    original = getattr(exc, 'orig', None) or exc
+    diag = getattr(original, 'diag', None)
+    primary = str(getattr(diag, 'message_primary', '') or '')
+    marker = re.search(r'\b(?:OWNER_OUTREACH_[A-Z0-9_]+|EMAIL_[A-Z0-9_]+)\b', primary)
+    code = str(getattr(original, 'pgcode', '') or '')
+    constraint = str(getattr(diag, 'constraint_name', '') or '')
+    return {
+        'error': marker.group(0) if marker else 'DATABASE_ERROR',
+        'sqlstate': code if re.fullmatch(r'[A-Z0-9]{5}', code) else 'unknown',
+        'constraint': constraint if re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]{0,100}', constraint) else 'unknown',
+        'exception': type(exc).__name__,
+    }
+
+
+def _safe_queue_log_id(value):
+    value = str(value or '')
+    return value if re.fullmatch(r'[0-9]{1,19}', value) else 'unknown'
+
+
 def enqueue_email(to, subject, body, html=None, from_address=None, from_name=None,
                   reply_to=None, headers=None, source=None, idempotency_key=None,
                   max_attempts=5, send_now=True, ref_type=None, ref_id=None,
-                  expires_at=None, attachments=None, mailbox_id=None) -> dict:
+                  expires_at=None, attachments=None, mailbox_id=None, campaign_id=None) -> dict:
     """
     Кладёт письмо в очередь. Возвращает {id, status, duplicate}.
     При idempotency_key повторный вызов не создаёт второе письмо.
@@ -210,8 +232,14 @@ def enqueue_email(to, subject, body, html=None, from_address=None, from_name=Non
     except Exception as exc:
         db.rollback()
         db.close()
-        logger.warning("email_queue: постановка не удалась (%s)", type(exc).__name__)
-        return {"id": None, "status": "error", "duplicate": False}
+        fields = _enqueue_error_fields(exc)
+        logger.warning(
+            'EMAIL_QUEUE_ENQUEUE_FAILED source=%s ref_type=%s campaign=%s member=%s mailbox=%s exception=%s error=%s sqlstate=%s constraint=%s',
+            'prospect_campaign' if source == 'prospect_campaign' else 'other',
+            'prospect_campaign_member' if ref_type == 'prospect_campaign_member' else 'other',
+            _safe_queue_log_id(campaign_id), _safe_queue_log_id(ref_id), _safe_queue_log_id(mailbox_id),
+            fields['exception'], fields['error'], fields['sqlstate'], fields['constraint'])
+        return {"id": None, "status": "error", "duplicate": False, "error_code": fields['error']}
     db.close()
 
     if send_now:
@@ -323,6 +351,11 @@ def _deliver(db, row) -> str:
             db.commit()
             logger.warning("email#%s content guard blocked before SMTP: %s",queue_id,reason)
             return "cancelled"
+        # Copy contract is now proven against the canonical stored body.
+        # Render the same unique first-party click URL into the MIME text part
+        # only; never mutate email_queue.text_body or campaign copy truth.
+        body = _tracking.render_text_click_tracking(db, int(queue_id), body)
+
         # Release member/campaign locks before external SMTP/IMAP.
         db.commit()
 

@@ -8,6 +8,8 @@
 Подписи: fn(db, user, ctx) -> dict, где ctx = {entities, account_id,
 command_id, operation}. Возврат: status, answer, changes, actions.
 """
+import json
+
 from app.services import command_executor as E
 
 ROUTES = (
@@ -55,6 +57,50 @@ def op_navigate(db, user, ctx):
 
 def op_smalltalk(db, user, ctx):
     topic = str((ctx.get("entities") or {}).get("topic") or "").strip().lower()
+    if topic == "audit_help":
+        from app.models.storage import Storage
+        account_id = str(ctx.get("account_id") or getattr(user, "account_id", "") or "").strip()
+        row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == "viral_gateway_context",
+        ).first() if account_id else None
+        try:
+            audit_ctx = json.loads(row.value or "{}") if row else {}
+        except Exception:
+            audit_ctx = {}
+        score = audit_ctx.get("score")
+        connected = bool(audit_ctx.get("connected"))
+        problems = [str(x or "") for x in (audit_ctx.get("main_problems") or []) if str(x or "").strip()]
+        if score is None:
+            return {
+                "status": "ok",
+                "answer": "Последний аудит пока не найден. Откройте Audit Gateway и завершите первый аудит.",
+                "route": "/audit",
+                "route_title": "Мой аудит",
+            }
+        labels = {
+            "unanswered": "клиенты без ответа",
+            "response": "скорость ответа",
+            "slow_response": "скорость ответа",
+            "weak_ads": "эффективность объявлений",
+            "followup": "follow-up",
+            "reactivation": "клиенты для возврата",
+            "kpi_gap": "выполнение KPI",
+        }
+        human = [labels.get(x, x) for x in problems]
+        suffix = (" Главные точки: " + ", ".join(human) + ".") if human else ""
+        return {
+            "status": "ok",
+            "answer": (
+                f"Я помню ваш последний BORIS Score: {int(score)}/100. "
+                + ("Он рассчитан на реальных данных BORIS." if connected else "Это предварительная оценка.")
+                + suffix
+                + " Могу открыть аудит или перейти к первому инструменту для исправления."
+            ),
+            "route": "/audit",
+            "route_title": "Мой аудит",
+            "hint": "Контекст аудита сохранён в BORIS.",
+        }
     if topic == "onboarding_help":
         from sqlalchemy import text as _t
         acc = ctx.get("account_id")

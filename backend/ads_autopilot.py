@@ -7,6 +7,7 @@ from app.services.mass_ai_guard import guarded_post as _mass_guarded_post
     venv/bin/python3 ads_autopilot.py <account_id>          # просмотр
     venv/bin/python3 ads_autopilot.py <account_id> --apply  # создать предложения
 """
+from client_aliases import client_id as _client_id, client_text as _client_text
 import json
 import os
 import sys
@@ -478,7 +479,7 @@ def measure_runs(acc, days=7, dry=True):
 
 
 def _main():
-    a = sys.argv[1] if len(sys.argv) > 1 else "prodazha_bytovok_25677"
+    a = sys.argv[1] if len(sys.argv) > 1 else _client_id("client_06")
     args = sys.argv[2:]
     dry = "--apply" not in args and "--yes" not in args
     if "--measure" in args:

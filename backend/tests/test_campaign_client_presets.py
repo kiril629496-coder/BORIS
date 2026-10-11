@@ -19,6 +19,73 @@ def test_campaign_context_reads_observed_and_feed_titles():
     assert "key='feed_items'" in src
     assert 'active_listing_titles' in src
 
+
+def test_campaign_strategy_routes_are_account_scoped_and_persistent():
+    src=(ROOT/'backend/app/api/campaigns.py').read_text(encoding='utf-8')
+    assert '@router.get("/strategy")' in src
+    assert '@router.put("/strategy")' in src
+    strategy=src[src.index('@router.get("/strategy")'):src.index('@router.get("/context")')]
+    assert strategy.count('_allowed_accounts(db, user)') >= 2
+    assert "key='campaign_strategy'" in strategy
+    assert 'account_id=:a' in strategy
+    assert 'INSERT INTO storage (account_id, key, value)' in strategy
+    assert 'db.commit()' in strategy
+
+
+def test_campaign_strategy_rejects_cross_account_access_before_storage_io():
+    src=(ROOT/'backend/app/api/campaigns.py').read_text(encoding='utf-8')
+    strategy=src[src.index('@router.get("/strategy")'):src.index('@router.get("/context")')]
+    # Both handlers must perform the existing allow-list check before their first
+    # storage query/write; this protects Account A from Account B strategy data.
+    for marker in ('def campaign_strategy', 'def save_campaign_strategy'):
+        block=strategy[strategy.index(marker):]
+        if marker == 'def campaign_strategy': block=block[:block.index('class CampaignStrategyBody')]
+        assert block.index('if aid not in _allowed_accounts(db, user):') < block.index('storage')
+
+
+def test_campaign_strategy_clamps_target_active_ads_and_has_safe_defaults():
+    src=(ROOT/'backend/app/api/campaigns.py').read_text(encoding='utf-8')
+    assert 'max(0, min(int(payload.get("target_active_ads") or 0), 100000))' in src
+    strategy=src[src.index('@router.get("/strategy")'):src.index('@router.get("/context")')]
+    assert 'strategy = {}' in strategy
+    assert 'strategy if isinstance(strategy, dict) else {}' in strategy
+
+
+def test_campaign_strategy_put_is_persistence_only_and_never_publishes():
+    src=(ROOT/'backend/app/api/campaigns.py').read_text(encoding='utf-8')
+    strategy=src[src.index('@router.get("/strategy")'):src.index('@router.get("/context")')]
+    assert 'publication' not in strategy.lower()
+    assert 'provider' not in strategy.lower()
+    assert 'campaign job' not in strategy.lower()
+    assert 'db.commit()' in strategy
+
+
+def test_campaign_strategy_frontend_block_is_on_existing_creation_page():
+    page=(ROOT/'frontend/app/dashboard/campaign/page.tsx').read_text(encoding='utf-8')
+    for marker in (
+        '/api/campaign/strategy?account_id=', 'Цель: активных объявлений', 'Сейчас активно:', 'Не хватает:',
+        'Направления', 'Города', 'use_price_list', 'use_site_services',
+        'unique_texts', 'unique_images', 'require_verified_price', 'require_preflight',
+        'setStrategy((current: any) => ({ ...current, ...result.strategy }))',
+    ):
+        assert marker in page
+    assert 'id="campaign-strategy"' in page
+    assert 'id="campaign-create"' in page
+
+
+def test_campaign_strategy_deficit_is_fail_closed_and_never_negative():
+    page=(ROOT/'frontend/app/dashboard/campaign/page.tsx').read_text(encoding='utf-8')
+    assert 'Math.max(0,Number(strategy.target_active_ads || 0)-Number(cat.active || 0))' in page
+
+
+def test_campaign_strategy_account_switch_resets_and_reloads_state():
+    page=(ROOT/'frontend/app/dashboard/campaign/page.tsx').read_text(encoding='utf-8')
+    assert '}, [selectedAccountId]);' in page
+    block=page[page.index('useEffect(() => {'):page.index('const load = useCallback', page.index('useEffect(() => {'))]
+    assert 'setStrategy({ target_active_ads: 0' in block
+    assert 'apiGet(`/api/campaign/strategy?account_id=${encodeURIComponent(selectedAccountId)}`)' in block
+
+
 def test_account_list_exposes_safe_business_context():
     src=(ROOT/'backend/app/api/accounts.py').read_text(encoding='utf-8')
     for field in ('company_niche','company_description','company_advantages','company_client_description','company_tone'):
@@ -94,24 +161,47 @@ def test_campaign_prompt_requires_visible_bottom_uniqueness():
     assert 'Фото + 1 главный баннер' in page
 
 
-def test_uniqueness_footer_is_bottom_visible_and_rotates():
-    from app.api.campaigns import _ff_append_uniqueness_footer, _ff_copy_quality_errors
+def test_seo_then_factual_uniqueness_is_bottom_and_fact_based():
+    from app.api.campaigns import _ff_append_uniqueness_footer, _ff_copy_quality_errors, _ff_factual_example
     base=(
         'Кухня на заказ в Уфе. Напишите нам, чтобы обсудить задачу.\n\n'
         'Подберём решение под подтверждённые параметры клиента и его задачи.\n\n'
-        'Работаем с индивидуальными проектами и не подменяем факты обещаниями.\n\n'
+        'Работаем только по подтверждённым данным без выдуманных обещаний.\n\n'
         'Пришлите исходные данные — ответим по существу. '
     )*5
-    tails=[]
-    for variant in range(1,6):
-        desc=_ff_append_uniqueness_footer(base,'Кухня на заказ','Уфа',variant=variant,item_id=100,max_chars=2400)
-        tails.append(desc.split('\n\n')[-1])
-        assert desc.rstrip().endswith(tails[-1])
-        assert '· Уфа' in tails[-1]
-        payload={'title':'Кухня на заказ','description':desc,'direction':'Кухня на заказ','city':'Уфа','copy_quality_contract':'sales_v3','uniqueness_footer':{'present':True,'position':'bottom'}}
-        codes={x.get('code') for x in _ff_copy_quality_errors(payload)}
-        assert 'copy_uniqueness_footer_missing' not in codes
-    assert len(set(tails))==5
+    payload={
+        'title':'Кухня на заказ','direction':'Кухня на заказ','city':'Уфа',
+        'goods_type':'Кухонные гарнитуры','goods_subtype':'Кухни',
+        'kitchen_type':'На заказ','condition':'Новое','price':45000,
+        'copy_quality_contract':'sales_v4'
+    }
+    example,meta=_ff_factual_example('Кухня на заказ','Уфа',payload)
+    assert meta['present'] is True and meta['needs_data'] is False
+    assert 'Пример товара:' in example
+    desc=_ff_append_uniqueness_footer(base,'Кухня на заказ','Уфа',variant=1,item_id=100,max_chars=2400,payload=payload)
+    assert 'Звоните нам, если ищете:' in desc
+    assert 'Пример товара:' in desc
+    assert desc.rfind('Звоните нам, если ищете:') < desc.rfind('Пример товара:')
+    assert desc.rstrip().endswith(example)
+    payload['description']=desc
+    payload['uniqueness_footer']=meta
+    codes={x.get('code') for x in _ff_copy_quality_errors(payload)}
+    assert 'copy_seo_block_missing' not in codes
+    assert 'copy_uniqueness_footer_missing' not in codes
+
+
+def test_factual_uniqueness_fails_closed_when_item_facts_missing():
+    from app.api.campaigns import _ff_factual_example, _ff_append_uniqueness_footer, _ff_copy_quality_errors
+    payload={'title':'Кухня на заказ','direction':'Кухня на заказ','city':'Уфа','copy_quality_contract':'sales_v4'}
+    example,meta=_ff_factual_example('Кухня на заказ','Уфа',payload)
+    assert example=='' and meta['needs_data'] is True and meta['present'] is False
+    desc=_ff_append_uniqueness_footer(
+        ('Кухня на заказ в Уфе. Напишите нам.\n\nПреимущество.\n\nФакты.\n\nCTA. ')*8,
+        'Кухня на заказ','Уфа',payload=payload
+    )
+    payload['description']=desc; payload['uniqueness_footer']=meta
+    codes={x.get('code') for x in _ff_copy_quality_errors(payload)}
+    assert 'copy_uniqueness_footer_missing' in codes
 
 
 def test_sales_v3_fails_closed_without_uniqueness_footer():
@@ -215,14 +305,21 @@ def test_client_prompt_for_direction_is_not_misparsed_as_audience():
         assert r['cities']==['Сочи']
     finally: db.close()
 
-def test_uniqueness_footer_scales_without_repeating_for_bulk_variants():
-    from app.api.campaigns import _ff_append_uniqueness_footer
-    base='Оффер Сочи.\n\nПреимущество.\n\nНапишите нам — ответим по задаче.'
-    vals=[_ff_append_uniqueness_footer(base,'Кухня на заказ','Уфа',variant=i,item_id=1000+i) for i in range(1,101)]
-    tails=[v.splitlines()[-1] for v in vals]
-    assert len(set(tails))==100
-    assert all(t.startswith('✦ ') for t in tails)
-    assert all('Кухня на заказ · Уфа' in t for t in tails)
+def test_short_title_policy_and_formula_rotation_for_bulk_variants():
+    from app.api.campaigns import _ff_title_variants, _ff_formula_meta
+    titles=_ff_title_variants('Кухня на заказ')
+    assert titles[0]=='Кухни на заказ'
+    assert all(1 <= len(t) <= 50 for t in titles)
+    assert all('под ключ' not in t.lower() and 'консультац' not in t.lower() and 'сопровожд' not in t.lower() for t in titles)
+    formulas=[_ff_formula_meta({'variant':i},'Кухня на заказ')['copy_formula_id'] for i in range(1,11)]
+    assert formulas==['PAS','FAB','BAB','4P','QUEST','OBJECTION','EXPERT','RESULT','COMPARISON','PROCESS']
+
+
+def test_strong_markup_is_preserved_but_other_html_removed():
+    from app.api.campaigns import _ff_plain_description_for_avito
+    out=_ff_plain_description_for_avito('<div><strong>Выгода</strong></div><script>x</script> Текст')
+    assert '<strong>Выгода</strong>' in out
+    assert '<div>' not in out and '<script>' not in out and '</script>' not in out
 
 def test_avito_xmlcheck_has_stale_cache_bust_fallback():
     from pathlib import Path
@@ -585,10 +682,11 @@ def test_exact_existing_feed_price_can_heal_required_price_without_guessing():
         db.close()
 
 
-def test_campaign_prepare_requires_exact_three_semantic_photos_not_any_image():
+def test_campaign_prepare_requires_exact_order_media_count_not_any_image():
     src=(ROOT/'backend/app/services/jobs.py').read_text(encoding='utf-8')
     assert '_prepared_photo_count' in src
-    assert '!= 3' in src
+    assert 'media_target=max(1,min(int(_media_order.get("media_per_item") or 3),8))' in src
+    assert '!= media_target' in src
     assert 'BORIS автоматически заменяет фотографии, которые не соответствуют объявлению.' in src
 
 
@@ -764,6 +862,22 @@ def test_unresolved_launcher_category_is_explicit_in_ui():
     assert 'Avito: уточним подкатегорию' in page
 
 
+def test_campaign_overview_surfaces_backend_readiness_and_feed_reconcile():
+    page=(ROOT/'frontend/app/dashboard/campaign/page.tsx').read_text(encoding='utf-8')
+    assert '/readiness?account_id=' in page
+    assert '/ai-marketer?account_id=' in page
+    # Client UI is intentionally humanized; backend readiness remains the
+    # authority, but raw developer wording must not leak into the product.
+    assert 'Готовность объявлений' in page
+    assert 'BORIS показывает фактическое состояние проверки простым языком' in page
+    assert 'Источник истины: backend readiness' not in page
+    assert 'function feedReconcileCopy(feed:any): string' in page
+    assert 'feed?.current_feed_count' in page
+    assert 'feed?.mapped_current_feed_count' in page
+    assert 'feed?.unmapped_current_feed_count' in page
+    assert 'BORIS видит "+unmapped+" объявлений Avito, которые ещё не связаны с текущими проектами.' in page
+
+
 def test_launcher_existing_feed_template_without_path_is_canonicalized():
     from app.db.session import SessionLocal
     from app.models.user import User
@@ -937,3 +1051,79 @@ def test_count_fragment_is_not_a_fake_campaign_direction():
         assert r['quantity'] == 1
     finally:
         db.close()
+
+
+def test_soft_furniture_bulk_titles_have_safe_lexical_diversity():
+    from app.api.campaigns import _ff_select_title
+    titles=[_ff_select_title("Чистка мягкой мебели",i) for i in range(1,11)]
+    assert len(set(titles)) >= 6, titles
+    banned=("скидк","гарант","за час","лучший","дешев","срочн")
+    assert all(not any(x in title.casefold() for x in banned) for title in titles)
+    assert all(1 <= len(title.split()) <= 3 for title in titles)
+
+
+def test_meta_business_scope_is_never_treated_as_avito_category():
+    from app.db.session import SessionLocal
+    from app.api.campaigns import _ff_category_candidates
+    db=SessionLocal()
+    try:
+        phrase='по каждой категории и каждому направлению бизнеса, которые уже есть у нас в BORIS'
+        assert _ff_category_candidates(db,phrase,limit=8) == []
+    finally:
+        db.close()
+
+
+def test_planeta_all_existing_directions_prompt_uses_account_scope_and_per_direction_quantity(monkeypatch):
+    from types import SimpleNamespace
+    import app.api.campaigns as C
+
+    directions=[
+        'Кухни на заказ',
+        'Гардеробные на заказ',
+        'Прихожие на заказ',
+        'Мебель для ванной на заказ',
+    ]
+    paths={
+        'Кухни на заказ':('95712','Для дома и дачи > Мебель и интерьер > Кухонные гарнитуры > Кухни'),
+        'Гардеробные на заказ':('68081','Для дома и дачи > Мебель и интерьер > Гардеробные системы и вешалки'),
+        'Прихожие на заказ':('68080','Для дома и дачи > Мебель и интерьер > Прихожие и обувницы'),
+        'Мебель для ванной на заказ':('68104','Для дома и дачи > Мебель и интерьер > Мебель для ванной'),
+    }
+    monkeypatch.setattr(C,'_ff_existing_account_directions',lambda db,aid,limit=20:list(directions))
+    monkeypatch.setattr(C,'_ff_existing_account_cities',lambda db,aid,limit=20:['Уфа','Ижевск','Стерлитамак'])
+    monkeypatch.setattr(C,'_ff_account_context',lambda db,aid:{'niche':'мебель на заказ'})
+    monkeypatch.setattr(C,'_ff_validated_category_hint',lambda db,d,hints:{})
+    monkeypatch.setattr(
+        C,'_ff_category_candidates',
+        lambda db,d,limit=4,path_hint=None:[
+            {'template_id':paths[d][0],'path':paths[d][1],'leaf_name':paths[d][1].split(' > ')[-1],'score':40}
+        ],
+    )
+    monkeypatch.setattr(C,'_ff_auto_category_candidate',lambda d,candidates:dict(candidates[0]) if candidates else {})
+
+    c=SimpleNamespace(default_account_id='planetazayavki_65985')
+    brief=(
+        'Сделай по 30 объявлений по каждой категории и каждому направлению бизнеса, '
+        'которые уже есть у нас в BORIS. Для каждой категории сделай разные заголовки, '
+        'тексты и рекламные гипотезы.'
+    )
+    result=C._ff_extract_plan(object(),c,C.FFWorkflowBriefBody(brief=brief,variants=1))
+    matrix=result.get('matrix') or []
+    assert result.get('directions') == directions
+    assert int(result.get('quantity') or 0) == 120
+    assert len(matrix) == 120
+    dumped=__import__('json').dumps(matrix,ensure_ascii=False).lower()
+    assert 'оборудование для бизнеса' not in dumped
+    assert 'услуги и оборудование для бизнеса' not in dumped
+    assert all(str(x.get('category_path') or '').startswith('Для дома и дачи > Мебель и интерьер >') for x in matrix)
+
+
+
+def test_photo_stack_uses_payload_banner_url_as_canonical_hero_identity():
+    src=(ROOT/'backend/app/api/campaigns.py').read_text(encoding='utf-8')
+    fn=src[src.index('def ff_workflow_photo_stack'):src.index('def ff_workflow_banners')]
+    assert 'PHOTO_STACK_CANONICAL_BANNER_URL_V1' in fn
+    assert '_banner_url=str(p.get("banner_url") or "").strip()' in fn
+    assert '_banner_key=_banner_url.split("/images/",1)[1].split("?",1)[0].lstrip("/")' in fn
+    assert 'str(getattr(a,"storage_key","") or "").lstrip("/")==_banner_key' in fn
+    assert 'source_provider' in fn

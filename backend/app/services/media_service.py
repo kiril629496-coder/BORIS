@@ -586,7 +586,10 @@ def _published_campaign_media_local_reconcile(db, limit=1000, account_ids=None):
             wanted_keys = [(pos, str(payload_keys.get(pos) or "")) for pos in range(image_count)]
             review_passed = bool(
                 isinstance(review, dict)
-                and (review.get("passed") is True or str(review.get("status") or "").lower() == "pass")
+                and (
+                    review.get("passed") is True
+                    or str(review.get("status") or "").lower() in {"pass","passed"}
+                )
             )
             safe_banner_expansion = bool(
                 expected_placements > 0
@@ -974,8 +977,13 @@ def _published_media_provider_cooldown_clear(db, account_id: str) -> None:
 
 
 
-def reconcile_published_campaign_media(db, limit=1000, paid_limit=None):
-    """Run local repair, then bounded exactly-once paid proof refresh if needed."""
+def reconcile_published_campaign_media(db, limit=1000, paid_limit=None, account_ids=None):
+    """Run local repair, then bounded exactly-once paid proof refresh if needed.
+
+    account_ids optionally narrows both local repair and paid provider calls to an
+    explicit tenant set. This is required for owner-directed Campaign repair so
+    one client's acceptance cannot consume another client's vision budget.
+    """
     import os
     from app.models.campaign_item import CampaignItem
     from app.models.media_link import MediaLink
@@ -987,7 +995,7 @@ def reconcile_published_campaign_media(db, limit=1000, paid_limit=None):
         validate_linked_media_semantics,
     )
 
-    local = _published_campaign_media_local_reconcile(db, limit=limit)
+    local = _published_campaign_media_local_reconcile(db, limit=limit, account_ids=account_ids)
     db.commit()
 
     if paid_limit is None:

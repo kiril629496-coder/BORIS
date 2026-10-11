@@ -28,8 +28,61 @@ _trace_id_var = contextvars.ContextVar("boris_trace_id", default=None)
 _heartbeat_write_cache: dict[str, float] = {}
 
 CRITICAL_KINDS = {"message_send", "inbound_message", "call_ingest", "crm_sync", "payment"}
-INTERACTIVE_KINDS = {"campaign_deliver", "campaign_enhance", "campaign_prepare", "client_owner_contract"}
+INTERACTIVE_KINDS = {"campaign_deliver", "campaign_enhance", "campaign_prepare", "campaign_inventory_maintain", "client_owner_contract", "campaign_banners", "campaign_editor"}
 HEAVY_KINDS = {"photo_session", "thumbnail_sweep", "media_reconcile", "media_backfill"}
+
+# PRODUCTION_CPU_ISOLATION_V1:
+# These preparation jobs are allowed to consume their reserved worker share when
+# global load is high because low-priority dev/QA cgroups can keep loadavg high.
+# External delivery remains intentionally excluded and stays fully conservative.
+CPU_RESERVED_INTERACTIVE_KINDS = {
+    "campaign_prepare", "campaign_enhance", "campaign_inventory_maintain",
+    "campaign_banners", "campaign_editor"
+}
+
+
+def _cgroup_cpu_weight(unit: str) -> int | None:
+    """Read cgroup-v2 cpu.weight directly from the live service cgroup."""
+    try:
+        path = Path("/sys/fs/cgroup/system.slice") / str(unit) / "cpu.weight"
+        return int(path.read_text().strip())
+    except Exception:
+        return None
+
+
+def production_cpu_isolation_state() -> dict:
+    """Return fail-closed proof that production has reserved CPU priority.
+
+    An explicit env flag may force-disable/force-enable this in controlled tests.
+    In normal production the proof is the live cgroup-v2 weights themselves.
+    """
+    raw = str(os.getenv("BORIS_PRODUCTION_CPU_ISOLATION", "") or "").strip().lower()
+    worker = _cgroup_cpu_weight("boris-background-worker.service")
+    deploy = _cgroup_cpu_weight("boris-deploy.service")
+    devqa = _cgroup_cpu_weight("sentinelx-cloud-core.service")
+    cron = _cgroup_cpu_weight("cron.service")
+    if raw in {"0", "false", "no", "off"}:
+        active = False
+        source = "env_disabled"
+    elif raw in {"1", "true", "yes", "on"}:
+        active = True
+        source = "env_enabled"
+    else:
+        active = bool(
+            worker is not None and worker >= 400
+            and (deploy is None or deploy <= 100)
+            and devqa is not None and devqa <= 100
+            and (cron is None or cron <= 100)
+        )
+        source = "cgroup_weights"
+    return {
+        "active": active,
+        "source": source,
+        "worker_cpu_weight": worker,
+        "deploy_cpu_weight": deploy,
+        "devqa_cpu_weight": devqa,
+        "cron_cpu_weight": cron,
+    }
 
 
 def new_trace_id() -> str:
@@ -534,6 +587,24 @@ def heartbeat(module: str, worker_id: str, *, state: str = "ok",
         db.close()
 
 
+def _heartbeat_effective_stale_seconds(
+    stale_seconds: int,
+    configured_seconds: int | None,
+    details: dict | None,
+) -> int:
+    """Cadence-aware heartbeat SLA while preserving generic fail-closed health."""
+    generic=max(1,int(stale_seconds or 300))
+    configured=max(generic,int(configured_seconds or generic))
+    try:
+        interval=max(0,int((details or {}).get("interval_sec") or 0))
+    except Exception:
+        interval=0
+    if interval<=0:
+        return configured
+    grace=max(60,min(900,max(1,interval//4)))
+    return max(configured,interval+grace)
+
+
 def heartbeat_health(db, *, stale_seconds: int = 300) -> dict:
     now = datetime.now(timezone.utc)
     rows = db.query(ReliabilityHeartbeat).order_by(ReliabilityHeartbeat.module,
@@ -578,6 +649,14 @@ def heartbeat_health(db, *, stale_seconds: int = 300) -> dict:
         # a healthy periodic worker stale for most of every cycle, making host
         # capacity critical and blocking canonical HA deployment.
         ("runtime", "campaign_post_publish_watchdog"): 1200,
+        # Inventory runs every 900s; allow one period plus scheduler jitter.
+        ("runtime", "campaign_inventory_scheduler"): 1200,
+        # MOP_ADAPTIVE_DIALOGUE_HEARTBEAT_SLA_V1: dialogue learning is a
+        # periodic profile rebuild. Runtime-side duplicate heartbeat may not
+        # carry interval_sec, so keep the configured max cadence (6h)+jitter.
+        ("runtime", "mop_dialogue_learning"): 23400,
+        # Match the canonical guardian runner heartbeat invariant (600s).
+        ("control_plane", "guardian"): 600,
         # MEDIA_PUBLISHED_SELF_HEAL_HEARTBEAT_SLA_V1: this worker is produced
         # only by the canonical daily media_reconcile cron (04:25 UTC). The
         # generic 5-minute SLA made a healthy daily worker stale for almost the
@@ -598,9 +677,10 @@ def heartbeat_health(db, *, stale_seconds: int = 300) -> dict:
         age = int((now - seen).total_seconds()) if seen else 10**9
         module_key = str(row.module or "")
         worker_key = str(row.worker_id or "")
-        worker_stale_seconds = max(
+        worker_stale_seconds = _heartbeat_effective_stale_seconds(
             int(stale_seconds),
             int(periodic_stale_seconds.get((module_key, worker_key), stale_seconds)),
+            row.details_json or {},
         )
         is_retired = False
         if expected_jobs is not None and module_key == 'jobs':
@@ -633,12 +713,14 @@ def heartbeat_health(db, *, stale_seconds: int = 300) -> dict:
 
 
 def queue_breakdown(db) -> dict:
-    """Queue pressure split by module and tenant to expose noisy neighbours."""
+    """Queue pressure split by module and tenant with owner-safe job diagnostics."""
     rows = db.query(BackgroundJob).filter(
         BackgroundJob.status.in_(("queued", "running", "validating"))
-    ).all()
+    ).order_by(BackgroundJob.id.asc()).all()
     modules: dict[str, dict] = {}
     accounts: dict[str, dict] = {}
+    now = datetime.now(timezone.utc)
+    items = []
     for job in rows:
         mod = job_module(job.kind)
         acc = str(job.account_id or "unscoped")
@@ -650,9 +732,41 @@ def queue_breakdown(db) -> dict:
                 target["queued"] += 1
             else:
                 target["running"] += 1
+        payload = dict(job.payload_json or {})
+        created = job.created_at or job.started_at or job.scheduled_at
+        try:
+            age_sec = max(0, int((now - created).total_seconds())) if created else 0
+        except Exception:
+            age_sec = 0
+        done = int(job.progress_done or 0)
+        total = int(job.progress_total or 0)
+        items.append({
+            "id": int(job.id),
+            "account_id": acc,
+            "kind": str(job.kind or ""),
+            "module": mod,
+            "status": str(job.status or ""),
+            "age_sec": age_sec,
+            "progress_done": done,
+            "progress_total": total,
+            "progress_percent": (round(done * 100.0 / total, 1) if total > 0 else None),
+            "blocked_reason": str(
+                payload.get("_capacity_reason")
+                or payload.get("_last_recovery_reason")
+                or payload.get("_module_blocked_reason")
+                or ""
+            )[:240],
+            "scheduled_at": job.scheduled_at.isoformat() if job.scheduled_at else None,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+        })
     hot_accounts = sorted(({"account_id": k, **v} for k, v in accounts.items()),
                           key=lambda x: (-x["total"], x["account_id"]))[:10]
-    return {"modules": modules, "hot_accounts": hot_accounts}
+    items.sort(key=lambda x: (
+        0 if x["status"] in {"running", "validating"} else 1,
+        -int(x["age_sec"] or 0),
+        int(x["id"]),
+    ))
+    return {"modules": modules, "hot_accounts": hot_accounts, "items": items[:80]}
 
 
 
@@ -928,6 +1042,72 @@ def backup_health() -> dict:
     return result
 
 
+# Count actual shard rows even though jobs.run_once maps their admission
+# class to campaign_prepare. Otherwise their DB lock connections disappear
+# from the concurrent resource-job budget.
+RESOURCE_WORK_KINDS = set(INTERACTIVE_KINDS) | set(HEAVY_KINDS) | {"campaign_media_shard"}
+
+
+def db_worker_admission_snapshot(db, kind: str | None = None) -> dict:
+    """Conservative DB-aware concurrency envelope for background resource work.
+
+    Worker sessions already exist before a job is claimed. Every running
+    non-critical resource job additionally owns a dedicated advisory-lock
+    connection and may briefly need one more DB connection inside its handler.
+    We therefore reserve two connections per concurrent resource job plus a
+    fixed control-plane reserve, while keeping the global safe ceiling below
+    PostgreSQL max_connections.
+    """
+    cap = capacity_health(db)
+    workers = max(1, min(int(os.getenv("BORIS_JOB_WORKERS", "8") or 8), 16))
+    db_max = max(1, int(cap.get("db_max_connections") or 100))
+    db_now = max(0, int(cap.get("db_connections") or 0))
+    try:
+        safe_pct = max(50, min(int(os.getenv("BORIS_DB_SAFE_PERCENT", "75") or 75), 90))
+    except Exception:
+        safe_pct = 75
+    try:
+        control_reserve = max(2, min(int(os.getenv("BORIS_DB_CONTROL_RESERVE", "4") or 4), 20))
+    except Exception:
+        control_reserve = 4
+    try:
+        per_job_budget = max(1, min(int(os.getenv("BORIS_DB_CONNECTIONS_PER_RESOURCE_JOB", "2") or 2), 4))
+    except Exception:
+        per_job_budget = 2
+    safe_limit = max(1, int(db_max * safe_pct / 100.0))
+    active_resource = int(db.query(func.count(BackgroundJob.id)).filter(
+        BackgroundJob.status.in_(("running", "validating")),
+        BackgroundJob.kind.in_(tuple(RESOURCE_WORK_KINDS)),
+    ).scalar() or 0)
+
+    # run_once marks the candidate running before admission_control(). That
+    # candidate has not acquired its advisory lock yet. Existing resource jobs
+    # normally contribute one dedicated lock connection each to db_now; remove
+    # those known lock connections to estimate the stable baseline.
+    candidate_included = 1 if str(kind or "") in RESOURCE_WORK_KINDS else 0
+    prior_resource = max(0, active_resource - candidate_included)
+    baseline_connections = max(0, db_now - prior_resource)
+    usable_for_jobs = max(0, safe_limit - control_reserve - baseline_connections)
+    max_parallel = max(0, min(workers, usable_for_jobs // per_job_budget))
+    allow = True
+    if candidate_included:
+        allow = active_resource <= max_parallel
+    return {
+        "allow": allow,
+        "configured_workers": workers,
+        "active_resource_jobs": active_resource,
+        "baseline_connections_est": baseline_connections,
+        "db_current": db_now,
+        "db_max_connections": db_max,
+        "db_safe_percent": safe_pct,
+        "db_safe_limit": safe_limit,
+        "db_control_reserve": control_reserve,
+        "db_connections_per_resource_job": per_job_budget,
+        "db_safe_parallel_resource_jobs": max_parallel,
+        "db_headroom_to_safe_limit": max(0, safe_limit - db_now),
+    }
+
+
 def capacity_plan(db) -> dict:
     """Conservative no-paid-call capacity projection for owner Guardian.
 
@@ -935,34 +1115,52 @@ def capacity_plan(db) -> dict:
     current host/DB headroom and the configured canonical worker pool.
     """
     cap = capacity_health(db)
-    workers = max(1, min(int(os.getenv("BORIS_JOB_WORKERS", "8") or 8), 16))
-    db_max = int(cap.get("db_max_connections") or 100)
-    db_now = int(cap.get("db_connections") or 0)
-    # Keep 25% DB reserve for API, schedulers, maintenance and bursts.
-    db_safe = max(1, int(db_max * 0.75))
-    db_headroom = max(0, db_safe - db_now)
+    gate = db_worker_admission_snapshot(db)
+    workers = int(gate["configured_workers"])
+    db_safe = int(gate["db_safe_limit"])
+    db_now = int(gate["db_current"])
+    db_parallel = int(gate["db_safe_parallel_resource_jobs"])
+    effective_slots = max(0, min(workers, db_parallel))
     scenarios = []
     for tenants in (10, 20, 30, 50, 100):
-        # Fair queue guarantees progress across tenants; heavy jobs remain 1/account.
-        waves = (tenants + workers - 1) // workers
-        # Each active background job can hold its business DB session plus one
-        # dedicated advisory-lock connection for the cross-node tenant slot.
-        # Keep four more connections for heartbeat/control-plane work.
-        db_need_peak = min(workers, tenants) * 2 + 4
+        parallel = min(tenants, effective_slots)
+        waves = ((tenants + parallel - 1) // parallel) if parallel > 0 else None
+        peak_total = (
+            int(gate["baseline_connections_est"])
+            + int(gate["db_control_reserve"])
+            + parallel * int(gate["db_connections_per_resource_job"])
+        )
         state = "ok"
         reasons = []
-        if db_need_peak > db_headroom:
-            state = "warning"; reasons.append("DB connection reserve is tight")
+        if parallel <= 0:
+            state = "warning"; reasons.append("DB-aware admission currently pauses resource jobs")
+        elif effective_slots < workers:
+            reasons.append(f"DB-aware admission caps resource concurrency to {effective_slots}/{workers}")
         if cap.get("memory_used_pct", 0) >= 75:
             state = "warning"; reasons.append("memory pressure")
         if cap.get("state") == "critical":
             state = "warning"; reasons.append("host currently under capacity pressure")
-        scenarios.append({"tenants": tenants, "worker_slots": workers, "waves_min": waves,
-                          "peak_background_db_connections_est": db_need_peak, "state": state,
-                          "note": "; ".join(reasons) if reasons else "fits conservative local resource budget"})
-    return {"worker_slots": workers, "db_safe_limit": db_safe, "db_current": db_now,
-            "db_headroom_to_safe_limit": db_headroom, "scenarios": scenarios,
-            "method": "synthetic resource projection; no paid AI/provider calls"}
+        scenarios.append({
+            "tenants": tenants,
+            "worker_slots": workers,
+            "db_safe_parallel_resource_jobs": effective_slots,
+            "parallel_resource_jobs": parallel,
+            "waves_min": waves,
+            "peak_db_connections_est": peak_total,
+            "db_safe_limit": db_safe,
+            "state": state,
+            "note": "; ".join(reasons) if reasons else "fits conservative local resource budget",
+        })
+    return {
+        "worker_slots": workers,
+        "db_safe_parallel_resource_jobs": effective_slots,
+        "db_safe_limit": db_safe,
+        "db_current": db_now,
+        "db_headroom_to_safe_limit": int(gate["db_headroom_to_safe_limit"]),
+        "db_admission": gate,
+        "scenarios": scenarios,
+        "method": "synthetic resource projection with DB-aware admission; no paid AI/provider calls",
+    }
 
 
 def admission_control(db, kind: str) -> dict:
@@ -976,6 +1174,33 @@ def admission_control(db, kind: str) -> dict:
     warning = [k for k,v in signals.items() if v.get("state") == "warning"]
     is_heavy = kind in HEAVY_KINDS
     is_interactive = kind in INTERACTIVE_KINDS
+    cpu_reservation = {"active": False}
+    cpu_reserved_bypass = False
+    if is_heavy or is_interactive:
+        db_gate = db_worker_admission_snapshot(db, kind)
+        if not bool(db_gate.get("allow", True)):
+            return {
+                "allow": False,
+                "class": "interactive" if is_interactive else "heavy",
+                "reason": (
+                    "db_safe_reserve:"
+                    f"{int(db_gate.get('active_resource_jobs') or 0)}>"
+                    f"{int(db_gate.get('db_safe_parallel_resource_jobs') or 0)}"
+                ),
+                "delay_seconds": 10,
+                "db_admission": db_gate,
+            }
+
+    # PRIORITY_AWARE_CPU_ADMISSION_V1:
+    # A high global loadavg can be caused entirely by deliberately de-prioritized
+    # dev/QA work. When cgroup evidence proves the Campaign worker owns a reserved
+    # CPU share, ignore ONLY cpu_load for non-publishing preparation jobs.
+    # DB reserve was already checked above; every other critical signal remains.
+    if is_interactive and kind in CPU_RESERVED_INTERACTIVE_KINDS and "cpu_load" in critical:
+        cpu_reservation = production_cpu_isolation_state()
+        if bool(cpu_reservation.get("active")):
+            critical = [k for k in critical if k != "cpu_load"]
+            cpu_reserved_bypass = True
 
     # MEDIA_RECONCILE_SELF_DEADLOCK_GUARD_V1: if the only worker-capacity
     # warning is the stale heartbeat that this exact daily media_reconcile job
@@ -1007,7 +1232,13 @@ def admission_control(db, kind: str) -> dict:
         return {"allow": False, "class": "interactive" if is_interactive else "heavy", "reason": "critical_capacity:" + ",".join(sorted(critical)), "delay_seconds": 45}
     if warning and is_heavy:
         return {"allow": False, "class": "heavy", "reason": "capacity_pressure:" + ",".join(sorted(warning)), "delay_seconds": 20}
-    return {"allow": True, "class": "interactive" if is_interactive else ("heavy" if is_heavy else "normal"), "reason": "capacity_available", "delay_seconds": 0}
+    return {
+        "allow": True,
+        "class": "interactive" if is_interactive else ("heavy" if is_heavy else "normal"),
+        "reason": "capacity_available_cpu_reserved" if cpu_reserved_bypass else "capacity_available",
+        "delay_seconds": 0,
+        "cpu_reservation": cpu_reservation if cpu_reserved_bypass else None,
+    }
 
 
 def capacity_recommendation(db) -> dict:
@@ -1021,13 +1252,19 @@ def capacity_recommendation(db) -> dict:
     q = queue_health(db)
     cpu = int(c.get("cpu_count") or 1)
     current = max(1, min(int(os.getenv("BORIS_JOB_WORKERS", str(cpu)) or cpu), 16))
+    db_gate = db_worker_admission_snapshot(db)
+    db_parallel = int(db_gate.get("db_safe_parallel_resource_jobs") or 0)
     pressure = {x["key"]: x for x in c.get("signals", [])}
     queue_depth = int(q.get("queued") or 0)
     queue_age = int(q.get("oldest_queued_age_sec") or 0)
     db_pct = float(c.get("db_connections_pct") or 0)
     mem_pct = float(c.get("memory_used_pct") or 0)
     cpu_pct = float((pressure.get("cpu_load") or {}).get("value") or 0)
-    if db_pct >= 65 or mem_pct >= 75 or cpu_pct >= 100:
+    if db_parallel < current:
+        action = "hold"
+        reason = "db_admission_cap"
+        recommended = current
+    elif db_pct >= 65 or mem_pct >= 75 or cpu_pct >= 100:
         action = "hold"
         reason = "host_pressure"
         recommended = current
@@ -1044,13 +1281,15 @@ def capacity_recommendation(db) -> dict:
     # tenant scenarios without generating external API cost.
     scenarios = []
     for tenants in (10, 20, 30, 50, 100):
-        heavy_slots = min(current, tenants)
+        heavy_slots = min(current, db_parallel, tenants)
         scenarios.append({"tenants": tenants, "worker_slots": current,
                           "max_parallel_heavy_tenants": heavy_slots,
+                          "db_safe_parallel_resource_jobs": db_parallel,
                           "tenant_heavy_limit": 1, "tenant_normal_limit": 2,
                           "external_paid_calls": 0})
     return {"current_workers": current, "recommended_workers": recommended,
-            "action": action, "reason": reason, "scenarios": scenarios}
+            "action": action, "reason": reason, "db_admission": db_gate,
+            "scenarios": scenarios}
 
 
 def capacity_health(db) -> dict:

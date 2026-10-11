@@ -58,8 +58,10 @@ export default function ReliabilityPage(){
   const workers=health?.workers?.workers||[];
   const modules=capacity?.breakdown?.modules||{};
   const noisy=capacity?.breakdown?.hot_accounts||[];
+  const queueItems=capacity?.breakdown?.items||[];
   const execution=health?.job_execution_24h||{};
   const scalePlan=capacity?.plan?.scenarios||[];
+  const dbAdmission=capacity?.plan?.db_admission||capacity?.recommendation?.db_admission||{};
 
   return <AppShell active="reliability" title="System Guardian" subtitle="Надёжность, очереди, процессы и защита BORIS"><Page className="boris-reliability-page">
     <header className="boris-reliability-head">
@@ -90,9 +92,20 @@ export default function ReliabilityPage(){
     <section className="boris-reliability-panel">
       <div className="boris-reliability-panel-head"><span>Запас по росту</span><h2>Готовность к большему числу клиентов</h2></div>
       <p className="boris-reliability-hint">Расчёт использует текущие ресурсы сервера и базы данных. Он не делает платных запросов к рекламным или AI-сервисам.</p>
+      {dbAdmission?.db_safe_limit ? <div className="boris-reliability-status-strip" style={{marginBottom:14}}>
+        <div data-state="ok"><i>✓</i><span>Соединения БД</span><strong>{dbAdmission.db_current}/{dbAdmission.db_safe_limit}</strong></div>
+        <div data-state={Number(dbAdmission.db_safe_parallel_resource_jobs||0)>=Number(dbAdmission.configured_workers||0)?"ok":"warning"}><i>{Number(dbAdmission.db_safe_parallel_resource_jobs||0)>=Number(dbAdmission.configured_workers||0)?"✓":"!"}</i><span>Безопасно параллельно</span><strong>{dbAdmission.db_safe_parallel_resource_jobs}/{dbAdmission.configured_workers}</strong></div>
+        <div data-state="ok"><i>✓</i><span>Резерв БД</span><strong>{dbAdmission.db_headroom_to_safe_limit}</strong></div>
+      </div> : null}
       <div className="boris-reliability-compact-list">
-        {scalePlan.length?scalePlan.map((x:any)=><div key={x.tenants}><b>{x.tenants} клиентов</b><span>{x.waves_min} волн при {x.worker_slots} фоновых процессах · пик БД около {x.peak_background_db_connections_est}</span><strong className={x.state==="ok"?"ok":"bad"}>{x.state==="ok"?"Ресурсов хватает":"Нужен запас"}</strong></div>):<div className="empty">Расчёт ёмкости ещё не получен</div>}
+        {scalePlan.length?scalePlan.map((x:any)=><div key={x.tenants}><b>{x.tenants} клиентов</b><span>{x.waves_min??"—"} волн · одновременно {x.parallel_resource_jobs??x.max_parallel_heavy_tenants??x.worker_slots} · пик БД около {x.peak_db_connections_est??x.peak_background_db_connections_est??"—"} / лимит {x.db_safe_limit??dbAdmission.db_safe_limit??"—"}</span><strong className={x.state==="ok"?"ok":"bad"}>{x.state==="ok"?"Ресурсов хватает":"BORIS ограничит параллельность"}</strong></div>):<div className="empty">Расчёт ёмкости ещё не получен</div>}
       </div>
+    </section>
+
+    <section className="boris-reliability-panel">
+      <div className="boris-reliability-panel-head"><span>Диагностика владельца</span><h2>Какие задачи выполняются и ждут</h2></div>
+      <p className="boris-reliability-hint">Только просмотр: клиент, тип задачи, возраст, прогресс и причина ожидания. Повторного запуска отсюда нет, поэтому экран не создаёт дубликаты.</p>
+      {queueItems.length?<div className="boris-reliability-table"><div className="head"><b>Клиент</b><b>Задача</b><b>Статус</b><b>Возраст</b><b>Прогресс</b><b>Причина</b></div>{queueItems.slice(0,30).map((x:any)=><div key={x.id}><strong>{x.account_id==="unscoped"?"Система":x.account_id}</strong><span>{humanizeBusinessText(x.kind,"Фоновая задача")}</span><span>{x.status==="queued"?"В очереди":x.status==="validating"?"Проверка":"В работе"}</span><span>{x.age_sec<60?String(x.age_sec)+" сек":x.age_sec<3600?String(Math.floor(x.age_sec/60))+" мин":String(Math.floor(x.age_sec/3600))+" ч"}</span><span>{x.progress_percent==null?"—":String(x.progress_percent)+"%"}</span><span>{humanizeBusinessText(x.blocked_reason,"—")}</span></div>)}</div>:<div className="boris-reliability-empty">Активных фоновых задач сейчас нет.</div>}
     </section>
 
     <section className="boris-reliability-panel">

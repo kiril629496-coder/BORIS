@@ -2,6 +2,7 @@ from __future__ import annotations
 from sqlalchemy import text
 from app.db.session import SessionLocal
 from app.services import prospect_campaigns as pc
+from app.services.outreach_discovery_policy import boris_discovery_slot
 
 def ensure_schema(db):
     # Canonical migration 049 owns the last_search_attempt_at column on prospect_replenish_runs.
@@ -42,7 +43,7 @@ def _adaptive_discovery_hours(ready_now:int, min_ready:int, every_hours:float)->
 def tick(min_ready:int=100, every_hours:int=6, repair_every_minutes:int=60)->dict:
     db=SessionLocal(); pc.ensure_schema(db); ensure_schema(db)
     try:
-        c=db.execute(text("""SELECT c.id,c.owner_id,c.niche,c.regions,c.min_quality_score,
+        c=db.execute(text("""SELECT c.id,c.owner_id,c.account_id,c.niche,c.regions,c.min_quality_score,
           count(m.id) FILTER (WHERE m.status='ready') ready,
           r.last_discovery_at,r.last_search_attempt_at,r.last_repair_at,COALESCE(r.discovery_cursor,0) discovery_cursor
           FROM prospect_campaigns c LEFT JOIN prospect_campaign_members m ON m.campaign_id=c.id
@@ -59,6 +60,11 @@ def tick(min_ready:int=100, every_hours:int=6, repair_every_minutes:int=60)->dic
           ORDER BY count(m.id) FILTER (WHERE m.status='ready') ASC,c.id LIMIT 1"""),{'rm':str(repair_every_minutes),'mr':min_ready}).mappings().first()
         if not c:return {'status':'idle'}
         cid=int(c['id']); owner=int(c['owner_id']); niche=c['niche']; regions=list(c['regions'] or []); min_quality=int(c['min_quality_score'] or 55); discovery_cursor=int(c['discovery_cursor'] or 0)
+        is_boris = c.get('account_id') == '__owner_outreach__'
+        next_niche_cursor = discovery_cursor
+        query_cursor = discovery_cursor
+        if is_boris:
+            niche, query_cursor, next_niche_cursor = boris_discovery_slot(discovery_cursor)
         ready_now=int(c.get('ready') or 0)
         # EMAIL_RESERVE_ADAPTIVE_DISCOVERY_V1: when the ready reserve is well
         # below target, waiting three hours between discovery passes lets the
@@ -76,17 +82,20 @@ def tick(min_ready:int=100, every_hours:int=6, repair_every_minutes:int=60)->dic
     try:
         # Keep the minute lifecycle bounded: heavy public-web discovery is spread
         # across scheduled passes instead of blocking one email worker for minutes.
-        d=pc.discover_niche(owner,niche,regions,target=100,max_queries=12,query_offset=discovery_cursor) if discovery_due else {'inserted':[],'existing':[],'next_offset':discovery_cursor}
+        d=pc.discover_niche(owner,niche,regions,target=100,max_queries=3 if is_boris else 12,query_offset=query_cursor) if discovery_due else {'inserted':[],'existing':[],'next_offset':discovery_cursor}
         inserted=[int(x) for x in (d.get('inserted') or [])]
         existing=[int(x) for x in (d.get('existing') or [])]
         search_health=dict(d.get('search_health') or {})
         search_degraded=bool(d.get('search_failure_count')) and search_health.get('state')=='degraded'
         if discovery_due:
             db=SessionLocal(); ensure_schema(db)
+            if is_boris:
+                db.execute(text('UPDATE prospect_replenish_runs SET discovery_cursor=:cursor,last_search_attempt_at=NOW(),updated_at=NOW() WHERE campaign_id=:c'), {'c':cid,'cursor':next_niche_cursor})
+                db.commit()
             if search_degraded:
                 db.execute(text("UPDATE prospect_replenish_runs SET last_search_attempt_at=NOW(),last_error='search_degraded',updated_at=NOW() WHERE campaign_id=:c"),{'c':cid})
             else:
-                db.execute(text("UPDATE prospect_replenish_runs SET last_search_attempt_at=NOW(),last_discovery_at=NOW(),discovery_cursor=:cursor,last_error=NULL,updated_at=NOW() WHERE campaign_id=:c"),{'c':cid,'cursor':int(d.get('next_offset') or 0)})
+                db.execute(text("UPDATE prospect_replenish_runs SET last_search_attempt_at=NOW(),last_discovery_at=NOW(),discovery_cursor=:cursor,last_error=NULL,updated_at=NOW() WHERE campaign_id=:c"),{'c':cid,'cursor':next_niche_cursor if is_boris else int(d.get('next_offset') or 0)})
             db.commit(); db.close()
         # Reuse already discovered domains that still have no selected email and
         # consume any newly seeded canonical backlog. This keeps discovery source-
@@ -152,6 +161,8 @@ def tick(min_ready:int=100, every_hours:int=6, repair_every_minutes:int=60)->dic
         return {
             'status':'degraded' if search_degraded else 'ok',
             'campaign_id':cid,
+            'attempted_niche':niche,
+            'discovery_cursor':next_niche_cursor if is_boris else int(d.get('next_offset') or 0),
             'inserted':len(inserted),
             'reused':len(existing),
             'retry_candidates':len(retry),

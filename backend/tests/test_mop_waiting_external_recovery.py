@@ -155,5 +155,107 @@ class WaitingExternal403RecoveryTests(unittest.TestCase):
         problems = messenger_api._mop_output_policy_violations(reply, history)
         self.assertIn("repeated_handoff_promise", problems)
 
+class ProactiveExternalReconciliationTests(unittest.TestCase):
+    class _Row:
+        def __init__(self, **values):
+            self._mapping = values
+
+    class _Result:
+        def __init__(self, rows=None, scalar_value=None, first_value=None):
+            self._rows = rows or []
+            self._scalar = scalar_value
+            self._first = first_value
+
+        def fetchall(self):
+            return self._rows
+
+        def scalar(self):
+            return self._scalar
+
+        def first(self):
+            return self._first
+
+    class _DB:
+        def __init__(self, event_id, account_id="account-a", source_account="account-a"):
+            self.event_id = event_id
+            self.account_id = account_id
+            self.source_account = source_account
+            self.calls = []
+            self.closed = False
+
+        def execute(self, statement, params):
+            sql = str(statement)
+            self.calls.append((sql, dict(params)))
+            if "FROM mop_drafts" in sql:
+                return ProactiveExternalReconciliationTests._Result(rows=[
+                    ProactiveExternalReconciliationTests._Row(
+                        id=7, status="draft_ready", avito_message_id=self.event_id
+                    )
+                ])
+            if "avito_created_at FROM messenger_messages" in sql:
+                source_id = messenger_api._reconciliation_source_message_id(self.event_id)
+                found = params["a"] == self.source_account and params["m"] == source_id
+                return ProactiveExternalReconciliationTests._Result(
+                    scalar_value=100 if found else None
+                )
+            if "SELECT 1 FROM messenger_messages" in sql:
+                return ProactiveExternalReconciliationTests._Result(first_value=(1,))
+            raise AssertionError(sql)
+
+        def close(self):
+            self.closed = True
+
+    def _run(self, event_id, account_id="account-a", source_account="account-a"):
+        db = self._DB(event_id, account_id, source_account)
+        transitions = []
+        cards = []
+
+        def set_status(_db, draft_id, new_status, previous, reason, **kwargs):
+            transitions.append((draft_id, new_status, previous, reason, kwargs))
+            return ({"id": draft_id}, "draft_ready")
+
+        from unittest.mock import patch
+        with patch("app.db.session.SessionLocal", return_value=db),              patch("app.mop_core.set_status", side_effect=set_status),              patch("app.mop_core.push_card",
+                   side_effect=lambda _db, draft_id: cards.append(draft_id)):
+            result = messenger_api._close_answered_externally(account_id, "chat-1")
+        return result, db, transitions, cards
+
+    def test_supported_proactive_ids_use_canonical_source_and_close(self):
+        for event_id, source_id in (
+            ("system:viewed_phone:source:1", "source:1"),
+            ("system:empty_chat:source-2", "source-2"),
+        ):
+            with self.subTest(event_id=event_id):
+                result, db, transitions, cards = self._run(event_id)
+                self.assertEqual(result, 7)
+                self.assertTrue(transitions)
+                self.assertEqual(cards, [7])
+                lookup = [params for sql, params in db.calls
+                          if "avito_created_at FROM messenger_messages" in sql]
+                self.assertEqual(lookup, [{"a": "account-a", "m": source_id}])
+
+    def test_ordinary_unknown_and_malformed_ids_remain_unchanged(self):
+        for message_id in (
+            "ordinary-id",
+            "system:unknown:source-3",
+            "system:viewed_phone:",
+        ):
+            with self.subTest(message_id=message_id):
+                self.assertEqual(
+                    messenger_api._reconciliation_source_message_id(message_id),
+                    message_id,
+                )
+
+    def test_other_account_source_cannot_close_draft(self):
+        result, _db, transitions, cards = self._run(
+            "system:viewed_phone:source-4",
+            account_id="account-b",
+            source_account="account-a",
+        )
+        self.assertIsNone(result)
+        self.assertEqual(transitions, [])
+        self.assertEqual(cards, [])
+
+
 if __name__ == "__main__":
     unittest.main()

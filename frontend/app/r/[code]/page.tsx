@@ -11,9 +11,14 @@ export default function RefRedirect() {
     const clean = raw.replace(/[^a-zA-Z0-9_-]/g, "").toLowerCase().slice(0, 40);
     if (clean) {
       document.cookie =
-        "boris_ref=" + encodeURIComponent(clean) + "; path=/; max-age=" + 90 * 24 * 3600;
+        "boris_ref=" + encodeURIComponent(clean) + "; path=/; max-age=" + 90 * 24 * 3600 + "; SameSite=Lax";
+      fetch("/api/viral/events", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({event:"viral_referral_visit", referral_code:clean, source:"referral_redirect"})
+      }).catch(() => {});
     }
-    router.replace("/");
+    router.replace("/audit");
   }, [params, router]);
 
   return (

@@ -4,6 +4,8 @@
 import os
 import datetime
 import json
+import hashlib
+import secrets
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -16,6 +18,7 @@ from jose import jwt, JWTError
 from app.db.session import SessionLocal
 from app.models.user import User
 from app.models.account import Account
+from app.models.storage import Storage
 import logging
 logger = logging.getLogger(__name__)
 
@@ -25,7 +28,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 # В продакшене ОБЯЗАТЕЛЬНО задать в .env, иначе токены будут инвалидироваться при каждом рестарте.
 JWT_SECRET = os.environ.get("JWT_SECRET", "CHANGE_ME_IN_ENV_TEMPORARY_DEV_SECRET_" + os.urandom(8).hex())
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_DAYS = 30  # токен живёт 30 дней — обычная практика для SaaS-веба
+JWT_EXPIRE_HOURS = max(1, min(int(os.environ.get("BORIS_AUTH_SESSION_TTL_HOURS", "168")), 24 * 30))
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
@@ -41,10 +44,45 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(user_id: int) -> str:
-    expire = datetime.datetime.utcnow() + datetime.timedelta(days=JWT_EXPIRE_DAYS)
-    payload = {"sub": str(user_id), "exp": expire}
+def create_access_token(
+    user_id: int,
+    *,
+    session_id: str | None = None,
+    security_epoch: int = 0,
+    expires_at: datetime.datetime | None = None,
+) -> str:
+    expire = expires_at or (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(hours=JWT_EXPIRE_HOURS)
+    )
+    payload = {
+        "sub": str(user_id),
+        "exp": expire,
+        "sev": int(security_epoch or 0),
+    }
+    if session_id:
+        payload["sid"] = str(session_id)
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _issue_user_session_token(db, user: User, request: Request) -> str:
+    """Issue a server-side revocable session and bind the JWT to it."""
+    from app.services.auth_sessions import issue_session
+    epoch = int(getattr(user, "security_epoch", 0) or 0)
+    sid, expires = issue_session(
+        db,
+        int(user.id),
+        epoch,
+        user_agent=request.headers.get("user-agent", ""),
+        ip=(request.client.host if request.client else ""),
+    )
+    db.commit()
+    return create_access_token(
+        int(user.id),
+        session_id=sid,
+        security_epoch=epoch,
+        expires_at=expires,
+    )
 
 
 def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> User:
@@ -55,6 +93,8 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> User:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         user_id = int(payload.get("sub"))
+        session_id = str(payload.get("sid") or "").strip()
+        token_epoch = int(payload.get("sev") or 0)
     except (JWTError, ValueError, TypeError):
         raise HTTPException(status_code=401, detail="Некорректный или просроченный токен")
 
@@ -63,6 +103,22 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> User:
         user = db.query(User).filter(User.id == user_id, User.is_active == True).first()
         if not user:
             raise HTTPException(status_code=401, detail="Пользователь не найден или деактивирован")
+        current_epoch = int(getattr(user, "security_epoch", 0) or 0)
+        if token_epoch != current_epoch:
+            raise HTTPException(status_code=401, detail="Сеанс завершён. Выполните вход снова.")
+        if session_id:
+            from app.services.auth_sessions import validate_session
+            if not validate_session(
+                db,
+                user_id=int(user.id),
+                session_id=session_id,
+                token_epoch=token_epoch,
+                current_epoch=current_epoch,
+            ):
+                raise HTTPException(status_code=401, detail="Сеанс завершён. Выполните вход снова.")
+        db.refresh(user)
+        user._auth_session_id = session_id or None
+        user._auth_security_epoch = token_epoch
         return user
     finally:
         db.close()
@@ -114,47 +170,17 @@ def get_current_user_or_internal(request: Request, token: Optional[str] = Depend
 def _account_subscription_access_state(db, account_id: str) -> dict:
     """Read-only base-tariff access gate for client-facing account APIs.
 
-    Explicit expired paid_until => account workspace is locked.
-    No billing/paid_until is NOT treated as expired here because onboarding/trial
-    flows have their own gates. Platform-owned accounts are never locked.
+    Delegate the paid clock to the shared subscription authority so Auth,
+    Messenger and Inbox cannot disagree about the same account.
     """
-    from sqlalchemy import text as _sub_text
     acc = db.query(Account).filter(Account.account_id == str(account_id)).first()
     if not acc:
         return {"allowed": True, "state": "account_missing"}
-    if bool(getattr(acc, "is_own", False)):
-        return {"allowed": True, "state": "platform_owned"}
-    row = db.execute(_sub_text(
-        "SELECT value FROM storage WHERE account_id=:a AND key='billing' "
-        "ORDER BY id DESC LIMIT 1"
-    ), {"a": str(account_id)}).fetchone()
-    if not row:
-        return {"allowed": True, "state": "billing_unknown"}
-    try:
-        billing = json.loads(row[0] or "{}")
-    except Exception:
-        return {"allowed": True, "state": "billing_invalid"}
-    raw = str((billing or {}).get("paid_until") or "").strip()
-    if not raw:
-        return {"allowed": True, "state": "paid_until_unknown"}
-    try:
-        until = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if until.tzinfo is None:
-            until = until.replace(tzinfo=datetime.timezone.utc)
-        now = datetime.datetime.now(datetime.timezone.utc)
-    except Exception:
-        return {"allowed": True, "state": "paid_until_invalid"}
-    if until < now:
-        return {
-            "allowed": False,
-            "state": "subscription_expired",
-            "paid_until": until.isoformat(),
-        }
-    return {
-        "allowed": True,
-        "state": "active",
-        "paid_until": until.isoformat(),
-    }
+    from app.services.subscription_gate import base_subscription_access
+    state = dict(base_subscription_access(db, str(account_id)))
+    if state.get("state") == "expired":
+        state["state"] = "subscription_expired"
+    return state
 
 
 def _user_subscription_scope_state(db, user: User) -> dict:
@@ -333,7 +359,13 @@ async def check_account_access(request: Request, user=Depends(get_current_user_o
             raise HTTPException(status_code=403, detail="Нет доступа к этому аккаунту")
 
         _subscription = _account_subscription_access_state(_db, str(account_id))
-        if not bool(_subscription.get("allowed")):
+        # Existing Campaign state remains readable after expiry, but mutations,
+        # provider actions, spend, and all non-GET routes stay subscription-gated.
+        _read_only_campaign = (
+            request.method == "GET"
+            and request.url.path.startswith("/api/campaign/")
+        )
+        if not _read_only_campaign and not bool(_subscription.get("allowed")):
             raise HTTPException(
                 status_code=402,
                 detail={
@@ -357,6 +389,65 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
     account_name: str = ""  # опционально: сразу создать связанный Avito-аккаунт
+    attribution_session_id: str = ""
+    utm_source: str = ""
+    utm_medium: str = ""
+    utm_campaign: str = ""
+    utm_content: str = ""
+    utm_term: str = ""
+    landing_path: str = ""
+    first_seen_at: str = ""
+    qa: bool = False
+
+
+def _auth_storage_get(db, account_id: str, key: str) -> dict:
+    row = db.query(Storage).filter(
+        Storage.account_id == str(account_id),
+        Storage.key == str(key),
+    ).order_by(Storage.id.desc()).first()
+    if not row or not row.value:
+        return {}
+    try:
+        value = json.loads(row.value)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _auth_storage_put(db, account_id: str, key: str, value: dict) -> None:
+    row = db.query(Storage).filter(
+        Storage.account_id == str(account_id),
+        Storage.key == str(key),
+    ).order_by(Storage.id.desc()).first()
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if row:
+        row.value = raw
+    else:
+        db.add(Storage(account_id=str(account_id), key=str(key), value=raw))
+
+
+def _register_attribution(req: RegisterRequest) -> dict:
+    out = {}
+    mapping = {
+        "session_id": req.attribution_session_id,
+        "utm_source": req.utm_source,
+        "utm_medium": req.utm_medium,
+        "utm_campaign": req.utm_campaign,
+        "utm_content": req.utm_content,
+        "utm_term": req.utm_term,
+        "landing_path": req.landing_path,
+        "first_seen_at": req.first_seen_at,
+        "referral_code": req.ref,
+    }
+    for key, value in mapping.items():
+        clean = str(value or "").strip()[:240]
+        if clean:
+            out[key] = clean
+    if req.qa:
+        out["qa"] = True
+    if out:
+        out["captured_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return out
 
 
 class LoginRequest(BaseModel):
@@ -369,6 +460,45 @@ class LoginOtpVerifyRequest(BaseModel):
     challenge_id: str
     code: str
     device_key: str
+
+
+
+def _make_fallback_captcha() -> dict:
+    a = secrets.randbelow(8) + 2
+    b = secrets.randbelow(8) + 2
+    salt = secrets.token_urlsafe(10)
+    answer_hash = hashlib.sha256(f"{salt}:{a+b}".encode("utf-8")).hexdigest()
+    exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+    token = jwt.encode({
+        "typ": "boris_captcha",
+        "exp": exp,
+        "salt": salt,
+        "answer_hash": answer_hash,
+    }, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return {"status": "ok", "question": f"{a} + {b} = ?", "challenge_token": token}
+
+
+def _verify_fallback_captcha(raw_token: str) -> tuple[bool, str]:
+    prefix = "boris-fallback:"
+    if not str(raw_token or "").startswith(prefix):
+        return False, "not_fallback"
+    try:
+        rest = str(raw_token)[len(prefix):]
+        challenge_token, answer = rest.rsplit(":", 1)
+        payload = jwt.decode(challenge_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("typ") != "boris_captcha":
+            return False, "bad_type"
+        salt = str(payload.get("salt") or "")
+        expected = str(payload.get("answer_hash") or "")
+        actual = hashlib.sha256(f"{salt}:{str(answer).strip()}".encode("utf-8")).hexdigest()
+        return secrets.compare_digest(actual, expected), "ok"
+    except Exception:
+        return False, "invalid"
+
+
+@router.get("/captcha-fallback")
+def captcha_fallback():
+    return _make_fallback_captcha()
 
 
 @router.post("/register")
@@ -386,21 +516,30 @@ def register(req: RegisterRequest, request: Request):
         _ip = request.client.host if request.client else ""
         _norm = _vf.normalize_email(req.email)
 
-        # Капча проверяется ТОЛЬКО здесь, на backend. Токен с фронта доверия не имеет.
-        if _ts.is_enabled():
-            if not (req.turnstile_token or "").strip():
+        # Капча проверяется ТОЛЬКО здесь, на backend. Основной путь — Cloudflare
+        # Turnstile. Если внешний виджет не загрузился (например, из-за VPN),
+        # принимаем короткую first-party challenge с того же домена BORIS.
+        _captcha_token = (req.turnstile_token or "").strip()
+        if _captcha_token.startswith("boris-fallback:"):
+            _ok, _why = _verify_fallback_captcha(_captcha_token)
+            if not _ok:
+                logger.warning("register: fallback captcha invalid (%s)", _why)
+                return {"status": "error", "code": "captcha_invalid",
+                        "message": "Проверка не пройдена. Попробуйте ещё раз."}
+        elif _ts.is_enabled():
+            if not _captcha_token:
                 logger.warning("register: капча не передана")
                 return {"status": "error", "code": "captcha_required",
                         "message": "Подтвердите, что вы не робот."}
-            _ok, _why = _ts.verify(req.turnstile_token, _ip)
+            _ok, _why = _ts.verify(_captcha_token, _ip)
             if not _ok:
                 logger.warning("register: капча не пройдена (%s)", _why)
                 return {"status": "error", "code": "captcha_invalid",
                         "message": "Проверка не пройдена. Попробуйте ещё раз."}
         else:
-            logger.warning("register: TURNSTILE_SECRET_KEY не задан, регистрация закрыта")
+            logger.warning("register: TURNSTILE_SECRET_KEY не задан; разрешён только BORIS fallback captcha")
             return {"status": "error", "code": "captcha_unavailable",
-                    "message": "Регистрация временно недоступна. Попробуйте позже."}
+                    "message": "Проверка временно недоступна. Попробуйте ещё раз."}
 
         # Лимиты: по IP и по адресу. Redis нет, окна считаются в auth_rate_events.
         if _vf.blocked_until(db, "reg:ip:" + _ip) or _vf.blocked_until(db, "reg:em:" + _norm):
@@ -479,7 +618,19 @@ def register(req: RegisterRequest, request: Request):
                               name=req.account_name or req.email.split("@")[0],
                               owner_user_id=user.id)
             db.add(account)
-            db.commit()         # единственный коммит: User и Account вместе
+            attribution = _register_attribution(req)
+            gateway_state = {
+                "stage": "REGISTERED",
+                "audit_completed": False,
+                "latest_audit_id": None,
+                "marketing_opt_in": False,
+                "registered_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+            if attribution:
+                gateway_state["first_touch"] = attribution
+            _auth_storage_put(db, account_id, "viral_gateway_state", gateway_state)
+            db.commit()         # единственный коммит: User, Account и attribution вместе
         except Exception:
             db.rollback()       # пользователь без аккаунта не остаётся
             raise
@@ -517,7 +668,7 @@ def register(req: RegisterRequest, request: Request):
             print("telegram notify failed:", _e)
 
 
-        token = create_access_token(user.id)
+        token = _issue_user_session_token(db, user, request)
         return {"status": "pending", "access_token": token, "token_type": "bearer",
                 "verification_id": _vid,
                 "email_masked": _vf.mask_email(user.email),
@@ -565,8 +716,21 @@ def create_manager(req: CreateManagerRequest, current=Depends(get_current_user))
 def login(req: LoginRequest, request: Request):
     db = SessionLocal()
     try:
+        from app.services import verification as _vf
+        _ip = request.client.host if request.client else ""
+        _norm = _vf.normalize_email(req.email)
+        if _vf.blocked_until(db, "login:ip:" + _ip) or _vf.blocked_until(db, "login:em:" + _norm):
+            raise HTTPException(status_code=429, detail="Слишком много попыток входа. Повторите позже.")
         user = db.query(User).filter(User.email == req.email, User.is_active == True).first()
         if not user or not verify_password(req.password, user.password_hash):
+            _vf.log_event(db, "login_failed", _norm, _ip)
+            email_attempts = _vf.count_events(db, "login_failed", rate_key=_norm, minutes=15)
+            ip_attempts = _vf.count_events(db, "login_failed", ip=_ip, minutes=15)
+            if email_attempts >= 10:
+                _vf.block(db, "login:em:" + _norm, "login_email_bruteforce", minutes=15)
+            if ip_attempts >= 30:
+                _vf.block(db, "login:ip:" + _ip, "login_ip_bruteforce", minutes=15)
+            db.commit()
             # Одинаковый ответ на "нет пользователя" и "неверный пароль" —
             # чтобы злоумышленник не мог перебирать email'ы для выяснения кто зарегистрирован
             raise HTTPException(status_code=401, detail="Неверный email или пароль")
@@ -630,7 +794,7 @@ def login(req: LoginRequest, request: Request):
         except Exception as _e:
             print("telegram notify failed:", _e)
 
-        token = create_access_token(user.id)
+        token = _issue_user_session_token(db, user, request)
         resp = {"status": "ok", "access_token": token, "token_type": "bearer",
                 "user": {"id": user.id, "email": user.email, "role": user.role,
                          "account_id": user.account_id,
@@ -689,7 +853,7 @@ def login_verify_code(req: LoginOtpVerifyRequest, request: Request):
             raise HTTPException(status_code=403, detail="Учётная запись заблокирована")
         user.last_login_at = datetime.datetime.utcnow()
         db.commit()
-        token = create_access_token(user.id)
+        token = _issue_user_session_token(db, user, request)
         return {
             "status": "ok",
             "access_token": token,
@@ -829,15 +993,58 @@ def verify_email(req: VerifyEmailRequest, request: Request):
             user.email_normalized = str(row["email"])
 
         # Общий четырёхдневный триал — только здесь и только один раз.
-        if user.trial_started_at is None:
+        trial_started_now = user.trial_started_at is None
+        if trial_started_now:
             user.trial_started_at = now
             user.subscription_expires_at = now + datetime.timedelta(days=4)
             logger.warning("verify-email: триал выдан пользователю id=%s", user.id)
 
+            # AUDIT_TRIAL_TRUTH_V1: this is the real product-side trial start.
+            # Record it here, not on the marketing CTA. Keep the current audit
+            # stage intact so AUDIT_STARTED/FULL_AUDIT_COMPLETED can continue
+            # independently after email verification.
+            account_id = str(getattr(user, "account_id", "") or "").strip()
+            if account_id:
+                gateway_state = _auth_storage_get(db, account_id, "viral_gateway_state")
+                first_touch = dict(gateway_state.get("first_touch") or {})
+                gateway_state["trial_started"] = True
+                gateway_state["trial_started_at"] = now.replace(tzinfo=datetime.timezone.utc).isoformat()
+                gateway_state["updated_at"] = now.replace(tzinfo=datetime.timezone.utc).isoformat()
+                _auth_storage_put(db, account_id, "viral_gateway_state", gateway_state)
+
+                event_id = "ve_" + secrets.token_hex(16)
+                event = {
+                    "event_id": event_id,
+                    "event": "trial_started",
+                    "stage": "TRIAL_STARTED",
+                    "source": "verify_email",
+                    "account_id": account_id,
+                    "session_id": first_touch.get("session_id"),
+                    "utm_source": first_touch.get("utm_source"),
+                    "utm_medium": first_touch.get("utm_medium"),
+                    "utm_campaign": first_touch.get("utm_campaign"),
+                    "utm_content": first_touch.get("utm_content"),
+                    "utm_term": first_touch.get("utm_term"),
+                    "landing_path": first_touch.get("landing_path"),
+                    "first_seen_at": first_touch.get("first_seen_at"),
+                    "referral_code": first_touch.get("referral_code"),
+                    "qa": bool(first_touch.get("qa")),
+                    "created_at": now.replace(tzinfo=datetime.timezone.utc).isoformat(),
+                }
+                db.add(Storage(account_id="viral_event", key=f"event:{event_id}",
+                               value=json.dumps(event, ensure_ascii=False, separators=(",", ":"))))
+                stage_event_id = "ve_" + secrets.token_hex(16)
+                db.add(Storage(account_id="viral_event", key=f"event:{stage_event_id}",
+                               value=json.dumps({
+                                   **event,
+                                   "event_id": stage_event_id,
+                                   "event": "gateway_stage",
+                               }, ensure_ascii=False, separators=(",", ":"))))
+
         db.commit()
         db.refresh(user)
 
-        token = create_access_token(user.id)
+        token = _issue_user_session_token(db, user, request)
         return {"status": "ok", "access_token": token, "token_type": "bearer",
                 "user": {"id": user.id, "email": user.email, "role": user.role,
                          "account_id": user.account_id, "status": user.status}}
@@ -947,5 +1154,96 @@ def change_verification_email(req: ChangeVerificationEmailRequest, request: Requ
         return {"status": "ok", "verification_id": vid,
                 "email_masked": _vf.mask_email(user.email),
                 "message": "Код отправлен на новый адрес"}
+    finally:
+        db.close()
+
+
+class RevokeSessionRequest(BaseModel):
+    session_id: str
+
+
+@router.get("/sessions")
+def auth_sessions(user: User = Depends(get_current_user)):
+    """List this user's server-side sessions; never returns token material or IP."""
+    from app.services.auth_sessions import list_sessions
+    db = SessionLocal()
+    try:
+        current_sid = str(getattr(user, "_auth_session_id", "") or "")
+        items = list_sessions(db, int(user.id))
+        for item in items:
+            item["current"] = bool(current_sid and item["session_id"] == current_sid)
+        return {"status": "ok", "sessions": items, "legacy_current": not bool(current_sid)}
+    finally:
+        db.close()
+
+
+@router.post("/sessions/revoke")
+def revoke_auth_session(body: RevokeSessionRequest, request: Request, user: User = Depends(get_current_user)):
+    from app.services.auth_sessions import revoke_session
+    sid = str(body.session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="Укажите сеанс")
+    db = SessionLocal()
+    try:
+        changed = revoke_session(db, int(user.id), sid)
+        if not changed:
+            raise HTTPException(status_code=404, detail="Сеанс не найден")
+        from app.services.messenger_security_audit import append_security_audit
+        append_security_audit(db, action="session_revoke", user_id=int(user.id), entity_type="session", entity_id=sid, session_id=str(getattr(user, "_auth_session_id", "") or "") or None, request_id=request.headers.get("x-boris-trace-id"))
+        db.commit()
+        from app.services.messenger_security import audit_security_event
+        audit_security_event(user_id=int(user.id), account_id=None, action="Завершил сеанс", object_kind="session", object_name="other_device", after="revoked")
+        return {"status": "ok", "revoked": sid}
+    finally:
+        db.close()
+
+
+@router.post("/sessions/revoke-all")
+def revoke_all_auth_sessions(request: Request, user: User = Depends(get_current_user)):
+    """Invalidate every previous token and issue one fresh current session."""
+    from app.services.auth_sessions import issue_session, revoke_all_and_advance_epoch
+    db = SessionLocal()
+    try:
+        new_epoch = revoke_all_and_advance_epoch(db, int(user.id), "user_revoke_all")
+        sid, expires = issue_session(
+            db,
+            int(user.id),
+            new_epoch,
+            user_agent=request.headers.get("user-agent", ""),
+            ip=(request.client.host if request.client else ""),
+        )
+        from app.services.messenger_security_audit import append_security_audit
+        append_security_audit(db, action="session_revoke_all", user_id=int(user.id), entity_type="session", entity_id=sid, session_id=sid, request_id=request.headers.get("x-boris-trace-id"), details={"new_security_epoch": new_epoch})
+        db.commit()
+        token = create_access_token(
+            int(user.id),
+            session_id=sid,
+            security_epoch=new_epoch,
+            expires_at=expires,
+        )
+        from app.services.messenger_security import audit_security_event
+        audit_security_event(user_id=int(user.id), account_id=None, action="Завершил все остальные сеансы", object_kind="session", object_name="all_other_devices", after="revoked")
+        return {"status": "ok", "access_token": token, "token_type": "bearer"}
+    finally:
+        db.close()
+
+
+@router.post("/logout")
+def logout(request: Request, user: User = Depends(get_current_user)):
+    """Server-side logout. Legacy tokens are invalidated through the epoch."""
+    from app.services.auth_sessions import revoke_all_and_advance_epoch, revoke_session
+    sid = str(getattr(user, "_auth_session_id", "") or "")
+    db = SessionLocal()
+    try:
+        if sid:
+            revoke_session(db, int(user.id), sid, "logout")
+        else:
+            revoke_all_and_advance_epoch(db, int(user.id), "legacy_logout")
+        from app.services.messenger_security_audit import append_security_audit
+        append_security_audit(db, action="logout", user_id=int(user.id), entity_type="session", entity_id=sid or "legacy", session_id=sid or None, request_id=request.headers.get("x-boris-trace-id"))
+        db.commit()
+        from app.services.messenger_security import audit_security_event
+        audit_security_event(user_id=int(user.id), account_id=None, action="Вышел из BORIS", object_kind="session", object_name="current_device", after="logged_out")
+        return {"status": "ok"}
     finally:
         db.close()

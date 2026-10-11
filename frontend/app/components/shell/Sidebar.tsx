@@ -13,7 +13,7 @@ type SessionUser = { role?: string; id?: number; email?: string; user?: { role?:
 
 type Props = { active?: string; open?: boolean; onClose?: () => void; onSelect?: (key: string) => void; };
 
-const OWNER_ONLY_NAV_KEYS = new Set(["clients-control", "journal", "ux-tester", "reliability"]);
+const OWNER_ONLY_NAV_KEYS = new Set(["clients-control", "journal", "ux-tester", "reliability", "audit-growth"]);
 
 function isActive(pathname: string, itemKey: string, href?: string, explicitActive?: string) {
   if (explicitActive) return explicitActive === itemKey;

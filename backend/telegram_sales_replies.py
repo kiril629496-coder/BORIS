@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 
 import os
 import re
+import time
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
@@ -1070,20 +1071,55 @@ def alert_unalerted_buyer_replies(limit: int = 10) -> tuple[int,int]:
     return sent,errors
 
 
+def _reply_scan_rows() -> list[dict]:
+    """Bounded recent+rotating reply scan.
+
+    Recent contacts are checked every cycle. Older contacted leads are scanned
+    with a durable cursor so the 30-day backlog advances without making one
+    cycle resolve 100 Telegram entities serially.
+    """
+    newest=max(5,int(os.getenv('TG_REPLY_SCAN_RECENT_LEADS','12') or 12))
+    rotating=max(5,int(os.getenv('TG_REPLY_SCAN_ROTATING_LEADS','18') or 18))
+    base_sql="""SELECT id,monitor_message_id,monitor_intent,contact_username,contact_peer_id,
+        contact_access_hash,contact_name,contacted_at,first_message_draft,original_text,approval_note
+      FROM boris_sales_hot_leads
+      WHERE contacted_at IS NOT NULL
+        AND ((contact_username IS NOT NULL AND contact_username<>'') OR contact_peer_id IS NOT NULL)
+        AND contacted_at >= NOW()-interval '30 days'"""
+    with engine.begin() as db:
+        ensure_schema(db)
+        recent=[dict(x) for x in db.execute(text(base_sql+" ORDER BY contacted_at DESC,id DESC LIMIT :lim"),{'lim':newest}).mappings().all()]
+        recent_ids={int(x['id']) for x in recent}
+        raw=db.execute(text("SELECT value_text FROM monitor_runtime_state WHERE key='tg_reply_scan_cursor_id'")).scalar()
+        try: cursor=int(raw or 0)
+        except Exception: cursor=0
+        if cursor<=0:
+            cursor=int(db.execute(text("SELECT COALESCE(max(id),0)+1 FROM boris_sales_hot_leads WHERE contacted_at IS NOT NULL")).scalar() or 1)
+        older=[dict(x) for x in db.execute(text(base_sql+" AND id<:cursor ORDER BY id DESC LIMIT :lim"),
+                                           {'cursor':cursor,'lim':rotating}).mappings().all()]
+        if not older:
+            cursor=int(db.execute(text("SELECT COALESCE(max(id),0)+1 FROM boris_sales_hot_leads WHERE contacted_at IS NOT NULL")).scalar() or 1)
+            older=[dict(x) for x in db.execute(text(base_sql+" AND id<:cursor ORDER BY id DESC LIMIT :lim"),
+                                               {'cursor':cursor,'lim':rotating}).mappings().all()]
+        next_cursor=min((int(x['id']) for x in older),default=cursor)
+        db.execute(text("""INSERT INTO monitor_runtime_state(key,value_text,updated_at)
+          VALUES('tg_reply_scan_cursor_id',:v,NOW())
+          ON CONFLICT(key) DO UPDATE SET value_text=EXCLUDED.value_text,updated_at=NOW()"""),
+          {'v':str(next_cursor)})
+    out=[]; seen=set()
+    for row in [*recent,*older]:
+        rid=int(row['id'])
+        if rid in seen: continue
+        seen.add(rid); out.append(row)
+    print(f'TG_REPLY_SCAN_BATCH=PASS recent={len(recent)} rotating={len(older)} total={len(out)} cursor={next_cursor}')
+    return out
+
+
 def main()->int:
     ensure_active_crm_next_actions()
     decline_alerted,decline_alert_errors=alert_unalerted_declines()
     buyer_alerted,buyer_alert_errors=alert_unalerted_buyer_replies()
-    with engine.begin() as db:
-        ensure_schema(db)
-        rows=db.execute(text("""
-          SELECT id,monitor_message_id,monitor_intent,contact_username,contact_peer_id,contact_name,contacted_at,first_message_draft,original_text,approval_note
-          FROM boris_sales_hot_leads
-          WHERE contacted_at IS NOT NULL
-            AND ((contact_username IS NOT NULL AND contact_username<>'') OR contact_peer_id IS NOT NULL)
-            AND contacted_at >= NOW()-interval '30 days'
-          ORDER BY contacted_at DESC LIMIT 100
-        """)).mappings().all()
+    rows=_reply_scan_rows()
 
     if not rows:
         print('TG_REPLIES=IDLE no_contacted_leads'); return 0
@@ -1092,18 +1128,49 @@ def main()->int:
         decrypt_secret(os.environ['MONITOR_TG_SESSION_ENC']),
         int(os.environ['MONITOR_TG_API_ID']),
         os.environ['MONITOR_TG_API_HASH'],
+        timeout=max(3,int(os.getenv('TG_REPLY_NETWORK_TIMEOUT_SECONDS','7') or 7)),
+        request_retries=max(0,int(os.getenv('TG_REPLY_REQUEST_RETRIES','1') or 1)),
+        connection_retries=max(0,int(os.getenv('TG_REPLY_CONNECTION_RETRIES','1') or 1)),
+        retry_delay=0,
     )
     found=0; alerted=decline_alerted+buyer_alerted; errors=decline_alert_errors+buyer_alert_errors
+    scan_t0=time.monotonic()
+    scan_budget=max(20,int(os.getenv('TG_REPLY_SCAN_BUDGET_SECONDS','70') or 70))
+    budget_exhausted=False
     try:
         for r in rows:
+            if time.monotonic()-scan_t0 >= scan_budget:
+                budget_exhausted=True
+                print(f'TG_REPLY_SCAN_BUDGET=REACHED elapsed={int(time.monotonic()-scan_t0)} budget={scan_budget}')
+                break
             username=str(r['contact_username'] or '').strip().lstrip('@')
             peer=r.get('contact_peer_id')
             if not username and not peer: continue
             label='@'+username if username else f'peer:{peer}'
             try:
-                entity=resolve_personal_entity(client,int(peer) if peer else username)
+                access_hash=r.get('contact_access_hash')
+                entity=None
+                if peer and access_hash:
+                    try:
+                        from telethon.tl.types import InputPeerUser
+                        entity=InputPeerUser(int(peer),int(access_hash))
+                    except Exception:
+                        entity=None
+                if entity is None and username:
+                    try:
+                        entity=resolve_personal_entity(client,username)
+                    except ValueError:
+                        entity=None
+                if entity is None and peer:
+                    try:
+                        entity=resolve_personal_entity(client,int(peer),dialog_limit=500)
+                    except ValueError:
+                        entity=None
+                if entity is None:
+                    print(f'TG_REPLY_ENTITY_UNRESOLVED lead={r["id"]} recipient={label}')
+                    continue
                 after=r['contacted_at']
-                for msg in client.iter_messages(entity,limit=30):
+                for msg in client.iter_messages(entity,limit=12):
                     if getattr(msg,'out',False):
                         continue
                     dt=getattr(msg,'date',None)

@@ -9,6 +9,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -125,12 +126,14 @@ async function apiGet<T = any>(url: string): Promise<T | null> {
 async function apiPost<T = any>(
   url: string,
   body: unknown,
+  extraHeaders: Record<string, string> = {},
 ): Promise<T | null> {
   const response = await fetch(API + url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...tokenHeaders(),
+      ...extraHeaders,
     },
     body: JSON.stringify(body),
   });
@@ -475,6 +478,7 @@ export default function MessagesPage() {
 
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
+  const sendIntentRef = useRef<{ accountId: string; chatId: string; text: string; key: string } | null>(null);
 
   useEffect(() => {
     setDialogRenderLimit(80);
@@ -633,12 +637,12 @@ export default function MessagesPage() {
   // the canonical DB current; this lightweight UI poll only projects that state.
   // Silent refresh preserves the draft, selected dialog and MOP controls.
   useEffect(() => {
+    if (!thread?.account_id || !thread?.avito_chat_id) return;
+
     const refreshVisible = () => {
       if (document.visibilityState !== "visible") return;
       void loadDialogs(true);
-      if (thread?.account_id && thread?.avito_chat_id) {
-        void loadThread(thread.account_id, thread.avito_chat_id, true);
-      }
+      void loadThread(thread.account_id, thread.avito_chat_id, true);
     };
     const timer = window.setInterval(refreshVisible, 4000);
     document.addEventListener("visibilitychange", refreshVisible);
@@ -797,6 +801,11 @@ export default function MessagesPage() {
     const accountId = thread.account_id;
     const chatId = thread.avito_chat_id;
     const sentText = draft.trim();
+    const priorIntent = sendIntentRef.current;
+    const intent = priorIntent && priorIntent.accountId === accountId && priorIntent.chatId === chatId && priorIntent.text === sentText
+      ? priorIntent
+      : { accountId, chatId, text: sentText, key: crypto.randomUUID() };
+    sendIntentRef.current = intent;
     setSending(true);
 
     try {
@@ -806,10 +815,13 @@ export default function MessagesPage() {
           account_id: accountId,
           avito_chat_id: chatId,
           text: sentText,
+          idempotency_key: intent.key,
         },
+        { "Idempotency-Key": intent.key },
       );
 
       if (result?.status === "ok") {
+        sendIntentRef.current = null;
         try {
           localStorage.removeItem(`boris_messages_draft:${accountId}:${chatId}`);
         } catch {}

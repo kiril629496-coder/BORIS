@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from scripts import crowd_seo_production_certifier as cert
@@ -249,10 +250,100 @@ def test_external_submission_snapshot_uses_latest_state_per_platform():
         {"platform": "guest_verified", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://x/add", "created_at": "2026-09-13T12:00:00+00:00"},
         {"platform": "guest_conti", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://conti/add", "created_at": "2026-09-13T12:02:00+00:00"},
         {"platform": "guest_mail", "action": "guest_catalog_email_submit", "status": "submitted_pending_email", "url": "https://mail/add", "created_at": "2026-09-13T12:01:00+00:00"},
+        {"platform": "tool_pending", "action": "guest_tool_submit", "status": "submitted_pending_moderation", "url": "https://tool.example/submit", "created_at": "2026-09-13T12:03:00+00:00"},
     ]
     with patch.object(cert.marketplace, "list_attempts", return_value=attempts):
         snap = cert._external_submissions_snapshot()
-    assert snap["pending_total"] == 2
-    assert [x["platform"] for x in snap["pending"]] == ["guest_conti", "guest_mail"]
+    assert snap["pending_total"] == 3
+    assert [x["platform"] for x in snap["pending"]] == ["guest_conti", "guest_mail", "tool_pending"]
     assert snap["verified_total"] == 1
     assert snap["verified"][0]["platform"] == "guest_verified"
+
+
+def test_daily_delivery_snapshot_counts_only_current_day_facts_and_unique_domains():
+    attempts = [
+        {"id": "pending-a", "platform": "guest_a", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://www.example.com/add", "created_at": "2026-09-27T08:00:00+00:00"},
+        {"id": "pending-b", "platform": "guest_b", "action": "guest_catalog_email_submit", "status": "submitted_pending_email", "url": "https://example.com/submit", "created_at": "2026-09-27T08:01:00+00:00"},
+        {"id": "pending-tool", "platform": "tool_directory", "action": "guest_tool_submit", "status": "submitted_pending_moderation", "url": "https://tool.example/submit", "created_at": "2026-09-27T08:01:30+00:00"},
+        {"id": "button-click-only", "platform": "forum_click", "action": "publish", "status": "submitted", "url": "https://click.example/topic", "created_at": "2026-09-27T08:02:00+00:00", "meta": {"publish_clicked": True, "publication_verified": False}},
+        {"id": "old-fact", "platform": "guest_old", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://old.example/add", "created_at": "2026-09-26T20:59:59+00:00"},
+    ]
+    publications = [{"draft_id": "live-c", "platform": "forum_c", "url": "https://forum.example/topic/1", "posted_at": "2026-09-27T08:03:00+00:00", "verified": True, "verified_at": "2026-09-27T08:04:00+00:00"}]
+    with (
+        patch.object(cert.marketplace, "list_attempts", return_value=attempts),
+        patch.object(cert.marketplace, "list_publications", return_value=publications),
+    ):
+        snap = cert._daily_delivery_snapshot(datetime(2026, 9, 27, 12, tzinfo=timezone.utc))
+    assert snap["submitted_today"] == 4
+    assert snap["submitted_unique_domains_today"] == 3
+    assert snap["submitted_unique_domains"] == ["example.com", "forum.example", "tool.example"]
+    assert snap["remaining_unique_domains"] == 17
+    assert snap["verified_today"] == 1
+    assert snap["verified_unique_domains_today"] == 1
+
+
+def test_daily_delivery_snapshot_rolls_over_at_moscow_midnight_and_is_idempotent():
+    attempts = [
+        {"id": "before-midnight", "platform": "old_day", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://old-day.example/add", "created_at": "2026-09-27T20:59:59+00:00"},
+        {"id": "at-midnight", "platform": "new_day", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://new-day.example/add", "created_at": "2026-09-27T21:00:00+00:00"},
+    ]
+    with (
+        patch.object(cert.marketplace, "list_attempts", return_value=attempts),
+        patch.object(cert.marketplace, "list_publications", return_value=[]),
+    ):
+        first = cert._daily_delivery_snapshot(datetime(2026, 9, 27, 21, 0, tzinfo=timezone.utc))
+        second = cert._daily_delivery_snapshot(datetime(2026, 9, 27, 21, 5, tzinfo=timezone.utc))
+    assert first["business_timezone"] == "Europe/Moscow"
+    assert first["business_date"] == "2026-09-28"
+    assert first["bucket_start_utc"] == "2026-09-27T21:00:00+00:00"
+    assert first["bucket_end_utc"] == "2026-09-28T21:00:00+00:00"
+    assert first["submitted_unique_domains"] == ["new-day.example"]
+    assert first["submitted_unique_domains_today"] == 1
+    assert second["submitted_unique_domains"] == first["submitted_unique_domains"]
+    assert second["submitted_unique_domains_today"] == first["submitted_unique_domains_today"]
+
+
+def test_daily_delivery_snapshot_keeps_previous_moscow_day_before_midnight():
+    attempts = [
+        {"id": "before-midnight", "platform": "old_day", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://old-day.example/add", "created_at": "2026-09-27T20:59:59+00:00"},
+        {"id": "at-midnight", "platform": "new_day", "action": "guest_catalog_submit", "status": "submitted_pending_moderation", "url": "https://new-day.example/add", "created_at": "2026-09-27T21:00:00+00:00"},
+    ]
+    with (
+        patch.object(cert.marketplace, "list_attempts", return_value=attempts),
+        patch.object(cert.marketplace, "list_publications", return_value=[]),
+    ):
+        snap = cert._daily_delivery_snapshot(datetime(2026, 9, 27, 20, 59, 59, tzinfo=timezone.utc))
+    assert snap["business_date"] == "2026-09-27"
+    assert snap["submitted_unique_domains"] == ["old-day.example"]
+    assert snap["submitted_unique_domains_today"] == 1
+
+
+def test_acquisition_lane_snapshot_reports_cooldown_eligible_ready_only():
+    platforms = [
+        {
+            "key": "used",
+            "url": "https://used.example/submit",
+            "delivery_lane": "autonomous_candidate",
+            "autonomous_ready": True,
+            "free_policy": {"free": True, "rule_decision": "allowed"},
+        },
+        {
+            "key": "fresh",
+            "url": "https://fresh.example/submit",
+            "delivery_lane": "autonomous_candidate",
+            "autonomous_ready": True,
+            "free_policy": {"free": True, "rule_decision": "allowed"},
+        },
+    ]
+    with (
+        patch.object(cert.marketplace, "list_platforms", return_value=platforms),
+        patch.object(cert, "_recent_submission_domains", return_value={"used.example"}),
+    ):
+        snap = cert._acquisition_lane_snapshot(
+            {"pending_total": 0},
+            datetime(2026, 9, 28, 12, tzinfo=timezone.utc),
+        )
+    assert snap["autonomous_ready_raw"] == 2
+    assert snap["autonomous_ready"] == 1
+    assert snap["cooldown_blocked_ready"] == 1
+    assert snap["submission_domain_cooldown_days"] == cert.reserve_policy.SUBMISSION_DOMAIN_COOLDOWN_DAYS

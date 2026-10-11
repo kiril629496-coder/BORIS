@@ -1,3 +1,4 @@
+from app.services.job_execution_clock import provider_call as _campaign_provider_call
 
 # -*- coding: utf-8 -*-
 """API Ad Campaign Workspace.
@@ -9,10 +10,11 @@
 аккаунтом либо связь в user_account_access. Свой механизм прав не заводим.
 """
 import json
+import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 from pydantic import BaseModel
-from sqlalchemy import text as _t
+from sqlalchemy import text as _t, or_
 
 from app.db.session import SessionLocal
 from app.services import campaign_service as CS
@@ -24,7 +26,9 @@ try:
 except ImportError:  # на случай другой раскладки
     from app.auth import get_current_user
 
-router = APIRouter(prefix="/api/campaign", tags=["campaign"])
+from app.services.campaign_card_revisions import CampaignRevisionRoute, guard_request
+
+router = APIRouter(prefix="/api/campaign", tags=["campaign"], route_class=CampaignRevisionRoute)
 
 
 def _db():
@@ -48,11 +52,648 @@ def _allowed_accounts(db, user) -> list:
     return [r[0] for r in rows]
 
 
+def _can_manage_ads(db, user, account_id: str) -> bool:
+    """Account-scoped write permission for Campaign mutations."""
+    aid = str(account_id or "").strip()
+    uid = int(getattr(user, "id", 0) or 0)
+    if not aid or not uid:
+        return False
+    if str(getattr(user, "role", "") or "").lower() == "owner":
+        return True
+    owned = db.execute(_t(
+        "SELECT 1 FROM accounts WHERE account_id=:a AND owner_user_id=:u LIMIT 1"
+    ), {"a": aid, "u": uid}).first()
+    if owned:
+        return True
+    granted = db.execute(_t(
+        "SELECT 1 FROM user_account_access "
+        "WHERE account_id=:a AND user_id=:u AND can_manage_ads=TRUE LIMIT 1"
+    ), {"a": aid, "u": uid}).first()
+    return bool(granted)
+
+
+def _require_manage_ads(db, user, account_id: str):
+    if not _can_manage_ads(db, user, account_id):
+        raise HTTPException(403, "Недостаточно прав для изменения объявлений")
+    return True
+
+
+async def _campaign_mutation_guard(request: Request, user=Depends(get_current_user), db=Depends(_db)):
+    """Router-wide fail-closed RBAC for every Campaign mutation endpoint."""
+    if str(request.method or "").upper() in {"GET", "HEAD", "OPTIONS"}:
+        return True
+
+    account_ids = set()
+    query_account = str(request.query_params.get("account_id") or "").strip()
+    if query_account:
+        account_ids.add(query_account)
+
+    body = {}
+    ctype = str(request.headers.get("content-type") or "").lower()
+    if "application/json" in ctype:
+        try:
+            parsed = await request.json()
+            if isinstance(parsed, dict):
+                body = parsed
+        except Exception:
+            body = {}
+    body_account = str(body.get("account_id") or "").strip()
+    if body_account:
+        account_ids.add(body_account)
+
+    campaign_id = request.path_params.get("campaign_id")
+    item_id = request.path_params.get("item_id")
+    item_ids = []
+    if isinstance(body.get("item_ids"), list):
+        for raw in body.get("item_ids") or []:
+            try:
+                item_ids.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+    if item_id is not None:
+        try:
+            item_ids.append(int(item_id))
+        except (TypeError, ValueError):
+            pass
+
+    if item_ids:
+        rows = db.execute(_t(
+            "SELECT DISTINCT account_id FROM campaign_items "
+            "WHERE id = ANY(:ids) AND account_id IS NOT NULL"
+        ), {"ids": list(set(item_ids))}).fetchall()
+        account_ids.update(str(r[0]).strip() for r in rows if r and str(r[0] or "").strip())
+
+    if campaign_id is not None and not item_ids and not body_account:
+        try:
+            cid = int(campaign_id)
+        except (TypeError, ValueError):
+            cid = 0
+        if cid:
+            rows = db.execute(_t(
+                "SELECT DISTINCT account_id FROM campaign_items "
+                "WHERE campaign_id=:c AND account_id IS NOT NULL"
+            ), {"c": cid}).fetchall()
+            account_ids.update(str(r[0]).strip() for r in rows if r and str(r[0] or "").strip())
+            default_account = db.execute(_t(
+                "SELECT default_account_id FROM campaigns WHERE id=:c"
+            ), {"c": cid}).scalar()
+            if str(default_account or "").strip():
+                account_ids.add(str(default_account).strip())
+
+    if not account_ids:
+        if str(getattr(user, "role", "") or "").lower() == "owner":
+            return True
+        raise HTTPException(403, "Недостаточно прав для изменения объявлений")
+
+    owner_action=(request.url.path.endswith(("/owner_activation","/guardian/deliver","/inventory-policy","/inventory-policy/run"))
+        or (request.url.path.endswith("/workflow/bulk-transform") and not body.get("preview_only",True) and body.get("confirmed")))
+    for aid in sorted(account_ids):
+        _require_manage_ads(db, user, aid)
+        if owner_action: _campaign_owner_only(db,user,aid)
+    guard_request(request, db, user, body, _allowed_accounts(db, user))
+    return True
+
+
+# Attach before any route decorators below are evaluated.
+router.dependencies.append(Depends(_campaign_mutation_guard))
+
+
 def _campaign_or_404(db, campaign_id: int, allowed: list):
     row = CS.get_campaign(db, campaign_id, allowed_accounts=allowed)
     if row is None:
         raise HTTPException(status_code=404, detail="Кампания не найдена")
     return row
+
+
+def _campaign_price_number(raw):
+    try:
+        value = float(str(raw).replace(" ", "").replace("\u00a0", "").replace("\u202f", "").replace(",", "."))
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _campaign_price_readiness_pass(payload):
+    if not hasattr(payload, "get"):
+        return False
+    if not bool(payload.get("verified_price") or payload.get("price_verified")):
+        return False
+    status = str(payload.get("price_status") or "").strip().upper()
+    if status in {"NEEDS_DATA", "PRICE_CONFLICT"}:
+        return False
+    if status == "NOT_APPLICABLE":
+        return True
+    return _campaign_price_number(payload.get("price")) is not None
+
+
+def _campaign_price_from_row(row):
+    if not hasattr(row, "get"):
+        return None
+    low = _campaign_price_number(row.get("price"))
+    high = _campaign_price_number(row.get("price_to"))
+    start = _campaign_price_number(row.get("price_from"))
+    if start is None:
+        start = low
+    if start is None and high is None:
+        for key in ("cost", "amount", "price_rub", "Price"):
+            start = _campaign_price_number(row.get(key))
+            if start is not None:
+                break
+    if start is None and high is None:
+        raw_value = str(row.get("value") or "").strip()
+        import re
+        numbers = re.findall(r"(?<![0-9])(?:\d{1,3}(?:[ \u00A0\u202F]\d{3})+|\d+)(?:[.,]\d+)?", raw_value)
+        if numbers:
+            start = _campaign_price_number(numbers[0])
+            high = _campaign_price_number(numbers[1]) if len(numbers) > 1 else None
+    if start is None and high is None:
+        return None
+    return {
+        "value": start,
+        "value_to": high,
+        "currency": str(row.get("currency") or row.get("currency_code") or "RUB").upper()[:8],
+        "price_type": str(row.get("price_type") or row.get("type") or ("range" if high is not None else "fixed")),
+        "updated_at": row.get("updated_at") or row.get("source_date") or row.get("extracted_at"),
+    }
+
+
+def _campaign_norm(value):
+    import re
+    return re.sub(r"[ \t\r\n]+", " ", str(value or "").casefold()).strip()
+
+
+def _campaign_resolve_prices(db, account_id, directions, feed_rows):
+    """Resolve only explicit account data; conflicts remain visible and unverified."""
+    candidates = {str(x): [] for x in (directions or []) if str(x).strip()}
+
+    def add(direction, price, source, reference, confidence):
+        if price is None or direction not in candidates:
+            return
+        candidates[direction].append({**price, "source": source, "source_reference": reference, "confidence": confidence})
+
+    # 1. Canonical price-list/catalog records.
+    catalog_rows = db.execute(_t("""
+        SELECT name, price, price_from, price_to, currency, source_ref
+        FROM catalog_products
+        WHERE account_id=:a AND deleted_at IS NULL
+        ORDER BY updated_at DESC NULLS LAST, id DESC
+        LIMIT 500
+    """), {"a": account_id}).mappings().all()
+    for direction in candidates:
+        key = _campaign_norm(direction)
+        for row in catalog_rows:
+            name = _campaign_norm(row.get("name"))
+            if name == key or (key and (key in name or name in key)):
+                add(direction, _campaign_price_from_row(dict(row)), "price_list", str(row.get("source_ref") or "catalog_products"), "high")
+                break
+
+    # 3/4. Confirmed Knowledge and existing-ad price facts are canonical numeric
+    # evidence. Draft facts are accepted only at the existing high-confidence
+    # threshold; free-form prose without an explicit number is ignored.
+    fact_rows = db.execute(_t("""
+        SELECT name, value, unit, source_type, source_ref, confidence, status,
+               source_date, extracted_at, updated_at
+        FROM client_facts
+        WHERE account_id=:a AND category='cena'
+          AND status <> 'rejected'
+          AND (status='confirmed' OR confidence >= 80)
+        ORDER BY confidence DESC NULLS LAST, updated_at DESC NULLS LAST, id DESC
+        LIMIT 500
+    """), {"a": account_id}).mappings().all()
+    for direction in candidates:
+        key = _campaign_norm(direction)
+        for row in fact_rows:
+            label = _campaign_norm(row.get("name"))
+            if not label or not (label == key or key in label or label in key):
+                continue
+            price = _campaign_price_from_row(dict(row))
+            source_type = str(row.get("source_type") or "")
+            source = "existing_ads" if source_type == "avito_item" else "confirmed_knowledge"
+            confidence = "high" if str(row.get("status") or "") == "confirmed" else "medium"
+            add(direction, price, source, str(row.get("source_ref") or "client_facts"), confidence)
+
+    # 2/6/7. Structured site, feed and explicit pricing-rule snapshots are stored
+    # as account-scoped JSON. No numeric value is accepted from free-form prose.
+    stored = db.execute(_t("""
+        SELECT key, value FROM storage
+        WHERE account_id=:a AND (key ILIKE '%site%' OR key ILIKE '%price%' OR key='feed_items')
+        LIMIT 50
+    """), {"a": account_id}).mappings().all()
+    for row in stored:
+        key_name = str(row.get("key") or "")
+        try:
+            payload = json.loads(row.get("value") or "null")
+        except Exception:
+            continue
+        rows = payload if isinstance(payload, list) else [payload]
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("title") or item.get("name") or item.get("direction") or "").strip()
+            price = _campaign_price_from_row(item)
+            for direction in candidates:
+                if label and (_campaign_norm(label) == _campaign_norm(direction) or _campaign_norm(direction) in _campaign_norm(label) or _campaign_norm(label) in _campaign_norm(direction)):
+                    if "site" in key_name.lower():
+                        source, confidence = "structured_website", "medium"
+                    elif key_name == "feed_items":
+                        source, confidence = "feed", "medium"
+                    else:
+                        source, confidence = "pricing_rules", "low"
+                    add(direction, price, source, f"storage:{key_name}", confidence)
+
+    resolved = {}
+    priority = {"price_list": 0, "structured_website": 1, "confirmed_knowledge": 2, "existing_ads": 3, "feed": 4, "pricing_rules": 5}
+    for direction, rows in candidates.items():
+        rows = sorted(rows, key=lambda x: priority.get(x["source"], 99))
+        chosen = rows[0] if rows else None
+        signatures = {(x.get("value"), x.get("value_to"), x.get("currency")) for x in rows}
+        conflict = len(signatures) > 1
+        verified = bool(chosen and chosen.get("confidence") in {"high", "medium"} and not conflict)
+        resolved[direction] = {
+            "price": chosen.get("value") if chosen else None,
+            "price_to": chosen.get("value_to") if chosen else None,
+            "price_type": chosen.get("price_type") if chosen else None,
+            "currency": chosen.get("currency") if chosen else None,
+            "source": chosen.get("source") if chosen else None,
+            "source_reference": chosen.get("source_reference") if chosen else None,
+            "confidence": chosen.get("confidence") if chosen else "none",
+            "verified": verified,
+            "updated_at": chosen.get("updated_at") if chosen else None,
+            "conflict": conflict,
+            "status": "PRICE_CONFLICT" if conflict else ("READY" if chosen else "NEEDS_DATA"),
+            "candidates": [{k: v for k, v in x.items() if k not in {"confidence"}} for x in rows],
+        }
+    return resolved
+
+
+@router.get("/strategy")
+def campaign_strategy(account_id: str = Query(...), db=Depends(_db), user=Depends(get_current_user)):
+    """Read the account-scoped ad creation and maintenance strategy."""
+    aid = str(account_id or "").strip()
+    if aid not in _allowed_accounts(db, user):
+        raise HTTPException(status_code=404, detail="Аккаунт не найден")
+    raw = db.execute(_t(
+        "SELECT value FROM storage WHERE account_id=:a AND key='campaign_strategy' LIMIT 1"
+    ), {"a": aid}).scalar()
+    try:
+        strategy = json.loads(raw) if raw else {}
+    except Exception:
+        strategy = {}
+    return {"status": "ok", "account_id": aid, "strategy": strategy if isinstance(strategy, dict) else {}}
+
+
+class CampaignStrategyBody(BaseModel):
+    target_active_ads: int = 0
+    directions: list[str] = []
+    cities: list[str] = []
+    use_price_list: bool = True
+    use_site_services: bool = True
+    unique_texts: bool = True
+    unique_images: bool = True
+    require_verified_price: bool = True
+    require_banners: bool = True
+    require_preflight: bool = True
+
+
+@router.put("/strategy")
+def save_campaign_strategy(account_id: str = Query(...), body: CampaignStrategyBody = ..., db=Depends(_db), user=Depends(get_current_user)):
+    """Persist only the bounded account-scoped creation strategy; this route changes settings only."""
+    aid = str(account_id or "").strip()
+    if aid not in _allowed_accounts(db, user):
+        raise HTTPException(status_code=404, detail="Аккаунт не найден")
+    _require_manage_ads(db,user,aid)
+    payload = body.dict()
+    payload["target_active_ads"] = max(0, min(int(payload.get("target_active_ads") or 0), 100000))
+    row = db.execute(_t(
+        "SELECT id FROM storage WHERE account_id=:a AND key='campaign_strategy' LIMIT 1"
+    ), {"a": aid}).first()
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if row:
+        db.execute(_t("UPDATE storage SET value=:v WHERE id=:id"), {"v": encoded, "id": row[0]})
+    else:
+        db.execute(_t(
+            "INSERT INTO storage (account_id, key, value) VALUES (:a, 'campaign_strategy', :v)"
+        ), {"a": aid, "v": encoded})
+    db.commit()
+    return {"status": "ok", "account_id": aid, "strategy": payload}
+
+
+class FFInventoryPolicyBody(BaseModel):
+    enabled: bool = False
+    auto_apply: bool = False
+    target_active_ads: int = 0
+    price_source: str = "company_price_list"  # company_price_list | website | range
+    price_min: int = 0
+    price_max: int = 0
+    randomize_price: bool = False
+    allow_create: bool = True
+    allow_edit_existing: bool = True
+    allow_reactivate: bool = True
+    allow_update_price: bool = True
+    allow_update_text: bool = True
+    allow_update_media: bool = True
+    allow_update_category: bool = True
+    daily_mode: str = "maintain"
+
+
+def _campaign_inventory_policy_read(db, account_id: str) -> dict:
+    raw=db.execute(_t(
+        "SELECT value FROM storage WHERE account_id=:a AND key='campaign_inventory_policy_v1' ORDER BY id DESC LIMIT 1"
+    ),{"a":account_id}).scalar()
+    try:
+        payload=json.loads(raw) if raw else {}
+    except Exception:
+        payload={}
+    defaults=FFInventoryPolicyBody().dict()
+    if isinstance(payload,dict):
+        defaults.update(payload)
+    defaults["target_active_ads"]=max(0,min(int(defaults.get("target_active_ads") or 0),100000))
+    defaults["price_min"]=max(0,int(defaults.get("price_min") or 0))
+    defaults["price_max"]=max(0,int(defaults.get("price_max") or 0))
+    if defaults["price_min"] and defaults["price_max"] and defaults["price_max"]<defaults["price_min"]:
+        defaults["price_min"],defaults["price_max"]=defaults["price_max"],defaults["price_min"]
+    if str(defaults.get("price_source") or "") not in {"company_price_list","website","range"}:
+        defaults["price_source"]="company_price_list"
+    defaults["daily_mode"]="maintain"
+    return defaults
+
+
+@router.get("/inventory-policy")
+def campaign_inventory_policy(account_id: str = Query(...), db=Depends(_db), user=Depends(get_current_user)):
+    aid=str(account_id or "").strip()
+    if aid not in _allowed_accounts(db,user):
+        raise HTTPException(status_code=404,detail="Аккаунт не найден")
+    return {"status":"ok","account_id":aid,"policy":_campaign_inventory_policy_read(db,aid)}
+
+
+@router.put("/inventory-policy")
+def save_campaign_inventory_policy(account_id: str = Query(...), body: FFInventoryPolicyBody = ..., db=Depends(_db), user=Depends(get_current_user)):
+    """Persist permissions/target only. This endpoint never changes Avito."""
+    aid=str(account_id or "").strip()
+    if aid not in _allowed_accounts(db,user):
+        raise HTTPException(status_code=404,detail="Аккаунт не найден")
+    _require_manage_ads(db,user,aid)
+    payload=body.dict()
+    payload["target_active_ads"]=max(0,min(int(payload.get("target_active_ads") or 0),100000))
+    payload["price_min"]=max(0,int(payload.get("price_min") or 0))
+    payload["price_max"]=max(0,int(payload.get("price_max") or 0))
+    if payload["price_min"] and payload["price_max"] and payload["price_max"]<payload["price_min"]:
+        payload["price_min"],payload["price_max"]=payload["price_max"],payload["price_min"]
+    if str(payload.get("price_source") or "") not in {"company_price_list","website","range"}:
+        payload["price_source"]="company_price_list"
+    payload["daily_mode"]="maintain"
+    payload["policy_version"]="CAMPAIGN_DAILY_ACTIVE_POLICY_V1"
+    encoded=json.dumps(payload,ensure_ascii=False,separators=(",",":"))
+    row=db.execute(_t(
+        "SELECT id FROM storage WHERE account_id=:a AND key='campaign_inventory_policy_v1' ORDER BY id DESC LIMIT 1"
+    ),{"a":aid}).first()
+    if row:
+        db.execute(_t("UPDATE storage SET value=:v WHERE id=:id"),{"v":encoded,"id":row[0]})
+    else:
+        db.execute(_t("INSERT INTO storage (account_id,key,value) VALUES (:a,'campaign_inventory_policy_v1',:v)"),{"a":aid,"v":encoded})
+    db.commit()
+    return {"status":"ok","account_id":aid,"policy":payload,"external_mutations":0}
+
+
+def _campaign_inventory_plan_snapshot(db, aid: str, policy: dict | None = None) -> dict:
+    """Canonical read-only maintenance plan shared by UI and background executor."""
+    policy=dict(policy or _campaign_inventory_policy_read(db,aid))
+    try:
+        from app.api.mass_editor import _latest_items
+        inventory=list(_latest_items(aid) or [])
+        inventory_source="avito_inventory"
+    except Exception as exc:
+        inventory=[]
+        inventory_source="unavailable"
+        observe_suppressed(__name__,exc,line=285)
+    active=[x for x in inventory if str(x.get("status") or "").strip().lower()=="active"]
+    non_active=[x for x in inventory if str(x.get("status") or "").strip().lower()!="active"]
+    safe_reactivate_statuses={"inactive","closed","expired","removed","old"}
+    reactivation_candidates=[
+        x for x in non_active
+        if str(x.get("status") or "").strip().lower() in safe_reactivate_statuses
+    ]
+    target=max(0,int(policy.get("target_active_ads") or 0))
+    deficit=max(0,target-len(active))
+    reactivate_planned=min(deficit,len(reactivation_candidates)) if policy.get("allow_reactivate") else 0
+    create_planned=max(0,deficit-reactivate_planned) if policy.get("allow_create") else 0
+
+    price_source=str(policy.get("price_source") or "company_price_list")
+    price_updates=0
+    price_update_ids=[]
+    if policy.get("allow_update_price"):
+        if price_source=="range":
+            low=max(0,int(policy.get("price_min") or 0)); high=max(0,int(policy.get("price_max") or 0))
+            if low and high:
+                for item in active:
+                    try: value=int(float(item.get("price") or 0))
+                    except Exception: value=0
+                    needs_change=bool(policy.get("randomize_price")) or value<low or value>high
+                    if value<low or value>high:
+                        price_updates+=1
+                    if needs_change and len(price_update_ids)<500:
+                        price_update_ids.append(str(item.get("id") or ""))
+        elif price_source in {"company_price_list","website"}:
+            # Exact per-title/product resolution happens inside the executor.
+            # The plan only marks bounded candidates; ambiguous/unverified matches
+            # remain blockers and are never changed.
+            price_update_ids=[str(item.get("id") or "") for item in active[:500] if str(item.get("id") or "")]
+
+    return {
+        "status":"ok",
+        "mode":"plan_only",
+        "account_id":aid,
+        "inventory_source":inventory_source,
+        "policy":policy,
+        "inventory":{
+            "total":len(inventory),
+            "active":len(active),
+            "non_active":len(non_active),
+            "reactivation_candidates":len(reactivation_candidates),
+        },
+        "target":{
+            "active_ads":target,
+            "deficit":deficit,
+            "surplus":max(0,len(active)-target) if target else 0,
+        },
+        "plan":{
+            "reactivate":reactivate_planned,
+            "create_new":create_planned,
+            "edit_active":len(active) if policy.get("allow_edit_existing") else 0,
+            "price_updates_by_range":price_updates,
+            "update_text":bool(policy.get("allow_update_text")),
+            "update_media":bool(policy.get("allow_update_media")),
+            "update_category":bool(policy.get("allow_update_category")),
+        },
+        "candidate_ids":[str(x.get("id") or "") for x in reactivation_candidates[:500]],
+        "active_candidates":[{k:x.get(k) for k in ("id","title","price","category","url","status")} for x in active[:500]],
+        "price_update_ids":price_update_ids,
+        "external_mutations":0,
+        "message":"План рассчитан без изменений Avito. Реактивация и массовые правки выполняются только через защищённые account-scoped исполнители.",
+    }
+
+
+@router.get("/inventory-policy/plan")
+def campaign_inventory_policy_plan(account_id: str = Query(...), db=Depends(_db), user=Depends(get_current_user)):
+    """Read-only daily maintenance plan across BORIS-created and legacy Avito ads."""
+    aid=str(account_id or "").strip()
+    if aid not in _allowed_accounts(db,user):
+        raise HTTPException(status_code=404,detail="Аккаунт не найден")
+    return _campaign_inventory_plan_snapshot(db,aid)
+
+
+class FFInventoryRunBody(BaseModel):
+    confirmed: bool = False
+
+
+@router.post("/inventory-policy/run")
+def campaign_inventory_policy_run(account_id: str = Query(...), body: FFInventoryRunBody = ...,
+                                  db=Depends(_db), user=Depends(get_current_user)):
+    """Queue one durable maintenance pass. External writes require explicit authority."""
+    aid=str(account_id or "").strip()
+    if aid not in _allowed_accounts(db,user):
+        raise HTTPException(status_code=404,detail="Аккаунт не найден")
+    _require_manage_ads(db,user,aid)
+    policy=_campaign_inventory_policy_read(db,aid)
+    execute=bool(body.confirmed or policy.get("auto_apply"))
+    if not bool(policy.get("enabled")) and not bool(body.confirmed):
+        raise HTTPException(status_code=409,detail={
+            "code":"inventory_policy_disabled",
+            "message":"Сначала включите режим поддержания или запустите один проход вручную."
+        })
+    from app.services.jobs import enqueue, job_public
+    from app.services.marketing_clock import marketing_today_iso
+    import hashlib as _hashlib_inventory
+    basis=json.dumps({
+        "account_id":aid,
+        "date":marketing_today_iso(),
+        "policy":policy,
+        "source":"manual" if body.confirmed else "auto",
+    },ensure_ascii=False,sort_keys=True,separators=(",",":"))
+    fingerprint="campaign_inventory_maintain:"+_hashlib_inventory.sha256(basis.encode("utf-8")).hexdigest()[:40]
+    row,created=enqueue(
+        db,"campaign_inventory_maintain",
+        payload={
+            "account_id":aid,
+            "stage":"snapshot",
+            "execute":execute,
+            "source":"manual" if body.confirmed else "auto",
+            "policy_snapshot":policy,
+        },
+        owner_user_id=getattr(user,"id",None),
+        account_id=aid,
+        fingerprint=fingerprint,
+        progress_total=4,
+    )
+    db.commit(); db.refresh(row)
+    data=job_public(row)
+    data["stage"]=str((row.result_json or {}).get("stage") or (row.payload_json or {}).get("stage") or "snapshot")
+    data["message"]=str((row.result_json or {}).get("message") or "")
+    return {"status":"ok","created":created,"execute":execute,"job":data}
+
+
+@router.get("/inventory-policy/status")
+def campaign_inventory_policy_status(account_id: str = Query(...), db=Depends(_db), user=Depends(get_current_user)):
+    """Return the newest durable maintenance job for this account."""
+    aid=str(account_id or "").strip()
+    if aid not in _allowed_accounts(db,user):
+        raise HTTPException(status_code=404,detail="Аккаунт не найден")
+    from app.models.background_job import BackgroundJob
+    from app.services.jobs import job_public
+    row=(db.query(BackgroundJob)
+         .filter(BackgroundJob.account_id==aid,BackgroundJob.kind=="campaign_inventory_maintain")
+         .order_by(BackgroundJob.id.desc()).first())
+    if not row:
+        return {"status":"ok","account_id":aid,"job":None}
+    data=job_public(row)
+    data["stage"]=str((row.result_json or {}).get("stage") or (row.payload_json or {}).get("stage") or "")
+    data["message"]=str((row.result_json or {}).get("message") or "")
+    data["result"]=dict(row.result_json or {})
+    return {"status":"ok","account_id":aid,"job":data}
+
+
+
+
+@router.get("/category-contract")
+def campaign_category_contract(template_id: str = Query(...), db=Depends(_db), user=Depends(get_current_user)):
+    """Human read-only Avito field contract for Campaign editors."""
+    from app.api.feed_contract import resolve_feed_contract, SYSTEM_FIELDS
+    # Auth is mandatory; the contract itself is shared metadata and carries no
+    # tenant business data.
+    if not _allowed_accounts(db,user):
+        raise HTTPException(403,"Нет доступных аккаунтов")
+    contract=resolve_feed_contract(str(template_id or "").strip(),_db=db)
+    if not contract.get("ok"):
+        raise HTTPException(404,"Категория Avito не найдена")
+    fields=[]
+    for tag,spec in (contract.get("fields") or {}).items():
+        if tag in SYSTEM_FIELDS:
+            continue
+        fields.append({
+            "field":tag,
+            "label":str(spec.get("name_ru") or tag),
+            "required":bool(spec.get("required")),
+            "allowed_values":list(spec.get("allowed") or []),
+            "depends_on":str(spec.get("depends_on") or ""),
+            "multiple":bool(spec.get("multiple")),
+        })
+    return {
+        "status":"ok",
+        "template_id":str(contract.get("template_id") or ""),
+        "category_path":str(contract.get("category_path") or ""),
+        "contract_version":str(contract.get("contract_version") or ""),
+        "fields":fields,
+    }
+
+
+@router.get("/project-context")
+def campaign_project_context(account_id: str = Query(...), db=Depends(_db), user=Depends(get_current_user)):
+    """Read-only human project facts imported from prior discussions.
+
+    The connector/importer is intentionally external to Campaign. This route
+    never fetches chats and never treats discussion prices as commercial truth.
+    Only confirmed/relevant account-scoped facts are surfaced.
+    """
+    aid=str(account_id or "").strip()
+    if aid not in _allowed_accounts(db,user):
+        raise HTTPException(status_code=404,detail="Аккаунт не найден")
+    row=db.execute(_t(
+        """SELECT key,value FROM storage
+           WHERE account_id=:a AND key IN ('existing_manus_context','project_discussion_context')
+           ORDER BY id DESC LIMIT 1"""
+    ),{"a":aid}).mappings().first()
+    if not row:
+        return {"status":"ok","account_id":aid,"connected":False,"facts":[],"source":None}
+    try:
+        payload=json.loads(row.get("value") or "{}")
+    except Exception:
+        payload={}
+    raw_facts=list(payload.get("facts") or []) if isinstance(payload,dict) else []
+    facts=[]
+    allowed_categories={
+        "priority_products","forbidden_claims","preferred_positioning",
+        "client_goals","cities","design_preferences","special_rules",
+    }
+    for raw in raw_facts[:200]:
+        if not isinstance(raw,dict):
+            continue
+        confidence=str(raw.get("confidence") or raw.get("status") or "").strip().lower()
+        category=str(raw.get("category") or "").strip()
+        text_value=str(raw.get("text") or raw.get("value") or "").strip()
+        if confidence not in {"confirmed","relevant"} or category not in allowed_categories or not text_value:
+            continue
+        facts.append({
+            "category":category,
+            "text":text_value[:1000],
+            "confidence":"confirmed" if confidence=="confirmed" else "relevant",
+            "source_badge":"Из прошлых обсуждений",
+        })
+    return {
+        "status":"ok","account_id":aid,"connected":True,
+        "facts":facts[:50],
+        "source":"existing_discussion_context",
+        "price_policy":"discussion_prices_require_current_verified_source",
+    }
 
 
 @router.get("/context")
@@ -501,6 +1142,11 @@ def campaign_account_context(account_id: str = Query(...), db=Depends(_db), user
 
     _launcher_entries_services=[{"title":x,**_resolved_launcher_hint(x,"services")} for x in _launcher_services]
     _launcher_entries_products=[{"title":x,**_resolved_launcher_hint(x,"products")} for x in _launcher_products]
+    _price_directions=[]
+    for _entry in (_launcher_entries_services + _launcher_entries_products):
+        _title=str(_entry.get("title") or "").strip()
+        if _title and _title not in _price_directions: _price_directions.append(_title)
+    _resolved_prices=_campaign_resolve_prices(db, aid, _price_directions, feed_hint_rows)
 
     return {
         "status": "ok",
@@ -516,6 +1162,7 @@ def campaign_account_context(account_id: str = Query(...), db=Depends(_db), user
         "launcher_directions_products": _launcher_products,
         "launcher_entries_services": _launcher_entries_services,
         "launcher_entries_products": _launcher_entries_products,
+        "resolved_prices": _resolved_prices,
         "launcher_kind": _profile_kind or None,
         "sources": {
             "profile": bool(account),
@@ -828,6 +1475,8 @@ def create_campaign(body: CreateCampaignBody, db=Depends(_db),
     acc = (body.account_id or "").strip()
     if acc and acc not in allowed:
         raise HTTPException(status_code=403, detail="Нет доступа к аккаунту")
+    if acc:
+        _require_manage_ads(db,user,acc)
     row = CS.new_campaign(db, name=body.name, owner_user_id=getattr(user, "id", None),
                           default_account_id=acc or None,
                           scenario_type=body.scenario_type or None,
@@ -856,8 +1505,503 @@ def list_campaigns(account_id: str = "", db=Depends(_db),
     rows = (db.query(Campaign).filter(Campaign.id.in_(list(ids | empty) or [0]),
                                       Campaign.status != "superseded")
               .order_by(Campaign.id.desc()).limit(100).all())
+
+    # CAMPAIGN_CURRENT_FEED_RECONCILE_V1: the live Feed projection can outlive
+    # (or be superseded away from) the Campaign row that originally produced it.
+    # Surface that truth explicitly instead of telling the owner "0 campaigns"
+    # while storage.feed_items still contains current account-scoped identities.
+    # This is read-only: no Campaign/Feed state is repaired or recreated here.
+    feed_reconcile = None
+    if account_id:
+        from app.models.storage import Storage
+        feed_row = (db.query(Storage)
+                    .filter(Storage.account_id == account_id, Storage.key == "feed_items")
+                    .order_by(Storage.id.desc()).first())
+        try:
+            feed_data = json.loads(feed_row.value or "[]") if feed_row else []
+        except Exception:
+            feed_data = []
+        feed_ids = sorted({
+            str(item.get("id") or "").strip()
+            for item in feed_data
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        }) if isinstance(feed_data, list) else []
+        feed_id_set = set(feed_ids)
+        matched_ids = set()
+        mapped_campaign_ids = set()
+        if feed_ids:
+            matched = (db.query(CampaignItem.campaign_id,
+                                CampaignItem.feed_identity,
+                                CampaignItem.external_item_id)
+                       .filter(CampaignItem.account_id == account_id)
+                       .filter((CampaignItem.feed_identity.in_(feed_ids)) |
+                               (CampaignItem.external_item_id.in_(feed_ids)))
+                       .all())
+            for campaign_id, feed_identity, external_item_id in matched:
+                mapped_campaign_ids.add(int(campaign_id))
+                for identity in (feed_identity, external_item_id):
+                    identity = str(identity or "").strip()
+                    if identity in feed_id_set:
+                        matched_ids.add(identity)
+        status_by_id = {}
+        if mapped_campaign_ids:
+            status_by_id = {
+                int(cid): str(status or "")
+                for cid, status in db.query(Campaign.id, Campaign.status)
+                .filter(Campaign.id.in_(sorted(mapped_campaign_ids))).all()
+            }
+        visible_campaign_ids = sorted(
+            cid for cid in mapped_campaign_ids
+            if status_by_id.get(cid) != "superseded"
+        )
+        superseded_campaign_ids = sorted(
+            cid for cid in mapped_campaign_ids
+            if status_by_id.get(cid) == "superseded"
+        )
+        unmapped = max(0, len(feed_ids) - len(matched_ids))
+        if not feed_ids:
+            reconcile_state = "NO_CURRENT_FEED"
+        elif not visible_campaign_ids:
+            reconcile_state = "CURRENT_FEED_WITHOUT_VISIBLE_CAMPAIGN"
+        elif unmapped:
+            reconcile_state = "PARTIAL_MAPPING"
+        else:
+            reconcile_state = "READY"
+
+        # Feed-mapped, non-superseded campaigns are authoritative for the selected
+        # account even when the legacy projection missed them. Merge only IDs
+        # proven through this account's current Feed identities.
+        recovered_campaign_ids = []
+        if visible_campaign_ids:
+            existing_row_ids = {int(getattr(row, "id", 0) or 0) for row in rows}
+            missing_visible_ids = [cid for cid in visible_campaign_ids if cid not in existing_row_ids]
+            if missing_visible_ids:
+                recovered = (db.query(Campaign)
+                             .filter(Campaign.id.in_(missing_visible_ids),
+                                     Campaign.status != "superseded")
+                             .order_by(Campaign.id.desc()).all())
+                recovered_campaign_ids = [int(row.id) for row in recovered]
+                rows = sorted([*rows, *recovered],
+                              key=lambda row: int(getattr(row, "id", 0) or 0),
+                              reverse=True)[:100]
+
+        feed_reconcile = {
+            "state": reconcile_state,
+            "current_feed_count": len(feed_ids),
+            "mapped_current_feed_count": len(matched_ids),
+            "unmapped_current_feed_count": unmapped,
+            "visible_campaign_ids": visible_campaign_ids,
+            "superseded_campaign_ids": superseded_campaign_ids,
+            "recovered_campaign_ids": recovered_campaign_ids,
+        }
+
+    # CAMPAIGN_OVERVIEW_DURABLE_PROGRESS_V1: project cards must survive a
+    # browser refresh and show the exact server-side job state instead of a local
+    # spinner. Use the newest durable Campaign job per campaign/account.
+    from app.models.background_job import BackgroundJob
+    from app.services.jobs import job_public as _campaign_job_public
+    _jobs_by_campaign = {}
+    if rows:
+        _row_ids = {int(getattr(r, "id", 0) or 0) for r in rows}
+        _job_rows = (db.query(BackgroundJob)
+                     .filter(BackgroundJob.kind.in_((
+                         "campaign_prepare","campaign_enhance","campaign_banners","campaign_deliver","campaign_editor",
+                         "campaign_inventory_maintain",
+                     )))
+                     .filter(BackgroundJob.account_id.in_(allowed or [""]))
+                     .order_by(BackgroundJob.id.desc()).limit(300).all())
+        for _job in _job_rows:
+            _payload = dict(_job.payload_json or {})
+            _result = dict(_job.result_json or {})
+            try:
+                _cid = int(_payload.get("campaign_id") or _result.get("campaign_id") or 0)
+            except Exception:
+                _cid = 0
+            if _cid <= 0 or _cid not in _row_ids or _cid in _jobs_by_campaign:
+                continue
+            _public_job = _campaign_job_public(_job)
+            _public_job["stage"] = str(_result.get("stage") or _payload.get("stage") or "")
+            _jobs_by_campaign[_cid] = _public_job
+
+    _campaigns = []
+    for _row in rows:
+        _public = CS.campaign_public(db, _row)
+        _cid = int(getattr(_row, "id", 0) or 0)
+        _public["active_job"] = _jobs_by_campaign.get(_cid)
+        _campaigns.append(_public)
+
     return {"status": "ok",
-            "campaigns": [CS.campaign_public(db, r) for r in rows]}
+            "campaigns": _campaigns,
+            "feed_reconcile": feed_reconcile}
+
+
+
+@router.get("/timeline/search")
+def campaign_timeline_search(account_id: str, q: str = "", category: str = "all",
+        period: str = "all", start: str = "", end: str = "", tz: str = "Europe/Moscow",
+        cursor: str = "", limit: int = Query(40, ge=1, le=100),
+        db=Depends(_db), user=Depends(get_current_user)):
+    if account_id not in _allowed_accounts(db,user):
+        raise HTTPException(403,"Нет доступа к аккаунту")
+    from app.services.campaign_history import page
+    return page(db,account_id,q=q,category=category,period=period,start=start,end=end,tz=tz,cursor=cursor,limit=limit)
+
+@router.get("/timeline/export")
+def campaign_timeline_export(account_id: str, q: str = "", category: str = "all",
+        period: str = "all", start: str = "", end: str = "", tz: str = "Europe/Moscow",
+        db=Depends(_db), user=Depends(get_current_user)):
+    if account_id not in _allowed_accounts(db,user):
+        raise HTTPException(403,"Нет доступа к аккаунту")
+    from app.services.campaign_history import page, csv_chunk
+    from fastapi.responses import StreamingResponse
+    from app.db.session import SessionLocal
+    args=dict(q=q,category=category,period=period,start=start,end=end,tz=tz,limit=100)
+    first=page(db,account_id,**args)
+    def stream():
+        yield "\ufeff"+csv_chunk(first["items"],header=True,tz=tz)
+        cursor=first["next_cursor"]
+        with SessionLocal() as session:
+            while cursor:
+                result=page(session,account_id,cursor=cursor,**args)
+                yield csv_chunk(result["items"],tz=tz)
+                cursor=result["next_cursor"]
+    return StreamingResponse(stream(),media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":'attachment; filename="campaign-history.csv"',"Cache-Control":"no-store"})
+
+@router.get("/timeline")
+def campaign_timeline(account_id: str, limit: int = Query(40, ge=1, le=100),
+                      db=Depends(_db), user=Depends(get_current_user)):
+    """Human client timeline built only from real action_log rows.
+
+    Consecutive per-item writes from one bulk intent are projected as one event,
+    so a real batch does not look like dozens of fake duplicate messages.
+    """
+    if account_id not in _allowed_accounts(db, user):
+        raise HTTPException(403, "Нет доступа к аккаунту")
+    raw_limit=min(500,max(int(limit)*8,80))
+    rows = db.execute(_t("""
+        SELECT id,ts,actor,action,object_kind,object_name,before_val,after_val,reason,source,request_id
+        FROM action_log
+        WHERE account_id=:a
+          AND (
+            source LIKE 'campaign.%'
+            OR source LIKE 'avito.%'
+            OR source LIKE 'mass_editor%'
+            OR action ILIKE '%объявлен%'
+            OR action ILIKE '%Avito%'
+          )
+        ORDER BY id DESC
+        LIMIT :n
+    """), {"a": account_id, "n": raw_limit}).fetchall()
+    actor_names = {
+        "boris": "BORIS",
+        "boris_auto": "BORIS",
+        "cron": "BORIS",
+        "system": "BORIS",
+        "user": "Сотрудник",
+    }
+    def _timeline_safe(value) -> str:
+        text_value=str(value or "")
+        text_value=re.sub(
+            r"(?i)\b(authorization|bearer|token|access_token|refresh_token|client_secret|secret|password|cookie|session_token)\b\s*[:=]\s*[^\s,;]+",
+            lambda m: m.group(1)+"=[скрыто]",
+            text_value,
+        )
+        text_value=re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer [скрыто]", text_value)
+        text_value=re.sub(r"<[^>]+>", " ", text_value)
+        return " ".join(text_value.split())[:700]
+
+    events=[]
+    for row in rows:
+        events.append({
+            "id":int(row[0]),
+            "when":row[1],
+            "actor_raw":str(row[2] or ""),
+            "actor":actor_names.get(str(row[2] or ""), "BORIS"),
+            "action":_timeline_safe(row[3]),
+            "object_kind":_timeline_safe(row[4]),
+            "object_name":_timeline_safe(row[5]),
+            "before":_timeline_safe(row[6]),
+            "after":_timeline_safe(row[7]),
+            "reason":_timeline_safe(row[8]),
+            "source":str(row[9] or ""),
+            "request_id":str(row[10] or ""),
+        })
+
+    # Real editor batches historically emitted one action_log row per item.
+    # Collapse only rows that are provably the same actor/action/source and were
+    # written within a tiny burst; unrelated real events stay separate.
+    grouped=[]
+    for event in events:
+        prev=grouped[-1] if grouped else None
+        can_group=False
+        if prev and event["source"] in {"campaign.item_patch","campaign.bulk_transform"}:
+            try:
+                delta=abs((prev["_last_when"]-event["when"]).total_seconds())
+            except Exception:
+                delta=999
+            can_group=(
+                delta<=3
+                and prev["_actor_raw"]==event["actor_raw"]
+                and prev["_action_raw"]==event["action"]
+                and prev["_source"]==event["source"]
+                and not event["before"] and not event["after"]
+            )
+        if can_group:
+            prev["count"]+=1
+            if event["object_name"] and event["object_name"] not in prev["objects"]:
+                prev["objects"].append(event["object_name"])
+            prev["_last_when"]=event["when"]
+            prev["first_id"]=min(prev["first_id"],event["id"])
+            continue
+        grouped.append({
+            "id":event["id"],
+            "first_id":event["id"],
+            "when":event["when"],
+            "_last_when":event["when"],
+            "_actor_raw":event["actor_raw"],
+            "_action_raw":event["action"],
+            "_source":event["source"],
+            "actor":event["actor"],
+            "action":event["action"],
+            "object_kind":event["object_kind"],
+            "object_name":event["object_name"],
+            "objects":[event["object_name"]] if event["object_name"] else [],
+            "before":event["before"],
+            "after":event["after"],
+            "reason":event["reason"],
+            "count":1,
+            "request_id":event["request_id"],
+        })
+
+    items=[]
+    for group in grouped[:int(limit)]:
+        count=int(group["count"])
+        actor=group["actor"]
+        title=group["action"] or "Действие по объявлениям"
+        if group["_source"]=="campaign.item_patch":
+            if count>1:
+                _n10=count%10; _n100=count%100
+                _word=("объявление" if _n10==1 and _n100!=11 else ("объявления" if _n10 in {2,3,4} and _n100 not in {12,13,14} else "объявлений"))
+                title=f"{actor} обновил {count} {_word}"
+            elif group["object_name"]:
+                title=f"{actor} изменил объявление «{group['object_name']}»"
+        try:
+            duration_ms=max(0,int(abs((group["when"]-group["_last_when"]).total_seconds())*1000)) if group["when"] and group["_last_when"] else 0
+        except Exception:
+            duration_ms=0
+        items.append({
+            "id":group["id"],
+            "when":group["when"].isoformat() if group["when"] else None,
+            "duration_ms":duration_ms,
+            "actor":actor,
+            "action":title,
+            "object_kind":group["object_kind"],
+            "object_name":group["object_name"],
+            "objects":group["objects"][:50],
+            "count":count,
+            "before":group["before"],
+            "after":group["after"],
+            "reason":group["reason"],
+            "has_details":bool(group["before"] or group["after"] or group["reason"] or count>1),
+        })
+    return {"status":"ok","account_id":account_id,"items":items,"total":len(items),"source":"real_action_log","history_contract":2}
+
+
+@router.get("/tasks")
+def campaign_task_history(account_id: str, campaign_id: int = 0,
+                          limit: int = Query(50, ge=1, le=100), cursor: str = "",
+                          db=Depends(_db), user=Depends(get_current_user)):
+    """Real durable Campaign job history with truthful timers."""
+    if account_id not in _allowed_accounts(db,user):
+        raise HTTPException(403,"Нет доступа к аккаунту")
+    from datetime import datetime, timezone
+    from app.models.background_job import BackgroundJob
+    relevant={
+        "campaign_prepare","campaign_enhance","campaign_banners","campaign_deliver","campaign_editor",
+        "campaign_inventory_maintain","campaign_post_publish_watch",
+        "client_owner_contract","photo_session","media_reconcile",
+    }
+    kind_labels={
+        "campaign_prepare":"Подготовка объявлений",
+        "campaign_editor":"Правка объявления",
+        "campaign_enhance":"Улучшение текстов",
+        "campaign_banners":"Создание баннеров",
+        "campaign_deliver":"Передача и проверка в Avito",
+        "campaign_inventory_maintain":"Поддержание активных объявлений",
+        "campaign_post_publish_watch":"Проверка результата публикации",
+        "client_owner_contract":"Подготовка клиентского результата",
+        "photo_session":"Подготовка фотографий",
+        "media_reconcile":"Обработка фотографий",
+    }
+    status_labels={
+        "queued":"В очереди","awaiting_confirmation":"Ждёт подтверждения",
+        "running":"В работе","validating":"Проверка результата",
+        "completed":"Завершена","partial":"Завершена частично",
+        "failed":"Ошибка","cancelled":"Остановлена",
+    }
+    stage_labels={
+        "competitor":"Анализ рынка","structure":"Структура объявлений",
+        "materialize":"Создание карточек","texts":"Тексты","media":"Фотографии",
+        "banners":"Баннеры","validation":"Проверка","safe_feed":"Подготовка Avito",
+        "sending":"Передача в Avito","awaiting_avito_result":"Avito проверяет",
+        "awaiting_scheduled_url_result":"Avito забирает обновление",
+        "snapshot":"Сверка профиля","reactivate":"Проверка завершённых",
+        "create_new":"Создание недостающих","verify":"Финальная проверка",
+        "preflight":"Предварительная проверка","internal_validation":"Внутренняя проверка",
+        "official_avito_validation":"Проверка требований Avito",
+        "ready_for_review":"Готово к проверке",
+    }
+    import base64
+    from sqlalchemy import or_,and_,func,cast,String,literal
+    page_before=None
+    if cursor:
+        try:
+            page_before=json.loads(base64.urlsafe_b64decode(cursor+"="*(-len(cursor)%4)))
+            if page_before["a"]!=account_id or page_before["c"]!=campaign_id:raise ValueError()
+            page_before["time"]=datetime.fromisoformat(page_before["t"])
+        except Exception:raise HTTPException(422,"Обновите список задач")
+    q=db.query(BackgroundJob).filter(BackgroundJob.account_id==account_id,BackgroundJob.kind.in_(relevant))
+    if campaign_id:q=q.filter(BackgroundJob.payload_json["campaign_id"].astext==str(campaign_id))
+    if page_before:
+        key=literal("b:")+func.lpad(cast(BackgroundJob.id,String),20,"0")
+        q=q.filter(or_(BackgroundJob.created_at<page_before["time"],and_(BackgroundJob.created_at==page_before["time"],key<page_before["k"])))
+    rows=q.order_by(BackgroundJob.created_at.desc(),BackgroundJob.id.desc()).limit(int(limit)+1).all()
+    now=datetime.now(timezone.utc)
+    items=[]
+    for row in rows:
+        if str(row.kind or "") not in relevant:
+            continue
+        payload=dict(row.payload_json or {})
+        cid=int(payload.get("campaign_id") or 0)
+        if campaign_id and cid!=int(campaign_id):
+            continue
+        created=row.created_at
+        started=row.started_at
+        finished=row.finished_at
+        end=finished or now
+        total_seconds=max(0,int((end-created).total_seconds())) if created else None
+        active_seconds=max(0,int((end-started).total_seconds())) if started else None
+        waiting_seconds=max(0,int((started-created).total_seconds())) if started and created else (total_seconds if created and not started and not finished else 0)
+        from app.services.job_execution_clock import summary as _timing_summary
+        _clock=_timing_summary(row)
+        total_seconds=_clock["duration_total_seconds"]
+        active_seconds=_clock["duration_active_seconds"]
+        waiting_seconds=_clock["duration_waiting_seconds"]
+        done=int(row.progress_done or 0); total=int(row.progress_total or 0)
+        percent=(100 if row.status=="completed" else (round(done*100/total) if total>0 else 0))
+        items.append({
+            "id":int(row.id),"_page_key":"b:"+str(row.id).zfill(20),
+            "campaign_id":cid or None,
+            "title":kind_labels.get(str(row.kind or ""),"Задача BORIS"),
+            "status":str(row.status or ""),
+            "status_text":status_labels.get(str(row.status or ""),"BORIS работает"),
+            "stage_text":stage_labels.get(str(payload.get("stage") or ""),""),
+            "created_at":created.isoformat() if created else None,
+            "started_at":started.isoformat() if started else None,
+            "finished_at":finished.isoformat() if finished else None,
+            "last_progress_at":row.updated_at.isoformat() if row.updated_at else None,
+            "duration_total_seconds":total_seconds,
+            "duration_active_seconds":active_seconds,
+            "duration_waiting_seconds":waiting_seconds,
+            "duration_provider_seconds":_clock["duration_provider_seconds"],
+            "timing_contract":_clock["timing_contract"],
+            "done":done,"total":total,"progress_percent":percent,
+            "retries":max(0,int(payload.get("_failure_count") or 0)+int(payload.get("_recovery_count") or 0)),
+            "problem":"BORIS не завершил один из этапов. Повтор возможен после проверки причины." if row.status=="failed" else None,
+        })
+
+    # MASS_EDITOR_TASK_TIMERS_V1: the legacy/Avito bulk editor has its own
+    # durable jobs in storage. Surface them in the same client task history so a
+    # mass edit never looks like an untracked background action.
+    if not campaign_id:
+        mass_sql="""WITH valid AS (SELECT id,key,value,CASE WHEN pg_input_is_valid(value,'jsonb') THEN value::jsonb ELSE '{}'::jsonb END AS obj FROM storage WHERE account_id=:a AND key LIKE 'mass_editor_job:%'), m AS (SELECT id,key,value,CASE WHEN pg_input_is_valid(obj->>'created_at','timestamptz') THEN (obj->>'created_at')::timestamptz ELSE 'epoch'::timestamptz END AS created FROM valid) SELECT id,key,value FROM m """
+        mass_args={"a":account_id,"n":int(limit)+1}
+        if page_before:
+            mass_sql+="WHERE (created, 'm:'||lpad(id::text,20,'0')) < (:t, :k) "
+            mass_args.update(t=page_before["time"],k=page_before["k"])
+        mass_rows=db.execute(_t(mass_sql+"ORDER BY created DESC,id DESC LIMIT :n"),mass_args).fetchall()
+        for storage_id,key,raw in mass_rows:
+            try:
+                job=json.loads(raw or "{}")
+            except Exception:
+                continue
+            if not isinstance(job,dict):
+                continue
+            status=str(job.get("status") or "")
+            created_raw=str(job.get("created_at") or "").strip()
+            started_raw=str(job.get("started_at") or job.get("claimed_at") or "").strip()
+            finished_raw=str(job.get("finished_at") or job.get("completed_at") or "").strip()
+            updated_raw=str(job.get("updated_at") or "").strip()
+            def _dt(raw_value):
+                if not raw_value:
+                    return None
+                try:
+                    val=datetime.fromisoformat(raw_value.replace("Z","+00:00"))
+                    return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+                except Exception:
+                    return None
+            created_dt=_dt(created_raw); started_dt=_dt(started_raw); finished_dt=_dt(finished_raw); updated_dt=_dt(updated_raw)
+            terminal=status in {"completed","partial","failed","cancelled"}
+            paused=terminal or status.startswith("blocked") or status in {"waiting_external","pending_external_verification","needs_action"}
+            end_dt=finished_dt or (updated_dt if paused and updated_dt else now)
+            duration_total=max(0,int((end_dt-created_dt).total_seconds())) if created_dt else None
+            duration_active=max(0,int((end_dt-started_dt).total_seconds())) if started_dt else None
+            duration_waiting=max(0,int((started_dt-created_dt).total_seconds())) if started_dt and created_dt else (duration_total if created_dt and not started_dt else 0)
+            done=int(job.get("processed") or job.get("done") or 0); total=int(job.get("total") or 0)
+            mode=str(job.get("mode") or "")
+            title=("Проверка массовых изменений" if mode=="verify" else
+                   "Сверка текущих объявлений Avito" if mode=="scan" else
+                   "Массовое редактирование объявлений")
+            items.append({
+                "id":"mass:"+str(job.get("job_id") or key.split(":",1)[-1]),"_page_key":"m:"+str(storage_id).zfill(20),
+                "campaign_id":None,
+                "title":title,
+                "status":status,
+                "status_text":(
+                    status_labels.get(status)
+                    or ("Нужно подключить Avito" if status=="blocked_credentials" else
+                        "Нужно действие" if status.startswith("blocked") or status in {"waiting_external","pending_external_verification","needs_action"} else
+                        "Завершена" if terminal and status=="completed" else "В работе")
+                ),
+                "stage_text":(
+                    "Нужно подключить Avito" if status=="blocked_credentials" else
+                    ("Изменение карточек" if mode!="verify" else "Проверка результата")
+                ),
+                "created_at":created_dt.isoformat() if created_dt else None,
+                "started_at":started_dt.isoformat() if started_dt else None,
+                "finished_at":finished_dt.isoformat() if finished_dt else None,
+                "last_progress_at":updated_dt.isoformat() if updated_dt else None,
+                "duration_total_seconds":duration_total,
+                "duration_active_seconds":duration_active,
+                "duration_waiting_seconds":duration_waiting,
+                "done":done,"total":total,
+                "progress_percent":100 if status=="completed" else (round(done*100/total) if total>0 else 0),
+                "retries":int(job.get("retries") or 0),
+                "problem":str(job.get("error") or job.get("message") or "")[:300] if (status=="failed" or status.startswith("blocked")) else None,
+            })
+        def _sort_key(item):
+            raw=str(item.get("created_at") or "")
+            try:
+                return datetime.fromisoformat(raw.replace("Z","+00:00")).timestamp()
+            except Exception:
+                return 0
+    from app.services.campaign_history import public_text
+    def page_sort(item):
+        raw=item.get("created_at")
+        try:stamp=datetime.fromisoformat(raw.replace("Z","+00:00")).timestamp() if raw else 0
+        except Exception:stamp=0
+        return stamp,item["_page_key"]
+    items=sorted(items,key=page_sort,reverse=True)
+    more=len(items)>int(limit);items=items[:int(limit)]
+    next_cursor=None
+    if more and items:
+        last=items[-1]
+        next_cursor=base64.urlsafe_b64encode(json.dumps({"a":account_id,"c":campaign_id,"t":last.get("created_at") or "1970-01-01T00:00:00+00:00","k":last["_page_key"]}).encode()).decode().rstrip("=")
+    for item in items:
+        item.pop("_page_key",None)
+        if item.get("problem"):item["problem"]=public_text(item["problem"])
+    return {"status":"ok","account_id":account_id,"campaign_id":campaign_id or None,"items":items,"total":len(items),"next_cursor":next_cursor,"source":"background_jobs+mass_editor_jobs"}
 
 
 @router.get("/ab-tests")
@@ -875,26 +2019,540 @@ def campaign_ab_tests(account_id:str, db=Depends(_db), user=Depends(get_current_
     try: stats=json.loads(stat_raw or "{}")
     except Exception: stats={}
     by_item={}
+    by_avito={}
     for it in (stats.get("items") or [] if isinstance(stats,dict) else []):
         ident=it.get("campaign_identity") or {}
         cid=ident.get("campaign_item_id")
-        if cid is not None: by_item[str(cid)]=it
+        if cid is not None:
+            by_item[str(cid)]=it
+        avito_id=str(it.get("id") or it.get("item_id") or ident.get("avito_item_id") or "").strip()
+        if avito_id:
+            by_avito[avito_id]=it
+    # AB_CURRENT_WORKING_SET_V1: the client A/B screen is an actionable
+    # current-working-set, not an archive. Superseded/replaced rows and local
+    # draft revisions with stale Avito ids belong to History, otherwise the
+    # "Редактировать" button can lead into an old publication lifecycle.
+    from app.models.campaign_item import CampaignItem as _ABCampaignItem
+    account_rows=(db.query(_ABCampaignItem)
+                  .filter(_ABCampaignItem.account_id==account_id)
+                  .all())
+    row_by_item={str(int(row.id)):row for row in account_rows}
+    def _ab_row_is_current(row, provider_state: str="", finish_marker=None) -> bool:
+        if row is None:
+            return False
+        lifecycle=str(getattr(row,"status","") or "").strip().lower()
+        identity=str(getattr(row,"identity_status","") or "").strip().lower()
+        if lifecycle=="superseded" or identity.startswith("superseded"):
+            return False
+        provider=str(provider_state or "").strip().lower()
+        if lifecycle in {"published","publishing"}:
+            return True
+        if lifecycle in {"draft","rejected","archived"}:
+            return bool(finish_marker)
+        if provider in {"active","old","inactive","closed","expired","removed"}:
+            return True
+        return bool(finish_marker)
+
     out=[]
     seen=set()
     for snap in snapshots:
         for it in snap.get("items") or []:
             k=str(it.get("item_id") or "")
             if not k or k in seen: continue
-            seen.add(k); m=by_item.get(k) or {}
-            out.append({**it,"views":int(m.get("views") or 0),"contacts":int(m.get("contacts") or 0),"conversion":float(m.get("conversion") or 0),"avito_status":m.get("status") or "waiting_data"})
+            m=by_item.get(k) or by_avito.get(str(it.get("avito_item_id") or "")) or {}
+            snap_row=row_by_item.get(k)
+            finish_marker=(it.get("ab_finish_requested") if isinstance(it,dict) else None)
+            if not _ab_row_is_current(snap_row,str(m.get("status") or ""),finish_marker):
+                continue
+            seen.add(k)
+            out.append({**it,"views":int(m.get("views") or 0),"contacts":int(m.get("contacts") or 0),"conversion":float(m.get("conversion") or 0),"avito_status":m.get("status") or getattr(snap_row,"status","waiting_data")})
+
+    # AB_AUTO_ENROLL_PUBLISHED_V1: every current BORIS campaign item that
+    # actually reached Avito participates automatically. Historical snapshot
+    # storage remains supported but superseded/draft-only rows stay in History.
+    published_rows=account_rows
+    for row in published_rows:
+        item_key=str(int(row.id))
+        avito_id=str(getattr(row,"avito_item_id",None) or "").strip()
+        try:
+            payload=json.loads(row.payload_json or "{}")
+        except Exception:
+            payload={}
+        m=by_item.get(item_key) or by_avito.get(avito_id) or {}
+        finish_marker=payload.get("ab_finish_requested") if isinstance(payload.get("ab_finish_requested"),dict) else None
+        if not _ab_row_is_current(row,str(m.get("status") or ""),finish_marker):
+            continue
+        if item_key in seen:
+            # Snapshot row already exists; enrich it later with the canonical
+            # hypothesis/formula data from the current CampaignItem.
+            for existing in out:
+                if str(existing.get("item_id") or "")==item_key:
+                    existing.setdefault("campaign_id",int(row.campaign_id))
+                    existing.setdefault("avito_item_id",avito_id or None)
+                    existing.setdefault("formula_id",payload.get("copy_formula_id") or payload.get("formula_family"))
+                    existing.setdefault("hypothesis",payload.get("hypothesis") or payload.get("creative_angle") or payload.get("angle"))
+                    existing.setdefault("creative_angle",payload.get("creative_angle") or payload.get("angle"))
+                    existing.setdefault("scale_parent_item_id",payload.get("scale_parent_item_id"))
+                    existing.setdefault("ab_finish_requested",payload.get("ab_finish_requested"))
+                    break
+            continue
+        seen.add(item_key)
+        m=by_item.get(item_key) or by_avito.get(avito_id) or {}
+        views=int(m.get("views") or m.get("uniqViews") or 0)
+        contacts=int(m.get("contacts") or m.get("uniqContacts") or 0)
+        conversion=round((contacts/views*100.0),2) if views>0 else 0.0
+        out.append({
+            "item_id":int(row.id),
+            "campaign_id":int(row.campaign_id),
+            "avito_item_id":avito_id or None,
+            "title":str(payload.get("title") or ""),
+            "description":str(payload.get("description") or ""),
+            "banner_url":str(payload.get("banner_url") or ""),
+            "views":views,
+            "contacts":contacts,
+            "conversion":conversion,
+            "avito_status":str(m.get("status") or row.status or "waiting_data"),
+            "formula_id":payload.get("copy_formula_id") or payload.get("formula_family"),
+            "hypothesis":payload.get("hypothesis") or payload.get("creative_angle") or payload.get("angle"),
+            "creative_angle":payload.get("creative_angle") or payload.get("angle"),
+            "scale_parent_item_id":payload.get("scale_parent_item_id"),
+            "ab_finish_requested":payload.get("ab_finish_requested"),
+            "auto_enrolled":True,
+        })
+
+    formula_names={
+        "AIDA":"Внимание → интерес → желание → действие",
+        "PAS":"Проблема → усиление боли → решение",
+        "FAB":"Характеристика → преимущество → выгода",
+        "BAB":"До → после → как получить результат",
+        "4P":"Обещание → картина результата → доказательства → действие",
+        "QUEST":"Понимание клиента → ценность → действие",
+        "OBJECTION":"Снятие возражений",
+        "EXPERT":"Экспертная подача",
+        "RESULT":"Фокус на результате",
+        "COMPARISON":"Сравнение вариантов",
+        "PROCESS":"Понятный процесс работы",
+    }
+    def _participating(x):
+        row=row_by_item.get(str(x.get("item_id")))
+        return row is not None and (_ff_payload(row).get("ab_participation") or {}).get("state")!="paused"
+    measured_conversions=[float(x.get("conversion") or 0) for x in out if _participating(x) and int(x.get("views") or 0)>=30 and int(x.get("contacts") or 0)>=1]
+    measured_sorted=sorted(measured_conversions)
+    median_conversion=(measured_sorted[len(measured_sorted)//2] if measured_sorted else None)
+    leader_item=None
+    leader_candidates=[x for x in out if _participating(x) and int(x.get("views") or 0)>=30 and int(x.get("contacts") or 0)>=3]
+    if leader_candidates:
+        leader_item=max(leader_candidates,key=lambda x:(float(x.get("conversion") or 0),int(x.get("contacts") or 0),int(x.get("views") or 0)))
+
+    for item in out:
+        # Client projection must never expose stored HTML/service markup.
+        item["title"]=" ".join(re.sub(r"<[^>]+>"," ",str(item.get("title") or "")).split())
+        item["description"]=" ".join(re.sub(r"<[^>]+>"," ",str(item.get("description") or "")).split())
+        views=int(item.get("views") or 0)
+        contacts=int(item.get("contacts") or 0)
+        conversion=float(item.get("conversion") or 0)
+        formula=str(item.get("formula_id") or "").strip().upper()
+        raw_hyp=str(item.get("hypothesis") or "").strip()
+        item["formula_label"]=formula_names.get(formula,formula or "Рекламный подход")
+        if raw_hyp:
+            if ":" in raw_hyp and raw_hyp.split(":",1)[0].upper() in formula_names:
+                raw_hyp=raw_hyp.split(":",1)[1].strip()
+            item["hypothesis_label"]=raw_hyp[:240]
+        else:
+            angle=str(item.get("creative_angle") or "").strip().replace("_"," ")
+            item["hypothesis_label"]=(angle[:240] if angle else (
+                item["formula_label"] if formula
+                else "Историческое объявление — отдельная гипотеза не сохранялась"
+            ))
+        finish_marker=item.get("ab_finish_requested") if isinstance(item.get("ab_finish_requested"),dict) else {}
+        provider_state=str(item.get("avito_status") or "").strip().lower()
+        if finish_marker and provider_state in {"old","inactive","closed","expired","removed"}:
+            state="finished"
+            state_label="Завершено"
+            action_hint="Avito подтвердил, что объявление больше не активно."
+        elif finish_marker:
+            state="finishing"
+            state_label="Завершается"
+            action_hint="BORIS уже передал изменение и ждёт подтверждение Avito."
+        elif views>=30 and contacts==0:
+            state="weak"
+            state_label="Слабее остальных"
+            action_hint="Просмотров уже достаточно, но обращений нет. Можно завершить объявление или запустить новую гипотезу."
+        elif views<30 or contacts<3:
+            state="collecting"
+            state_label="Пока мало данных"
+            action_hint="BORIS продолжает собирать просмотры и обращения."
+        elif leader_item is not None and int(item.get("item_id") or 0)==int(leader_item.get("item_id") or 0):
+            state="leader"
+            state_label="Есть лидер"
+            action_hint="Этот подход можно масштабировать после проверки качества обращений."
+        elif contacts==0 or (median_conversion is not None and conversion < float(median_conversion)*0.5):
+            state="weak"
+            state_label="Слабее остальных"
+            action_hint="Можно завершить объявление или запустить новую гипотезу."
+        else:
+            state="testing"
+            state_label="Тестируется"
+            action_hint="Данных достаточно для сравнения, но явного лидера пока нет."
+        item["experiment_state"]=state
+        item["experiment_state_label"]=state_label
+        item["action_hint"]=action_hint
+        row=row_by_item.get(str(item.get("item_id")))
+        participation=(_ff_payload(row).get("ab_participation") or {}) if row else {}
+        item["updated_at"]=row.updated_at.isoformat() if row and row.updated_at else None
+        item["enrolled"]=participation.get("state")!="paused"
+        if not item["enrolled"]:
+            item["experiment_state"]="paused"
+            item["experiment_state_label"]="Тест приостановлен"
+            item["action_hint"]="Объявление остаётся на площадке. Можно возобновить тот же тест."
+
+
+    # Canonical durable A/B history. This is strictly account-scoped and read-only.
+    history=[]
+    try:
+        from app.models.campaign_item import CampaignItem
+        history_rows=db.query(CampaignItem).filter(CampaignItem.account_id==account_id).all()
+    except Exception:
+        history_rows=[]
+    state_map={"pending":"NEW","observing":"RUNNING","improved":"WINNER","worse":"LOSER","no_clear_effect":"INCONCLUSIVE","insufficient_data":"INCONCLUSIVE"}
+    for row in history_rows:
+        try: payload=json.loads(row.payload_json or "{}")
+        except Exception: continue
+        if not isinstance(payload,dict): continue
+        for version in (payload.get("optimization_versions") or []):
+            if not isinstance(version,dict): continue
+            result=str(version.get("result") or "pending").strip().lower()
+            after=version.get("kpi_after") or {}
+            observations=version.get("observations") or []
+            views=sum(int(x.get("views") or 0) for x in observations if isinstance(x,dict)) if isinstance(observations,list) else 0
+            contacts=sum(int(x.get("contacts") or 0) for x in observations if isinstance(x,dict)) if isinstance(observations,list) else 0
+            if isinstance(after,dict):
+                views=max(views,int(after.get("views") or 0)); contacts=max(contacts,int(after.get("contacts") or 0))
+            history.append({"campaign_item_id":row.id,"version":version.get("version"),
+                            "formula_id":version.get("formula_id") or version.get("copy_formula_id") or payload.get("copy_formula_id"),
+                            "result":result,"state":state_map.get(result,"INCONCLUSIVE"),
+                            "views":views,"contacts":contacts,"kpi_after":after,
+                            "decision":version.get("decision"),"updated_at":version.get("timestamp")})
+    # GET is a read-only projection. Durable learning is written by the
+    # observation/materialization path, not by a browser read.
     memory={"account_id":account_id,"stats_date":stats.get("stats_date") or stats.get("date"),"items":out}
-    val=json.dumps(memory,ensure_ascii=False)
-    ex=db.execute(_t("SELECT id FROM storage WHERE account_id=:a AND key='avito_ab_learning_memory' ORDER BY id DESC LIMIT 1"),{"a":account_id}).first()
-    if ex: db.execute(_t("UPDATE storage SET value=:v WHERE id=:i"),{"v":val,"i":ex[0]})
-    else: db.execute(_t("INSERT INTO storage(account_id,key,value) VALUES(:a,'avito_ab_learning_memory',:v)"),{"a":account_id,"v":val})
+    ranked=sorted([x for x in out if x.get("enrolled") and x.get("experiment_state")=="leader"],key=lambda x:(x.get("conversion",0),x.get("contacts",0),x.get("views",0)),reverse=True)
+    return {"status":"ok","account_id":account_id,"stats_date":memory["stats_date"],"items":out,"leaders":ranked[:5],"total":len(out),"with_data":sum(1 for x in out if x.get("views",0)>0),"history":history,"history_total":len(history),"ab_actions_contract":2}
+
+
+
+
+
+def _campaign_owner_only(db,user,account_id):
+    if str(getattr(user,"role","")).lower()=="owner":
+        return
+    owned=db.execute(_t("SELECT 1 FROM accounts WHERE account_id=:a AND owner_user_id=:u"),
+        {"a":account_id,"u":getattr(user,"id",None)}).first()
+    if not owned: raise HTTPException(403,"Это действие доступно владельцу аккаунта")
+
+def _ab_event(db,item,action,user,extra=None):
+    from app.models.storage import Storage
+    from datetime import datetime,timezone
+    import uuid
+    payload=_ff_payload(item)
+    event={"when":datetime.now(timezone.utc).isoformat(),"action":action,
+        "actor":str(getattr(user,"email","") or "Сотрудник"),
+        "hypothesis":payload.get("hypothesis") or payload.get("creative_angle"),
+        "formula":payload.get("copy_formula_id") or payload.get("formula_family"),
+        "item_id":item.id,"campaign_id":item.campaign_id,**(extra or {})}
+    db.add(Storage(account_id=item.account_id,key=f"campaign_ab_event:{item.id}:{uuid.uuid4().hex}",
+        value=json.dumps(event,ensure_ascii=False)))
+    db.execute(_t("INSERT INTO action_log (account_id,actor,user_id,source,action,object_kind,object_name) VALUES (:a,'user',:u,:source,:act,'объявление',:name)"),
+        {"a":item.account_id,"u":getattr(user,"id",None),"source":f"campaign.ab:{item.campaign_id}:{item.id}","act":action[:64],"name":str(payload.get("title") or "")[:300]})
+
+@router.get("/ab-tests/{item_id}/journal")
+def campaign_ab_journal(item_id:int,account_id:str,cursor:int=0,
+        limit:int=Query(20,ge=1,le=100),db=Depends(_db),user=Depends(get_current_user)):
+    if account_id not in _allowed_accounts(db,user): raise HTTPException(403,"Нет доступа к аккаунту")
+    from app.models.campaign_item import CampaignItem
+    from app.models.storage import Storage
+    from app.services.campaign_history import public_text,OLD_DETAILS
+    item=db.query(CampaignItem).filter(CampaignItem.id==item_id,CampaignItem.account_id==account_id).first()
+    if not item: raise HTTPException(404,"Объявление не найдено")
+    q=db.query(Storage).filter(Storage.account_id==account_id,Storage.key.like(f"campaign_ab_event:{item_id}:%"))
+    if cursor:q=q.filter(Storage.id<cursor)
+    rows=q.order_by(Storage.id.desc()).limit(limit+1).all()
+    events=[]
+    for row in rows[:limit]:
+        try:event=json.loads(row.value)
+        except Exception:continue
+        events.append({"id":row.id,"when":event.get("when"),
+            **{k:public_text(event.get(k)) for k in ("action","actor","hypothesis","formula")},
+            "job_id":event.get("job_id")})
+    legacy=[]
+    if not cursor:
+        for e in (_ff_payload(item).get("optimization_versions") or [])[-20:]:
+            if not isinstance(e,dict) or not e.get("timestamp"):continue
+            legacy.append({"when":e["timestamp"],"action":"Наблюдение за результатом",
+                "actor":"BORIS","reason":public_text(e.get("decision")),"notice":OLD_DETAILS})
+    from datetime import datetime
+    observations=[]
+    if not cursor:
+        stats_rows=db.query(Storage).filter(Storage.account_id==account_id,Storage.key.like("daily_stats:%")).order_by(Storage.key.desc(),Storage.id.desc()).limit(30).all()
+        for saved in stats_rows:
+            try:stats=json.loads(saved.value)
+            except Exception:continue
+            if not isinstance(stats,dict):continue
+            day=str(stats.get("date") or saved.key.split(":",1)[-1])
+            try:datetime.fromisoformat(day)
+            except (ValueError,TypeError):continue
+            for metric in stats.get("items") or []:
+                if not isinstance(metric,dict):continue
+                ident=metric.get("campaign_identity") or {}
+                bound=ident.get("campaign_item_id")
+                same=(str(bound)==str(item.id)) if bound is not None else bool(item.avito_item_id and str(metric.get("id") or metric.get("item_id") or "")==str(item.avito_item_id))
+                if not same:continue
+                try:views=max(0,int(metric.get("views") or metric.get("uniqViews") or 0));contacts=max(0,int(metric.get("contacts") or metric.get("uniqContacts") or 0))
+                except (ValueError,TypeError):continue
+                observations.append({"date":day,"views":views,"contacts":contacts,"conversion":round(100*contacts/views,2) if views else None})
+                break
+    payload=_ff_payload(item)
+    return {"status":"ok","items":events,"legacy":legacy,"observations":observations,
+        "hypothesis":public_text(payload.get("hypothesis") or payload.get("creative_angle")),
+        "formula":public_text(payload.get("copy_formula_id") or payload.get("formula_family")),
+        "participation":"paused" if (payload.get("ab_participation") or {}).get("state")=="paused" else "participating",
+        "next_cursor":rows[limit-1].id if len(rows)>limit else None}
+
+
+class CampaignABActionBody(BaseModel):
+    account_id: str
+    item_id: int
+    action: str
+    count: int = 0
+    confirmed: bool = False
+    prompt: str = ""
+    expected_updated_at: dict | str | None = None
+
+
+def _ab_finish_managed_feed_item(db, account_id: str, row) -> dict:
+    """Stage an exact BORIS-owned feed item to finish via Avito DateEnd."""
+    from datetime import date, timedelta, datetime, timezone
+    from app.models.storage import Storage
+    from app.api.avito import _assert_no_legacy_visual_urls
+
+    feed_id=str(getattr(row,"feed_identity",None) or getattr(row,"external_item_id",None) or "").strip()
+    if not feed_id:
+        return {"status":"blocked","reason":"feed_identity_missing","changed_feed":False}
+    storage=db.query(Storage).filter(Storage.account_id==account_id,Storage.key=="feed_items").first()
+    if not storage or not storage.value:
+        return {"status":"blocked","reason":"canonical_feed_missing","changed_feed":False}
+    try:
+        feed=json.loads(storage.value or "[]")
+    except Exception:
+        feed=[]
+    if not isinstance(feed,list):
+        feed=[]
+    matches=[x for x in feed if isinstance(x,dict) and str(x.get("id") or x.get("Id") or "").strip()==feed_id]
+    if len(matches)!=1:
+        return {"status":"blocked","reason":"exact_feed_identity_not_unique","feed_identity":feed_id,"matches":len(matches),"changed_feed":False}
+    end=(date.today()-timedelta(days=1)).isoformat()
+    target=matches[0]
+    target["date_end"]=end
+    if "DateEnd" in target:
+        target["DateEnd"]=end
+    for feed_item in feed:
+        if isinstance(feed_item,dict):
+            _assert_no_legacy_visual_urls(db,account_id,feed_item.get("images") or [])
+    storage.value=json.dumps(feed,ensure_ascii=False)
+    try:
+        payload=json.loads(row.payload_json or "{}")
+    except Exception:
+        payload={}
+    payload["ab_finish_requested"]={
+        "requested_at":datetime.now(timezone.utc).isoformat(),
+        "feed_identity":feed_id,
+        "date_end":end,
+        "status":"staged",
+    }
+    row.payload_json=json.dumps(payload,ensure_ascii=False)
+    row.content_hash=CS.content_hash(payload)
     db.commit()
-    ranked=sorted(out,key=lambda x:(x.get("conversion",0),x.get("contacts",0),x.get("views",0)),reverse=True)
-    return {"status":"ok","account_id":account_id,"stats_date":memory["stats_date"],"items":out,"leaders":ranked[:5],"total":len(out),"with_data":sum(1 for x in out if x.get("views",0)>0)}
+    return {"status":"staged","feed_identity":feed_id,"date_end":end,"changed_feed":True}
+
+
+@router.post("/ab-tests/action")
+def campaign_ab_test_action(body: CampaignABActionBody, db=Depends(_db), user=Depends(get_current_user)):
+    """Owner actions from the A/B results screen.
+
+    Scale creates a new draft Campaign through the canonical preparation
+    pipeline. Finish is an explicit external action and may stage only an exact
+    BORIS-owned canonical feed identity.
+    """
+    account_id=str(body.account_id or "").strip()
+    if not account_id or account_id not in _allowed_accounts(db,user):
+        raise HTTPException(403,"Нет доступа к аккаунту")
+    _require_manage_ads(db,user,account_id)
+    from app.models.campaign_item import CampaignItem
+    item=(db.query(CampaignItem)
+          .filter(CampaignItem.id==int(body.item_id),CampaignItem.account_id==account_id)
+          .first())
+    if not item:
+        raise HTTPException(404,"Объявление не найдено")
+    try:
+        payload=json.loads(item.payload_json or "{}")
+    except Exception:
+        payload={}
+    action=str(body.action or "").strip().lower()
+
+    from app.services.campaign_card_revisions import lock_versions
+    if action in {"finish","scale"}:
+        _campaign_owner_only(db,user,account_id)
+    if action not in {"pause","resume","edit","finish","scale"}:
+        raise HTTPException(422,"Неизвестное действие A/B теста")
+    lock_versions(db,int(item.campaign_id),[item.id],body.expected_updated_at,[account_id])
+    if action in {"finish","scale"}:
+        from app.services.campaign_ab_action_guard import enforce_current_ab_action
+        enforce_current_ab_action(db,user,account_id,int(item.id),action)
+    payload=_ff_payload(item)
+    if action in {"pause","resume"}:
+        state="paused" if action=="pause" else "active"
+        participation=dict(payload.get("ab_participation") or {})
+        if participation.get("state")==state:
+            return {"status":"ok","action":action,"item_id":item.id,"unchanged":True}
+        from datetime import datetime,timezone
+        participation.update(state=state,changed_at=datetime.now(timezone.utc).isoformat())
+        payload["ab_participation"]=participation
+        item.payload_json=json.dumps(payload,ensure_ascii=False)
+        _ab_event(db,item,"Тест приостановлен" if action=="pause" else "Тест возобновлён",user)
+        db.commit()
+        return {"status":"ok","action":action,"item_id":item.id,"external":False,
+            "message":"Участие в тесте приостановлено. Объявление остаётся на площадке." if action=="pause" else "Тест возобновлён для того же объявления."}
+    if action=="edit":
+        prompt=str(body.prompt or "").strip()
+        if not prompt:raise HTTPException(422,"Напишите, что изменить")
+        result=ff_workflow_enhance(int(item.campaign_id),FFEnhanceBody(item_ids=[item.id],prompt=prompt),db,user)
+        if result.get("job"):
+            _ab_event(db,item,"Правка через BORIS поставлена в очередь",user,{"job_id":result["job"].get("id")})
+            db.commit()
+        return {**result,"action":"edit","message":"Задача сохранена. Ход выполнения доступен в разделе «Задачи»." if result.get("job") else result.get("message","Правка не запущена")}
+
+    if action=="finish":
+        if not bool(body.confirmed):
+            raise HTTPException(409,detail={"code":"confirmation_required","message":"Подтвердите перевод объявления в завершённые."})
+        if str(item.source or "") not in {"feed_factory","ab_scale"}:
+            raise HTTPException(409,detail={"code":"managed_feed_required","message":"BORIS может автоматически завершить только объявление, которым управляет через свой Avito-фид."})
+        staged=_ab_finish_managed_feed_item(db,account_id,item)
+        if staged.get("status")!="staged":
+            return {"status":"blocked","action":"finish","item_id":item.id,**staged}
+        try:
+            from app.api.avito import feed_send_to_avito
+            upload=feed_send_to_avito(account_id=account_id)
+        except Exception as exc:
+            upload={"status":"error","message":str(exc)[:240]}
+        item=(db.query(CampaignItem).filter(CampaignItem.id==int(body.item_id)).first())
+        try:
+            fresh=json.loads(item.payload_json or "{}")
+        except Exception:
+            fresh={}
+        marker=dict(fresh.get("ab_finish_requested") or {})
+        marker["upload_status"]=str((upload or {}).get("status") or "error")
+        marker["upload_id"]=(upload or {}).get("upload_id") or (upload or {}).get("id")
+        marker["status"]="sent_to_avito" if str((upload or {}).get("status") or "")=="ok" else "staged_waiting_send"
+        fresh["ab_finish_requested"]=marker
+        _ab_event(db,item,"Запрошено завершение объявления",user,{"state":marker["status"]})
+        item.payload_json=json.dumps(fresh,ensure_ascii=False)
+        item.content_hash=CS.content_hash(fresh)
+        db.commit()
+        return {
+            "status":"ok" if marker["status"]=="sent_to_avito" else "partial",
+            "action":"finish","item_id":item.id,
+            "message":("BORIS передал завершение в Avito и будет ждать подтверждение."
+                       if marker["status"]=="sent_to_avito"
+                       else "Завершение подготовлено. BORIS не показывает ложный успех, пока Avito не примет изменение."),
+            "external":True,"feed_identity":staged.get("feed_identity"),
+            "upload_status":marker.get("upload_status"),
+        }
+
+    if action=="scale":
+        count=max(1,min(50,int(body.count or 0)))
+        source_campaign=_campaign_or_404(db,int(item.campaign_id),_allowed_accounts(db,user))
+        try:
+            source_settings=json.loads(source_campaign.settings_json or "{}")
+        except Exception:
+            source_settings={}
+        source_ff=dict(source_settings.get("feed_factory") or {})
+        direction=str(payload.get("direction") or item.segment or payload.get("title") or "Объявление").strip()
+        city=str(payload.get("city") or item.geo or "").strip()
+        formula=str(payload.get("copy_formula_id") or payload.get("formula_family") or "").strip()
+        creative=str(payload.get("creative_angle") or payload.get("angle") or "").strip()
+        category_path=str(payload.get("category_path") or "").strip()
+        template_id=str(payload.get("template_id") or "").strip()
+        params=dict(payload.get("params") or {}) if isinstance(payload.get("params"),dict) else {}
+        answers={k:{"mode":"exact","value":str(v)} for k,v in params.items() if v not in (None,"",[])}
+        ff={
+            "version":2,
+            "step":"brief",
+            "brief":(
+                f"Масштабировать успешное объявление «{str(payload.get('title') or direction)}». "
+                f"Создать {count} новых уникальных вариантов по той же подтверждённой товарной или услуговой логике. "
+                "Сохранить факты, цену, категорию и выигравший рекламный подход; не копировать текст и баннер один в один."
+            ),
+            "account_id":account_id,
+            "account_context":dict(source_ff.get("account_context") or {}),
+            "directions":[direction],
+            "services_products":[direction],
+            "creative_angles":[creative] if creative else [],
+            "audience":str(source_ff.get("audience") or ""),
+            "cities":[city] if city else list(source_ff.get("cities") or [])[:1],
+            "variants":count,
+            "quantity":count,
+            "defaults":{
+                "price":int(payload.get("price") or 0),
+                "params":params,
+                "city":city,
+            },
+            "references":{
+                **dict(source_ff.get("references") or {}),
+                "mode":"preserve_text",
+                "text":str(payload.get("description") or ""),
+            },
+            "source_contract":dict(source_ff.get("source_contract") or {}),
+            "ab_scale":{
+                "source_campaign_id":int(item.campaign_id),
+                "source_item_id":int(item.id),
+                "source_avito_item_id":str(item.avito_item_id or ""),
+                "formula_id":formula,
+                "creative_angle":creative,
+                "hypothesis":str(payload.get("hypothesis") or ""),
+                "requested_count":count,
+            },
+        }
+        if template_id:
+            ff["direction_intake"]={
+                direction:{
+                    "direction":direction,
+                    "template_id":template_id,
+                    "category_path":category_path,
+                    "mode":"shared",
+                    "answers":answers,
+                    "confirmed":True,
+                }
+            }
+        new_campaign=CS.new_campaign(
+            db,
+            name=f"Масштабирование · {str(payload.get('title') or direction)[:70]}",
+            owner_user_id=getattr(user,"id",None),
+            default_account_id=account_id,
+            scenario_type="ab_scale",
+            source_type="ab_scale",
+            settings={"feed_factory":ff},
+        )
+        job=_campaign_guardian_enqueue(db,new_campaign,user,account_id,"campaign_prepare")
+        _ab_event(db,item,"Масштабирование теста",user,{"count":count,"new_campaign_id":new_campaign.id})
+        db.commit()
+        return {
+            "status":"ok","action":"scale","source_item_id":int(item.id),
+            "campaign_id":int(new_campaign.id),"count":count,
+            "job":_campaign_guardian_job_public(job),
+            "message":f"BORIS создал проект на {count} новых вариантов и уже начал подготовку.",
+        }
+
+    raise HTTPException(422,"Неизвестное действие A/B теста")
 
 
 @router.get("/{campaign_id}")
@@ -921,9 +2579,70 @@ def get_items(campaign_id: int, account_id: str = "", status: str = "",
                                 hypothesis_id=hypothesis_id or None,
                                 search=search, allowed_accounts=allowed,
                                 limit=limit, offset=offset)
+    public_items=[CS.item_public(r) for r in rows]
+    if rows:
+        from app.models.media_asset import MediaAsset
+        from app.models.media_link import MediaLink
+        from app.services.media_service import asset_public
+        ids=[str(r.id) for r in rows]
+        linked=(db.query(MediaLink,MediaAsset)
+                .join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+                .filter(MediaLink.entity_type=="campaign_item",
+                        MediaLink.entity_id.in_(ids),
+                        MediaAsset.deleted_at.is_(None))
+                .order_by(MediaLink.entity_id,MediaLink.position,MediaLink.id).all())
+        media_by_item={}
+        for link,asset in linked:
+            pub=asset_public(asset)
+            media_by_item.setdefault(str(link.entity_id),[]).append({
+                "media_id":int(asset.id),
+                "role":str(link.role or "gallery"),
+                "position":int(link.position or 0),
+                "url":pub.get("original_url") or pub.get("preview_url"),
+                "preview_url":pub.get("preview_url") or pub.get("original_url"),
+            })
+        row_by_id={int(r.id):r for r in rows}
+        for item in public_items:
+            rid=int(item.get("id") or 0)
+            item["hero_media_id"]=getattr(row_by_id.get(rid),"hero_media_id",None)
+            item["media"]=media_by_item.get(str(rid),[])
     return {"status": "ok", "total": total, "limit": limit, "offset": offset,
-            "items": [CS.item_public(r) for r in rows],
+            "items": public_items,
             "counts": CS.status_counts(db, campaign_id, allowed_accounts=allowed)}
+
+
+@router.get("/{campaign_id}/item/{item_id}")
+def get_campaign_item(campaign_id: int, item_id: int, db=Depends(_db), user=Depends(get_current_user)):
+    """Exact card fetch used by deep links from A/B/history without pagination assumptions."""
+    allowed=_allowed_accounts(db,user)
+    _campaign_or_404(db,campaign_id,allowed)
+    from app.models.campaign_item import CampaignItem
+    from app.models.media_asset import MediaAsset
+    from app.models.media_link import MediaLink
+    from app.services.media_service import asset_public
+    row=(db.query(CampaignItem)
+         .filter(CampaignItem.id==int(item_id),CampaignItem.campaign_id==int(campaign_id),
+                 CampaignItem.account_id.in_(allowed)).first())
+    if row is None:
+        raise HTTPException(404,"Объявление не найдено")
+    item=CS.item_public(row)
+    linked=(db.query(MediaLink,MediaAsset)
+            .join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+            .filter(MediaLink.entity_type=="campaign_item",
+                    MediaLink.entity_id==str(row.id),
+                    MediaAsset.deleted_at.is_(None))
+            .order_by(MediaLink.position,MediaLink.id).all())
+    item["hero_media_id"]=getattr(row,"hero_media_id",None)
+    item["media"]=[]
+    for link,asset in linked:
+        pub=asset_public(asset)
+        item["media"].append({
+            "media_id":int(asset.id),"role":str(link.role or "gallery"),
+            "position":int(link.position or 0),
+            "url":pub.get("original_url") or pub.get("preview_url"),
+            "preview_url":pub.get("preview_url") or pub.get("original_url"),
+        })
+    return {"status":"ok","item":item}
 
 
 @router.post("/{campaign_id}/item")
@@ -1022,7 +2741,17 @@ def _ff_enforce_sales_copy_shape(description: str, topic: str, city: str, max_ch
     topic=str(topic or "").strip(); city=str(city or "").strip()
     paras=[x.strip() for x in _re.split(r"\n\s*\n",desc) if x.strip()]
     first=(paras[0] if paras else desc)[:260].lower()
-    need_topic=bool(topic) and not any(w[:4] in first for w in _re.findall(r"[а-яёa-z0-9]+",topic.lower()) if len(w)>=4)
+    topic_low=str(topic or "").lower().replace("ё","е")
+    topic_markers=[w[:4] for w in _re.findall(r"[а-яa-z0-9]+",topic_low) if len(w)>=4]
+    # Russian product-family inflection can change the fourth character
+    # (кухни -> кухонная). Treat lexical family synonyms as the same subject so
+    # the sales-shape guard never prepends one generic lead to many unique cards.
+    if "кухн" in topic_low or "кухон" in topic_low: topic_markers += ["кухн","кухо"]
+    if "гардероб" in topic_low: topic_markers += ["гард"]
+    if "прихож" in topic_low: topic_markers += ["прих"]
+    if "ванн" in topic_low or "сануз" in topic_low: topic_markers += ["ванн","сану"]
+    topic_markers=list(dict.fromkeys(x for x in topic_markers if x))
+    need_topic=bool(topic) and not any(marker in first for marker in topic_markers)
     city_words=[w for w in _re.findall(r"[а-яёa-z0-9]+",city.lower()) if len(w)>=4]
     need_city=bool(city_words) and not all(w[:4] in first for w in city_words[:3])
     if need_topic or need_city:
@@ -1051,76 +2780,246 @@ def _ff_enforce_sales_copy_shape(description: str, topic: str, city: str, max_ch
     return "\n\n".join(kept).strip()[:max_chars].rstrip()
 
 
-def _ff_append_uniqueness_footer(description: str, topic: str, city: str, variant: int = 1, item_id: int = 0, max_chars: int = 2400) -> str:
-    """Guarantee a visible, factual per-card example at the bottom of Feed Factory copy.
-
-    The footer uses only the direction and geography already present in the card.
-    Its wording rotates deterministically across variants/items, so mass campaigns
-    do not fake uniqueness by changing one adjective while preserving the same tail.
-    """
+def _ff_search_keywords(topic: str, payload: dict | None = None) -> list[str]:
     import re as _re
-    desc=str(description or "").strip(); topic=str(topic or "").strip(); city=str(city or "").strip()
-    if not topic:
-        return desc[:max_chars].rstrip()
-    # Avoid naive Russian case inflection (e.g. «в Уфа»). A neutral separator
-    # keeps arbitrary city names grammatically correct without inventing forms.
-    where=(" · "+city) if city else ""
-    labels=["Пример задачи","Конкретный сценарий","Пример обращения","Сценарий клиента","Пример запроса"]
-    leads=[
-        "Опишите исходную ситуацию", "Напишите, что уже известно по задаче",
-        "Пришлите исходные данные", "Укажите ключевые вводные",
-        "Расскажите о вашей ситуации своими словами", "Опишите текущую задачу",
-        "Сообщите, с чего начинаем", "Напишите основные вводные",
-        "Опишите, что нужно решить", "Расскажите, какой результат нужен",
+    topic=" ".join(str(topic or "").split()).strip()
+    p=payload if isinstance(payload,dict) else {}
+    vals=[topic, str(p.get("goods_type") or ""), str(p.get("goods_subtype") or ""), str(p.get("service_type") or ""), str(p.get("service_subtype") or "")]
+    out=[]
+    for raw in vals:
+        raw=" ".join(str(raw or "").split()).strip()
+        if raw and raw.casefold() not in {x.casefold() for x in out}:
+            out.append(raw)
+    # Add one conservative lexical search variant for common product families.
+    low=topic.casefold()
+    if "кухн" in low: out += ["кухонный гарнитур"]
+    elif "гардероб" in low: out += ["гардеробная"]
+    elif "прихож" in low: out += ["мебель в прихожую"]
+    elif "душев" in low: out += ["душевая перегородка"]
+    dedup=[]
+    for x in out:
+        x=_re.sub(r"\s+"," ",x).strip(" ,.;")
+        if x and x.casefold() not in {y.casefold() for y in dedup}: dedup.append(x)
+    return dedup[:8]
+
+
+def _ff_factual_example(topic: str, city: str, payload: dict | None = None) -> tuple[str,dict]:
+    """Build a concrete bottom example only from already-confirmed card fields."""
+    p=payload if isinstance(payload,dict) else {}
+    facts=[]
+    candidates=[
+        ("Направление", topic),
+        ("Тип", p.get("goods_subtype") or p.get("goods_type") or p.get("service_subtype") or p.get("service_type")),
+        ("Исполнение", p.get("kitchen_type") or p.get("condition")),
+        ("Цвет", p.get("color")),
+        ("Материал", p.get("material")),
+        ("Размер", p.get("size")),
+        ("Комплектация", p.get("configuration") or p.get("equipment")),
+        ("Категория", p.get("category_path") or p.get("category")),
+        ("Город", city),
     ]
-    closes=[
-        "и желаемый результат — так ответ будет точнее.",
-        "и что важно получить в итоге.",
-        "— обсудим подходящий вариант.",
-        "— сразу перейдём к предметному обсуждению.",
-        "— уточним только действительно важные детали.",
-        "и приоритет результата — предложим следующий шаг.",
-        "и ожидаемый итог — разберём задачу по существу.",
-        "— ответим по конкретной ситуации без общих обещаний.",
-        "и цель обращения — так будет проще начать с главного.",
-        "— дальше уточним только то, что влияет на решение.",
-        "и что для вас важнее всего в результате.",
-        "— подготовим ответ именно по вашей ситуации.",
-        "и желаемый итог — без лишних общих вопросов.",
-        "— разберём вводные и следующий практический шаг.",
-        "и главный приоритет — это поможет ответить предметно.",
-        "— начнём с фактов, которые уже известны.",
-        "и ожидаемый результат — остальное уточним по необходимости.",
-        "— так обсуждение сразу будет привязано к вашей задаче.",
-        "и что уже пробовали — если это важно для результата.",
-        "— достаточно тех фактов, которые вы уже знаете.",
-    ]
-    # Up to 1000 deterministic formulations per same topic+city. The offset is
-    # topic/geo-specific, while variant progression is collision-free for variants
-    # 1..1000. Different topics are already semantically distinct by construction.
-    import zlib as _zlib
-    base=_zlib.crc32((topic+"|"+city).encode("utf-8")) % 1000
-    serial=(base+max(0,int(variant or 1)-1)) % 1000
-    label=labels[serial % len(labels)]
-    lead=leads[(serial // len(labels)) % len(leads)]
-    close=closes[(serial // (len(labels)*len(leads))) % len(closes)]
-    footer=f"✦ {label}: {topic}{where}. {lead} {close}"
-    # Do not duplicate a model-written explicit footer; normalize its location instead.
-    tail=desc[-700:].lower()
-    if any(x in tail for x in ("✦ пример задачи:","✦ конкретный сценарий:","✦ пример обращения:","✦ сценарий клиента:","✦ пример запроса:")):
+    seen=set()
+    for label,val in candidates:
+        val=" ".join(str(val or "").split()).strip()
+        if not val or val.casefold() in seen: continue
+        seen.add(val.casefold()); facts.append((label,val))
+    price=int(p.get("price") or 0)
+    if price>0:
+        mode="от " if str(p.get("price_mode") or "")=="from" else ""
+        facts.append(("Цена", f"{mode}{price} ₽"))
+    # Topic + city alone are not enough to claim factual uniqueness.
+    non_geo=[x for x in facts if x[0] not in {"Город"}]
+    if len(non_geo)<2:
+        return "",{"present":False,"position":"bottom","policy":"factual_example_v2","needs_data":True,"reason":"insufficient_confirmed_item_facts"}
+    label="Пример товара" if (p.get("goods_type") or p.get("goods_subtype")) else "Пример услуги"
+    body="; ".join(f"{k}: {v}" for k,v in facts)
+    return f"<strong>{label}:</strong> {body}.",{"present":True,"position":"bottom","policy":"factual_example_v2","needs_data":False,"fact_count":len(facts)}
+
+
+def _ff_append_uniqueness_footer(description: str, topic: str, city: str, variant: int = 1, item_id: int = 0, max_chars: int = 2400, payload: dict | None = None) -> str:
+    """Append SEO search phrases and, below them, a factual item example."""
+    desc=str(description or "").strip()
+    keywords=_ff_search_keywords(topic,payload)
+    seo=""
+    if keywords:
+        seo="<strong>Звоните нам, если ищете:</strong>\n"+", ".join(keywords)+"."
+    example,meta=_ff_factual_example(topic,city,payload)
+    tail_parts=[x for x in (seo,example) if x]
+    if not tail_parts:
         return desc[:max_chars].rstrip()
-    budget=max(200,max_chars-len(footer)-2)
+    tail="\n\n".join(tail_parts)
+    budget=max(200,max_chars-len(tail)-2)
     if len(desc)>budget:
         cut=desc[:budget]
         para=cut.rfind("\n\n")
-        if para>=max(400,int(budget*0.68)):
-            cut=cut[:para]
+        if para>=max(400,int(budget*0.68)): cut=cut[:para]
         else:
             stop=max(cut.rfind(". "),cut.rfind(".\n"),cut.rfind("! "),cut.rfind("? "))
-            if stop>=max(400,int(budget*0.68)):
-                cut=cut[:stop+1]
+            if stop>=max(400,int(budget*0.68)): cut=cut[:stop+1]
         desc=cut.rstrip()
-    return (desc+"\n\n"+footer).strip()[:max_chars].rstrip()
+    return (desc+"\n\n"+tail).strip()[:max_chars].rstrip()
+
+
+def _ff_learned_formula(db, account_id: str) -> str:
+    """Return a proven account-scoped leader from canonical history first.
+
+    CampaignItem.payload_json.optimization_versions is the durable learning
+    source. The old storage projection is read only as a compatibility fallback
+    for accounts whose historical items predate that contract.
+    """
+    account_id = str(account_id or "").strip()
+    allowed = {"AIDA", "PAS", "BAB", "FAB", "4P", "4U", "QUEST", "EXPERT", "RESULT", "COMPARISON", "SCENARIO", "PROCESS", "PROOF_FIRST", "BENEFIT_FIRST", "PRICE_FIRST", "OBJECTION", "CONSULTATION", "QUALITY", "SPEED", "RELIABILITY", "CONVENIENCE", "PREMIUM", "ECONOMY", "PRODUCT"}
+    candidates = []
+    try:
+        from app.models.campaign_item import CampaignItem
+        rows = db.query(CampaignItem).filter(CampaignItem.account_id == account_id).all()
+    except Exception:
+        rows = []
+    for row in rows:
+        try:
+            payload = json.loads(row.payload_json or "{}")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        base_formula = str(payload.get("copy_formula_id") or payload.get("formula_id") or "").strip().upper()
+        for version in (payload.get("optimization_versions") or []):
+            if not isinstance(version, dict):
+                continue
+            formula = str(version.get("formula_id") or version.get("copy_formula_id") or base_formula).strip().upper()
+            if formula not in allowed or str(version.get("result") or "").lower() in {"worse", "loser", "revert"}:
+                continue
+            observations = version.get("observations") or []
+            if isinstance(observations, list) and observations:
+                views = sum(int(x.get("views") or 0) for x in observations if isinstance(x, dict))
+                contacts = sum(int(x.get("contacts") or 0) for x in observations if isinstance(x, dict))
+                conversion = (contacts / views * 100) if views else 0.0
+            else:
+                after = version.get("kpi_after") or {}
+                views = int(after.get("views") or 0) if isinstance(after, dict) else 0
+                contacts = int(after.get("contacts") or 0) if isinstance(after, dict) else 0
+                conversion = float(after.get("conversion") or 0) if isinstance(after, dict) else 0.0
+            # Require a meaningful observation window; zero/single-noise samples
+            # remain exploration/fallback rather than becoming a winner.
+            if views < 30 and contacts < 3:
+                continue
+            candidates.append((conversion, contacts, views, formula))
+    if candidates:
+        candidates.sort(reverse=True)
+        return candidates[0][3]
+
+    # Backward-compatible projection fallback only; never write it here.
+    raw = db.execute(_t(
+        "SELECT value FROM storage WHERE account_id=:a AND key='avito_ab_learning_memory' "
+        "ORDER BY id DESC LIMIT 1"
+    ), {"a": account_id}).scalar()
+    try:
+        memory = json.loads(raw or "{}")
+    except Exception:
+        return ""
+    if not isinstance(memory, dict):
+        return ""
+    for item in (memory.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        formula = str(item.get("copy_formula_id") or "").strip().upper()
+        try:
+            views = int(item.get("views") or 0)
+            contacts = int(item.get("contacts") or 0)
+            conversion = float(item.get("conversion") or 0)
+        except (TypeError, ValueError):
+            continue
+        if formula in allowed and (views >= 30 or contacts >= 3):
+            candidates.append((conversion, contacts, views, formula))
+    candidates.sort(reverse=True)
+    return candidates[0][3] if candidates else ""
+
+
+def _ff_formula_meta(payload: dict, topic: str) -> dict:
+    """Deterministic formula registry used by local-first generation and review UI."""
+    formulas=[
+        ("PAS","problem_solution","Проблема → усиление контекста → решение → действие"),
+        ("FAB","features_benefits","Характеристики → преимущества → выгоды"),
+        ("BAB","before_after_bridge","До → после → путь к результату"),
+        ("4P","promise_picture_proof_push","Обещание без гарантии → картина результата → подтверждённые факты → CTA"),
+        ("QUEST","qualify_educate_transition","Квалификация → понимание → объяснение → переход к действию"),
+        ("OBJECTION","objection_answer","Возражение → ответ фактами → предложение → CTA"),
+        ("EXPERT","expert_diagnosis","Ситуация → экспертный разбор → решение → CTA"),
+        ("RESULT","result_focused","Подтверждённый результат → условия → следующий шаг"),
+        ("COMPARISON","comparison_focused","Подтверждённое сравнение → критерии выбора → CTA"),
+        ("PROCESS","process_focused","Подтверждённый процесс → этапы → следующий шаг"),
+        ("SCENARIO","customer_scenario","Сценарий клиента → задача → решение → следующий шаг"),
+        ("PRODUCT","product_facts","Оффер → характеристики → выгоды → условия → CTA"),
+        ("AIDA","attention_interest_desire_action","Внимание → интерес → желание → действие"),
+        ("4U","useful_urgent_unique_ultra_specific","Польза → реальная срочность → отличие → конкретика"),
+        ("PROOF_FIRST","proof_focused","Подтверждённое доказательство → выгода → следующий шаг"),
+        ("BENEFIT_FIRST","benefit_focused","Подтверждённая выгода → условия → CTA"),
+        ("PRICE_FIRST","price_focused","Только подтверждённая цена → ценность → следующий шаг"),
+        ("CONSULTATION","consultative","Задача клиента → уточнение → фактическое решение"),
+        ("QUALITY","quality_focused","Подтверждённые параметры качества → выгоды → CTA"),
+        ("SPEED","speed_focused","Подтверждённые сроки → процесс → следующий шаг"),
+        ("RELIABILITY","reliability_focused","Подтверждённая надёжность → proof → CTA"),
+        ("CONVENIENCE","convenience_focused","Подтверждённое удобство → условия → действие"),
+        ("PREMIUM","premium_focused","Подтверждённые premium-факты → ценность → CTA"),
+        ("ECONOMY","economy_focused","Подтверждённая экономия → условия → действие"),
+    ]
+    variant=max(1,int(payload.get("variant") or 1))
+    learned=str(payload.get("learned_formula_id") or "").strip().upper()
+    learned_ids={x[0] for x in formulas}
+    has_winner=learned in learned_ids
+    # Deterministic 75/25 controller: proven leader is reused for three variants,
+    # while every fourth variant explores a different canonical family. With no
+    # evidence, the full pool rotates evenly. The ratio is configurable but remains
+    # bounded and never eliminates exploration completely.
+    try:
+        exploration_pct=max(10,min(40,int(payload.get("formula_exploration_pct") or 25)))
+    except (TypeError,ValueError):
+        exploration_pct=25
+    explore_slot=(variant % max(2,round(100/exploration_pct))) == 0
+    if has_winner and not explore_slot:
+        fid,angle,reason=next(x for x in formulas if x[0] == learned)
+        selection_mode="EXPLOITATION"
+        selection_reason="proven account-scoped formula leader reused; controlled exploration retained"
+        memory_source=str(payload.get("formula_memory_source") or "campaign_item.optimization_versions")
+        memory_version=str(payload.get("formula_memory_version") or "optimization_versions:v1")
+        formula_score=payload.get("formula_score")
+    else:
+        offset=(variant-1) % len(formulas)
+        if has_winner:
+            offset=(formulas.index(next(x for x in formulas if x[0] == learned))+variant) % len(formulas)
+        fid,angle,reason=formulas[offset]
+        selection_mode="CONTROLLED_EXPLORATION" if has_winner else "EXPLORATION"
+        selection_reason="controlled exploration against account-scoped winner" if has_winner else "no proven winner; broad formula-pool exploration"
+        memory_source=str(payload.get("formula_memory_source") or ("campaign_item.optimization_versions" if has_winner else "none"))
+        memory_version=str(payload.get("formula_memory_version") or ("optimization_versions:v1" if has_winner else "none"))
+        formula_score=None
+    existing=str(payload.get("creative_angle") or "").strip()
+    import re as _formula_re
+    topic_key=_formula_re.sub(r"[^a-z0-9а-яё]+","-",str(topic or "").casefold()).strip("-")[:48] or "topic"
+    hypothesis_id=f"formula:{fid.lower()}:topic:{topic_key}:v{variant}"
+    return {
+        "copy_formula_id":fid,
+        "copy_formula_name":fid,
+        "copy_formula_version":"1",
+        "formula_family":fid,
+        "selection_mode":selection_mode,
+        "selection_reason":selection_reason,
+        "memory_source":memory_source,
+        "memory_version":memory_version,
+        "formula_score":formula_score,
+        "hypothesis_id":hypothesis_id,
+        "creative_angle":existing or angle,
+        "angle":existing or angle,
+        "headline_strategy":"high_frequency_core_2_3_words",
+        "hook_strategy":angle,
+        "hook_type":angle,
+        "proof_strategy":"confirmed_knowledge_only",
+        "proof_type":"confirmed_facts_only",
+        "cta_strategy":"direct_natural_next_step",
+        "cta_type":"direct_next_step",
+        "hypothesis":f"{fid}: этот рекламный угол даст больше целевых обращений для «{topic}»",
+        "formula_reason":reason,
+    }
 
 
 def _ff_copy_quality_errors(payload: dict) -> list[dict]:
@@ -1130,7 +3029,7 @@ def _ff_copy_quality_errors(payload: dict) -> list[dict]:
     """
     import re as _re
     contract=str(payload.get("copy_quality_contract") or "")
-    if contract not in {"sales_v2","sales_v3"}:
+    if contract not in {"sales_v2","sales_v3","sales_v4"}:
         return []
     title=str(payload.get("title") or "").strip()
     desc=str(payload.get("description") or "").strip()
@@ -1159,17 +3058,39 @@ def _ff_copy_quality_errors(payload: dict) -> list[dict]:
         if not city_ok:
             out.append({"field":"description","code":"copy_lead_city_missing","message":"В первом продающем блоке нет географии объявления"})
     if direction:
-        words=[w for w in _re.findall(r"[а-яёa-z0-9]+",direction) if len(w)>=4]
-        if words and not any(w[:4] in first for w in words[:5]):
+        direction_norm=direction.replace("ё","е")
+        markers=[w[:4] for w in _re.findall(r"[а-яa-z0-9]+",direction_norm) if len(w)>=4]
+        # The lead may use a natural inflected/synonym form of the same Russian
+        # product family (кухни -> кухонная мебель). Reuse the same conservative
+        # lexical aliases as the sales-shape guard so valid client copy is not
+        # rejected merely by morphology while unrelated families still fail.
+        if "кухн" in direction_norm or "кухон" in direction_norm: markers += ["кухн","кухо"]
+        if "гардероб" in direction_norm: markers += ["гард"]
+        if "прихож" in direction_norm: markers += ["прих"]
+        if "ванн" in direction_norm or "сануз" in direction_norm: markers += ["ванн","сану"]
+        markers=list(dict.fromkeys(x for x in markers if x))
+        if markers and not any(marker in first for marker in markers):
             out.append({"field":"description","code":"copy_lead_service_missing","message":"Первый продающий блок не называет услугу/направление"})
     if contract=="sales_v3":
+        # Legacy compatibility: do not retroactively invalidate already-approved
+        # cards created under the previous rotating-footer contract.
         footer=dict(payload.get("uniqueness_footer") or {})
         tail=desc[-650:].lower()
         visible_footer=any(x in tail for x in ("✦ пример задачи:","✦ конкретный сценарий:","✦ пример обращения:","✦ сценарий клиента:","✦ пример запроса:"))
         if not (footer.get("present") is True and str(footer.get("position") or "")=="bottom" and visible_footer):
             out.append({"field":"description","code":"copy_uniqueness_footer_missing","message":"Внизу описания нет отдельного уникализированного примера задачи для этой карточки"})
-    if not title or len(title)>50:
-        out.append({"field":"title","code":"copy_title_invalid","message":"Заголовок должен быть конкретным и не длиннее 50 символов"})
+    elif contract=="sales_v4":
+        footer=dict(payload.get("uniqueness_footer") or {})
+        tail=desc[-900:].lower()
+        seo_ok="звоните нам, если ищете:" in tail
+        example_ok=any(x in tail for x in ("пример товара:","пример услуги:","пример авто:","пример квартиры:","пример заказа:"))
+        if not seo_ok:
+            out.append({"field":"description","code":"copy_seo_block_missing","message":"Внизу описания нет отдельного блока поисковых фраз «Звоните нам, если ищете:»"})
+        if not (footer.get("present") is True and str(footer.get("position") or "")=="bottom" and example_ok):
+            out.append({"field":"description","code":"copy_uniqueness_footer_missing","message":"После SEO-блока нет отдельного фактического примера товара/услуги для этой карточки"})
+    title_words=[w for w in _re.findall(r"[а-яёa-z0-9]+",title.lower()) if w]
+    if not title or len(title)>50 or (contract=="sales_v4" and len(title_words)>4):
+        out.append({"field":"title","code":"copy_title_invalid","message":"Заголовок должен быть коротким поисковым запросом: обычно 2–3 слова, максимум 50 символов"})
     return out
 
 
@@ -1256,10 +3177,16 @@ def _ff_brief_negative_claim_errors(db, row, payload):
     The guard is deliberately narrow and triggers only on explicit negative rules.
     """
     import re as _r
+    from sqlalchemy.exc import DBAPIError as _ValidationDBAPIError
     try:
         from app.models.campaign import Campaign as _NegCampaign
         campaign=db.query(_NegCampaign).filter(_NegCampaign.id==int(row.campaign_id)).first()
         _,ff=_ff_state_load(campaign) if campaign is not None else (None,{})
+    except _ValidationDBAPIError:
+        # Never swallow a broken PostgreSQL transaction: the durable job runner
+        # owns rollback/retry. Hiding it here turns the next harmless query into
+        # PendingRollbackError and masks the real transient disconnect.
+        raise
     except Exception:
         ff={}
     brief=str((ff or {}).get("brief") or "")
@@ -1286,6 +3213,14 @@ def _ff_validate_row(row, db):
     p=_ff_payload(row); errors=[]; warnings=[]
     errors.extend(_ff_copy_quality_errors(p))
     errors.extend(_ff_brief_negative_claim_errors(db,row,p))
+    _content_need=p.get("content_needs_data")
+    if isinstance(_content_need,dict) and _content_need:
+        errors.append({
+            "field":"description",
+            "code":"content_needs_data",
+            "reason":str(_content_need.get("code") or "verified_content_facts_missing"),
+            "message":str(_content_need.get("message") or "Для объявления не хватает подтверждённых фактов для безопасного текста"),
+        })
     for key,label in (("title","Заголовок"),("description","Описание"),("address","Адрес"),("category","Категория")):
         if not str(p.get(key) or "").strip(): errors.append({"field":key,"code":"required","message":f"Не заполнено: {label}"})
     try:
@@ -1293,7 +3228,19 @@ def _ff_validate_row(row, db):
     except Exception: errors.append({"field":"price","code":"price_invalid","message":"Цена должна быть числом"})
     images=list(p.get("images") or [])
     if not images: errors.append({"field":"images","code":"images_missing","message":"Не добавлено ни одного изображения"})
-    if len(set(images))!=len(images): warnings.append({"field":"images","code":"images_duplicate","message":"Есть повторяющиеся изображения"})
+    _unique_images=True
+    from sqlalchemy.exc import DBAPIError as _ValidationDBAPIError
+    try:
+        _strategy_raw=db.execute(_t("SELECT value FROM storage WHERE account_id=:a AND key='campaign_strategy' LIMIT 1"), {"a":str(getattr(row,"account_id","") or "")}).scalar()
+        _strategy=json.loads(_strategy_raw) if _strategy_raw else {}
+        _unique_images=bool(_strategy.get("unique_images",True)) if isinstance(_strategy,dict) else True
+    except _ValidationDBAPIError:
+        raise
+    except Exception:
+        _unique_images=True
+    if len(set(str(x).strip() for x in images if str(x).strip()))!=len([x for x in images if str(x).strip()]):
+        _duplicate={"field":"images","code":"images_duplicate","message":"Есть повторяющиеся изображения"}
+        (errors if _unique_images else warnings).append(_duplicate)
     # Preserve the exact gallery contract selected by the workflow. If semantic
     # auto-curation removes a bad photo, one surviving photo is not "good enough"
     # when the task asked for three. Validation must force the worker back to media.
@@ -1309,15 +3256,23 @@ def _ff_validate_row(row, db):
             # and reuse; counting every historical link makes a complete stack look
             # invalid. Validate that every canonical stack id is still linked and is
             # not a banner, while ignoring extra non-canonical links.
-            _linked_photo_ids=set()
+            _linked_photo_ids=set(); _linked_banner_ids=set()
             for _lnk,_asset in _pairs:
                 _provider=str(_asset.source_provider or "").lower(); _ref=str(_asset.source_ref or "")
-                _is_banner=(_provider in {"openai","boris_local"} and str(_lnk.role or "")=="hero") or _ref in {"campaign_openai_gpt_image_2","campaign_openai_visual_local_text_v1","campaign_stock_visual_local_text_v1"}
-                if not _is_banner:
+                _is_banner=(_provider in {"openai","boris_local","openai_full_ai_premium"} and str(_lnk.role or "")=="hero") or _ref in {"campaign_openai_gpt_image_2","campaign_openai_visual_local_text_v1","campaign_stock_visual_local_text_v1"}
+                if _is_banner:
+                    _linked_banner_ids.add(int(_asset.id))
+                else:
                     _linked_photo_ids.add(int(_asset.id))
-            _present=sum(1 for _mid in _stack_ids if _mid in _linked_photo_ids)
-            if _present!=len(_stack_ids):
-                errors.append({"field":"images","code":"photo_stack_incomplete","expected":len(_stack_ids),"actual":_present,"message":f"Нужно {len(_stack_ids)} проверенных фотографий, сейчас осталось {_present}"})
+            # PHOTO_STACK_BANNER_SEPARATION_V1: after_banner stacks may persist
+            # the hero id together with gallery ids. Banner presence is validated
+            # by the banner contract; gallery completeness must count only photo ids.
+            _expected_photo_stack_ids=[_mid for _mid in _stack_ids if _mid not in _linked_banner_ids]
+            _present=sum(1 for _mid in _expected_photo_stack_ids if _mid in _linked_photo_ids)
+            if _present!=len(_expected_photo_stack_ids):
+                errors.append({"field":"images","code":"photo_stack_incomplete","expected":len(_expected_photo_stack_ids),"actual":_present,"message":f"Нужно {len(_expected_photo_stack_ids)} проверенных фотографий, сейчас осталось {_present}"})
+        except _ValidationDBAPIError:
+            raise
         except Exception:
             errors.append({"field":"images","code":"photo_stack_check_failed","message":"Не удалось подтвердить полный фотостек объявления"})
     import os as _os
@@ -1338,7 +3293,7 @@ def _ff_validate_row(row, db):
     # retroactively reinterpret thousands of legacy AUTO campaign descriptions,
     # where a phrase such as «стоимость от 6000» can intentionally describe a
     # company-wide range while the individual legacy card carries another price.
-    _strict_price_contract=bool(p.get("feed_factory")) or str(p.get("copy_quality_contract") or "") in {"sales_v3"}
+    _strict_price_contract=bool(p.get("feed_factory")) or str(p.get("copy_quality_contract") or "") in {"sales_v3","sales_v4"}
     if _strict_price_contract and _copy_price_claims:
         if _canonical_price<=0:
             errors.append({"field":"description","code":"copy_price_unconfirmed","claims":sorted(set(_copy_price_claims)),"message":"В тексте указана цена объявления, но подтверждённая цена карточки отсутствует"})
@@ -1389,7 +3344,7 @@ def _ff_uniqueness_required(payload: dict) -> bool:
     """
     p=payload or {}
     return bool(
-        str(p.get("copy_quality_contract") or "") in {"sales_v2","sales_v3"}
+        str(p.get("copy_quality_contract") or "") in {"sales_v2","sales_v3","sales_v4"}
         or str(p.get("unique_variant") or "").strip()
         or str(p.get("uniqueness_strategy") or "").strip()
     )
@@ -1407,6 +3362,64 @@ def _ff_similarity_text(value: str) -> str:
     s=_re.sub(r"<[^>]+>"," ",s)
     s=_re.sub(r"https?://\S+"," ",s)
     return " ".join(_re.findall(r"[а-яa-z0-9]+",s))
+
+
+def _ff_media_near_duplicate_pairs(db, rows, max_distance: int = 6, limit: int = 200) -> list[dict]:
+    """Detect visually near-identical linked images across different campaign items.
+
+    Exact SHA/pHash duplicates are handled elsewhere too; this guard closes the
+    perceptual gap where tiny crops/text changes produce different bytes but the
+    same effective creative.
+    """
+    from app.models.media_link import MediaLink
+    from app.models.media_asset import MediaAsset
+    item_ids={str(int(r.id)):int(r.id) for r in (rows or [])}
+    if len(item_ids)<2:
+        return []
+    linked=(db.query(MediaLink,MediaAsset)
+            .join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+            .filter(MediaLink.entity_type=="campaign_item",
+                    MediaLink.entity_id.in_(list(item_ids)),
+                    MediaAsset.deleted_at.is_(None))
+            .order_by(MediaLink.entity_id,MediaLink.position,MediaLink.id).all())
+    # MEDIA_NEAR_DUPLICATE_TX_BOUNDARY_V1:
+    # Detach every scalar required by the O(N²) pHash comparison, then release
+    # the PostgreSQL transaction before doing CPU work. Large 100+ ad campaigns
+    # can have ~1000 linked media rows; holding an idle transaction while Python
+    # compares ~500k pairs caused the server to close SSL before the next query.
+    raw_entries=[]
+    for link,asset in linked:
+        raw_entries.append((
+            item_ids.get(str(link.entity_id)),
+            int(asset.id),
+            int(link.position or 0),
+            str(getattr(asset,"phash","") or "").strip().lower(),
+        ))
+    db.commit()
+    entries=[]
+    for item_id,asset_id,position,ph in raw_entries:
+        if not ph:
+            continue
+        try:
+            value=int(ph,16)
+        except Exception:
+            continue
+        entries.append((item_id,asset_id,position,ph,value))
+    found=[]
+    for i in range(len(entries)):
+        ia,ma,pa,pha,va=entries[i]
+        for j in range(i+1,len(entries)):
+            ib,mb,pb,phb,vb=entries[j]
+            if not ia or not ib or ia==ib:
+                continue
+            dist=(va^vb).bit_count()
+            if dist<=int(max_distance):
+                found.append({"a":ia,"b":ib,"media_a":ma,"media_b":mb,
+                              "position_a":pa,"position_b":pb,
+                              "phash_a":pha,"phash_b":phb,"distance":dist})
+                if len(found)>=limit:
+                    return found
+    return found
 
 
 def _ff_near_duplicate_pairs(rows, threshold: float = 0.86, limit: int = 200) -> list[dict]:
@@ -1454,7 +3467,15 @@ def _ff_near_duplicate_pairs(rows, threshold: float = 0.86, limit: int = 200) ->
 
 @router.get("/{campaign_id}/validation")
 def campaign_validation(campaign_id:int, db=Depends(_db), user=Depends(get_current_user)):
-    allowed=_allowed_accounts(db,user); _campaign_or_404(db,campaign_id,allowed); rows=_ff_items(db,campaign_id,allowed); reports=[_ff_validate_row(r,db) for r in rows]
+    allowed=_allowed_accounts(db,user); _campaign_or_404(db,campaign_id,allowed); rows=_ff_items(db,campaign_id,allowed)
+    reports=[]
+    for _idx,r in enumerate(rows):
+        reports.append(_ff_validate_row(r,db))
+        if (_idx+1)%8==0:
+            db.commit()
+    from types import SimpleNamespace as _SimpleNamespace
+    rows=[_SimpleNamespace(id=int(r.id),account_id=str(getattr(r,"account_id","") or ""),segment=str(getattr(r,"segment","") or ""),payload_json=str(getattr(r,"payload_json","") or "{}")) for r in rows]
+    db.commit()
     seen={}; dup=[]; lead_seen={}; lead_dup=[]; desc_seen={}; desc_dup=[]; near_dup=_ff_near_duplicate_pairs(rows)
     import re as _copy_re
     for r in rows:
@@ -1462,7 +3483,7 @@ def campaign_validation(campaign_id:int, db=Depends(_db), user=Depends(get_curre
         if key!=("",""):
             if key in seen: dup.append([seen[key],r.id])
             else: seen[key]=r.id
-        if str(p.get("copy_quality_contract") or "") in {"sales_v2","sales_v3"}:
+        if str(p.get("copy_quality_contract") or "") in {"sales_v2","sales_v3","sales_v4"}:
             _desc_norm=" ".join(_copy_re.findall(r"[а-яёa-z0-9]+",str(p.get("description") or "").lower()))
             if len(_desc_norm)>=80:
                 if _desc_norm in desc_seen: desc_dup.append([desc_seen[_desc_norm],r.id])
@@ -1474,7 +3495,7 @@ def campaign_validation(campaign_id:int, db=Depends(_db), user=Depends(get_curre
                 else: lead_seen[lead_key]=r.id
     report_by_id={int(x["id"]):x for x in reports}
     for pair in dup:
-        strict_pair=any(str(_ff_payload(r).get("copy_quality_contract") or "") in {"sales_v2","sales_v3"} for r in rows if r.id in pair)
+        strict_pair=any(str(_ff_payload(r).get("copy_quality_contract") or "") in {"sales_v2","sales_v3","sales_v4"} for r in rows if r.id in pair)
         for rid in pair:
             rr=report_by_id.get(int(rid))
             if not rr: continue
@@ -1673,9 +3694,15 @@ def _ff_cross_campaign_near_duplicate_conflicts(db, campaign_id:int, rows:list, 
 def campaign_approval(campaign_id:int, body:CampaignApprovalBody, db=Depends(_db), user=Depends(get_current_user)):
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); rows=_ff_items(db,campaign_id,allowed); wanted=set(body.item_ids or [r.id for r in rows]); changed=0; blocked=[]; media_links_recovered=[]
     _ff_assert_mutable(campaign)
-    cross_campaign_dupes=_ff_cross_campaign_duplicate_conflicts(db,campaign_id,rows) if body.approved else {}
-    cross_campaign_near=_ff_cross_campaign_near_duplicate_conflicts(db,campaign_id,rows) if body.approved else {}
-    near_pairs=_ff_near_duplicate_pairs(rows) if body.approved else []
+    # CAMPAIGN_APPROVAL_SCOPE_EXPENSIVE_CHECKS_V1:
+    # When the owner approves only a chunk of a large campaign, duplicate/conflict
+    # analysis must run only for that requested chunk. Running 120-card cross-campaign
+    # similarity work on every 8-card checkpoint held one PostgreSQL connection long
+    # enough for SSL/transaction expiry and made large campaigns impossible to approve.
+    _approval_rows=[r for r in rows if int(r.id) in wanted]
+    cross_campaign_dupes=_ff_cross_campaign_duplicate_conflicts(db,campaign_id,_approval_rows) if body.approved else {}
+    cross_campaign_near=_ff_cross_campaign_near_duplicate_conflicts(db,campaign_id,_approval_rows) if body.approved else {}
+    near_pairs=_ff_near_duplicate_pairs(_approval_rows) if body.approved else []
     near_by_id={}
     for _pair in near_pairs:
         near_by_id.setdefault(int(_pair["a"]),[]).append(_pair)
@@ -1716,6 +3743,12 @@ def campaign_approval(campaign_id:int, body:CampaignApprovalBody, db=Depends(_db
             if body.comment.strip():
                 p=_ff_payload(r); p["owner_review_comment"]=body.comment.strip(); r.payload_json=json.dumps(p,ensure_ascii=False)
         changed+=1
+        # CAMPAIGN_APPROVAL_LONG_BATCH_TX_BOUNDARY_V1:
+        # Large verified campaigns can exceed PostgreSQL connection/transaction
+        # age limits when 100+ cards are validated in one transaction. Persist
+        # bounded checkpoints; final delivery still requires every card READY.
+        if changed % 8 == 0:
+            db.commit()
     db.commit()
     try:
         _,ff=_ff_state_load(campaign); ff["step"]="preview" if body.approved and changed else "validation"; _ff_state_save(db,campaign,ff)
@@ -2017,13 +4050,50 @@ def _ff_avito_autoload_capability(db, account_id: str, refresh: bool = False) ->
 def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoload: bool=False):
     import hashlib
     from app.models.account import Account
-    rows,scoped,approved,accounts,images,cities=_ff_activation_snapshot(db,campaign.id,allowed,account_id)
+    # DELIVERY_SNAPSHOT_NO_EXPIRE_V1:
+    # This request intentionally uses bounded commits while validating 100+ items.
+    # Keep already-loaded Campaign/CampaignItem scalar state detached from commit
+    # expiration so each checkpoint does not trigger hundreds of lazy reloads.
+    db.expire_on_commit = False
+    # Cache scalar identity before any bounded commit below. SQLAlchemy expires ORM
+    # instances on commit; long 100+ item validation must not lazy-reload Campaign
+    # through a connection that may have been recycled meanwhile.
+    _campaign_id=int(campaign.id)
+    _campaign_name=str(campaign.name or "")
+    rows,scoped,approved,accounts,images,cities=_ff_activation_snapshot(db,_campaign_id,allowed,account_id)
     if not scoped or accounts != [account_id]:
         raise HTTPException(409, detail={"message":"Кампания содержит объявления другого аккаунта. Отправка заблокирована."})
-    items,xml=_ff_delivery_projection(scoped,db); current_sha=hashlib.sha256(xml.encode("utf-8")).hexdigest()
+    # Legacy/incomplete CampaignItems may not yet satisfy the FeedItem schema
+    # (for example price=None). Read-only readiness/AI projections must fail closed
+    # instead of turning missing business data into an HTTP 500. Do not invent
+    # defaults here: publication/official validation still uses the strict
+    # _ff_delivery_projection path and will remain blocked until the item is valid.
+    projection_error=None
+    try:
+        items,xml=_ff_delivery_projection(scoped,db)
+        current_sha=hashlib.sha256(xml.encode("utf-8")).hexdigest()
+    except Exception as exc:
+        items,xml=[],""
+        current_sha=""
+        projection_error={
+            "type": type(exc).__name__,
+            "message": "Фид не готов: заполните обязательные данные объявления.",
+        }
     _,ff=_ff_state_load(campaign); check=ff.get("official_xml_check") or ff.get("official_xmlcheck") or {}
     validated_sha=str(check.get("sha256") or "").strip(); check_status=str(check.get("status") or "").lower()
-    validation_state="READY" if check_status in {"pass","ok"} and validated_sha and validated_sha==current_sha else ("STALE" if check_status in {"pass","ok"} else ("CHECKING" if check_status in {"pending","checking","processing"} else ("ERROR" if check_status in {"error","errors","failed"} else "NOT_CHECKED")))
+    pending_validation_state="CHECKING" if check_status in {"pending","checking","processing"} else None
+    if projection_error:
+        validation_state="ERROR"
+    elif check_status in {"pass","ok"} and validated_sha and validated_sha==current_sha:
+        validation_state="READY"
+    elif check_status in {"pass","ok"}:
+        validation_state="STALE"
+    elif pending_validation_state:
+        validation_state=pending_validation_state
+    elif check_status in {"error","errors","failed"}:
+        validation_state="ERROR"
+    else:
+        validation_state="NOT_CHECKED"
     activation=dict(ff.get("owner_activation") or {})
     publication_locked=bool(_ff_publication_locked(ff))
     submitted=dict(activation.get("submitted_snapshot") or {})
@@ -2036,7 +4106,13 @@ def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoloa
     price_modes=sorted({str(_ff_payload(r).get("price_unit") or _ff_payload(r).get("price_type") or "за объявление").strip() for r in scoped})
     all_approved=len(approved)==len(scoped)==len(rows)
     intake=_ff_direction_intake(db,campaign,ff,scoped); intake_ready=bool(intake.get("all_complete")); intake_pending=[d.get("direction") for d in intake.get("directions") or [] if not d.get("complete")]
-    semantic_reports=[_ff_validate_row(r,db) for r in scoped]
+    semantic_reports=[]
+    for _semantic_idx,_semantic_row in enumerate(scoped):
+        semantic_reports.append(_ff_validate_row(_semantic_row,db))
+        # Readiness is read-only but SQLAlchemy still keeps a transaction open.
+        # Bound transaction age on 100+ item campaigns just like official feed validation.
+        if (_semantic_idx+1)%8==0:
+            db.commit()
     # Feed validation contains contract/copy/media errors together. Feed Control must
     # not mislabel newly-required Avito parameters as a photo semantic failure.
     # Count only errors emitted by the media semantic guard in this UI indicator.
@@ -2047,18 +4123,28 @@ def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoloa
         if _media_errors:
             semantic_invalid.append({**_report,"errors":_media_errors})
     semantic_ready=not semantic_invalid
+    image_duplicate_reports=[]
+    for _report in semantic_reports:
+        _dups=[e for e in (_report.get("errors") or []) if str(e.get("code") or "") in {"images_duplicate","photo_duplicate"}]
+        if _dups: image_duplicate_reports.append({**_report,"errors":_dups})
+    media_near_duplicate_pairs=_ff_media_near_duplicate_pairs(db,scoped,max_distance=6)
+    image_unique=(not image_duplicate_reports) and (not media_near_duplicate_pairs)
     near_duplicate_pairs=_ff_near_duplicate_pairs(scoped)
-    cross_campaign_near=_ff_cross_campaign_near_duplicate_conflicts(db,campaign.id,scoped)
+    cross_campaign_near=_ff_cross_campaign_near_duplicate_conflicts(db,_campaign_id,scoped)
     content_unique=(not near_duplicate_pairs) and (not cross_campaign_near)
     autoload=_ff_avito_autoload_capability(db,account_id,refresh=bool(refresh_autoload))
     autoload_ready=bool(autoload.get("autoload_ready"))
-    can_send=(not publication_locked) and all_approved and intake_ready and semantic_ready and content_unique and validation_state=="READY" and autoload_ready
+    can_send=(not publication_locked) and all_approved and intake_ready and semantic_ready and image_unique and content_unique and validation_state=="READY" and autoload_ready
     reason=None
     if publication_locked:
         reason="Кампания уже передана Avito. BORIS отслеживает итог публикации; повторная отправка заблокирована."
+    elif projection_error:
+        reason=str(projection_error.get("message") or "Фид не готов: заполните обязательные данные объявления.")
     elif not intake_ready: reason="Перед публикацией ответьте на вопросы по направлениям: "+", ".join(intake_pending[:8])
     elif not all_approved: reason=f"Сначала согласуйте объявления. Сейчас согласовано {len(approved)} из {len(scoped)}."
     elif not semantic_ready: reason=f"Фотографии/контент не прошли обязательную смысловую проверку: заблокировано {len(semantic_invalid)} объявлений."
+    elif not image_unique:
+        reason=f"Отправка заблокирована: найдены одинаковые или визуально почти одинаковые изображения ({len(image_duplicate_reports)} exact, {len(media_near_duplicate_pairs)} near-pHash пар)."
     elif not content_unique:
         _cross_count=sum(len(v) for v in cross_campaign_near.values())
         reason=f"Отправка заблокирована: найдено {len(near_duplicate_pairs)} пар почти одинаковых текстов внутри кампании и {_cross_count} совпадений с уже опубликованными объявлениями. BORIS должен сначала реально уникализировать основную часть."
@@ -2066,16 +4152,19 @@ def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoloa
     elif validation_state!="READY": reason="Перед отправкой нужна успешная актуальная проверка Avito."
     elif not bool(autoload.get("connected")): reason="Для аккаунта не настроено рабочее подключение Avito."
     elif not autoload_ready: reason=autoload.get("message") or "Автозагрузка Avito недоступна для этого аккаунта."
-    return {"status":"ok","campaign_id":campaign.id,"campaign_name":campaign.name,"account_id":account_id,"account_name":getattr(acc,"name",None) or account_id,
+    return {"status":"ok","campaign_id":_campaign_id,"campaign_name":_campaign_name,"account_id":account_id,"account_name":getattr(acc,"name",None) or account_id,
             "feed_url":f"https://boris-ai.pro/api/avito/feed/{account_id}.xml","feed_url_class":"PUBLIC","feed_mode":"Автозагрузка Avito XML","publication_mode":"Только после подтверждения владельца",
             "items":len(scoped),"approved":len(approved),"photos":images,"cities":cities,"categories":categories,"price_modes":price_modes,
-            "current_sha":current_sha,"validated_sha":validated_sha or None,"validation_state":validation_state,"validation_message":check.get("message") or check.get("result") or "",
+            "current_sha":current_sha or None,"validated_sha":validated_sha or None,"validation_state":validation_state,"validation_message":check.get("message") or check.get("result") or "",
+            "projection_error":projection_error,
             "publication_locked":publication_locked,"submitted_snapshot":submitted or None,"submitted_sha":submitted_sha or None,
             "submitted_validation_state":submitted_validation_state,"working_copy_changed_after_submit":working_copy_changed_after_submit,
             "last_validation":check.get("checked_at"),"warnings":len(check.get("warnings") or []),"errors":len(check.get("errors") or []),
             "activation":activation,"last_send":activation.get("sent_at") or activation.get("updated_at"),"last_result":activation.get("message") or "",
             "intake_ready":intake_ready,"intake_pending":intake_pending,
             "semantic_ready":semantic_ready,"semantic_blocked":len(semantic_invalid),
+            "image_unique":image_unique,"image_duplicate_reports":image_duplicate_reports[:100],
+            "media_near_duplicate_pairs":media_near_duplicate_pairs[:100],"media_near_duplicate_threshold":6,
             "content_unique":content_unique,"near_duplicate_pairs":near_duplicate_pairs[:100],
             "cross_campaign_near_duplicates":cross_campaign_near,
             "account_bound":accounts==[account_id],"avito_connected":bool(autoload.get("connected")),
@@ -2084,13 +4173,385 @@ def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoloa
             "can_send":can_send,"blocked_reason":reason}
 
 
+def _ff_target_readiness_snapshot(db, campaign, allowed, account_id: str):
+    """Read-only orchestration snapshot for Target Deficit and publication readiness.
+
+    This consumer composes existing CampaignItem, Feed Control, image uniqueness,
+    Content QA, and account-scope gates. It never creates creatives, writes state,
+    calls a provider, or sends a publication request.
+    """
+    import hashlib
+    target = str(account_id or "").strip()
+    strategy_raw = db.execute(_t(
+        "SELECT value FROM storage WHERE account_id=:a AND key='campaign_strategy' LIMIT 1"
+    ), {"a": target}).scalar()
+    try:
+        strategy = json.loads(strategy_raw or "{}")
+    except Exception:
+        strategy = {}
+    if not isinstance(strategy, dict):
+        strategy = {}
+    target_active = max(0, int(strategy.get("target_active_ads") or 0))
+    active = db.execute(_t("""
+        SELECT COUNT(DISTINCT item_id) FROM avito_position_snapshots
+        WHERE account_id=:a AND LOWER(COALESCE(visibility,'')) IN
+              ('active','visible','published','public')
+          AND measured_at >= (CURRENT_TIMESTAMP - INTERVAL '72 hours')
+    """), {"a": target}).scalar() or 0
+    current_active = max(0, int(active))
+    deficit = max(0, target_active - current_active)
+
+    rows, scoped, approved, accounts, images, cities = _ff_activation_snapshot(
+        db, campaign.id, allowed, target
+    )
+    # A brand-new campaign legitimately has no materialized CampaignItem rows yet.
+    # Delivery must remain fail-closed for publication, but read-only readiness
+    # must describe that empty state instead of misclassifying it as cross-account.
+    if rows:
+        delivery = _ff_delivery_snapshot(db, campaign, allowed, target)
+    else:
+        delivery = {
+            "status": "ok",
+            "campaign_id": campaign.id,
+            "account_id": target,
+            "items": 0,
+            "approved": 0,
+            "validation_state": "NOT_CHECKED",
+            "intake_ready": False,
+            "semantic_ready": False,
+            "image_unique": True,
+            "content_unique": True,
+            "account_bound": bool(str(campaign.default_account_id or "").strip() == target),
+            "can_send": False,
+            "blocked_reason": "Нет материализованных объявлений. Завершите структуру и подготовку карточек.",
+        }
+    payloads = [_ff_payload(row) for row in scoped]
+    directions = {str(p.get("direction") or "").strip() for p in payloads if str(p.get("direction") or "").strip()}
+    city_values = {str(p.get("city") or "").strip() for p in payloads if str(p.get("city") or "").strip()}
+    formulas = {str(p.get("copy_formula_id") or p.get("formula_id") or "").strip().upper() for p in payloads if str(p.get("copy_formula_id") or p.get("formula_id") or "").strip()}
+    # CampaignItem.hypothesis_id is the canonical durable assignment. Older
+    # rows may not duplicate it inside payload_json, so readiness must combine
+    # both sources instead of falsely reporting an unassigned hypothesis.
+    hypotheses = set()
+    hypothesis_assignments = []
+    for row,p in zip(scoped,payloads):
+        value=str(p.get("hypothesis_id") or p.get("hypothesis") or getattr(row,"hypothesis_id",None) or "").strip()
+        hypothesis_assignments.append(value)
+        if value:
+            hypotheses.add(value)
+    images_seen = {str(p.get("image_sha256") or p.get("image_hash") or p.get("image_url") or "").strip() for p in payloads if str(p.get("image_sha256") or p.get("image_hash") or p.get("image_url") or "").strip()}
+    banners = {str(p.get("banner_url") or p.get("banner") or "").strip() for p in payloads if str(p.get("banner_url") or p.get("banner") or "").strip()}
+    banner_assignments = [
+        str(p.get("banner_url") or p.get("banner") or "").strip()
+        for p in payloads
+    ]
+    combinations = set()
+    for p in payloads:
+        combinations.add((
+            str(p.get("direction") or "").strip().casefold(),
+            str(p.get("city") or "").strip().casefold(),
+            str(p.get("copy_formula_id") or p.get("formula_id") or "").strip().upper(),
+            str(p.get("hypothesis_id") or p.get("hypothesis") or "").strip(),
+            str(p.get("image_sha256") or p.get("image_hash") or p.get("image_url") or "").strip(),
+            str(p.get("banner_url") or p.get("banner") or "").strip(),
+        ))
+    generated = len(scoped)
+    capacity = len(combinations)
+    qa_reports = [_ff_validate_row(row, db) for row in scoped]
+    qa_pass = sum(1 for report in qa_reports if report.get("valid"))
+    all_text = bool(scoped) and all(str(p.get("description") or p.get("text") or "").strip() for p in payloads)
+    all_price = bool(scoped) and all(_campaign_price_readiness_pass(p) for p in payloads)
+    if not bool(strategy.get("require_verified_price", True)):
+        all_price = True
+    # Formula families are reusable; assignment means every item has one.
+    formula_assigned = bool(scoped) and all(
+        str(p.get("copy_formula_id") or p.get("formula_id") or "").strip() for p in payloads)
+    hypothesis_assigned = bool(scoped) and all(hypothesis_assignments)
+    image_pass = bool(scoped) and bool(delivery.get("semantic_ready"))
+    image_unique = bool(delivery.get("image_unique"))
+    # MEDIA_PROVENANCE_TRUTH_V1: MediaLink -> MediaAsset is the durable source
+    # of truth for materialized campaign media. Do not label a linked approved
+    # asset as AI_GENERATED merely because legacy payload_json omitted helper
+    # provenance fields.
+    from app.models.media_link import MediaLink as _ReadinessMediaLink
+    from app.models.media_asset import MediaAsset as _ReadinessMediaAsset
+    _media_by_item = {}
+    if scoped:
+        _entity_ids = [str(row.id) for row in scoped]
+        _linked_media = (
+            db.query(_ReadinessMediaLink, _ReadinessMediaAsset)
+            .join(_ReadinessMediaAsset, _ReadinessMediaAsset.id == _ReadinessMediaLink.media_id)
+            .filter(
+                _ReadinessMediaLink.entity_type == "campaign_item",
+                _ReadinessMediaLink.entity_id.in_(_entity_ids),
+                _ReadinessMediaAsset.deleted_at.is_(None),
+            )
+            .order_by(_ReadinessMediaLink.entity_id, _ReadinessMediaLink.position, _ReadinessMediaLink.id)
+            .all()
+        )
+        for _link, _asset in _linked_media:
+            _media_by_item.setdefault(str(_link.entity_id), []).append((_link, _asset))
+
+    image_source_trace = []
+    for row, p in zip(scoped, payloads):
+        linked = _media_by_item.get(str(row.id)) or []
+        if linked:
+            _link, asset = linked[0]
+            source_type = str(asset.source_type or "").strip().lower()
+            provider = str(asset.source_provider or "").strip().lower()
+            if source_type == "upload":
+                selected_source, selection_reason = "OWNER_MEDIA", "linked owner-upload media is present"
+            elif provider == "pexels" or source_type in {"stock", "approved_stock"}:
+                selected_source, selection_reason = "APPROVED_STOCK", "linked approved stock media is present"
+            elif provider == "openai" or source_type in {"generated", "ai_generated"}:
+                selected_source, selection_reason = "AI_GENERATED", "linked generated media is present"
+            else:
+                selected_source, selection_reason = "REUSE_APPROVED", "linked approved account media is present"
+            provenance = {
+                "source_type": asset.source_type,
+                "source_provider": asset.source_provider,
+                "source_ref": asset.source_ref,
+                "storage_key": asset.storage_key,
+                "status": asset.status,
+                "file_state": asset.file_state,
+                "sha256": asset.sha256,
+                "phash": asset.phash,
+            }
+            asset_id = int(asset.id)
+        else:
+            asset_id = p.get("media_asset_id") or p.get("asset_id")
+            provenance = p.get("image_provenance")
+            if p.get("owner_media") or p.get("owner_image"):
+                selected_source, selection_reason = "OWNER_MEDIA", "payload owner media evidence is present"
+            elif p.get("stock_asset") or p.get("stock_url"):
+                selected_source, selection_reason = "APPROVED_STOCK", "payload approved stock evidence is present"
+            elif p.get("reuse_asset") or p.get("reuse_media_id") or p.get("image_url") or p.get("image"):
+                selected_source, selection_reason = "REUSE_APPROVED", "payload reusable media evidence is present"
+            else:
+                selected_source, selection_reason = "NO_MEDIA", "no linked or payload media provenance exists"
+        image_source_trace.append({
+            "campaign_item_id": int(row.id),
+            "selected_source": selected_source,
+            "selection_reason": selection_reason,
+            "fallback_chain": ["OWNER_MEDIA", "APPROVED_STOCK", "REUSE_APPROVED", "AI_GENERATED"],
+            "asset_id": asset_id,
+            "provenance": provenance,
+            "account_scope": target,
+        })
+    banner_qa_explicit_failures=[
+        int(row.id) for row,p in zip(scoped,payloads)
+        if (p.get("banner_url") or p.get("banner"))
+        and isinstance(p.get("banner_qa"),dict)
+        and bool(p.get("banner_qa"))
+        and p.get("banner_qa",{}).get("passed") is False
+    ]
+    banner_pass = bool(scoped) and (
+        not bool(strategy.get("require_banners", True))
+        or (all(banner_assignments) and not banner_qa_explicit_failures)
+    )
+    category_pass = bool(scoped) and all(str(p.get("category_path") or p.get("category") or "").strip() for p in payloads)
+    attributes_pass = bool(scoped) and all(isinstance(p.get("params"), dict) or isinstance(p.get("attributes"), dict) for p in payloads)
+    feed_pass = bool(delivery.get("validation_state") == "READY" and delivery.get("account_bound") and delivery.get("intake_ready") and category_pass and attributes_pass)
+    account_scope_pass = bool((accounts == [target]) or (not rows and delivery.get("account_bound")))
+    require_verified_price = bool(strategy.get("require_verified_price", True))
+    no_conflict = not any(str(p.get("price_status") or "").strip().upper() == "PRICE_CONFLICT" for p in payloads)
+    no_needs_data = (
+        not any(
+            str(p.get("status") or "").strip().upper() == "NEEDS_DATA"
+            or str(p.get("price_status") or "").strip().upper() == "NEEDS_DATA"
+            or bool(p.get("content_needs_data"))
+            for p in payloads
+        )
+        and (all_price or not require_verified_price)
+    )
+    gate_values = {
+        "price_pass": all_price, "text_pass": all_text, "content_qa_pass": bool(delivery.get("content_unique")) and qa_pass == generated,
+        "formula_assigned": formula_assigned, "hypothesis_assigned": hypothesis_assigned,
+        "image_pass": image_pass, "image_unique": image_unique, "banner_pass": banner_pass,
+        "category_pass": category_pass, "attributes_pass": attributes_pass,
+        "feed_pass": feed_pass, "account_scope_pass": account_scope_pass,
+        "no_conflict": no_conflict, "no_needs_data": no_needs_data,
+    }
+    block_reasons = [name for name, passed in gate_values.items() if not passed]
+    if generated == 0:
+        block_reasons.append("EMPTY_CAMPAIGN")
+    if deficit > capacity:
+        block_reasons.append("CONTENT_CAPACITY_EXHAUSTED")
+    ready_to_publish = bool(generated and all(gate_values.values()) and deficit <= capacity)
+    return {
+        "status": "ok", "campaign_id": campaign.id, "account_id": target,
+        "target": target_active, "active": current_active, "deficit": deficit,
+        "capacity": capacity, "planned": min(deficit, capacity), "generated": generated,
+        "qa_pass": qa_pass, "blocked": max(0, generated - qa_pass),
+        "ready_to_publish": ready_to_publish, "capacity_remaining": max(0, capacity - generated),
+        "block_reasons": block_reasons, "gates": gate_values,
+        "formula_families": sorted(formulas), "hypothesis_count": len(hypotheses),
+        "image_sources": len(images_seen), "image_source_trace": image_source_trace[:100], "banner_count": len(banners),
+        "delivery": {"can_send": bool(delivery.get("can_send")), "validation_state": delivery.get("validation_state"),
+                     "image_unique": image_unique, "content_unique": bool(delivery.get("content_unique")),
+                     "blocked_reason": delivery.get("blocked_reason")},
+        "account_bound": account_scope_pass,
+    }
+
+
+@router.get("/{campaign_id}/readiness")
+def campaign_target_readiness(campaign_id: int, account_id: str = "", db=Depends(_db), user=Depends(get_current_user)):
+    """Read-only Target Deficit and Posting Readiness projection."""
+    allowed = _allowed_accounts(db, user)
+    campaign = _campaign_or_404(db, campaign_id, allowed)
+    target = str(account_id or campaign.default_account_id or "").strip()
+    if not target or target not in allowed:
+        raise HTTPException(403, "Нет доступа к аккаунту")
+    return _ff_target_readiness_snapshot(db, campaign, allowed, target)
+
+def _ff_ai_marketer_projection(db, campaign, allowed, account_id: str):
+    """Deterministic AI Marketer projection; never writes learning or publishes."""
+    from app.models.campaign_item import CampaignItem
+    readiness = _ff_target_readiness_snapshot(db, campaign, allowed, account_id)
+    rows = db.query(CampaignItem).filter(CampaignItem.account_id == account_id).all()
+    from app.services.campaign_creative_memory import creative_family_memory
+    creative_memory = creative_family_memory(rows)
+    history = []
+    active_hypotheses = set()
+    tested_types = set()
+    formula_states = {"WINNER": set(), "LOSER": set(), "INCONCLUSIVE": set(), "RUNNING": set()}
+    for row in rows:
+        try:
+            payload = json.loads(row.payload_json or "{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        for key in ("active_hypothesis_id", "hypothesis_id"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                active_hypotheses.add(value)
+        durable_hypothesis=str(getattr(row,"hypothesis_id",None) or "").strip()
+        if durable_hypothesis:
+            active_hypotheses.add(durable_hypothesis)
+        for version in payload.get("optimization_versions") or []:
+            if not isinstance(version, dict):
+                continue
+            result = str(version.get("result") or "pending").strip().lower()
+            state = {"improved":"WINNER", "worse":"LOSER", "no_clear_effect":"INCONCLUSIVE",
+                     "insufficient_data":"INCONCLUSIVE", "observing":"RUNNING",
+                     "pending":"NEW"}.get(result, "INCONCLUSIVE")
+            formula = str(version.get("formula_id") or version.get("copy_formula_id") or payload.get("copy_formula_id") or "").strip().upper()
+            hypothesis_type = str(version.get("hypothesis_type") or payload.get("hypothesis_type") or "FORMULA").strip().upper()
+            if state in formula_states and formula:
+                formula_states[state].add(formula)
+            tested_types.add(hypothesis_type)
+            history.append({"item_id": row.id, "formula_id": formula, "hypothesis_type": hypothesis_type,
+                            "state": state, "version": version.get("version"),
+                            "views": int((version.get("kpi_after") or {}).get("views") or 0) if isinstance(version.get("kpi_after"), dict) else 0})
+    priority = ["FORMULA", "TITLE", "OPENING", "FIRST_IMAGE", "BANNER", "CTA", "PRICE_PRESENTATION"]
+    next_type = next((kind for kind in priority if kind not in tested_types), "FORMULA")
+    winners = sorted(formula_states["WINNER"])
+    losers = sorted(formula_states["LOSER"])
+    inconclusive = sorted(formula_states["INCONCLUSIVE"])
+    running = sorted(formula_states["RUNNING"])
+    planned = int(readiness.get("planned") or 0)
+    exploit = min(planned, int(round(planned * 0.75))) if winners else 0
+    explore = max(0, planned - exploit)
+    if winners:
+        formula_distribution = {winners[0]: exploit} if exploit else {}
+        formula_distribution["EXPLORATION"] = explore
+    else:
+        formula_distribution = {"EXPLORATION": planned}
+    reason = ("Нет доказанного winner: распределить plan по formula families и собрать evidence."
+              if not winners else
+              f"Сохранить winner {winners[0]} стабильным и тестировать только слой {next_type}.")
+    recommendation = {
+        "next_best_hypothesis": f"{next_type}: account-scoped controlled test",
+        "hypothesis_type": next_type,
+        "reason": reason,
+        "expected_signal": "contacts/views and conversion" if next_type != "PRICE_PRESENTATION" else "contacts with trusted price context",
+        "what_to_keep_constant": ["one primary hypothesis per item", "account scope", "verified facts"],
+        "what_to_change": [next_type],
+        "measurement_window": "until meaningful observation window; do not call winner below 30 views and 3 contacts",
+        "stop_condition": "stop on winner/loser/inconclusive state or any readiness gate failure",
+        "fallback_action": "controlled exploration" if not winners else "reuse proven formula with 25% exploration",
+        "confidence": "medium" if history else "low",
+        "evidence_refs": ["CampaignItem.payload_json.optimization_versions", "Target Deficit/Posting Readiness snapshot"],
+    }
+    return {
+        "status": "ok", "account_id": account_id, "campaign_id": campaign.id,
+        "target": readiness.get("target"), "active": readiness.get("active"),
+        "deficit": readiness.get("deficit"), "capacity": readiness.get("capacity"),
+        "ready_to_publish": readiness.get("ready_to_publish"), "blocked": readiness.get("blocked"),
+        "block_reasons": readiness.get("block_reasons") or [],
+        "formula_winners": winners, "formula_losers": losers,
+        "formula_inconclusive": inconclusive, "formula_running": running,
+        "active_hypotheses": sorted(active_hypotheses), "history_count": len(history),
+        "creative_family_memory": creative_memory,
+        "creative_plan": {
+            "planned_total": planned, "exploit_count": exploit, "explore_count": explore,
+            "formula_distribution": formula_distribution,
+            "hypothesis_distribution": {next_type: planned},
+            "image_source_distribution": {"existing_or_approved": planned},
+            "banner_distribution": {
+                "existing_pipeline": planned,
+                "mode": "v7_family_evidence_v1",
+                "weights_pct": dict((creative_memory.get("plan") or {}).get("weights_pct") or {}),
+                "evidence_status": (creative_memory.get("plan") or {}).get("status"),
+                "winner": (creative_memory.get("plan") or {}).get("winner"),
+                "runner_up": (creative_memory.get("plan") or {}).get("runner_up"),
+                "hard_cap_pct": (creative_memory.get("plan") or {}).get("hard_cap_pct"),
+            },
+            "capacity": readiness.get("capacity"),
+            "capacity_remaining": readiness.get("capacity_remaining"),
+            "blocked_count": readiness.get("blocked"),
+            "reason": "Plan only; no creative records are created.",
+        },
+        "recommendation": recommendation,
+    }
+
+
+@router.get("/{campaign_id}/ai-marketer")
+def campaign_ai_marketer(campaign_id: int, account_id: str = "", db=Depends(_db), user=Depends(get_current_user)):
+    """Read-only next-best-hypothesis and creative-plan projection."""
+    allowed = _allowed_accounts(db, user)
+    campaign = _campaign_or_404(db, campaign_id, allowed)
+    target = str(account_id or campaign.default_account_id or "").strip()
+    if not target or target not in allowed:
+        raise HTTPException(403, "Нет доступа к аккаунту")
+    return _ff_ai_marketer_projection(db, campaign, allowed, target)
+
+
 def _campaign_guardian_job_public(job):
     from app.services.jobs import job_public
     data = job_public(job)
     result = job.result_json or {}
-    data["stage"] = result.get("stage") or (job.payload_json or {}).get("stage") or ""
+    stage = str(result.get("stage") or (job.payload_json or {}).get("stage") or "")
+    retryable = bool(result.get("retryable"))
+    system_wait_stages = {
+        "media_retry","media_source_wait","billing_pending",
+        "awaiting_scheduled_url_result","publication_pending_review",
+    }
+    owner_action_stages = {
+        "needs_input","needs_avito_connection","needs_autoload_access",
+        "banner_confirmation_required","billing_limit","banner_cost_cap",
+    }
+    requires_owner_action = bool(
+        str(job.status or "") == "awaiting_confirmation"
+        and (
+            stage in owner_action_stages
+            or bool(result.get("questions"))
+            or bool(result.get("intake"))
+            or (not retryable and stage not in system_wait_stages)
+        )
+    )
+    data["stage"] = stage
     data["message"] = result.get("message") or ""
-    data["result"] = {k: result.get(k) for k in ("stage","campaign_id","account_id","items","photos","validation_state","avito_connected","can_send","blocked_reason","external_upload","upload_id","report") if k in result}
+    data["retryable"] = retryable
+    data["requires_owner_action"] = requires_owner_action
+    if str(job.status or "") == "awaiting_confirmation":
+        data["waiting_kind"] = "owner_action" if requires_owner_action else "system_wait"
+        if not requires_owner_action:
+            data["state_text"] = "BORIS продолжит автоматически"
+    else:
+        data["waiting_kind"] = "active" if str(job.status or "") in {"queued","running","validating"} else "terminal"
+    data["result"] = {k: result.get(k) for k in ("stage","campaign_id","account_id","items","photos","validation_state","avito_connected","can_send","blocked_reason","external_upload","upload_id","report","retryable") if k in result}
     if result.get("questions"):
         data["questions"] = result.get("questions")
     if result.get("intake"):
@@ -2147,6 +4608,15 @@ def _campaign_guardian_enqueue(db, campaign, user, account_id, kind):
         row.finished_at = None
         row.progress_done = 0
         p = dict(row.payload_json or {})
+        # CAMPAIGN_EXPLICIT_RESUME_RECOVERY_BUDGET_V1:
+        # _recovery_count protects autonomous stale/startup recovery from looping
+        # forever. An explicit authenticated continuation of the SAME durable row
+        # is a new execution window, not another crash recovery. Reset only the
+        # technical recovery budget; keep the row identity, attempts and business
+        # artifacts so no duplicate job/campaign/provider intent is created.
+        p.pop("_recovery_count", None)
+        p.pop("_last_recovered_at", None)
+        p.pop("_last_recovery_reason", None)
         p.update({"campaign_id":campaign.id,"account_id":account_id,"stage":"queued"})
         row.payload_json = p
     db.commit(); db.refresh(row)
@@ -2158,6 +4628,19 @@ def campaign_guardian_prepare(campaign_id:int, body:dict|None=None, db=Depends(_
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed)
     body=body or {}; target=str(body.get("account_id") or campaign.default_account_id or "").strip()
     if not target or target not in allowed: raise HTTPException(403,"Нет доступа к аккаунту")
+    _require_manage_ads(db,user,target)
+    # TITLE_UNIQUENESS_PREPARE_GATE_V1:
+    # Repair only fact-safe duplicate titles before media/banner preparation.
+    # This is local/deterministic and cannot trigger a provider purchase.
+    _title_repair=_ff_repair_duplicate_titles_fact_safe(db,campaign,allowed)
+    if _title_repair.get("status")=="needs_attention":
+        raise HTTPException(status_code=409,detail={
+            "code":"title_uniqueness_needs_attention",
+            "message":"Часть повторяющихся заголовков нельзя безопасно изменить без новых фактов.",
+            "items":_title_repair.get("unresolved") or [],
+            "unique":_title_repair.get("unique"),
+            "total":_title_repair.get("total"),
+        })
     if body.get("content_mode") == "local_verified_v2":
         from app.services.local_content_worker import enqueue_local
         from app.services.local_content_worker.boris_content import Blocked
@@ -2180,6 +4663,7 @@ def campaign_guardian_deliver(campaign_id:int, body:FFOwnerActivationBody, db=De
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed)
     target=str(body.account_id or campaign.default_account_id or "").strip()
     if not target or target not in allowed: raise HTTPException(403,"Нет доступа к аккаунту")
+    _require_manage_ads(db,user,target)
     row=_campaign_guardian_enqueue(db,campaign,user,target,"campaign_deliver")
     return {"status":"ok","job":_campaign_guardian_job_public(row),"persistent":True,"account_scoped":True}
 
@@ -2194,8 +4678,13 @@ def campaign_guardian_status(campaign_id:int, account_id:str="", db=Depends(_db)
     rows=db.query(BackgroundJob).filter(BackgroundJob.account_id==target,
         BackgroundJob.kind.in_(("campaign_prepare","campaign_deliver","campaign_enhance"))).order_by(BackgroundJob.id.desc()).limit(20).all()
     rows=[j for j in rows if int((j.payload_json or {}).get("campaign_id") or 0)==campaign_id]
-    return {"status":"ok","campaign_id":campaign_id,"account_id":target,"jobs":[_campaign_guardian_job_public(j) for j in rows],
-            "running":any(j.status in ("queued","running","validating") for j in rows)}
+    public_jobs=[_campaign_guardian_job_public(j) for j in rows]
+    return {"status":"ok","campaign_id":campaign_id,"account_id":target,"jobs":public_jobs,
+            "running":any(
+                str(j.get("status") or "") in ("queued","running","validating")
+                or (str(j.get("status") or "")=="awaiting_confirmation" and not bool(j.get("requires_owner_action")))
+                for j in public_jobs
+            )}
 
 
 @router.get("/{campaign_id}/feed_control")
@@ -2208,6 +4697,10 @@ def campaign_feed_control(campaign_id:int, account_id:str="", db=Depends(_db), u
 
 @router.post("/{campaign_id}/feed_control/validate")
 def campaign_feed_validate(campaign_id:int, body:FFOwnerActivationBody, db=Depends(_db), user=Depends(get_current_user)):
+    from app.services.campaign_editor_jobs import maybe_enqueue
+    _queued = maybe_enqueue(db, user, campaign_id, 'validate', body)
+    if _queued is not None:
+        return _queued
     import asyncio, hashlib, datetime, os
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); target=(body.account_id or campaign.default_account_id or "").strip()
     if not target or target not in allowed: raise HTTPException(403,"Нет доступа к аккаунту")
@@ -2216,14 +4709,24 @@ def campaign_feed_validate(campaign_id:int, body:FFOwnerActivationBody, db=Depen
     _,ff_now=_ff_state_load(campaign); intake=_ff_direction_intake(db,campaign,ff_now,scoped)
     if not intake.get("all_complete"):
         raise HTTPException(409,detail={"message":"Проверка фида заблокирована: сначала завершите опрос по каждому направлению.","directions":[d.get("direction") for d in intake.get("directions") or [] if not d.get("complete")]})
-    semantic_reports=[_ff_validate_row(r,db) for r in scoped]; semantic_bad=[x for x in semantic_reports if not x.get("valid")]
+    _feed_local_context=_ff_rule_capture(db,campaign,target,"local_validation",_ff_rule_item_input(scoped))
+    semantic_reports=[]
+    for _idx,_row in enumerate(scoped):
+        semantic_reports.append(_ff_validate_row(_row,db))
+        if (_idx+1)%8==0:
+            db.commit()
+    _ff_rule_result(db,_feed_local_context,source="campaigns._ff_validate_row",expected_item_ids=[int(r.id) for r in scoped],reports=semantic_reports)
+    semantic_bad=[x for x in semantic_reports if not x.get("valid")]
     if semantic_bad:
+        # Persist observed negative validation before the existing blocked response.
+        db.commit()
         raise HTTPException(409,detail={"message":"Проверка Avito заблокирована: сначала исправьте несоответствие фотографий названию/описанию/категории.","semantic_invalid":[x.get("id") for x in semantic_bad]})
     items,xml=_ff_delivery_projection(scoped,db); sha=hashlib.sha256(xml.encode("utf-8")).hexdigest()
     root="/root/BORIS/backend/images"; rel=f"{target}/feed_factory_validation/campaign_{campaign_id}_owner_check.xml"; path=os.path.join(root,rel); os.makedirs(os.path.dirname(path),exist_ok=True)
     with open(path,"w",encoding="utf-8") as f: f.write(xml)
     url="https://boris-ai.pro/images/"+rel
     from app.api.parser import validate_feed_xmlcheck
+    _feed_xml_context=_ff_rule_capture(db,campaign,target,"xmlcheck",{"xml_sha256":sha},artifact_sha256=sha)
     result={"status":"error","errors":["Avito validator did not complete"],"raw_text":"","issues":[]}
     # Everything required by the validator is now scalar/file state. Close all
     # campaign reads before external Avito xmlcheck; ORM access resumes afterwards.
@@ -2231,7 +4734,7 @@ def campaign_feed_validate(campaign_id:int, body:FFOwnerActivationBody, db=Depen
     # Retry only transport/unknown failures. A deterministic Avito schema error must not
     # be submitted three times: we learn it immediately and surface the missing fact.
     for _attempt in range(3):
-        try: result=asyncio.run(validate_feed_xmlcheck(url)) or {}
+        try: result=_campaign_provider_call(asyncio.run, validate_feed_xmlcheck(url)) or {}
         except Exception as e: result={"status":"error","errors":[str(e)],"raw_text":"","issues":[]}
         _st=str(result.get("status") or "").lower()
         if _st in {"ok","errors","pending"}: break
@@ -2364,6 +4867,7 @@ def campaign_feed_validate(campaign_id:int, body:FFOwnerActivationBody, db=Depen
     _check_message="XML соответствует формату" if ok else ("Avito ещё формирует отчёт — BORIS продолжит проверку автоматически" if pending else "Проверка Avito не пройдена")
     ff["official_xml_check"]={"status":_check_status,"checker":"Avito xmlcheck","message":_check_message,"ready":len(scoped) if ok else 0,"total":len(scoped),"sha256":sha,"url":url,"checked_at":now,"media_placements":images,"warnings":result.get("warnings") or [],"errors":result.get("errors") or [],"issues":result.get("issues") or [],"learned":learned,"transport":result.get("transport"),"check_id":result.get("check_id")}
     ff["owner_ready_xml"]={"artifact":"/images/"+rel,"sha256":sha,"items":len(scoped),"media_placements":images,"generated_at":now,"external_upload":False,"official_xmlcheck":{"status":_check_status,"message":_check_message,"checked_items":len(scoped),"checked_at":now}}
+    _ff_rule_result(db,_feed_xml_context,xml_written=True,xml_items=len(scoped),xmlcheck_status=_result_status,check_id=result.get("check_id"))
     _ff_state_save(db,campaign,ff)
     # Official XML validation is also the natural point to refresh real Autoload
     # capability, so READY never means "OAuth keys exist but upload is forbidden".
@@ -2409,6 +4913,7 @@ def campaign_owner_activate(campaign_id:int, body:FFOwnerActivationBody, db=Depe
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed)
     target=(body.account_id or "").strip()
     if target not in allowed: raise HTTPException(403,"Нет доступа к аккаунту")
+    _require_manage_ads(db,user,target)
     from app.services.reliability import module_blocked as _module_blocked
     _disabled,_disabled_reason=_module_blocked(db,"marketing",target)
     if _disabled:
@@ -2418,7 +4923,30 @@ def campaign_owner_activate(campaign_id:int, body:FFOwnerActivationBody, db=Depe
         raise HTTPException(409,detail={"message":f"Согласуйте объявления перед размещением. Сейчас согласовано {len(approved)} из {len(scoped)}.","approved":len(approved),"total":len(scoped)})
     # Delivery always refreshes real Autoload capability immediately before any
     # persistent feed-store mutation or external upload.
+    _feed_activation_context=_ff_rule_capture(db,campaign,target,"activation_preflight",_ff_rule_item_input(scoped))
     delivery=_ff_delivery_snapshot(db,campaign,allowed,target,refresh_autoload=True)
+    _ff_rule_result(db,_feed_activation_context,delivery=delivery)
+    # _ff_delivery_snapshot already closes bounded read transactions; this closes the ledger-only observation.
+    db.commit()
+    # CAMPAIGN_OWNER_ACTIVATION_CAN_SEND_V1:
+    # Publication is allowed only from the exact fresh delivery projection that
+    # proves every owner-facing readiness dimension. Individual legacy checks
+    # below remain as explicit diagnostics, but they must never be able to turn
+    # a fresh can_send=False projection into a publishable campaign.
+    if not delivery.get("can_send"):
+        raise HTTPException(409,detail={
+            "code":"campaign_delivery_not_ready",
+            "message":delivery.get("blocked_reason") or "Кампания ещё не готова к отправке в Avito.",
+            "can_send":False,
+            "image_unique":bool(delivery.get("image_unique")),
+            "content_unique":bool(delivery.get("content_unique")),
+            "intake_ready":bool(delivery.get("intake_ready")),
+            "account_bound":bool(delivery.get("account_bound")),
+            "semantic_ready":bool(delivery.get("semantic_ready")),
+            "validation_state":delivery.get("validation_state"),
+            "autoload_ready":bool(delivery.get("autoload_ready")),
+            "changed_avito":False,
+        })
     if not delivery.get("semantic_ready"):
         raise HTTPException(409,detail={"message":delivery.get("blocked_reason") or "Отправка заблокирована: фотографии не соответствуют названию/описанию/категории.","semantic_blocked":delivery.get("semantic_blocked")})
     if delivery.get("validation_state") != "READY":
@@ -2458,6 +4986,7 @@ def campaign_owner_activate(campaign_id:int, body:FFOwnerActivationBody, db=Depe
         and int((_campaign_settings or {}).get("parent_campaign_item_id") or 0)>0
     )
     _targeted_replacement_evidence=None
+    _feed_replacement_context=_ff_rule_capture(db,campaign,target,"activation_preflight",{"replacement":{k:_campaign_settings.get(k) for k in ("publication_mode","replace_feed_identity","parent_campaign_item_id","provider_rejection_upload_id")},"current_sha":delivery.get("current_sha")}) if _targeted_replacement else None
     if _targeted_replacement:
         if _explicit_cutover or len(campaign_items)!=1:
             raise HTTPException(status_code=409,detail={
@@ -2599,6 +5128,8 @@ def campaign_owner_activate(campaign_id:int, body:FFOwnerActivationBody, db=Depe
             "verified_at":_repair_verified_at,
         }
 
+    if _feed_replacement_context is not None:
+        _ff_rule_result(db,_feed_replacement_context,delivery=delivery,replacement_requested=True,replacement_evidence=_targeted_replacement_evidence)
     if _explicit_cutover:
         _old_campaign_id=int(_cutover.get("old_campaign_id") or 0)
         _preserve=int((_campaign_settings or {}).get("preserve_existing_feed_items") or 0)
@@ -2816,6 +5347,7 @@ def campaign_owner_activate(campaign_id:int, body:FFOwnerActivationBody, db=Depe
                          "items":len(campaign_items),"approved":len(approved),"photos":delivery.get("photos"),"feed_url":delivery.get("feed_url"),
                          "validated_artifact":_validated_artifact,
                          "official_checked_at":delivery.get("last_validation"),"captured_at":_pre_sent_at}
+    _feed_publish_context=_ff_rule_capture(db,campaign,target,"publish_submit",{"campaign_xml_sha256":delivery.get("current_sha"),"validated_sha256":delivery.get("validated_sha")},artifact_sha256=delivery.get("current_sha"))
     _,ff=_ff_state_load(campaign); ff["step"]="publication_processing"; ff["owner_activation"]={"status":"processing","account_id":target,"items":len(campaign_items),"submitted_snapshot":_submitted_snapshot,"updated_at":_pre_sent_at}; _ff_state_save(db,campaign,ff)
     result=feed_send_to_avito(target)
     _,ff=_ff_state_load(campaign); _sent_at=_dt_activation.datetime.now(_dt_activation.timezone.utc).isoformat()
@@ -2823,6 +5355,7 @@ def campaign_owner_activate(campaign_id:int, body:FFOwnerActivationBody, db=Depe
         ff["step"]="publication_processing"; ff["owner_activation"]={"status":"processing","account_id":target,"items":len(campaign_items),"message":result.get("message") or "Avito обрабатывает фид","upload_id":result.get("upload_id"),"delivery_state":result.get("delivery_state") or "submitted","submitted_snapshot":_submitted_snapshot,"sent_at":_sent_at,"updated_at":_sent_at}
     else:
         ff["step"]="publication_failed"; ff["owner_activation"]={"status":"failed","account_id":target,"items":len(campaign_items),"message":result.get("message") or "Не удалось передать объявления","submitted_snapshot":_submitted_snapshot,"sent_at":_sent_at,"updated_at":_sent_at}
+    _ff_rule_result(db,_feed_publish_context,canonical_publisher="app.api.avito.feed_send_to_avito",result=result)
     _ff_state_save(db,campaign,ff)
     return {"status":result.get("status"),"campaign_id":campaign_id,"account_id":target,"items":len(campaign_items),
             "activation":ff["owner_activation"],"external_upload":result.get("delivery_state") in {"submitted","submitted_reconciled"},
@@ -2883,6 +5416,19 @@ class FFWorkflowBriefBody(BaseModel):
     price: int = 0
     defaults: dict = {}
     category_hints: dict = {}
+    # CAMPAIGN_SOURCE_CONTRACT_V1: one durable input contract for a client task.
+    # URLs/sections are explicit owner-provided sources, not prose hints that can
+    # disappear after reload. bind_product_data keeps title/photos/features/price
+    # from one parsed product together through materialization.
+    source_urls: list[str] = []
+    source_sections: list[str] = []
+    bind_product_data: bool = False
+    use_parsed_products: bool = True
+    price_source: str = "company_or_site"  # company_or_site | company_price_list | website | range
+    price_min: int = 0
+    price_max: int = 0
+    trust_owner_source_prices: bool = True
+
 
 class FFMaterializeBody(BaseModel):
     account_id: str = ""
@@ -2893,6 +5439,96 @@ class FFMutationBody(BaseModel):
     media_ids: list[int] = []
     image_urls: list[str] = []
     hero_media_id: int | None = None
+    remove_media_ids: list[int] = []
+    media_order_ids: list[int] = []
+
+
+def _ff_push_edit_history(payload: dict, action: str, actor: str = "BORIS", note: str = "") -> None:
+    """Persist a bounded human-readable item history before a visible mutation."""
+    from datetime import datetime, timezone
+    snapshot = {
+        "title": str(payload.get("title") or ""),
+        "description": str(payload.get("description") or ""),
+        "price": payload.get("price"),
+        "category": str(payload.get("category") or payload.get("category_path") or ""),
+        "template_id": str(payload.get("template_id") or ""),
+        "params": dict(payload.get("params") or {}) if isinstance(payload.get("params"), dict) else {},
+        "images": [str(x) for x in (payload.get("images") or []) if str(x).strip()][:20],
+        "banner_url": str(payload.get("banner_url") or ""),
+    }
+    history = [dict(x) for x in (payload.get("edit_history") or []) if isinstance(x, dict)]
+    history.append({
+        "at": datetime.now(timezone.utc).isoformat(),
+        "action": str(action or "edit")[:80],
+        "actor": str(actor or "BORIS")[:80],
+        "note": str(note or "")[:500],
+        "snapshot": snapshot,
+    })
+    payload["edit_history"] = history[-20:]
+
+class FFBulkTransformBody(BaseModel):
+    item_ids: list[int] = []
+    title_template: str = ""
+    description_template: str = ""
+    description_mode: str = "append"  # append | prepend | replace
+    variables: dict[str, list[str]] = {}
+    price: float | None = None
+    city: str = ""
+    template_id: str = ""
+    category_params: dict = {}
+    preview_only: bool = True
+    confirmed: bool = False
+
+
+def _ff_bulk_variable_map(payload: dict, row, index: int, manual: dict[str, list[str]]) -> dict[str, str]:
+    """Resolve per-card variables without crossing product boundaries."""
+    import re
+    source_product=dict(payload.get("source_product") or {})
+    source_characteristics=dict(payload.get("source_product_characteristics") or source_product.get("characteristics") or {})
+    params=dict(payload.get("params") or {})
+    direction=str(payload.get("direction") or row.segment or payload.get("title") or "").strip()
+    category_path=str(payload.get("category_path") or payload.get("category") or "").strip()
+    built={
+        "товар":str(source_product.get("title") or direction),
+        "услуга":direction,
+        "направление":direction,
+        "город":str(payload.get("city") or row.geo or ""),
+        "цена":str(int(float(payload.get("price") or 0))) if float(payload.get("price") or 0)>0 else "",
+        "категория":category_path.split(">")[-1].strip() if category_path else "",
+        "номер":str(index+1),
+        "вариант":str(payload.get("variant") or index+1),
+        "текущий_заголовок":str(payload.get("title") or ""),
+        "текущий_текст":str(payload.get("description") or ""),
+    }
+    def norm(k):
+        return re.sub(r"[^0-9a-zа-яё]+","",str(k or "").casefold())
+    values={norm(k):str(v) for k,v in built.items() if str(v).strip()}
+    for source in (source_characteristics,params):
+        for key,val in source.items():
+            if val in (None,"",[]):
+                continue
+            values.setdefault(norm(key),str(val))
+    for key,options in (manual or {}).items():
+        clean=[str(x).strip() for x in (options or []) if str(x).strip()]
+        if clean:
+            values[norm(key)]=clean[index % len(clean)]
+    return values
+
+
+def _ff_render_bulk_template(template: str, values: dict[str,str]) -> tuple[str,list[str]]:
+    import re
+    missing=[]
+    def repl(match):
+        raw=str(match.group(1) or "").strip()
+        key=re.sub(r"[^0-9a-zа-яё]+","",raw.casefold())
+        value=str(values.get(key) or "").strip()
+        if not value:
+            missing.append(raw)
+            return match.group(0)
+        return value
+    rendered=re.sub(r"\{([^{}]+)\}",repl,str(template or ""))
+    return rendered,sorted(set(missing))
+
 
 class FFTextBody(BaseModel):
     item_ids: list[int] = []
@@ -2918,6 +5554,10 @@ class FFBannerBody(BaseModel):
     # images. Larger batches require an explicit second-step confirmation with
     # the exact expected number of paid images.
     confirmed_paid_items: int = 0
+    # A partial batch retry keeps every neighbor's original paid image intent.
+    # Quality corrections advance the image key, never the <=4 RUB budget key.
+    item_idempotency_keys: dict[str, str] = {}
+    item_budget_intent_keys: dict[str, str] = {}
 
 class FFAutoMediaBody(BaseModel):
     item_ids: list[int] = []
@@ -2997,6 +5637,93 @@ def _ff_assert_mutable(campaign):
     return ff
 
 
+def _ff_assert_card_editor_mutable(campaign):
+    """Allow local card revisions after terminal publication, never during delivery.
+
+    A completed/partial publication is live Avito truth, but it must not freeze the
+    BORIS editor forever. Card edits after terminal publication are local revisions:
+    they require a fresh validation/owner publication action and never write Avito
+    from the editor endpoint itself.
+    """
+    _, ff=_ff_state_load(campaign)
+    activation=dict(ff.get("owner_activation") or {})
+    status=str(activation.get("status") or "").lower()
+    step=str(ff.get("step") or "").lower()
+    in_flight=status in {"processing","submitted","scheduled","scheduled_waiting","scheduled_pending_review","pending_review"} or step in {
+        "publication_processing","publication_scheduled","publication_pending_review",
+    }
+    if in_flight:
+        raise HTTPException(status_code=409, detail={
+            "code":"campaign_publication_in_flight",
+            "message":"Avito сейчас обрабатывает отправку. Изменения станут доступны после итогового статуса.",
+            "publication_status":status,
+            "step":step,
+        })
+    return ff
+
+
+def _ff_mark_post_publication_revision(ff: dict, item_id: int, changed_fields: list[str]) -> None:
+    """Record that BORIS has a local revision which is not yet applied in Avito."""
+    import datetime as _dt
+    activation=dict(ff.get("owner_activation") or {})
+    status=str(activation.get("status") or "").lower()
+    step=str(ff.get("step") or "").lower()
+    terminal=status in {"completed","partial"} or step in {"publication_completed","publication_partial"}
+    if not terminal:
+        return
+    state=dict(ff.get("post_publication_revision") or {})
+    ids={int(x) for x in (state.get("item_ids") or []) if str(x).isdigit()}
+    ids.add(int(item_id))
+    fields=set(str(x) for x in (state.get("changed_fields") or []) if str(x).strip())
+    fields.update(str(x) for x in (changed_fields or []) if str(x).strip())
+    state.update({
+        "state":"local_changes_pending_validation",
+        "item_ids":sorted(ids),
+        "changed_fields":sorted(fields),
+        "updated_at":_dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "requires_owner_publication":True,
+        "external_mutation":False,
+    })
+    ff["post_publication_revision"]=state
+
+
+def _ff_assert_media_commit_mutable(campaign):
+    """Automatic work cannot become an unrequested post-publication revision."""
+    from app.services.job_execution_clock import current_job_provenance
+    ff = _ff_assert_card_editor_mutable(campaign)
+    kind = str((current_job_provenance() or {}).get("job_kind") or "")
+    if kind in {"campaign_prepare", "campaign_banners", "campaign_media_shard"} and _ff_publication_locked(ff):
+        raise HTTPException(409, detail={"code":"campaign_publication_locked",
+            "message":"Публикация изменила состояние кампании. Автоматическая задача не применяет устаревшие медиа."})
+    return ff
+
+
+
+def _ff_rule_capture(db, campaign, account_id, stage, source_value, *, artifact_sha256=None):
+    """Ledger-only pre-action capture; current mutable workflow remains its owner."""
+    from app.services.control_feed_rule_facts import feed_event_identity
+    from uuid import uuid4
+    from app.services.control_rule_runtime import safe_capture_feed_context
+    return safe_capture_feed_context(db, account_id=account_id, campaign_id=int(campaign.id),
+        stage=stage, event_id=feed_event_identity(stage, {"campaign_id":int(campaign.id),"account_id":account_id,"source":source_value,"invocation_id":str(uuid4())}),
+        artifact_sha256=artifact_sha256, artifact_kind="campaign_xml_bytes" if artifact_sha256 else None)
+
+
+def _ff_rule_result(db, context, **values):
+    from datetime import datetime, timezone
+    from app.services.control_rule_runtime import observe_feed_result
+    facts={k:context.get(k) for k in ("account_id","campaign_id","stage","artifact_sha256","artifact_kind")}
+    facts.update(event_id=context.get("source_event_id"),observed_at=datetime.now(timezone.utc).isoformat(),**values)
+    return observe_feed_result(db,context,facts)
+
+
+def _ff_rule_item_input(rows):
+    # Exact persisted content identity; an evidence/result drift for identical
+    # source inputs remains an explicit ledger conflict rather than refreshing QA.
+    return [{"id":int(r.id),"account_id":str(r.account_id or ""),
+             "payload":_ff_payload(r),"updated_at":str(getattr(r,"updated_at",None))} for r in rows]
+
+
 def _ff_state_save(db, campaign, ff):
     import datetime as _dt
     root, _ = _ff_state_load(campaign)
@@ -3010,6 +5737,133 @@ def _ff_state_save(db, campaign, ff):
     # can remain idle for the whole provider round-trip.
     db.commit()
     return ff
+
+
+
+
+
+
+
+
+def _ff_order_event(order: dict, event: str, **extra) -> dict:
+    import datetime as _dt
+    row={"event":str(event or "").strip(),"at":_dt.datetime.now(_dt.timezone.utc).isoformat()}
+    for k,v in extra.items():
+        if v is not None: row[str(k)]=v
+    hist=[dict(x or {}) for x in (order.get("events") or []) if isinstance(x,dict)]
+    comparable={k:v for k,v in row.items() if k!="at"}
+    if not hist or {k:v for k,v in hist[-1].items() if k!="at"}!=comparable:
+        hist.append(row)
+    order["events"]=hist[-100:]
+    return order
+
+
+def _ff_order_contract(ff: dict, campaign_id: int = 0, account_id: str = "") -> dict:
+    import hashlib as _hashlib, re as _re, datetime as _dt
+    ff=dict(ff or {})
+    matrix=[dict(x or {}) for x in (ff.get("matrix") or []) if isinstance(x,dict)]
+    directions=[str(x).strip() for x in (ff.get("directions") or []) if str(x).strip()]
+    cities=[str(x).strip() for x in (ff.get("cities") or []) if str(x).strip()]
+    requested=max(0,int(ff.get("items_planned") or ff.get("quantity") or len(matrix) or 0))
+    by_direction={}
+    for cell in matrix:
+        d=str(cell.get("direction") or "").strip()
+        if d: by_direction[d]=int(by_direction.get(d) or 0)+1
+    if not by_direction and directions and requested:
+        base=requested//len(directions); rem=requested%len(directions)
+        for idx,d in enumerate(directions): by_direction[d]=base+(1 if idx<rem else 0)
+    brief=str(ff.get("brief") or "").strip()
+    _media_match=_re.search(r"(?:"
+                            r"(\d{1,2})\s+(?:изображен\w*|фотограф\w*|фото)\s+(?:на|для)\s+(?:кажд\w*\s+)?(?:объявлен\w*|карточ\w*)"
+                            r"|(?:на|для)\s+кажд\w*\s+(?:объявлен\w*|карточ\w*)[^\n.]{0,45}?(\d{1,2})\s+(?:изображен\w*|фотограф\w*|фото)"
+                            r")",brief,_re.IGNORECASE)
+    _media_value=next((x for x in (_media_match.groups() if _media_match else []) if x),None)
+    media_per_item=max(1,min(int(_media_value) if _media_value else int((ff.get("order_contract") or {}).get("media_per_item") or 3),8))
+    _existing_order=dict(ff.get("order_contract") or {})
+    _derived_banner_required=bool(_re.search(r"(?:перв\w*\s+(?:картин|фотограф|фото)[^\n.]{0,80}баннер|баннер\w*\s+(?:на|для)\s+кажд)",brief,_re.IGNORECASE))
+    # DURABLE_BANNER_REQUIRED_CONTRACT_V1:
+    # Once the owner/order workflow has an explicit banner_required value, it is
+    # authoritative. Progress refreshes must not silently reinterpret the old
+    # free-form brief and erase a later explicit owner/benchmark decision.
+    banner_required=(bool(_existing_order.get("banner_required"))
+                     if "banner_required" in _existing_order
+                     else _derived_banner_required)
+    _banner_every_match=_re.search(
+        r"(?:1\s*баннер\w*\s*(?:на|кажд\w*)\s*(\d{1,2})|баннер\w*\s*(?:кажд\w*|через)\s*(\d{1,2}))",
+        brief,_re.IGNORECASE)
+    _banner_every_value=next((x for x in (_banner_every_match.groups() if _banner_every_match else []) if x),None)
+    if "banner_every_n" in _existing_order:
+        try: banner_every_n=max(1,min(int(_existing_order.get("banner_every_n") or 1),20))
+        except (TypeError,ValueError): banner_every_n=1
+    elif _banner_every_value:
+        banner_every_n=max(1,min(int(_banner_every_value),20))
+    elif str(account_id or ff.get("account_id") or "") == "planetazayavki_65985":
+        banner_every_n=4
+    else:
+        banner_every_n=1
+    norm=_re.sub(r"\s+"," ",brief.casefold()).strip()
+    basis=json.dumps({"account_id":str(account_id or ff.get("account_id") or ""),"brief":norm,
+                      "requested":requested,"directions":directions,"cities":cities},ensure_ascii=False,sort_keys=True)
+    fingerprint=_hashlib.sha256(basis.encode("utf-8")).hexdigest()
+    order=_existing_order
+    first=not bool(order)
+    order.update({"version":1,"order_id":str(order.get("order_id") or ("ffo_"+fingerprint[:20])),
+                  "fingerprint":fingerprint,"campaign_id":int(campaign_id or order.get("campaign_id") or 0),
+                  "account_id":str(account_id or ff.get("account_id") or order.get("account_id") or ""),
+                  "original_user_prompt":brief,"requested_total":requested,"requested_per_direction":by_direction,
+                  "directions":directions,"cities":cities,"media_per_item":media_per_item,
+                  "banner_required":banner_required,"banner_every_n":banner_every_n,
+                  "updated_at":_dt.datetime.now(_dt.timezone.utc).isoformat()})
+    if first:
+        order.update({"status":"ACCEPTED","current_stage":"brief","created_count":0,"qa_pass_count":0,
+                      "ready_count":0,"blocked_count":0,"failed_count":0,"submitted_count":0,"published_count":0,
+                      "started_at":order["updated_at"],"completed_at":None,"last_error":None,"blocking_reason":None,
+                      "retry_count":0,"resume_after":None})
+        _ff_order_event(order,"ORDER_ACCEPTED",requested_total=requested)
+        _ff_order_event(order,"PLAN_BUILT",requested_total=requested,directions=len(directions))
+    ff["order_contract"]=order
+    return ff
+
+def _ff_order_progress(db, campaign, ff: dict, account_id: str = "", stage: str = "", persist: bool = False) -> dict:
+    from app.services.campaign_order_contract import summarize
+    ff=_ff_order_contract(ff,int(getattr(campaign,"id",0) or 0),str(account_id or getattr(campaign,"default_account_id","") or ""))
+    order=dict(ff.get("order_contract") or {})
+    if stage: order["current_stage"]=str(stage)
+    ff["order_contract"]=order
+    order=summarize(db,campaign,ff,str(account_id or order.get("account_id") or ""),payload_fn=_ff_payload,validate_fn=_ff_validate_row)
+    if stage: order["current_stage"]=str(stage)
+    ff["order_contract"]=order
+    if persist: _ff_state_save(db,campaign,ff)
+    return order
+
+
+def _ff_order_exact_ready(order: dict) -> bool:
+    from app.services.campaign_order_contract import exact_ready
+    return bool(exact_ready(order))
+
+
+
+def _ff_find_active_order_duplicate(db, campaign, ff: dict):
+    from app.models.campaign import Campaign
+    order=dict((ff or {}).get("order_contract") or {})
+    fp=str(order.get("fingerprint") or "")
+    aid=str(order.get("account_id") or getattr(campaign,"default_account_id","") or "")
+    if not fp or not aid:
+        return None
+    rows=(db.query(Campaign)
+          .filter(Campaign.default_account_id==aid,Campaign.id!=int(campaign.id))
+          .order_by(Campaign.id.desc()).limit(100).all())
+    for other in rows:
+        if str(other.status or "") in {"superseded","completed"}:
+            continue
+        _,off=_ff_state_load(other)
+        oo=dict((off or {}).get("order_contract") or {})
+        if str(oo.get("fingerprint") or "")!=fp:
+            continue
+        if str(oo.get("status") or "") in {"CANCELLED","DONE"}:
+            continue
+        return other,off,oo
+    return None
 
 
 def _ff_account_context(db, account_id):
@@ -3102,6 +5956,17 @@ def _ff_category_candidates(db, direction, limit=4, path_hint: str | None = None
     from app.models.category_template import CategoryTreeLeaf
     import re as _re
     text = str(direction or "").strip().lower()
+    # CATEGORY_META_INSTRUCTION_FAIL_CLOSED_V1:
+    # Phrases like «по каждому направлению бизнеса» describe selection scope,
+    # not a product/service. Never let lexical matching route the word
+    # «бизнес» into «Оборудование для бизнеса».
+    if _re.search(
+        r"\b(?:кажд(?:ой|ому|ые|ого)|все(?:м|х)?|наши(?:м|х)?)\s+"
+        r"(?:категори\w*|направлен\w*)(?:\s+(?:бизнеса|компании|аккаунта))?\b",
+        text,
+        _re.IGNORECASE,
+    ) or _re.search(r"\bнаправлен\w*\s+(?:бизнеса|компании|аккаунта)\b", text, _re.IGNORECASE):
+        return []
     # CATEGORY_PATH_HINT_EVIDENCE_V1: an exact GoodsType/category group already
     # observed in this client's feed is stronger than free-text token order. It
     # narrows candidate search but never chooses a leaf by itself.
@@ -3134,6 +5999,19 @@ def _ff_category_candidates(db, direction, limit=4, path_hint: str | None = None
         furniture_leaf = "Гардеробные системы и вешалки"
     elif "ванн" in text and "мебел" in text:
         furniture_leaf = "Мебель для ванной"
+    furniture_product = bool(
+        furniture_leaf
+        or (
+            any(x in text for x in (
+                "мебел","шкаф","комод","тумб","стенк","гостин",
+                "стол","стул","диван","кресл","матрас","кроват",
+            ))
+            and not any(x in text for x in (
+                "электрическ","электрощит","распределительн","серверн",
+                "телекоммуникац","шкаф управлен","инструментальн","промышленн",
+            ))
+        )
+    )
     q = db.query(CategoryTreeLeaf).filter(CategoryTreeLeaf.template_id.isnot(None))
     if _path_hint:
         q = q.filter(CategoryTreeLeaf.path.ilike("%" + _path_hint + "%"))
@@ -3176,6 +6054,10 @@ def _ff_category_candidates(db, direction, limit=4, path_hint: str | None = None
         q = q.filter(CategoryTreeLeaf.path.ilike("Недвижимость >%"))
     elif furniture_leaf:
         q = q.filter(CategoryTreeLeaf.leaf_name == furniture_leaf)
+    elif furniture_product:
+        # FURNITURE_BRANCH_LOCK_V1: generic furniture names such as «шкаф»,
+        # «стенка», «тумба» must never drift into industrial/business equipment.
+        q = q.filter(CategoryTreeLeaf.path.ilike("Для дома и дачи > Мебель и интерьер >%"))
     elif words:
         q = q.filter(CategoryTreeLeaf.path.ilike("%" + words[0] + "%"))
     rows = q.limit(250).all()
@@ -3282,7 +6164,7 @@ def _ff_auto_category_candidate(direction: str, candidates: list[dict]) -> dict:
 
 
 def _ff_contract_missing(db, template_id, params):
-    from app.api.feed_contract import resolve_feed_contract, _required_now, SYSTEM_FIELDS
+    from app.api.feed_contract import resolve_feed_contract, _required_now, _empty_param, SYSTEM_FIELDS
     contract = resolve_feed_contract(template_id, _db=db)
     missing = []
     if not contract.get("ok"):
@@ -3292,7 +6174,7 @@ def _ff_contract_missing(db, template_id, params):
     for name, spec in fields.items():
         if name in SYSTEM_FIELDS:
             continue
-        if name in params or not _required_now(name, spec, fields, params):
+        if not _empty_param(params.get(name)) or not _required_now(name, spec, fields, params):
             continue
         allowed = spec.get("allowed") or []
         if len(allowed) == 1:
@@ -3463,7 +6345,8 @@ def _ff_profile_load(db, account_id: str, direction: str) -> dict:
     try:
         value = json.loads(row.value or "{}")
         return value if isinstance(value, dict) else {}
-    except Exception:
+    except Exception as _policy_exc:
+        observe_suppressed(__name__, _policy_exc, line=9837)
         return {}
 
 
@@ -3756,6 +6639,225 @@ def _ff_validated_category_hint(db, direction: str, hints: dict) -> dict:
     return {"template_id":str(row.template_id or ""),"path":str(row.path or ""),"leaf_name":str(row.leaf_name or ""),"score":100,"source":"existing_account_feed"}
 
 
+def _ff_normalize_source_urls(values) -> list[str]:
+    from urllib.parse import urlparse
+    out=[]
+    for raw in values or []:
+        value=str(raw or "").strip()
+        if not value:
+            continue
+        if not value.startswith(("http://","https://")):
+            value="https://"+value
+        try:
+            parsed=urlparse(value)
+        except Exception:
+            continue
+        if parsed.scheme not in {"http","https"} or not parsed.netloc or any(ch.isspace() for ch in parsed.netloc):
+            continue
+        normalized=value.rstrip("/")
+        if normalized not in out:
+            out.append(normalized)
+        if len(out)>=30:
+            break
+    return out
+
+
+def _ff_product_price_value(product: dict) -> int:
+    import re
+    raw=product.get("price")
+    if isinstance(raw,(int,float)) and float(raw)>0:
+        return int(round(float(raw)))
+    text_value=str(raw or "")
+    match=re.search(r"([0-9][0-9\s]{1,})",text_value)
+    if not match:
+        return 0
+    try:
+        return int(match.group(1).replace(" ",""))
+    except Exception:
+        return 0
+
+
+def _ff_parsed_product_catalog(db, account_id: str, source_urls=None, source_sections=None) -> dict:
+    """Read the existing account-scoped site parser output without crawling again.
+
+    The returned rows stay whole: title, product_url, price, characteristics and
+    images belong to one source product and are never mixed across products.
+    """
+    from urllib.parse import urlparse
+    from app.models.storage import Storage
+    row=db.query(Storage).filter(Storage.account_id==account_id,Storage.key=="parsed_products").order_by(Storage.id.desc()).first()
+    if not row:
+        return {"products":[],"source_urls":[],"parsed_at":None,"count":0}
+    try:
+        data=json.loads(row.value or "{}")
+    except Exception:
+        return {"products":[],"source_urls":[],"parsed_at":None,"count":0}
+    products=[dict(x) for x in (data.get("products") or []) if isinstance(x,dict)]
+    requested_urls=_ff_normalize_source_urls(source_urls or [])
+    requested_hosts=set()
+    for value in requested_urls:
+        try:
+            requested_hosts.add(urlparse(value).netloc.lower())
+        except (ValueError, TypeError):
+            continue
+    section_tokens=[]
+    section_token_slugs=[]
+    section_urls=[]
+    for raw in source_sections or []:
+        value=str(raw or "").strip()
+        if not value:
+            continue
+        if value.startswith(("http://","https://")):
+            section_urls.extend(_ff_normalize_source_urls([value]))
+        else:
+            section_tokens.append(value.casefold())
+            try:
+                from app.api.accounts import _slugify as _campaign_slugify
+                slug=_campaign_slugify(value).replace("_","-")
+            except Exception:
+                slug=""
+            section_token_slugs.append(slug)
+    if section_urls:
+        for value in section_urls:
+            if value not in requested_urls:
+                requested_urls.append(value)
+            try:
+                requested_hosts.add(urlparse(value).netloc.lower())
+            except (ValueError, TypeError):
+                continue
+
+    filtered=[]
+    for idx,product in enumerate(products):
+        purl=str(product.get("product_url") or "").strip()
+        host=""
+        try:
+            host=urlparse(purl).netloc.lower()
+        except Exception:
+            host=""
+        domain_ok=(not requested_hosts) or (host in requested_hosts)
+        hay=" ".join([
+            str(product.get("title") or ""),
+            str(product.get("category_path") or ""),
+            str(product.get("description") or ""),
+            purl,
+        ]).casefold()
+        purl_lc=purl.casefold()
+        section_ok=(not section_tokens) or any(token in hay for token in section_tokens) or any(
+            slug and (slug in purl_lc or slug.replace("-","_") in purl_lc)
+            for slug in section_token_slugs
+        )
+        url_ok=(not requested_urls) or any(
+            purl.rstrip("/").startswith(url.rstrip("/")) for url in requested_urls
+        ) or domain_ok
+        if domain_ok and section_ok and url_ok:
+            clean=dict(product)
+            clean["_source_index"]=idx
+            clean["_price_value"]=_ff_product_price_value(product)
+            clean["images"]=[str(x) for x in (product.get("images") or []) if str(x).strip()][:20]
+            if not clean["images"] and str(product.get("image") or "").strip():
+                clean["images"]=[str(product.get("image")).strip()]
+            filtered.append(clean)
+    return {
+        "products":filtered[:500],
+        "source_urls":list(data.get("source_urls") or ([data.get("source_url")] if data.get("source_url") else [])),
+        "parsed_at":data.get("parsed_at"),
+        "count":len(filtered),
+        "raw_count":len(products),
+    }
+
+
+def _ff_existing_account_cities(db, account_id: str, limit: int = 20) -> list[str]:
+    """Return current placement geos from non-superseded Campaign items."""
+    aid=str(account_id or "").strip()
+    if not aid:
+        return []
+    rows=db.execute(_t("""
+        SELECT ci.geo AS city, COUNT(*) AS item_count, MAX(ci.updated_at) AS last_seen
+        FROM campaign_items ci
+        JOIN campaigns c ON c.id=ci.campaign_id
+        WHERE ci.account_id=:a
+          AND COALESCE(ci.geo,'')<>''
+          AND COALESCE(ci.status,'')<>'superseded'
+          AND COALESCE(c.status,'')<>'superseded'
+        GROUP BY ci.geo
+        ORDER BY COUNT(*) DESC, MAX(ci.updated_at) DESC NULLS LAST, ci.geo ASC
+        LIMIT 80
+    """),{"a":aid}).mappings().all()
+    out=[]; seen=set()
+    for row in rows:
+        city=" ".join(str(row.get("city") or "").split()).strip()
+        key=city.casefold().replace("ё","е")
+        if not city or key in seen:
+            continue
+        if key in {"avito","авито","boris","борис","telegram","телеграм","vk","вк"}:
+            continue
+        seen.add(key); out.append(city)
+        if len(out)>=max(1,min(int(limit or 20),50)):
+            break
+    return out
+
+
+def _ff_existing_account_directions(db, account_id: str, limit: int = 20) -> list[str]:
+    """Return current account directions from non-superseded Campaign items.
+
+    This is used only when the owner explicitly asks for "all/current directions
+    already in BORIS". It must never infer a direction from generic words such as
+    "business", "category" or "account".
+    """
+    aid=str(account_id or "").strip()
+    if not aid:
+        return []
+    rows=db.execute(_t("""
+        SELECT ci.segment AS direction,
+               COUNT(*) AS item_count,
+               MAX(ci.updated_at) AS last_seen
+        FROM campaign_items ci
+        JOIN campaigns c ON c.id=ci.campaign_id
+        WHERE ci.account_id=:a
+          AND COALESCE(ci.segment,'')<>''
+          AND COALESCE(ci.status,'')<>'superseded'
+          AND COALESCE(c.status,'')<>'superseded'
+        GROUP BY ci.segment
+        ORDER BY MAX(ci.updated_at) DESC NULLS LAST, COUNT(*) DESC, ci.segment ASC
+        LIMIT 80
+    """),{"a":aid}).mappings().all()
+    out=[]; seen=set()
+    for row in rows:
+        raw=" ".join(str(row.get("direction") or "").split()).strip()
+        if not raw:
+            continue
+        low=raw.casefold().replace("ё","е")
+        # Never recycle service/taxonomy/meta labels as commercial directions.
+        if low in {
+            "мебель и интерьер","для дома и дачи","оборудование для бизнеса",
+            "услуги и оборудование для бизнеса","товары","услуги",
+        }:
+            continue
+        if re.search(r"\b(?:направлен\w*|категори\w*)\s+(?:бизнеса|компании|аккаунта)\b",low):
+            continue
+        # Canonicalize known furniture families so category resolution receives a
+        # product phrase, not a historical SEO/title variant.
+        canonical=raw
+        if "кухн" in low:
+            canonical="Кухни на заказ"
+        elif "гардероб" in low:
+            canonical="Гардеробные на заказ"
+        elif "прихож" in low:
+            canonical="Прихожие на заказ"
+        elif "ванн" in low and "мебел" in low:
+            canonical="Мебель для ванной на заказ"
+        key=canonical.casefold().replace("ё","е")
+        if key in seen:
+            continue
+        candidates=_ff_category_candidates(db,canonical,limit=8)
+        if not _ff_auto_category_candidate(canonical,candidates):
+            continue
+        seen.add(key); out.append(canonical)
+        if len(out)>=max(1,min(int(limit or 20),50)):
+            break
+    return out
+
+
 def _ff_extract_plan(db, campaign, body):
     import re as _re
     brief = str(body.brief or "").strip()
@@ -3875,6 +6977,24 @@ def _ff_extract_plan(db, campaign, body):
         if not body.directions:
             directions=list(dict.fromkeys(x["direction"] for x in parsed_cells))
 
+    # ACCOUNT_DIRECTION_SCOPE_V1:
+    # «по каждой категории / по каждому направлению бизнеса, которое уже есть
+    # в BORIS» is a scope selector, not a commercial direction. Resolve it from
+    # the selected account's current non-superseded Campaign data BEFORE the
+    # generic natural-language "по ..." parser sees the word «бизнес».
+    _existing_scope_request=bool(_re.search(
+        r"(?:по\s+)?(?:кажд(?:ой|ому)|все(?:м|х)?|наши(?:м|х)?)\s+"
+        r"(?:категори\w*|направлен\w*)"
+        r"(?:\s+(?:бизнеса|компании|аккаунта))?"
+        r"(?:[^.\n]{0,80}\b(?:уже\s+)?(?:есть|имеютс\w*)\b[^.\n]{0,40}\bBORIS\b)?",
+        brief,
+        _re.IGNORECASE,
+    ))
+    if _existing_scope_request and not body.directions and not parsed_cells:
+        directions=_ff_existing_account_directions(db,campaign.default_account_id or "",limit=20)
+        if not cities and not body.cities:
+            cities=_ff_existing_account_cities(db,campaign.default_account_id or "",limit=20)
+
     if not directions:
         # Launcher and normal client prompts quote the actual offer. Parse the full
         # quoted phrase first so internal prepositions such as «в эвакуатор»,
@@ -3957,40 +7077,107 @@ def _ff_extract_plan(db, campaign, body):
                 cities.append(city)
         # Compact natural form: «Уборка в Москве, 1 объявление, цена от ...».
         # Here there is no explicit word «объявление» before the city, so the strict
-        # patterns above intentionally do not match it. Accept only a conservative
-        # set of common city forms to avoid treating product phrases such as
-        # «перегородки в душ» as geography.
+        # patterns above intentionally do not match it. Accept any explicit
+        # capitalized Cyrillic geo tail instead of a hard-coded city whitelist.
+        # This remains fail-closed for common product phrases such as «в душ»
+        # (lowercase), Latin brand names and all-caps abbreviations.
         if not cities:
             _first_cell=_re.split(r"[,;]",first_task,1)[0].strip()
-            _tail_geo=_re.search(r"\s+в\s+(?:городе\s+|г\.\s*)?([А-ЯЁA-Z][А-Яа-яЁёA-Za-z-]+(?:\s+[А-ЯЁA-Z][А-Яа-яЁёA-Za-z-]+)?)\s*$",_first_cell)
+            _tail_geo=_re.search(
+                r"\s+в\s+(?:городе\s+|г\.\s*)?"
+                r"([А-ЯЁ][а-яё][А-Яа-яЁё-]*(?:\s+[А-ЯЁ][а-яё][А-Яа-яЁё-]*)?)\s*$",
+                _first_cell,
+            )
             if _tail_geo:
                 _raw=_tail_geo.group(1).strip()
-                _known_geo={
-                    "москва","москве","санкт-петербург","санкт-петербурге","питер","питере",
-                    "сочи","уфа","уфе","пенза","пензе","ижевск","ижевске","калуга","калуге",
-                    "казань","казани","самара","самаре","тула","туле","тверь","твери",
-                    "воронеж","воронеже","краснодар","краснодаре","новосибирск","новосибирске",
-                    "екатеринбург","екатеринбурге","ростов-на-дону","нижний новгород","нижнем новгороде",
-                    "челябинск","челябинске","омск","омске","пермь","перми","волгоград","волгограде",
-                }
-                if _raw.lower() in _known_geo:
-                    city=_normal_ru_phrase(_raw,title=True)
-                    if city and city.lower() not in rejected:
-                        cities=[city]
-                        # The compact geo belongs to placement, not to the product/service
-                        # name. Strip it from the direction so category matching receives
-                        # «Тестовая уборка», not «Тестовая уборка в Москве».
-                        _geo_suffix=_re.compile(r"\s+в\s+"+_re.escape(_raw)+r"\s*$",_re.IGNORECASE)
-                        directions=[_geo_suffix.sub("",str(d)).strip() for d in directions]
-                        directions=[d for d in directions if d]
+                city=_normal_ru_phrase(_raw,title=True)
+                if city and city.lower() not in rejected:
+                    cities=[city]
+                    # The compact geo belongs to placement, not to the product/service
+                    # name. Strip it from the direction so category matching receives
+                    # the offer only, regardless of which Russian city the client uses.
+                    _geo_suffix=_re.compile(r"\s+в\s+"+_re.escape(_raw)+r"\s*$",_re.IGNORECASE)
+                    directions=[_geo_suffix.sub("",str(d)).strip() for d in directions]
+                    directions=[d for d in directions if d]
         cities=cities[:20]
     variants = max(1, min(int(body.variants or 1), 10))
     defaults = dict(body.defaults or {})
     if body.price:
         defaults["price"] = int(body.price)
     account_id = campaign.default_account_id or ""
+
+    source_urls=_ff_normalize_source_urls(body.source_urls or [])
+    source_sections=[str(x or "").strip() for x in (body.source_sections or []) if str(x or "").strip()][:50]
+    source_catalog=_ff_parsed_product_catalog(
+        db, account_id,
+        source_urls=source_urls,
+        source_sections=source_sections,
+    ) if (bool(body.use_parsed_products) and (bool(body.bind_product_data) or bool(source_urls) or bool(source_sections))) else {"products":[],"source_urls":[],"count":0,"raw_count":0,"parsed_at":None}
+    bound_products=list(source_catalog.get("products") or []) if bool(body.bind_product_data) else []
+    price_source=str(body.price_source or "company_or_site").strip().lower()
+    if price_source not in {"company_or_site","company_price_list","website","range"}:
+        price_source="company_or_site"
+    price_min=max(0,int(body.price_min or 0))
+    price_max=max(0,int(body.price_max or 0))
+    if price_max and price_min and price_max<price_min:
+        price_min,price_max=price_max,price_min
+    source_contract={
+        "version":1,
+        "source_urls":source_urls,
+        "source_sections":source_sections,
+        "bind_product_data":bool(body.bind_product_data),
+        "use_parsed_products":bool(body.use_parsed_products),
+        "parsed_products_available":int(source_catalog.get("raw_count") or 0),
+        "parsed_products_matched":int(source_catalog.get("count") or 0),
+        "parsed_at":source_catalog.get("parsed_at"),
+        "parsed_source_urls":list(source_catalog.get("source_urls") or []),
+        "price_source":price_source,
+        "price_min":price_min,
+        "price_max":price_max,
+        "trust_owner_source_prices":bool(body.trust_owner_source_prices),
+        "binding_rule":"one_product_one_photos_features_price",
+    }
+
     matrix = []
-    if parsed_cells and not body.directions:
+    if bound_products:
+        # PRODUCT_BINDING_MATRIX_V1: every matrix row carries exactly one source
+        # product. Variants may repeat a product, but its price/photos/features
+        # always travel as one immutable source_product object.
+        for product in bound_products[:500]:
+            d=str(product.get("title") or "").strip()
+            if not d:
+                continue
+            candidates=_ff_category_candidates(db,d)
+            hinted=_ff_validated_category_hint(db,d,body.category_hints)
+            if hinted:
+                candidates=[hinted]+[x for x in candidates if str(x.get("template_id") or "")!=str(hinted.get("template_id") or "")]
+            candidate=hinted or _ff_auto_category_candidate(d,candidates)
+            product_snapshot={
+                "source_index":int(product.get("_source_index") or 0),
+                "title":d,
+                "product_url":str(product.get("product_url") or ""),
+                "price_raw":product.get("price"),
+                "price":int(product.get("_price_value") or 0),
+                "description":str(product.get("description") or ""),
+                "characteristics":dict(product.get("characteristics") or {}),
+                "images":[str(x) for x in (product.get("images") or []) if str(x).strip()][:20],
+                "category_path":str(product.get("category_path") or ""),
+                "source":"parsed_products",
+            }
+            for city in (cities or [""]):
+                matrix.append({
+                    "direction":d,
+                    "city":city,
+                    "variant":1,
+                    "price":int(product_snapshot["price"] or 0),
+                    "price_mode":"exact" if int(product_snapshot["price"] or 0)>0 else "",
+                    "template_id":candidate.get("template_id",""),
+                    "category_path":candidate.get("path",""),
+                    "category_candidates":candidates,
+                    "source_product":product_snapshot,
+                })
+        directions=list(dict.fromkeys(str(x.get("direction") or "") for x in matrix if str(x.get("direction") or "")))
+    elif parsed_cells and not body.directions:
         for _cell in parsed_cells[:50]:
             d=_cell["direction"]
             candidates=_ff_category_candidates(db,d)
@@ -4024,8 +7211,20 @@ def _ff_extract_plan(db, campaign, body):
         if parsed_cells and _re.search(r"по\s+одному\s+объявлен\w*\s+на\s+кажд",brief,_re.IGNORECASE):
             qty=len(matrix)
         else:
-            qm=_re.search(r"(\d{1,4})\s+.{0,40}?(?:объявлен\w*|карточ\w*)",brief.lower())
-            qty=int(qm.group(1)) if qm else len(matrix)
+            # PER_DIRECTION_QUANTITY_V1: «по 30 объявлений по каждому
+            # направлению / каждой категории» means 30 for EACH resolved
+            # direction, not 30 total for the whole multi-category campaign.
+            per_direction=_re.search(
+                r"по\s+(\d{1,4})\s+(?:разн\w*\s+)?(?:объявлен\w*|карточ\w*)"
+                r"\s+(?:по|на)\s+кажд(?:ому|ой)\s+(?:направлен\w*|категори\w*)",
+                brief,
+                _re.IGNORECASE,
+            )
+            if per_direction and directions:
+                qty=int(per_direction.group(1))*len(directions)
+            else:
+                qm=_re.search(r"(\d{1,4})\s+.{0,40}?(?:объявлен\w*|карточ\w*)",brief.lower())
+                qty=int(qm.group(1)) if qm else len(matrix)
     qty=max(0,min(qty,1000))
     # The requested quantity is a real materialization contract, not a label.
     # Repeat direction × city cells with increasing creative variant numbers
@@ -4076,7 +7275,8 @@ def _ff_extract_plan(db, campaign, body):
             "account_context": ctx, "directions": directions, "services_products": directions,
             "creative_angles": creative_angles,
             "audience": audience, "cities": cities, "variants": variants, "quantity": qty,
-            "defaults": defaults, "matrix": matrix, "items_planned": len(matrix)}
+            "defaults": defaults, "matrix": matrix, "items_planned": len(matrix),
+            "source_contract": source_contract}
 
 
 def _ff_item_by_id(db, campaign_id, item_id, allowed):
@@ -4109,7 +7309,8 @@ def ff_workflow_get(campaign_id:int, db=Depends(_db), user=Depends(get_current_u
             else:
                 ff=dict(ff); ff["scope_reconcile"]={"status":"blocked_ambiguous","live_items":len(live_ids),"saved_items":len(saved_ids),"planned":planned}
     questions = _ff_questions(db,campaign,ff) if ff else []
-    return {"status":"ok", "workflow":ff, "questions":questions,
+    order = _ff_order_progress(db,campaign,ff,campaign.default_account_id or "",stage=str((ff or {}).get("step") or ""),persist=False) if ff else {}
+    return {"status":"ok", "workflow":ff, "questions":questions, "order":order,
             "items_total":len(rows), "counts":CS.status_counts(db,campaign_id,allowed_accounts=allowed)}
 
 
@@ -4119,9 +7320,20 @@ def ff_workflow_brief(campaign_id:int, body:FFWorkflowBriefBody, db=Depends(_db)
     _ff_assert_mutable(campaign)
     ff = _ff_extract_plan(db,campaign,body)
     ff = _ff_hydrate_profiles(db,campaign,ff)
+    ff = _ff_order_contract(ff,campaign.id,campaign.default_account_id or "")
+    duplicate=_ff_find_active_order_duplicate(db,campaign,ff)
+    if duplicate:
+        existing,existing_ff,existing_order=duplicate
+        campaign.status="superseded"
+        ff["duplicate_order"]={"existing_campaign_id":int(existing.id),"existing_order_id":str(existing_order.get("order_id") or "")}
+        _ff_state_save(db,campaign,ff)
+        existing_questions=_ff_questions(db,existing,existing_ff)
+        return {"status":"ok","duplicate":True,"existing_campaign_id":int(existing.id),
+                "existing_order_id":str(existing_order.get("order_id") or ""),"workflow":existing_ff,
+                "questions":existing_questions,"order":existing_order}
     ff["questions"] = _ff_questions(db,campaign,ff)
     _ff_state_save(db,campaign,ff)
-    return {"status":"ok", "workflow":ff, "questions":ff["questions"]}
+    return {"status":"ok", "workflow":ff, "questions":ff["questions"], "order":ff.get("order_contract")}
 
 
 @router.post("/{campaign_id}/workflow/answers")
@@ -4174,20 +7386,232 @@ def ff_workflow_intake_get(campaign_id:int, db=Depends(_db), user=Depends(get_cu
     return _ff_direction_intake(db,campaign,ff,rows)
 
 
-def _ff_title_variants(direction: str, brief: str = "") -> list[str]:
-    d=str(direction or "").strip(); low=d.lower(); out=[]
-    if "продаж" in low and "кварт" in low:
-        out=["Брокер по продаже квартир", "Помощь в продаже квартиры под ключ", "Продажа квартиры с брокером", "Риелтор по продаже квартир", "Сопровождение продажи квартиры"]
-    elif ("подбор" in low or "покуп" in low) and "кварт" in low:
-        out=["Брокер по подбору квартиры", "Подбор квартиры под ваш бюджет", "Помощь в покупке квартиры", "Риелтор для покупки квартиры", "Сопровождение покупки квартиры"]
-    elif "инвест" in low:
-        out=["Инвестиционный брокер по недвижимости", "Подбор недвижимости для инвестиций", "Инвестиции в недвижимость с брокером", "Подбор инвестиционной квартиры", "Консультация инвестора по недвижимости"]
-    elif "ипот" in low:
-        out=["Ипотечный брокер", "Помощь с ипотекой под ключ", "Ипотечное сопровождение", "Подбор ипотеки и сопровождение сделки", "Консультация ипотечного брокера"]
-    else:
-        out=[d, f"{d} под ключ", f"Консультация: {d}", f"{d} — сопровождение", f"Помощь специалиста: {d}"]
-    return list(dict.fromkeys([x[:50] for x in out if x.strip()]))[:8]
+def _ff_core_title(direction: str) -> str:
+    """Return a conservative 2–3 word search-core title without inventing facts."""
+    import re as _re
+    d=" ".join(str(direction or "").strip().split())
+    d=_re.sub(r"[:|/—–-]+"," ",d)
+    d=" ".join(d.split()).strip()
+    low=d.casefold()
+    if "чистк" in low or "химчист" in low:
+        return d[:50]
+    known=(
+        ("кухн", "Кухни на заказ"),
+        ("гардероб", "Гардеробные на заказ"),
+        ("прихож", "Прихожие на заказ"),
+        ("мебел", "Мебель на заказ") if "ванн" not in low else ("мебел", "Мебель для ванной"),
+        ("душев", "Душевые перегородки"),
+        ("брусчат", "Брусчатка"),
+        ("штукатур", "Механизированная штукатурка"),
+        ("ипотеч", "Ипотечный брокер"),
+    )
+    for needle,title in known:
+        if needle in low:
+            return title
+    words=[w for w in d.split() if w]
+    generic={"консультация","консультации","помощь","специалиста","сопровождение","сопровождения","под","ключ"}
+    words=[w for w in words if w.casefold() not in generic]
+    if len(words)<=3:
+        return " ".join(words)[:50]
+    if "из" in [w.casefold() for w in words]:
+        idx=[w.casefold() for w in words].index("из")
+        if 2<=idx<=3:
+            return " ".join(words[:idx])[:50]
+    if len(words)>=3 and words[-2].casefold()=="на" and words[-1].casefold()=="заказ":
+        return " ".join([words[0],words[-2],words[-1]])[:50]
+    if len(words)>=3 and words[1].casefold()=="для":
+        return " ".join(words[:3])[:50]
+    return " ".join(words[:3])[:50]
 
+
+def _ff_title_variants(direction: str, brief: str = "") -> list[str]:
+    """Search-first titles: core query is the default; no unconfirmed modifiers."""
+    core=_ff_core_title(direction)
+    low=str(direction or "").casefold()
+    out=[core]
+    # Safe lexical alternatives only; no claims such as stock/warranty/urgency.
+    # A broad soft-furniture cleaning direction truthfully contains the common
+    # object intents below. Keep these lexical, not commercial: no promises,
+    # timing, discounts, guarantees or unverified service method.
+    if ("чистк" in low or "химчист" in low) and "мебел" in low:
+        out += [
+            "Чистка диванов",
+            "Чистка кресел",
+            "Чистка обивки",
+            "Чистка мебели",
+            "Чистка мебельной обивки",
+        ]
+    elif "кухн" in low:
+        out += [
+            "Кухонные гарнитуры",
+            "Мебель для кухни",
+            "Кухонная мебель на заказ",
+            "Кухни по размерам",
+            "Гарнитуры для кухни",
+            "Кухни под заказ",
+            "Кухонные гарнитуры на заказ",
+            "Кухни по индивидуальным размерам",
+            "Мебель кухни на заказ",
+            "Кухонная мебель по размерам",
+        ]
+    elif "гардероб" in low:
+        out += [
+            "Гардеробные",
+            "Гардеробные системы",
+            "Гардеробная на заказ",
+            "Гардеробные по размерам",
+            "Мебель для гардеробной",
+            "Гардеробная система на заказ",
+            "Гардеробные под заказ",
+            "Гардеробная по размерам",
+            "Системы хранения на заказ",
+            "Мебель гардеробной на заказ",
+        ]
+    elif "прихож" in low:
+        out += [
+            "Мебель в прихожую",
+            "Мебель для прихожей",
+            "Прихожая на заказ",
+            "Прихожие по размерам",
+            "Мебель прихожей на заказ",
+            "Прихожие под заказ",
+            "Мебель в прихожую на заказ",
+            "Прихожая по размерам",
+            "Мебель для прихожей на заказ",
+            "Прихожие по индивидуальным размерам",
+        ]
+    elif "ванн" in low and "мебел" in low:
+        out += [
+            "Мебель в ванную",
+            "Ванная мебель на заказ",
+            "Мебель для санузла",
+            "Мебель в ванную на заказ",
+            "Мебель для ванной по размерам",
+            "Мебель в ванную по размерам",
+            "Мебель для ванной под заказ",
+            "Мебель ванной на заказ",
+            "Мебель ванной по размерам",
+            "Мебель для санузла на заказ",
+        ]
+    elif "шкаф" in low:
+        out += ["Шкафы на заказ"]
+    elif "душев" in low:
+        out += ["Стеклянные перегородки"]
+    return list(dict.fromkeys([x[:50].strip() for x in out if x and x.strip()]))[:11]
+
+
+def _ff_select_title(direction: str, variant: int, brief: str = "") -> str:
+    """Search-first portfolio: explore each safe lexical title once, then return to core."""
+    pool=_ff_title_variants(direction,brief)
+    if not pool:
+        return _ff_core_title(direction)
+    variant=max(1,int(variant or 1))
+    # TITLE_DIVERSITY_SAFE_POOL_V1: bulk exact-N may contain repeated rows of one
+    # direction. Use each fact-safe lexical alternative once before falling back
+    # to the strongest core query. This yields useful diversity without adding
+    # synthetic numbers or unverified commercial claims.
+    if variant <= len(pool):
+        return pool[variant-1]
+    return pool[0]
+
+
+
+
+def _ff_repair_duplicate_titles_fact_safe(db, campaign, allowed) -> dict:
+    """Repair duplicate Feed Factory titles without a paid copy rewrite.
+
+    Existing banner-bearing rows win canonical ownership of a duplicate title,
+    because changing a rendered banner headline would invalidate the artifact.
+    Other duplicates are repaired using only the existing safe lexical title
+    pool plus the item's already-confirmed city. No prices, descriptions,
+    categories, hypotheses or media links are changed here.
+    """
+    rows=_ff_items(db,int(campaign.id),allowed)
+    if not rows:
+        return {"status":"not_needed","changed":[],"unresolved":[],"unique":0,"total":0}
+    _,ff=_ff_state_load(campaign)
+    brief=str((ff or {}).get("brief") or "")
+    all_used=set()
+    groups={}
+    for row in rows:
+        p=_ff_payload(row)
+        key=_campaign_norm(str(p.get("title") or ""))
+        if key:
+            all_used.add(key)
+        if key and _ff_uniqueness_required(p):
+            groups.setdefault(key,[]).append(row)
+    changed=[]; unresolved=[]
+    for key,group in groups.items():
+        if len(group)<2:
+            continue
+        ordered=sorted(
+            group,
+            key=lambda row: (
+                0 if str(_ff_payload(row).get("banner") or "").strip() else 1,
+                int(row.id),
+            ),
+        )
+        # Keep the first/best row on the original title; only later duplicates
+        # need a new fact-safe wording.
+        for row in ordered[1:]:
+            p=_ff_payload(row)
+            if str(p.get("banner") or "").strip():
+                unresolved.append({"item_id":int(row.id),"reason":"banner_title_locked"})
+                continue
+            topic=str(p.get("direction") or row.segment or row.offer or "").strip()
+            city=str(p.get("city") or row.geo or "").strip()
+            pool=_ff_title_variants(topic,brief)
+            candidates=[]
+            for base in pool:
+                if city:
+                    candidates.append((str(base)+" "+city).strip())
+                candidates.append(str(base).strip())
+            picked=""
+            for candidate in candidates:
+                candidate=_ff_clean_title_for_avito(candidate,topic)
+                candidate_key=_campaign_norm(candidate)
+                if candidate and candidate_key and candidate_key not in all_used:
+                    picked=candidate
+                    break
+            if not picked:
+                unresolved.append({"item_id":int(row.id),"reason":"safe_title_pool_exhausted"})
+                continue
+            _ff_push_edit_history(
+                p,
+                "boris_title_uniqueness_repair",
+                actor="BORIS",
+                note="Устранён повтор заголовка без изменения фактов объявления",
+            )
+            old_title=str(p.get("title") or "")
+            p["title"]=picked
+            p["title_uniqueness_repair"]={
+                "policy":"fact_safe_lexical_plus_confirmed_city_v1",
+                "automatic":True,
+                "previous_title":old_title[:50],
+            }
+            # Title participates in the semantic content fingerprint. Existing
+            # gallery links stay intact, but the old evidence is no longer proof
+            # for the edited card and must be revalidated by the normal pipeline.
+            p["media_semantic_evidence"]=[]
+            row.payload_json=json.dumps(p,ensure_ascii=False)
+            row.content_hash=CS.content_hash(p)
+            row.analysis_hash=None
+            row.status="draft"
+            all_used.add(_campaign_norm(picked))
+            changed.append({"item_id":int(row.id),"before":old_title,"after":picked})
+    if changed:
+        db.commit()
+    # Recompute truth after the repair, not from the candidate set above.
+    fresh=_ff_items(db,int(campaign.id),allowed)
+    titles=[_campaign_norm(str(_ff_payload(row).get("title") or "")) for row in fresh]
+    titles=[x for x in titles if x]
+    return {
+        "status":"ok" if not unresolved else "needs_attention",
+        "changed":changed,
+        "unresolved":unresolved,
+        "unique":len(set(titles)),
+        "total":len(fresh),
+    }
 
 def _ff_avito_search_recommendations(db, account_id: str, direction: str, refresh: bool=False, city: str="") -> dict:
     import datetime as _dt, hashlib as _hl, time as _time
@@ -4352,11 +7776,77 @@ def ff_workflow_add_direction(campaign_id:int, body:dict, db=Depends(_db), user=
             "intake":_ff_direction_intake(db,campaign,ff,_ff_items(db,campaign_id,allowed))}
 
 
+def _ff_attach_source_product_media(db, row, source_product: dict, user) -> dict:
+    """Register/link only local images that belong to this exact parsed product.
+
+    Remote URLs remain in payload for later controlled import, but never become a
+    fake MediaAsset. Idempotent registration/linking makes materialize retries safe.
+    """
+    import os
+    from app.services import media_service as M
+    from app.services import media_storage as MS
+    linked=[]
+    remote=[]
+    product_url=str(source_product.get("product_url") or "")
+    for pos,raw in enumerate(source_product.get("images") or []):
+        url=str(raw or "").strip()
+        if not url:
+            continue
+        if not url.startswith("/images/"):
+            remote.append(url)
+            continue
+        key=url[len("/images/"):].lstrip("/")
+        if not key or not MS.exists(key):
+            continue
+        try:
+            sha=MS.sha256_of(key)
+            size=MS.size_of(key)
+            asset,_created=M.register_asset(
+                db,
+                owner_user_id=getattr(user,"id",None),
+                account_id=str(row.account_id or ""),
+                storage_key=key,
+                filename=os.path.basename(key),
+                media_type="image",
+                source_type="website_import",
+                sha256=sha,
+                file_size=size,
+                created_by=getattr(user,"id",None),
+                source_provider="site_parser",
+                source_ref=product_url or f"parsed_product:{source_product.get('source_index')}",
+                license_json={
+                    "source":"client_website",
+                    "product_url":product_url,
+                    "campaign_item_id":int(row.id),
+                },
+                status="approved",
+            )
+            M.link(
+                db, asset, "campaign_item", str(row.id),
+                "hero" if not linked else "gallery",
+                len(linked),
+                created_by=getattr(user,"id",None),
+            )
+            linked.append(asset)
+        except Exception as exc:
+            # Registration is fail-soft here: the payload still preserves the exact
+            # source URL and later media QA remains fail-closed before publication.
+            observe_suppressed(__name__, exc, line=5585)
+    if linked:
+        row.hero_media_id=int(linked[0].id)
+    return {
+        "linked_media_ids":[int(a.id) for a in linked],
+        "linked_count":len(linked),
+        "remote_images":remote,
+    }
+
+
 @router.post("/{campaign_id}/workflow/materialize")
 def ff_workflow_materialize(campaign_id:int, body:FFMaterializeBody, db=Depends(_db), user=Depends(get_current_user)):
     import hashlib as _hashlib
     from app.models.campaign_item import CampaignItem
-    from app.api.feed_contract import resolve_feed_contract, resolve_applicable_params
+    from app.api.feed_contract import resolve_feed_contract, resolve_applicable_params, validate_feed_item
+    from app.services.campaign_scale_lineage import apply_scale_lineage
     allowed = _allowed_accounts(db,user); campaign = _campaign_or_404(db,campaign_id,allowed)
     _ff_assert_mutable(campaign)
     _, ff = _ff_state_load(campaign); account_id=(body.account_id or ff.get("account_id") or campaign.default_account_id or "").strip()
@@ -4367,7 +7857,9 @@ def ff_workflow_materialize(campaign_id:int, body:FFMaterializeBody, db=Depends(
         elif d.get("mode")=="shared" and not d.get("complete"): pending.append(d.get("direction"))
     if pending:
         raise HTTPException(409,{"message":"Сначала ответьте на вопросы по каждому направлению и подтвердите параметры.","directions":pending})
+    _feed_rule_context=_ff_rule_capture(db,campaign,account_id,"materialize",{k:ff.get(k) for k in ("matrix","directions","cities","brief")})
     defaults=ff.get("defaults") or {}; created=0; updated=0; ids=[]; created_refs=[]
+    scale_lineage=dict(ff.get("ab_scale") or {}) if isinstance(ff.get("ab_scale"),dict) else {}
     # A prior concurrent quota race may have created local draft rows but failed the
     # final atomic tariff consume. Settle that debt before any further workflow step;
     # an idempotent retry must never turn those rows into free uncharged inventory.
@@ -4398,7 +7890,9 @@ def ff_workflow_materialize(campaign_id:int, body:FFMaterializeBody, db=Depends(
         _direction=str(_cell.get("direction") or "")
         _entry=dict((ff.get("direction_intake") or {}).get(_direction) or {})
         _tid=str(_entry.get("template_id") or _cell.get("template_id") or "")
-        _raw="|".join([_direction,str(_cell.get("city") or ""),_tid,str(_cell.get("variant") or 1)])
+        _source_product=dict(_cell.get("source_product") or {})
+        _source_identity=str(_source_product.get("product_url") or _source_product.get("source_index") or "")
+        _raw="|".join([_direction,str(_cell.get("city") or ""),_tid,_source_identity,str(_cell.get("variant") or 1)])
         _ref="ff:"+_hashlib.sha1(_raw.encode("utf-8")).hexdigest()[:20]
         _exists=db.query(CampaignItem.id).filter(CampaignItem.campaign_id==campaign_id,CampaignItem.account_id==account_id,CampaignItem.source=="feed_factory",CampaignItem.source_ref==_ref,CampaignItem.status != "superseded").first()
         if not _exists: new_needed+=1
@@ -4432,17 +7926,43 @@ def ff_workflow_materialize(campaign_id:int, body:FFMaterializeBody, db=Depends(
     for cell in matrix:
         direction=str(cell.get("direction") or ""); entry=dict((ff.get("direction_intake") or {}).get(direction) or {})
         selected_tid=str(entry.get("template_id") or cell.get("template_id") or ""); selected_path=str(entry.get("category_path") or cell.get("category_path") or "")
-        raw="|".join([direction,str(cell.get("city") or ""),selected_tid,str(cell.get("variant") or 1)])
+        source_product=dict(cell.get("source_product") or {})
+        source_identity=str(source_product.get("product_url") or source_product.get("source_index") or "")
+        raw="|".join([direction,str(cell.get("city") or ""),selected_tid,source_identity,str(cell.get("variant") or 1)])
         ref="ff:"+_hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
         row=db.query(CampaignItem).filter(CampaignItem.campaign_id==campaign_id,CampaignItem.account_id==account_id,CampaignItem.source=="feed_factory",CampaignItem.source_ref==ref,CampaignItem.status != "superseded").first()
         path=selected_path; parts=[x.strip() for x in path.split(">") if x.strip()]
         category=parts[1] if len(parts)>=2 else (parts[0] if parts else "")
-        price_by_city=defaults.get("price_by_city") or {}; price=cell.get("price") or price_by_city.get(cell.get("city"),defaults.get("price",0))
+        source_contract=dict(ff.get("source_contract") or {})
+        price_source_policy=str(source_contract.get("price_source") or "company_or_site")
+        price_by_city=defaults.get("price_by_city") or {}
+        price=cell.get("price") or price_by_city.get(cell.get("city"),defaults.get("price",0))
         price_fact={}
-        if not int(price or 0):
+        source_price=int(source_product.get("price") or 0)
+        source_price_verified=False
+        source_price_kind=""
+        if price_source_policy=="range":
+            low=max(0,int(source_contract.get("price_min") or 0))
+            high=max(0,int(source_contract.get("price_max") or 0))
+            if low and high:
+                if high<low:
+                    low,high=high,low
+                span=max(1,high-low+1)
+                digest=int(_hashlib.sha1(f"{campaign_id}|{ref}|owner-price-range".encode("utf-8")).hexdigest()[:12],16)
+                price=low+(digest % span)
+                source_price_verified=True
+                source_price_kind="owner_range_policy"
+        elif source_product and source_price and price_source_policy in {"website","company_or_site"}:
+            price=source_price
+            explicit_source=bool(source_contract.get("source_urls") or source_contract.get("source_sections"))
+            source_price_verified=bool(source_contract.get("trust_owner_source_prices",True) and explicit_source)
+            source_price_kind="website_user_supplied" if source_price_verified else "website_observed"
+        if not int(price or 0) or price_source_policy=="company_price_list":
             price_fact=_ff_confirmed_price_default(db,account_id,direction)
             if price_fact.get("price"):
                 price=int(price_fact["price"])
+                source_price_verified=True
+                source_price_kind=str(price_fact.get("source") or "company_price_list")
         intake_params,param_ranges=_ff_intake_params_for_cell(ff,direction,cell.get("variant") or 1)
         base_params={} if str(entry.get("mode") or "shared")=="per_item" else dict(defaults.get("params") or {})
         base_params.update(intake_params)
@@ -4463,15 +7983,45 @@ def ff_workflow_materialize(campaign_id:int, body:FFMaterializeBody, db=Depends(
         base_params=coverage.get("params") or {}
         angle_list=list(ff.get("creative_angles") or [])
         angle=angle_list[(max(1,int(cell.get("variant") or 1))-1)%len(angle_list)] if angle_list else ""
+        product_images=[str(x) for x in (source_product.get("images") or []) if str(x).strip()][:20]
+        price_verified=bool(int(price or 0)>0 and source_price_verified)
         payload={"direction":direction,"variant":cell.get("variant",1),"creative_angle":angle,"title":"","description":"","price":price or 0,"price_mode":cell.get("price_mode") or "","price_unit":cell.get("price_unit") or "",
-                 "price_benchmark_logic":("confirmed campaign benchmark" if price_fact else ""),"price_source":(price_fact.get("source") if price_fact else ""),"price_fact_id":(price_fact.get("fact_id") if price_fact else None),
+                 "price_benchmark_logic":("confirmed campaign benchmark" if price_fact else ("bound product source" if source_product else "")),
+                 "price_source":source_price_kind or (price_fact.get("source") if price_fact else ""),
+                 "price_fact_id":(price_fact.get("fact_id") if price_fact else None),
+                 "price_verified":price_verified,"verified_price":price_verified,
+                 "price_status":("VERIFIED" if price_verified else ("RESOLVED" if int(price or 0)>0 else "NEEDS_DATA")),
                  "city":cell.get("city", ""),"address":cell.get("city", ""),"category":category,"template_id":selected_tid,
                  "category_path":path,"params":base_params,"parameter_mode":str(entry.get("mode") or "shared"),"parameter_ranges":param_ranges,
-                 "intake_contract_version":entry.get("contract_version") or "","parameter_coverage":{"available":coverage.get("available_fields",0),"filled":coverage.get("filled_fields",0),"removed_non_applicable":coverage.get("removed_non_applicable") or []},"images":[],"feed_factory":True}
+                 "intake_contract_version":entry.get("contract_version") or "","parameter_coverage":{"available":coverage.get("available_fields",0),"filled":coverage.get("filled_fields",0),"removed_non_applicable":coverage.get("removed_non_applicable") or []},
+                 "images":product_images,"feed_factory":True}
+        if scale_lineage:
+            payload=apply_scale_lineage(payload,scale_lineage)
+        if source_product:
+            payload["source_product"]={
+                "source":"parsed_products",
+                "source_index":source_product.get("source_index"),
+                "product_url":str(source_product.get("product_url") or ""),
+                "title":str(source_product.get("title") or direction),
+                "price_raw":source_product.get("price_raw"),
+                "price":int(source_product.get("price") or 0),
+                "description":str(source_product.get("description") or ""),
+                "characteristics":dict(source_product.get("characteristics") or {}),
+                "images":product_images,
+                "category_path":str(source_product.get("category_path") or ""),
+            }
+            payload["source_product_characteristics"]=dict(source_product.get("characteristics") or {})
+            payload["source_product_description"]=str(source_product.get("description") or "")
+            payload["product_binding"]={
+                "policy":"one_product_one_photos_features_price",
+                "identity":source_identity,
+                "source_ref":str(source_product.get("product_url") or source_product.get("source_index") or ""),
+            }
         payload["media_semantic_guard"]={"mode":"universal_text_image","min_confidence":0.80,"source_of_truth":"title+description+category+direction"}
         if defaults.get("guarantee"): payload["guarantee"]=defaults["guarantee"]
         if defaults.get("phone"): payload["phone"]=defaults["phone"]
         if defaults.get("manager"): payload["manager"]=defaults["manager"]
+        row_created=False
         if row:
             old=_ff_payload(row)
             for k,v in payload.items():
@@ -4480,11 +8030,14 @@ def ff_workflow_materialize(campaign_id:int, body:FFMaterializeBody, db=Depends(
             # of one. If confirmed campaign-price memory has since become available,
             # an idempotent materialize retry must heal the existing draft instead
             # of preserving 0 forever and failing official Avito XML validation.
-            if price_fact and int(old.get("price") or 0)<=0:
-                old["price"]=int(price_fact["price"])
-                old["price_benchmark_logic"]="confirmed campaign benchmark"
-                old["price_source"]=str(price_fact.get("source") or "")
+            if source_price_verified and int(old.get("price") or 0)<=0 and int(price or 0)>0:
+                old["price"]=int(price)
+                old["price_benchmark_logic"]="confirmed campaign benchmark" if price_fact else "bound product source"
+                old["price_source"]=source_price_kind or str(price_fact.get("source") or "")
                 old["price_fact_id"]=int(price_fact.get("fact_id") or 0) or None
+                old["price_verified"]=True
+                old["verified_price"]=True
+                old["price_status"]="VERIFIED"
             # Reconcile visible monetary claims on EVERY idempotent materialize,
             # not only in the exact moment when price changes from 0. A previous
             # run may already have persisted canonical price while stale AI prose
@@ -4503,7 +8056,16 @@ def ff_workflow_materialize(campaign_id:int, body:FFMaterializeBody, db=Depends(
             row.payload_json=json.dumps(old,ensure_ascii=False); row.geo=cell.get("city") or row.geo; row.content_hash=CS.content_hash(old); updated+=1
         else:
             row=CS.add_item(db,campaign_id,account_id,payload=payload,source="feed_factory",source_ref=ref,segment=str(cell.get("direction") or ""),geo=str(cell.get("city") or ""),offer=str(cell.get("direction") or ""),status="needs_data")
-            db.flush(); created+=1; created_refs.append(ref)
+            db.flush(); created+=1; created_refs.append(ref); row_created=True
+        if source_product and row_created:
+            media_binding=_ff_attach_source_product_media(db,row,source_product,user)
+            bound_payload=_ff_payload(row)
+            bound_payload["product_media_binding"]={
+                "policy":"exact_source_product_only",
+                **media_binding,
+            }
+            row.payload_json=json.dumps(bound_payload,ensure_ascii=False)
+            row.content_hash=CS.content_hash(bound_payload)
         ids.append(row.id)
 
     # CAMPAIGN_LISTING_TARIFF_BEFORE_COMMIT_V1: new campaign cards must never
@@ -4539,17 +8101,26 @@ def ff_workflow_materialize(campaign_id:int, body:FFMaterializeBody, db=Depends(
         _ff_root["feed_factory"]=ff
         campaign.settings_json=json.dumps(_ff_root,ensure_ascii=False)
     db.commit()
-    ff["item_ids"] = ids; ff["step"]="texts"; _ff_state_save(db,campaign,ff)
-    return {"status":"ok","created":created,"updated":updated,"item_ids":ids,"items_total":len(ids)}
+    ff["item_ids"] = ids; ff["step"]="texts"
+    order=_ff_order_progress(db,campaign,ff,account_id,stage="materialize",persist=False)
+    _ff_order_event(order,"ITEM_CREATED",created_count=int(order.get("created_count") or 0),requested_total=int(order.get("requested_total") or 0))
+    ff["order_contract"]=order
+    _feed_rule_rows=[r for r in _ff_items(db,campaign.id,allowed) if int(r.id) in set(ids)]
+    _ff_rule_result(db,_feed_rule_context,order_id=order.get("order_id"),requested_total=order.get("requested_total"),
+        materialized_ids=list(ids),items_total=len(ids),created_count=int(created),updated_count=int(updated),
+        row_scope_verified=(len(_feed_rule_rows)==len(ids) and all(str(r.account_id or "")==account_id for r in _feed_rule_rows)))
+    _ff_state_save(db,campaign,ff)
+    return {"status":"ok","created":created,"updated":updated,"item_ids":ids,"items_total":len(ids),"order":order}
 
 
 @router.post("/{campaign_id}/workflow/mutate")
 def ff_workflow_mutate(campaign_id:int, body:FFMutationBody, db=Depends(_db), user=Depends(get_current_user)):
     from app.models.media_asset import MediaAsset
     from app.models.media_link import MediaLink
+    from app.services import media_service as M
     from app.services.media_service import asset_public
-    allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); changed=[]
-    _ff_assert_mutable(campaign)
+    allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); changed=[]; audit_rows=[]
+    _editor_ff=_ff_assert_card_editor_mutable(campaign)
     wanted=body.item_ids or [r.id for r in _ff_items(db,campaign_id,allowed)]
     media_urls=[]; media_rows=[]
     for mid in body.media_ids or []:
@@ -4561,15 +8132,122 @@ def ff_workflow_mutate(campaign_id:int, body:FFMutationBody, db=Depends(_db), us
     for iid in wanted:
         row=_ff_item_by_id(db,campaign_id,iid,allowed)
         if not row: continue
+        _require_manage_ads(db,user,str(row.account_id or "").strip())
         p=_ff_payload(row)
+        _audit_before={
+            "title":p.get("title"),"description":p.get("description"),"price":p.get("price"),
+            "city":p.get("city") or row.geo,"address":p.get("address"),
+            "category":p.get("category") or p.get("category_path"),
+            "images_count":len(p.get("images") or []),
+        }
+        _semantic_before={k:str(p.get(k) or "") for k in ("title","description")}
+        if (body.patch or body.media_ids or body.image_urls or body.hero_media_id or body.remove_media_ids or body.media_order_ids):
+            _ff_push_edit_history(
+                p,
+                "manual_edit",
+                actor=str(getattr(user,"email",None) or getattr(user,"id",None) or "client"),
+                note="Изменение карточки через редактор BORIS",
+            )
         for k,v in (body.patch or {}).items():
             if k in {"title","description","price","city","address","category","template_id","category_path","params","phone","manager","delivery","active","replacement_state","banner","banner_url","images"}:
                 p[k]=v
-        if media_urls:
+        existing_images=list(p.get("images") or [])
+        if body.remove_media_ids:
+            remove_ids={int(x) for x in (body.remove_media_ids or []) if int(x)>0}
+            linked=(db.query(MediaLink,MediaAsset)
+                    .join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+                    .filter(MediaLink.entity_type=="campaign_item",
+                            MediaLink.entity_id==str(row.id),
+                            MediaLink.media_id.in_(list(remove_ids)),
+                            MediaAsset.deleted_at.is_(None)).all())
+            remove_urls=set()
+            for link,asset in linked:
+                pub=asset_public(asset)
+                remove_urls.add(str(pub.get("original_url") or pub.get("preview_url") or ""))
+                db.delete(link)
+            db.flush()
+            remaining=(db.query(MediaLink,MediaAsset)
+                       .join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+                       .filter(MediaLink.entity_type=="campaign_item",
+                               MediaLink.entity_id==str(row.id),
+                               MediaAsset.deleted_at.is_(None))
+                       .order_by(MediaLink.position,MediaLink.id).all())
+            rebuilt_images=[]
+            for pos,(link,asset) in enumerate(remaining):
+                link.position=pos
+                link.role="hero" if pos==0 else "gallery"
+                pub=asset_public(asset)
+                url=str(pub.get("original_url") or pub.get("preview_url") or "")
+                if url:
+                    rebuilt_images.append(url)
+            row.hero_media_id=int(remaining[0][1].id) if remaining else None
+            p["images"]=rebuilt_images
+            p["media_semantic_evidence"]=[]
+            if p.get("banner_qa"):
+                p["banner_qa"]={**dict(p.get("banner_qa") or {}),"passed":False,"reason":"media_changed_requires_recheck"}
             existing_images=list(p.get("images") or [])
-            p["images"]=list(dict.fromkeys(media_urls + existing_images))
+        if body.media_order_ids:
+            # CAMPAIGN_MEDIA_REORDER_V1: reorder only the exact media set already
+            # linked to this CampaignItem. A missing/foreign id fails closed so a
+            # drag operation can never detach or borrow another item's photo.
+            ordered_ids=[]
+            for raw in (body.media_order_ids or []):
+                mid=int(raw or 0)
+                if mid>0 and mid not in ordered_ids:
+                    ordered_ids.append(mid)
+            linked_all=(db.query(MediaLink,MediaAsset)
+                        .join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+                        .filter(MediaLink.entity_type=="campaign_item",
+                                MediaLink.entity_id==str(row.id),
+                                MediaAsset.deleted_at.is_(None))
+                        .order_by(MediaLink.position,MediaLink.id).all())
+            current_ids=[int(asset.id) for _,asset in linked_all]
+            if not ordered_ids or len(ordered_ids)!=len(current_ids) or set(ordered_ids)!=set(current_ids):
+                raise HTTPException(status_code=409,detail={
+                    "code":"campaign_media_order_scope_mismatch",
+                    "message":"Порядок фото изменился параллельно. Обновите карточку и повторите.",
+                    "expected_count":len(current_ids),
+                    "received_count":len(ordered_ids),
+                })
+            by_media={int(asset.id):(link,asset) for link,asset in linked_all}
+            rebuilt_images=[]
+            for pos,mid in enumerate(ordered_ids):
+                link,asset=by_media[mid]
+                link.position=pos
+                link.role="hero" if pos==0 else "gallery"
+                pub=asset_public(asset)
+                url=str(pub.get("original_url") or pub.get("preview_url") or "")
+                if url:
+                    rebuilt_images.append(url)
+            row.hero_media_id=int(ordered_ids[0])
+            p["images"]=rebuilt_images
+            p["media_semantic_evidence"]=[]
+            if p.get("banner_qa"):
+                p["banner_qa"]={**dict(p.get("banner_qa") or {}),"passed":False,"reason":"media_order_changed_requires_recheck"}
+            existing_images=list(p.get("images") or [])
         if body.hero_media_id:
+            new_hero=next((a for a in media_rows if int(a.id)==int(body.hero_media_id)),None)
+            if new_hero is None:
+                new_hero=db.query(MediaAsset).filter(MediaAsset.id==int(body.hero_media_id),MediaAsset.deleted_at.is_(None)).first()
+                if not new_hero or (new_hero.account_id and new_hero.account_id not in allowed):
+                    raise HTTPException(403,"Нет доступа к hero media")
+            new_pub=asset_public(new_hero)
+            new_hero_url=new_pub.get("original_url") or new_pub.get("preview_url")
+            old_hero_url=""
+            if row.hero_media_id:
+                old_hero=db.query(MediaAsset).filter(MediaAsset.id==int(row.hero_media_id),MediaAsset.deleted_at.is_(None)).first()
+                if old_hero:
+                    old_pub=asset_public(old_hero)
+                    old_hero_url=old_pub.get("original_url") or old_pub.get("preview_url") or ""
+            gallery=[x for x in existing_images if x and x not in {new_hero_url,old_hero_url}]
+            if new_hero_url:
+                p["images"]=[new_hero_url]+gallery
             row.hero_media_id=int(body.hero_media_id)
+            # A different image requires a fresh item-specific semantic proof.
+            # Never inherit evidence that was bound to the previous media id.
+            p["media_semantic_evidence"]=[]
+        elif media_urls:
+            p["images"]=list(dict.fromkeys(media_urls + existing_images))
         elif media_rows and not row.hero_media_id:
             row.hero_media_id=media_rows[0].id
         for pos,a in enumerate(media_rows):
@@ -4582,21 +8260,418 @@ def ff_workflow_mutate(campaign_id:int, body:FFMutationBody, db=Depends(_db), us
                 M.link(db,a,"campaign_item",str(row.id),role,pos,created_by=getattr(user,"id",None))
         if "city" in p: row.geo=str(p.get("city") or "")
         _patch_keys=set((body.patch or {}).keys())
-        _copy_only={"title","description","price","city","address","phone","manager","delivery","active","replacement_state"}
-        if _patch_keys and _patch_keys.issubset(_copy_only) and p.get("media_semantic_evidence"):
-            # Explicit copy edits do not change the advertised object/category. Preserve
-            # already approved media and bind the evidence to the new copy fingerprint.
+        _semantic_copy_keys={"title","description"}
+        _semantic_changed=any(
+            key in _patch_keys and str(p.get(key) or "") != _semantic_before.get(key,"")
+            for key in _semantic_copy_keys
+        )
+        _safe_rebind_keys={"price","city","address","phone","manager","delivery","active","replacement_state"}
+        if _semantic_changed:
+            # Title/description can change the advertised meaning. Never rebind the
+            # previous image/banner proof to new semantics without a fresh check.
+            p["media_semantic_evidence"]=[]
+            if p.get("banner_qa"):
+                p["banner_qa"]={**dict(p.get("banner_qa") or {}),"passed":False,"reason":"copy_changed_requires_recheck"}
+        elif _patch_keys and _patch_keys.issubset(_safe_rebind_keys) and p.get("media_semantic_evidence"):
             try:
                 from app.services.media_semantic_validator import semantic_content_fingerprint
                 _fp=semantic_content_fingerprint(p)
                 for _ev in (p.get("media_semantic_evidence") or []):
                     if isinstance(_ev,dict) and bool(_ev.get("match")): _ev["content_fingerprint"]=_fp
             except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=4582)
+        _audit_after={
+            "title":p.get("title"),"description":p.get("description"),"price":p.get("price"),
+            "city":p.get("city") or row.geo,"address":p.get("address"),
+            "category":p.get("category") or p.get("category_path"),
+            "images_count":len(p.get("images") or []),
+        }
+        _changed_fields=[key for key in _audit_after if _audit_after.get(key)!=_audit_before.get(key)]
+        if _changed_fields:
+            _field_labels={"title":"Название","description":"Описание","price":"Цена","city":"Город","address":"Адрес","category":"Категория","images_count":"Фото"}
+            def _brief(values):
+                parts=[]
+                for key in _changed_fields:
+                    val=values.get(key)
+                    if key=="description":
+                        val=" ".join(re.sub(r"<[^>]+>"," ",str(val or "")).split())[:260]
+                    else:
+                        val=str(val if val not in (None,"") else "—")[:160]
+                    parts.append(f"{_field_labels.get(key,key)}: {val}")
+                return " · ".join(parts)[:1800]
+            audit_rows.append({
+                "account_id":str(row.account_id or ""),
+                "object_name":str(p.get("title") or _audit_before.get("title") or "Объявление")[:120],
+                "item_id":int(row.id),
+                "before":_brief(_audit_before),
+                "after":_brief(_audit_after),
+                "fields":", ".join(_field_labels.get(key,key) for key in _changed_fields),
+            })
         row.payload_json=json.dumps(p,ensure_ascii=False); row.content_hash=CS.content_hash(p)
         if row.status in ("imported","needs_data","ready"): row.status="draft"
+        if _changed_fields:
+            _ff_mark_post_publication_revision(_editor_ff,int(row.id),_changed_fields)
         changed.append(row.id)
-    db.commit(); _,ff=_ff_state_load(campaign); ff["step"]="validation"; _ff_state_save(db,campaign,ff)
+    db.commit()
+    _,ff=_ff_state_load(campaign)
+    _activation_status=str((ff.get("owner_activation") or {}).get("status") or "").lower()
+    _terminal_publication=_activation_status in {"completed","partial"} or str(ff.get("step") or "").lower() in {"publication_completed","publication_partial"}
+    if _terminal_publication:
+        _revision=dict(_editor_ff.get("post_publication_revision") or {})
+        if _revision:
+            ff["post_publication_revision"]=_revision
+    else:
+        ff["step"]="validation"
+    _ff_state_save(db,campaign,ff)
+    for _audit in audit_rows:
+        log_action(
+            account_id=_audit["account_id"],
+            action="Изменил объявление",
+            object_kind="объявление",
+            object_name=_audit["object_name"],
+            before_val=_audit["before"],
+            after_val=_audit["after"],
+            reason=("Изменены поля: "+_audit["fields"])[:900],
+            actor=ACTOR_USER,user_id=getattr(user,"id",None),
+            source=f"campaign.item_mutate:{campaign_id}:{_audit['item_id']}",
+        )
     return {"status":"ok","changed":changed}
+
+
+
+
+@router.post("/{campaign_id}/workflow/bulk-transform")
+def ff_workflow_bulk_transform(campaign_id:int, body:FFBulkTransformBody, db=Depends(_db), user=Depends(get_current_user)):
+    """Preview/apply per-card template variables without cross-product leakage."""
+    from app.services.campaign_editor_jobs import maybe_enqueue
+    _queued = maybe_enqueue(db, user, campaign_id, 'bulk_transform', body)
+    if _queued is not None:
+        return _queued
+    from app.api.feed_contract import resolve_feed_contract, resolve_applicable_params, validate_feed_item
+
+    allowed=_allowed_accounts(db,user)
+    campaign=_campaign_or_404(db,campaign_id,allowed)
+    _ff_assert_mutable(campaign)
+    wanted=[int(x) for x in (body.item_ids or []) if int(x)>0]
+    if not wanted:
+        raise HTTPException(422,"Выберите объявления для массовой настройки")
+    rows=[r for r in _ff_items(db,campaign_id,allowed) if int(r.id) in set(wanted)]
+    if len(rows)!=len(set(wanted)):
+        raise HTTPException(404,"Часть выбранных объявлений не найдена")
+    for _aid in sorted({str(r.account_id or "").strip() for r in rows if str(r.account_id or "").strip()}):
+        _require_manage_ads(db,user,_aid)
+    mode=str(body.description_mode or "append").strip().lower()
+    if mode not in {"append","prepend","replace"}:
+        raise HTTPException(422,"Неизвестный режим изменения описания")
+
+    category_contract=None
+    category_path=""
+    if str(body.template_id or "").strip():
+        category_contract=resolve_feed_contract(str(body.template_id).strip(),_db=db)
+        if not category_contract.get("ok"):
+            return {"status":"blocked","preview_only":bool(body.preview_only),"errors":[{"code":"category_contract_unavailable","message":"BORIS не смог загрузить обязательные параметры выбранной категории Avito."}],"items":[]}
+        category_path=str(category_contract.get("category_path") or "").strip()
+
+    preview=[]
+    errors=[]
+    prepared=[]
+    sorted_rows=sorted(rows,key=lambda r:int(r.id))
+    for index,row in enumerate(sorted_rows):
+        p=_ff_payload(row)
+        values=_ff_bulk_variable_map(p,row,index,body.variables or {})
+        if str(body.city or "").strip():
+            values["город"]=str(body.city).strip()
+        title=str(p.get("title") or "")
+        description=str(p.get("description") or "")
+        missing=[]
+        next_title=title
+        next_description=description
+        if str(body.title_template or "").strip():
+            rendered,miss=_ff_render_bulk_template(str(body.title_template),values)
+            missing.extend(miss)
+            next_title=" ".join(rendered.split()).strip()[:50]
+            if not next_title:
+                missing.append("заголовок")
+        if str(body.description_template or "").strip():
+            rendered,miss=_ff_render_bulk_template(str(body.description_template),values)
+            missing.extend(miss)
+            rendered=rendered.strip()
+            if mode=="replace":
+                next_description=rendered
+            elif mode=="prepend":
+                next_description=(rendered+"\n\n"+description).strip()
+            else:
+                next_description=(description+"\n\n"+rendered).strip()
+        if len(next_description)>5000:
+            errors.append({"item_id":int(row.id),"code":"description_too_long","message":"После массовой правки описание превышает безопасный лимит."})
+            continue
+
+        next_params=dict(p.get("params") or {})
+        next_template=str(p.get("template_id") or "")
+        next_category=str(p.get("category_path") or p.get("category") or "")
+        if category_contract is not None:
+            next_template=str(body.template_id).strip()
+            same_category=(next_template==str(p.get("template_id") or ""))
+            rendered_params=dict(p.get("params") or {}) if same_category else {}
+            param_missing=[]
+            for key,val in (body.category_params or {}).items():
+                if isinstance(val,str):
+                    rendered,miss=_ff_render_bulk_template(val,values)
+                    rendered_params[str(key)]=rendered
+                    param_missing.extend(miss)
+                elif val not in (None,""):
+                    rendered_params[str(key)]=val
+            if param_missing:
+                missing.extend(param_missing)
+            report=validate_feed_item({"id":str(row.id),"params":rendered_params},category_contract)
+            if report.get("errors"):
+                errors.append({
+                    "item_id":int(row.id),
+                    "code":"category_fields_missing",
+                    "message":"Не заполнены обязательные параметры новой категории.",
+                    "fields":[str(x.get("label") or x.get("field") or "") for x in (report.get("errors") or [])],
+                    "details":report.get("errors") or [],
+                })
+                continue
+            coverage=resolve_applicable_params(report.get("resolved_params") or rendered_params,category_contract)
+            next_params=dict(coverage.get("params") or {})
+            next_category=category_path
+
+        if missing:
+            errors.append({
+                "item_id":int(row.id),
+                "code":"missing_variables",
+                "message":"Не хватает данных для переменных: "+", ".join(sorted(set(missing))),
+                "missing_variables":sorted(set(missing)),
+            })
+            continue
+
+        next_price=float(body.price) if body.price is not None else float(p.get("price") or 0)
+        item_preview={
+            "item_id":int(row.id),
+            "title_before":title,
+            "title_after":next_title,
+            "description_before":description,
+            "description_after":next_description,
+            "price_before":p.get("price"),
+            "price_after":next_price if body.price is not None else p.get("price"),
+            "city_before":str(p.get("city") or row.geo or ""),
+            "city_after":str(body.city or "").strip() or str(p.get("city") or row.geo or ""),
+            "template_id_before":str(p.get("template_id") or ""),
+            "template_id_after":next_template,
+            "category_after":next_category,
+            "params_after":next_params,
+            "variables":values,
+        }
+        preview.append(item_preview)
+        prepared.append((row,p,item_preview))
+
+    if errors:
+        return {
+            "status":"blocked",
+            "preview_only":bool(body.preview_only),
+            "items":preview,
+            "errors":errors,
+            "message":"BORIS не применил массовую правку: сначала заполните недостающие данные.",
+        }
+
+    if bool(body.preview_only):
+        return {
+            "status":"ok","preview_only":True,
+            "items":preview,"errors":[],
+            "message":f"BORIS подготовил предпросмотр для {len(preview)} объявлений. Наружу ничего не отправлено.",
+        }
+
+    if not bool(body.confirmed):
+        raise HTTPException(409,detail={"code":"confirmation_required","message":"Сначала посмотрите результат массовой правки и подтвердите применение."})
+
+    changed=[]
+    for row,p,item_preview in prepared:
+        _ff_push_edit_history(
+            p,"bulk_edit",
+            actor=str(getattr(user,"email",None) or getattr(user,"id",None) or "client"),
+            note="Массовая настройка карточек BORIS",
+        )
+        copy_changed=False
+        if str(body.title_template or "").strip() and item_preview["title_after"]!=str(p.get("title") or ""):
+            p["title"]=item_preview["title_after"]
+            copy_changed=True
+        if str(body.description_template or "").strip() and item_preview["description_after"]!=str(p.get("description") or ""):
+            p["description"]=item_preview["description_after"]
+            copy_changed=True
+
+        if str(body.city or "").strip():
+            city=str(body.city).strip()
+            p["city"]=city
+            p["address"]=city
+            row.geo=city
+
+        if body.price is not None:
+            price=float(body.price)
+            if price<=0:
+                raise HTTPException(422,"Цена должна быть больше нуля")
+            p["price"]=int(price) if float(price).is_integer() else price
+            p["price_verified"]=True
+            p["verified_price"]=True
+            p["price_status"]="VERIFIED"
+            p["price_source"]="owner_confirmed_bulk"
+            p["price_source_reference"]=f"campaign_bulk:item:{row.id}"
+            p["price_conflict"]=False
+            p["description"]=_ff_reconcile_copy_price(
+                str(p.get("description") or ""),int(float(price)),str(p.get("price_mode") or "")
+            )
+
+        category_changed=False
+        if category_contract is not None:
+            p["template_id"]=item_preview["template_id_after"]
+            p["category_path"]=item_preview["category_after"]
+            parts=[x.strip() for x in str(item_preview["category_after"] or "").split(">") if x.strip()]
+            p["category"]=parts[-1] if parts else str(item_preview["category_after"] or "")
+            p["params"]=dict(item_preview["params_after"] or {})
+            category_changed=True
+
+        if copy_changed or category_changed:
+            p["media_semantic_evidence"]=[]
+            if p.get("banner_qa"):
+                p["banner_qa"]={**dict(p.get("banner_qa") or {}),"passed":False,"reason":"bulk_change_requires_recheck"}
+        row.payload_json=json.dumps(p,ensure_ascii=False)
+        row.content_hash=CS.content_hash(p)
+        if row.status in ("ready","needs_data","imported"):
+            row.status="draft"
+        changed.append(int(row.id))
+
+    db.commit()
+    _,ff=_ff_state_load(campaign)
+    ff["step"]="validation"
+    _ff_state_save(db,campaign,ff)
+    if changed:
+        _bulk_account=str(prepared[0][0].account_id or "") if prepared else ""
+        log_action(
+            account_id=_bulk_account,
+            action="Массово обновил объявления",
+            object_kind="объявления",
+            object_name=f"{len(changed)} объявлений",
+            after_val=f"Обновлено карточек: {len(changed)}",
+            reason="Пользователь подтвердил предпросмотр массовой настройки BORIS",
+            actor=ACTOR_USER,user_id=getattr(user,"id",None),
+            source="campaign.bulk_transform",
+        )
+    return {
+        "status":"ok","preview_only":False,"changed":changed,
+        "items":preview,"errors":[],
+        "message":f"Массовая настройка применена к {len(changed)} объявлениям. BORIS запустит повторную проверку.",
+    }
+
+
+@router.post("/{campaign_id}/workflow/price-confirm")
+def ff_workflow_price_confirm(campaign_id:int, body:dict, db=Depends(_db), user=Depends(get_current_user)):
+    """Persist an owner-confirmed price fact for selected campaign items.
+
+    This is intentionally separate from the generic mutate route: UI edits may
+    change visible copy fields, but only this explicit action can promote a
+    monetary value into verified campaign truth.
+    """
+    import datetime as _dt
+    allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed)
+    _editor_ff=_ff_assert_card_editor_mutable(campaign)
+    requested=[int(x) for x in (body.get("item_ids") or []) if int(x)>0]
+    if not requested:
+        raise HTTPException(422,"Выберите объявление")
+    clear=bool(body.get("clear"))
+    not_applicable=bool(body.get("not_applicable"))
+    if clear and not_applicable:
+        raise HTTPException(422,"Нельзя одновременно очистить цену и отметить её неприменимой")
+    price=None if (clear or not_applicable) else _campaign_price_number(body.get("price"))
+    if not clear and not not_applicable and price is None:
+        raise HTTPException(422,"Укажите цену больше нуля")
+    changed=[]
+    audit_rows=[]
+    verified_at=_dt.datetime.now(_dt.timezone.utc).isoformat()
+    for iid in requested:
+        row=_ff_item_by_id(db,campaign_id,iid,allowed)
+        if not row or str(row.account_id or "") != str(campaign.default_account_id or ""):
+            continue
+        p=_ff_payload(row)
+        _price_before=p.get("price")
+        _price_status_before=str(p.get("price_status") or "")
+        if clear:
+            p["price"]=0
+            p["price_verified"]=False
+            p["verified_price"]=False
+            p["price_status"]="NEEDS_DATA"
+            p["price_source"]="owner_removed"
+            p["price_source_reference"]=f"campaign_ui:item:{row.id}"
+            p["price_conflict"]=False
+            p.pop("price_verified_at",None)
+        elif not_applicable:
+            p["price"]=0
+            p["price_verified"]=True
+            p["verified_price"]=True
+            p["price_status"]="NOT_APPLICABLE"
+            p["price_source"]="owner_confirmed_not_applicable"
+            p["price_source_reference"]=f"campaign_ui:item:{row.id}"
+            p["price_conflict"]=False
+            p["price_verified_at"]=verified_at
+        else:
+            normalized=int(price) if float(price).is_integer() else float(price)
+            p["price"]=normalized
+            p["price_verified"]=True
+            p["verified_price"]=True
+            p["price_status"]="VERIFIED"
+            p["price_source"]="owner_confirmed"
+            p["price_source_reference"]=f"campaign_ui:item:{row.id}"
+            p["price_conflict"]=False
+            p["price_verified_at"]=verified_at
+            if str(p.get("description") or "").strip():
+                p["description"]=_ff_reconcile_copy_price(
+                    str(p.get("description") or ""), int(float(price)), str(p.get("price_mode") or "")
+                )
+        _price_changed=(p.get("price") != _price_before) or (str(p.get("price_status") or "") != _price_status_before)
+        if _price_changed:
+            # Price edits do not change the advertised object, so linked media
+            # semantic evidence may be rebound to the new safe content fingerprint.
+            # A QA-approved banner can contain rendered price text, however, so
+            # invalidate only that banner proof until it is checked again.
+            try:
+                from app.services.media_semantic_validator import semantic_content_fingerprint
+                _fp=semantic_content_fingerprint(p)
+                for _ev in (p.get("media_semantic_evidence") or []):
+                    if isinstance(_ev,dict) and bool(_ev.get("match")):
+                        _ev["content_fingerprint"]=_fp
+            except Exception as _suppressed_exc:
+                observe_suppressed(__name__, _suppressed_exc, line=5621)
+            if p.get("banner_url") and isinstance(p.get("banner_qa"),dict) and p.get("banner_qa"):
+                p["banner_qa"]={**dict(p.get("banner_qa") or {}),"passed":False,"reason":"price_changed_requires_recheck"}
+        row.payload_json=json.dumps(p,ensure_ascii=False)
+        row.content_hash=CS.content_hash(p)
+        if row.status in ("imported","needs_data","ready"):
+            row.status="draft"
+        changed.append(row.id)
+        if _price_changed:
+            _ff_mark_post_publication_revision(_editor_ff,int(row.id),["price"])
+            audit_rows.append({
+                "account_id":str(row.account_id or ""),
+                "object_name":str(p.get("title") or "Объявление")[:120],
+                "before":("Цена: "+str(_price_before if _price_before not in (None,"") else "—"))[:300],
+                "after":("Цена: "+str(p.get("price") if p.get("price") not in (None,"") else "—")+" · "+str(p.get("price_status") or ""))[:300],
+            })
+    db.commit()
+    if _editor_ff.get("post_publication_revision"):
+        _,_latest_ff=_ff_state_load(campaign)
+        _latest_ff["post_publication_revision"]=dict(_editor_ff.get("post_publication_revision") or {})
+        _ff_state_save(db,campaign,_latest_ff)
+    for _audit in audit_rows:
+        log_action(
+            account_id=_audit["account_id"],action="Изменил цену объявления",
+            object_kind="объявление",object_name=_audit["object_name"],
+            before_val=_audit["before"],after_val=_audit["after"],
+            reason="Цена подтверждена или изменена в редакторе BORIS",
+            actor=ACTOR_USER,user_id=getattr(user,"id",None),source="campaign.price_confirm",
+        )
+    return {
+        "status":"ok","changed":changed,
+        "price_status":("NEEDS_DATA" if clear else ("NOT_APPLICABLE" if not_applicable else "VERIFIED")),
+        "verified":not clear,
+    }
 
 
 @router.post("/{campaign_id}/workflow/text-file")
@@ -4740,7 +8815,7 @@ def _ff_explicit_copy_price_claims(description: str) -> list[int]:
     pat=_re.compile(rf"(?i)\b(?:цена|стоимость)(?:\s+(?:товара|изделия|карточки|объявления))?\s*(?:[:.\-–—]|составляет|от|—)?\s*(?:от\s+)?(?P<amount>{num})\s*{rub}")
     out=[]
     for m in pat.finditer(text):
-        raw=str(m.group('amount') or '').replace(' ','').replace(',','.')
+        raw=_re.sub(r"\s+","",str(m.group('amount') or '')).replace(',','.')
         try: value=int(round(float(raw)))
         except Exception: continue
         if value>0: out.append(value)
@@ -4810,7 +8885,10 @@ def _ff_plain_description_for_avito(raw: str, *, brief: str = "", price: int = 0
     text=_re.sub(r"(?i)<b([^>]*)>","<strong>",text)
     text=_re.sub(r"(?i)</b>","</strong>",text)
     text=_re.sub(r"(?i)<strong[^>]*>","<strong>",text)
+    # Preserve the only formatting BORIS explicitly allows in Avito descriptions.
+    text=text.replace("<strong>","__BORIS_STRONG_OPEN__").replace("</strong>","__BORIS_STRONG_CLOSE__")
     text=_re.sub(r"<[^>]+>","",text)
+    text=text.replace("__BORIS_STRONG_OPEN__","<strong>").replace("__BORIS_STRONG_CLOSE__","</strong>")
     text=_html.unescape(text)
     # Render every remaining spintax group to the first concrete option.
     for _ in range(8):
@@ -4869,61 +8947,229 @@ def _ff_plain_description_for_avito(raw: str, *, brief: str = "", price: int = 0
 
 
 def _ff_bulk_safe_copy(topic: str, payload: dict, ff: dict) -> tuple[str,str]:
-    """Fast factual copy for large strict-facts campaigns; generic across accounts/niches."""
+    """Deterministic client-facing Avito copy built only from known campaign facts."""
+    import re as _re
     variant=max(1,int(payload.get("variant") or 1)); city=str(payload.get("city") or "").strip()
-    ctx=ff.get("account_context") or {}; client=str(ctx.get("client_description") or "")
+    ctx=ff.get("account_context") or {}
     clean_topic=" ".join(str(topic or "Предложение").split()).strip()
-    titles=_ff_title_variants(clean_topic,str(ff.get("brief") or "")); title=titles[(variant-1)%len(titles)] if titles else clean_topic
-    openings=[
-        f"{clean_topic}: начнём с вашей задачи и исходных условий.",
-        f"По направлению «{clean_topic}» сначала уточним, какой результат вам нужен.",
-        f"Нужен {clean_topic.lower()}? Опишите задачу — разберём подходящий следующий шаг.",
-        f"{clean_topic} — обсудим ваш запрос и важные для выбора условия.",
-        f"Если рассматриваете {clean_topic.lower()}, начнём с короткого разбора вашей ситуации.",
-        f"По услуге «{clean_topic}» работаем от конкретной задачи клиента, без неподтверждённых обещаний.",
-        f"{clean_topic}: уточним ваши требования и определим, что важно проверить в первую очередь.",
-        f"Перед началом по направлению «{clean_topic}» разберём исходные данные и цель обращения.",
-        f"{clean_topic}: расскажите, что именно требуется — предложим понятный следующий шаг.",
-        f"Обращение по теме «{clean_topic}» начинаем с уточнения задачи и ваших критериев.",
-        f"{clean_topic}: можно начать с консультации и разбора исходных условий.",
-        f"Если у вас задача по теме «{clean_topic}», опишите её в сообщении — разберём детали.",
-        f"По направлению «{clean_topic}» сначала фиксируем требования клиента, затем обсуждаем варианты.",
-        f"{clean_topic}: обсудим цель обращения и ограничения, которые важно учитывать.",
-        f"Для задачи «{clean_topic}» начнём с того, что уже известно и что нужно уточнить.",
-        f"{clean_topic}: разберём запрос последовательно и без выдуманных условий.",
-        f"Если вам актуален {clean_topic.lower()}, напишите исходные данные — начнём с них.",
-        f"По теме «{clean_topic}» можно сначала получить разбор задачи и понять дальнейшие действия.",
-        f"{clean_topic}: уточним контекст обращения и критерии, которые важны именно вам.",
-        f"Начать работу по направлению «{clean_topic}» можно с сообщения с вашей задачей и вводными.",
+    formula=_ff_formula_meta(payload,clean_topic)
+    payload.update(formula)
+    existing_title=" ".join(str(payload.get("title") or "").split()).strip()
+    title=_ff_clean_title_for_avito(existing_title,clean_topic) if existing_title else _ff_select_title(clean_topic,variant,str(ff.get("brief") or ""))
+
+    internal=_re.compile(
+        r"(?:\bBORIS\b|не\s+обещат|не\s+выдум|не\s+подстав|"
+        r"подтвержд[её]нн|неподтвержд[её]нн|автоматическ|"
+        r"внутренн(?:яя|ие|ий)|системн(?:ая|ые|ый)|"
+        r"как\s+формируется\s+предложение|источник\s+факт)",
+        _re.I,
+    )
+    topic_low=clean_topic.casefold()
+    family_groups=(("кухн","кухон"),("гардероб",),("ванн","сануз"),("прихож",))
+    def public_fragments(raw: str, limit: int = 700) -> str:
+        pieces=[]
+        for part in _re.split(r"[;\n]+", str(raw or "")):
+            part=" ".join(part.split()).strip(" .")
+            if not part or internal.search(part):
+                continue
+            low=part.casefold()
+            # A fact scoped to another product family must never leak into this ad.
+            scoped_elsewhere=False
+            for markers in family_groups:
+                if any(m in low for m in markers) and not any(m in topic_low for m in markers):
+                    scoped_elsewhere=True
+                    break
+            if scoped_elsewhere:
+                continue
+            # Keep client-facing facts, remove evidence/provenance wording.
+            part=_re.sub(r"(?i)подтверждена\s+возможность\s+фурнитуры\s+", "доступна фурнитура ", part)
+            part=_re.sub(r"(?i)подтверждена\s+возможность\s+", "доступна возможность ", part)
+            part=_re.sub(r"(?i)подтвержд[её]нн(?:ые|ая|ый|ое|ого|ой|ым|ыми)?\s*", "", part)
+            part=" ".join(part.split()).strip(" .")
+            if part:
+                pieces.append(part)
+        return "; ".join(pieces)[:limit].rstrip(" ;.")
+
+    advantages=public_fragments(str(ctx.get("advantages") or ""),700)
+    company_desc=public_fragments(str(ctx.get("description") or ""),420)
+    geo=(f" · {city}" if city else "")
+    fid=str(formula.get("copy_formula_id") or "AIDA").upper()
+
+    title_has_city=bool(city and city.casefold() in title.casefold())
+    cycle=max(0,(variant-1)//24)
+    header_tags={
+        "PAS":"решение под вашу задачу","FAB":"параметры и выгоды","BAB":"от идеи к готовому варианту",
+        "OBJECTION":"разберём без лишней сложности","EXPERT":"индивидуальный разбор","SCENARIO":"сценарий под ваши условия",
+        "PRODUCT":"подбор по характеристикам","4P":"решение под ваши приоритеты","QUEST":"поможем выбрать",
+        "RESULT":"фокус на результате","COMPARISON":"сравним варианты","PROCESS":"понятный процесс",
+        "4U":"быстрый старт","PROOF_FIRST":"понятные условия","BENEFIT_FIRST":"выгоды для вас",
+        "PRICE_FIRST":"ориентир по стоимости","CONSULTATION":"поможем с выбором","QUALITY":"акцент на качестве",
+        "SPEED":"быстро к конкретике","RELIABILITY":"понятность на каждом шаге","CONVENIENCE":"удобство под вас",
+        "PREMIUM":"внимание к деталям","ECONOMY":"разумный выбор","AIDA":"обсудим вашу задачу",
+    }
+    header=(title.upper()+((' · '+city.upper()) if city and not title_has_city else ''))
+    cycle_tags=["под ваш сценарий","с учётом приоритетов","с фокусом на удобство","с вниманием к деталям","для реального использования"]
+    header_hook=header_tags.get(fid,"обсудим вашу задачу")+" · "+cycle_tags[cycle%len(cycle_tags)]
+    blocks=[f"<strong>{header} — {header_hook}.</strong>"]
+    openings={
+        "PAS": f"Если по направлению «{clean_topic}» нужен понятный результат без лишней суеты, начнём с вашей задачи и подберём подходящий вариант под реальные условия.",
+        "FAB": f"{clean_topic}{geo}: подберём вариант под ваши параметры и объясним, на что обратить внимание при выборе.",
+        "BAB": f"Есть идея по направлению «{clean_topic}», но пока непонятно, какой вариант выбрать? Разберём задачу и поможем перейти от общей идеи к конкретному решению.",
+        "OBJECTION": f"Не обязательно заранее разбираться во всех деталях по теме «{clean_topic}». Достаточно описать, что вам нужно, а важные параметры уточним по ходу общения.",
+        "EXPERT": f"По направлению «{clean_topic}» важно учитывать задачу целиком: размеры, условия, пожелания и особенности конкретного случая. Поможем собрать всё в понятный вариант.",
+        "SCENARIO": f"Опишите задачу по направлению «{clean_topic}» — разберём вводные, уточним важные детали и предложим следующий понятный шаг.",
+        "PRODUCT": f"{clean_topic}{geo}: поможем подобрать подходящий вариант по назначению, характеристикам и вашим пожеланиям.",
+        "4P": f"{clean_topic}{geo}: задача — подобрать решение, которое подходит именно под ваши условия, а не просто предложить универсальный вариант.",
+        "QUEST": f"Чтобы понять, какой вариант по направлению «{clean_topic}» подойдёт лучше, расскажите, что для вас важнее всего: результат, параметры, внешний вид, бюджет или особенности использования.",
+        "RESULT": f"Фокус по направлению «{clean_topic}» — на результате, который нужен именно вам. Опишите задачу, и обсудим, какой вариант лучше соответствует вашим приоритетам.",
+        "COMPARISON": f"По направлению «{clean_topic}» можно сравнить несколько вариантов по параметрам, удобству и стоимости. Поможем увидеть различия и выбрать без лишней сложности.",
+        "PROCESS": f"{clean_topic}{geo}: расскажем, из каких шагов складывается решение, что нужно уточнить в начале и что вы получите на следующем этапе.",
+        "4U": f"{clean_topic}{geo}: если задача актуальна сейчас, напишите основные параметры — быстро поймём, какой вариант стоит рассматривать в первую очередь.",
+        "PROOF_FIRST": f"По направлению «{clean_topic}» важны не громкие обещания, а понятные условия и реальные возможности компании. Начнём с вашей задачи и доступных вариантов.",
+        "BENEFIT_FIRST": f"{clean_topic}{geo}: сначала определим, что для вас важнее — удобство, внешний вид, функциональность, бюджет или другой результат — и от этого подберём вариант.",
+        "PRICE_FIRST": f"Стоимость по направлению «{clean_topic}» зависит от выбранного варианта и параметров задачи. Напишите вводные — уточним, что влияет на расчёт и какие решения можно рассмотреть.",
+        "CONSULTATION": f"Не уверены, какой вариант по направлению «{clean_topic}» выбрать? Опишите задачу — поможем сориентироваться и понять, с чего лучше начать.",
+        "QUALITY": f"{clean_topic}{geo}: если в приоритете качество исполнения и материалов, расскажите о задаче и важных для вас деталях — подберём подходящий вариант.",
+        "SPEED": f"Если по направлению «{clean_topic}» важно быстро перейти от идеи к конкретному решению, пришлите основные вводные — начнём предметное обсуждение без лишних шагов.",
+        "RELIABILITY": f"{clean_topic}{geo}: когда важны понятность и предсказуемость, лучше заранее обсудить ключевые параметры задачи. Поможем собрать их в конкретный вариант.",
+        "CONVENIENCE": f"По направлению «{clean_topic}» можно подобрать решение под ваш привычный сценарий использования, пространство и приоритеты. Расскажите, что должно быть удобно именно вам.",
+        "PREMIUM": f"{clean_topic}{geo}: если важны внешний вид, материалы, детали и индивидуальная проработка, опишите желаемый результат — обсудим подходящие варианты.",
+        "ECONOMY": f"Если по направлению «{clean_topic}» важно рационально уложиться в бюджет, расскажите задачу и приоритеты — поможем определить, на чём имеет смысл сосредоточиться.",
+        "AIDA": f"{clean_topic}{geo}: расскажите, что именно хотите получить, — поможем подобрать подходящий вариант и быстро перейти к предметному обсуждению.",
+    }
+    focus_blocks={
+        "PAS":"Сначала выделим то, что мешает получить нужный результат сейчас, затем разберём варианты решения и выберем подходящий по вашим условиям.",
+        "FAB":"Сравним характеристики, которые действительно важны в вашей ситуации, и переведём их в понятные практические плюсы — без перегруза терминами.",
+        "BAB":"Зафиксируем, что есть сейчас и какой результат вы хотите получить после. Между этими двумя точками соберём понятный набор решений.",
+        "OBJECTION":"Если есть сомнения по цене, материалам, срокам обсуждения или самому выбору, напишите их сразу — так разговор быстрее перейдёт к сути.",
+        "EXPERT":"Посмотрим на задачу как на проект: назначение, ограничения, размеры, желаемый результат и приоритеты. Это помогает не терять важные детали.",
+        "SCENARIO":"Можно описать реальную ситуацию использования: кто будет пользоваться, что должно помещаться или работать, что неудобно сейчас и что хочется изменить.",
+        "PRODUCT":"Если уже знаете нужный тип или характеристики, перечислите их. Если нет — начнём с назначения и подберём варианты, которые стоит сравнить.",
+        "4P":"Сформулируем полезный результат, покажем подходящий вариант и обсудим, почему он соответствует задаче. Следующий шаг будет понятен до оформления.",
+        "QUEST":"Начнём с нескольких критериев выбора и приоритетов. После этого проще отсечь неподходящие решения и сосредоточиться на действительно полезных.",
+        "RESULT":"Не будем начинать с каталога ради каталога: сначала определим, что должно измениться для вас после покупки или выполнения проекта.",
+        "COMPARISON":"Можно сравнить два-три подхода по удобству, внешнему виду, комплектации и стоимости, чтобы решение было осознанным, а не случайным.",
+        "PROCESS":"Разложим задачу на последовательные шаги: вводные, подбор, уточнение деталей и согласование варианта. Вы будете понимать, что происходит дальше.",
+        "4U":"Если решение нужно без долгой переписки, пришлите основные параметры одним сообщением. Этого достаточно, чтобы быстро сузить круг вариантов.",
+        "PROOF_FIRST":"Обсудим реальные возможности компании и применимые к вашей задаче условия. Это позволяет выбирать на понятной основе, а не по общим лозунгам.",
+        "BENEFIT_FIRST":"Скажите, какая польза важнее именно вам: больше удобства, лучше организация пространства, внешний вид, долговечность или экономия бюджета.",
+        "PRICE_FIRST":"Чтобы стоимость была предметной, уточним параметры, которые на неё влияют. После этого можно сравнивать варианты без ложных ориентиров.",
+        "CONSULTATION":"Если пока есть только идея, этого достаточно. Поможем сформулировать требования и понять, какие вопросы действительно стоит решить до выбора.",
+        "QUALITY":"Обсудим детали, которые влияют на ощущение качества: материалы, исполнение, удобство, внешний вид и соответствие конкретной задаче.",
+        "SPEED":"Соберём только необходимые вводные и сразу перейдём к вариантам. Ненужные вопросы не должны растягивать путь к решению.",
+        "RELIABILITY":"Заранее проговорим ключевые параметры и ожидаемый результат, чтобы на следующем этапе не возникало разных трактовок одной задачи.",
+        "CONVENIENCE":"Оттолкнёмся от вашего ежедневного сценария: как будет использоваться решение, что должно быть под рукой и какие неудобства хочется убрать.",
+        "PREMIUM":"Если важны детали и индивидуальный характер решения, отдельно обсудим визуальную часть, материалы, сочетания и уровень проработки.",
+        "ECONOMY":"Разделим обязательные параметры и дополнительные пожелания. Так проще сохранить нужный результат и не переплачивать за второстепенное.",
+        "AIDA":"Сначала поймём задачу, затем покажем, какие варианты заслуживают внимания, и только после этого предложим конкретный следующий шаг.",
+    }
+    intro=openings.get(fid,openings["AIDA"])
+    focus=focus_blocks.get(fid,focus_blocks["AIDA"])
+    perspective_blocks=[
+        "Отдельно посмотрим на исходную ситуацию: что уже есть, что хочется изменить и какие ограничения нельзя игнорировать. Это даёт основу для решения, которое подходит не только визуально, но и по использованию.",
+        "Второй ракурс — приоритеты. Можно заранее разделить обязательные требования и пожелания: так проще сравнивать варианты и понимать, где изменения действительно улучшают результат.",
+        "Ещё один полезный подход — идти от повседневного сценария. Расскажите, как решение будет использоваться каждый день, что должно стать проще и какие детали особенно важны именно в вашем случае.",
+        "Если выбор кажется слишком широким, сузим его через критерии: назначение, пространство, внешний вид, удобство и бюджет. После такого отбора остаются только варианты, которые есть смысл обсуждать дальше.",
+        "Можно начать не с готового решения, а с примера, который вам нравится или не нравится. Разберём, какие элементы в нём важны, и перенесём эти ориентиры на вашу задачу без копирования чужого проекта.",
     ]
-    goals=[
-        "Напишите в Avito — обсудим вашу ситуацию и следующий шаг.",
-        "Оставьте сообщение в Avito, чтобы начать с консультации.",
-        "Напишите, что для вас важно — начнём с уточнения задачи.",
-        "Свяжитесь через сообщения Avito — разберём исходные данные.",
-        "Опишите задачу в сообщении, чтобы определить следующий шаг.",
-        "Напишите в Avito — ответим по существу вашего запроса.",
-        "Начните с сообщения: укажите цель обращения и важные условия.",
-        "Оставьте сообщение — обсудим, что нужно проверить перед началом работы.",
+    perspective=perspective_blocks[cycle%len(perspective_blocks)]
+
+    low=clean_topic.casefold()
+    furniture=any(x in low for x in ("мебел","кухн","шкаф","гардероб","прихож","ванн","сануз","фасад"))
+    product=any(x in low for x in ("товар","оборудован","техник","материал","плитк","самокат","бетон","кирпич"))
+    if furniture:
+        detail_blocks=[
+            "Можно обсудить размеры, планировку, фасады, материалы, цвет, фурнитуру, наполнение и внешний вид. Фото помещения или референс помогут быстрее понять идею.",
+            "Для проекта под помещение полезны примерные размеры, особенности планировки и пожелания по хранению. Можно сразу приложить фото текущего пространства.",
+            "Если важен внешний вид, напишите желаемый стиль, оттенки и материалы. Если важнее функциональность — перечислите, что и как должно храниться или использоваться.",
+            "Для нестандартной планировки отметьте ниши, углы, высоту, выступы и другие ограничения. Даже примерные данные помогут предметно обсудить конфигурацию.",
+            "Можно начать с задачи по наполнению: что должно поместиться, какие зоны нужны и чем неудобен текущий вариант. От этого легче перейти к компоновке.",
+            "Если уже есть пример понравившегося проекта, приложите его и напишите, что именно хотите сохранить или изменить: форму, материалы, цвет или детали.",
+            "При выборе материалов можно обсудить внешний вид, практичность и бюджет. Не обязательно знать названия заранее — достаточно описать желаемый эффект.",
+            "Если проектом будут пользоваться несколько человек, расскажите о привычках и сценариях использования. Это помогает точнее продумать наполнение и доступ.",
+            "Можно отдельно обсудить фасады, ручки, фурнитуру, подсветку и внутреннее наполнение — от базового решения до более детальной комплектации.",
+            "Чтобы быстрее перейти к варианту, пришлите размеры или фото места установки и перечислите три главных пожелания к будущему проекту.",
+        ]
+    elif product:
+        detail_blocks=[
+            "Напишите назначение, количество и ключевые характеристики. Если есть фото, ссылка или пример — приложите, чтобы быстрее подобрать вариант.",
+            "Если точная модель ещё не выбрана, опишите, где и как будет использоваться товар. По сценарию использования проще определить нужные параметры.",
+            "Укажите обязательные требования и то, чем можно поступиться. Это помогает сравнить предложения без лишних характеристик.",
+            "Если нужен комплект или несколько единиц, напишите количество и различия между ними. Так подбор будет точнее с первого сообщения.",
+            "Можно прислать пример похожего товара и отметить, что в нём подходит, а что хотелось бы изменить.",
+            "Если важен бюджет, укажите ориентир и обязательные параметры. Поможем понять, какие варианты имеет смысл рассматривать.",
+            "Для совместимости с уже имеющимся оборудованием или материалами перечислите известные размеры, типы подключения или другие важные параметры.",
+            "Если покупка нужна для конкретной задачи, начните с результата, который хотите получить. Характеристики можно уточнить после этого.",
+        ]
+    else:
+        detail_blocks=[
+            "Опишите задачу, город и примерный объём работ. Фото объекта или важные ограничения помогут сразу перейти к конкретике.",
+            "Напишите, что нужно сделать, где находится объект и какой результат хотите получить. Краткого описания достаточно для начала.",
+            "Если есть фотографии, размеры, количество или особенности объекта — добавьте их в сообщение. Остальное можно уточнить дальше.",
+            "Укажите, что уже сделано и что требуется получить в итоге. Это помогает точнее определить следующий шаг.",
+            "Если есть ограничения по доступу, материалам или способу выполнения, напишите их сразу — так обсуждение будет предметнее.",
+            "Для нескольких объектов перечислите их количество и основные различия. Необязательно составлять длинное техническое задание.",
+            "Можно начать с фотографии и одного вопроса: что нужно изменить или получить. Дальше уточним детали по существу.",
+            "Если для вас особенно важны аккуратность, скорость, бюджет или конкретный результат, отметьте это в первом сообщении.",
+        ]
+    detail=detail_blocks[(variant-1)%len(detail_blocks)]
+
+    choice_blocks=[
+        "Подберём подходящий вариант и объясним различия простым языком. Для расчёта уточним только параметры, которые действительно на него влияют.",
+        "Поможем сравнить решения по вашим приоритетам. Основные условия можно обсудить прямо в сообщениях Avito до следующего шага.",
+        "Можно начать с короткого сообщения без длинного технического задания. Дальше уточним только то, что влияет на выбор.",
+        "Если рассматриваете несколько вариантов, разберём плюсы каждого применительно к вашей задаче и поможем сузить выбор.",
+        "Сначала договоримся о критериях выбора, затем предложим вариант для предметного обсуждения — так проще избежать лишних итераций.",
+        "Покажите пример того, что нравится, или опишите желаемый результат словами. Мы переведём это в конкретные параметры для обсуждения.",
+        "Если приоритеты конкурируют — например, внешний вид и бюджет — обсудим компромиссы заранее и выберем, что важнее сохранить.",
+        "Обсуждение можно вести поэтапно: сначала главное решение, затем детали. Это удобно, когда часть пожеланий ещё формируется.",
     ]
-    opening=openings[(variant-1)%len(openings)]
-    if city:
-        opening=f"{clean_topic} · {city} — "+opening.split(":",1)[-1].strip().lstrip("— ")
-    lines=[opening]
-    lines.append("Сначала разберём сам запрос: что нужно получить, какие исходные условия уже известны и какие параметры для вас принципиальны. Так разговор начинается не с общих обещаний, а с конкретной задачи, которую можно последовательно уточнить.")
-    lines.append("Дальше сопоставим ваши вводные с доступными вариантами решения и обозначим, что нужно уточнить до следующего шага. Если часть данных пока неизвестна, это нормально: начните с того, что уже есть, без необходимости заранее собирать полный технический список.")
-    lines.append("До принятия решения можно задать вопросы по тем условиям, которые для вас важны. В объявлении используются только подтверждённые сведения: без выдуманных сроков, гарантий или характеристик, которых нет в исходных данных.")
-    # Add only facts explicitly present in account knowledge and relevant to this topic.
-    low=(client+" "+clean_topic).lower()
-    if any(x in clean_topic.lower() for x in ("квартир","недвижимост","ипотек")) and client:
-        facts=[]
-        if "семь" in client.lower(): facts.append("семьи с детьми")
-        if "студент" in client.lower(): facts.append("покупка квартиры для ребёнка-студента")
-        if "инвестор" in client.lower(): facts.append("инвестиционные задачи")
-        if facts: lines.append("Среди подтверждённых задач: "+", ".join(facts)+".")
-        if "банкрот" in client.lower(): lines.append("Важно: после банкротства возможность работы ограничена правилами агентства.")
-    lines.append(goals[(variant-1)%len(goals)])
-    return _ff_clean_title_for_avito(title,clean_topic),"\n\n".join(lines)
+    choice=choice_blocks[(variant-1)%len(choice_blocks)]
+
+    cta_blocks=[
+        "Нажмите «Написать» в Avito и отправьте сообщение с коротким описанием задачи — начнём с самого важного.",
+        "Нажмите «Написать» и отправьте сообщение с основными вводными — перейдём к подходящим вариантам.",
+        "Нажмите «Написать» в Avito и сообщите, какой результат хотите получить, — подскажем следующий шаг.",
+        "Нажмите «Написать» и пришлите сообщение с задачей, фото или размерами, если они есть, — так быстрее перейдём к конкретике.",
+        "Нажмите «Написать» и начните сообщение с трёх вещей: что нужно, город и главные пожелания.",
+        "Нажмите «Написать» в Avito и отправьте сообщение с двумя-тремя главными требованиями к результату.",
+        "Нажмите «Написать» и сообщите, что для вас важнее всего в выборе, — с этого начнём подбор.",
+        "Нажмите «Написать» и отправьте короткое сообщение. Если данных пока мало, уточним их уже в предметном диалоге.",
+    ]
+    cta=cta_blocks[(variant-1)%len(cta_blocks)]
+
+    facts=[]
+    if advantages:
+        fact_labels=["Почему выбирают компанию","Что может быть полезно","Преимущества","Сильные стороны"]
+        facts.append(f"<strong>{fact_labels[(variant-1)%len(fact_labels)]}:</strong> {advantages}.")
+    if company_desc and variant%3==0:
+        facts.append(f"<strong>О компании:</strong> {company_desc}.")
+    city_block=(f"<strong>География:</strong> {city}." if city else "")
+
+    sections=[
+        ("intro",intro),
+        ("focus","<strong>На чём сделаем акцент:</strong> "+focus),
+        ("perspective","<strong>Дополнительный ракурс:</strong> "+perspective),
+        ("detail","<strong>Что важно для подбора:</strong> "+detail),
+        ("choice","<strong>Как подойдём к выбору:</strong> "+choice),
+    ]
+    orders=[
+        ("intro","focus","perspective","detail","choice"),
+        ("intro","detail","perspective","focus","choice"),
+        ("intro","choice","focus","perspective","detail"),
+        ("intro","perspective","choice","detail","focus"),
+        ("intro","detail","focus","choice","perspective"),
+    ]
+    section_map=dict(sections)
+    order_index=((variant-1)%len(orders)+cycle)%len(orders)
+    blocks.extend(section_map[k] for k in orders[order_index])
+    if city_block:
+        blocks.append(city_block)
+    blocks.extend(facts)
+    blocks.append("<strong>Следующий шаг:</strong> "+cta)
+
+    description="\n\n".join(blocks)
+    return _ff_clean_title_for_avito(title,clean_topic),description
 
 
 def _ff_zero_touch_safe_description(topic: str, payload: dict, brief: str = "") -> str:
@@ -5152,7 +9398,7 @@ def ff_workflow_enhance(campaign_id:int, body:FFEnhanceBody, db=Depends(_db), us
     import hashlib
     from app.services.jobs import enqueue, job_public
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed)
-    _ff_assert_mutable(campaign)
+    _ff_assert_card_editor_mutable(campaign)
     if _ff_paid_qa_forbidden(campaign): return _ff_paid_qa_response()
     prompt=str(body.prompt or "").strip()
     if not prompt: raise HTTPException(400,"Напишите, как усилить объявления")
@@ -5162,7 +9408,7 @@ def ff_workflow_enhance(campaign_id:int, body:FFEnhanceBody, db=Depends(_db), us
     account_id=str(campaign.default_account_id or "").strip()
     if not account_id or account_id not in allowed: raise HTTPException(403,"Нет доступа к аккаунту")
     digest=hashlib.sha1((prompt+"|"+",".join(map(str,ids))).encode("utf-8")).hexdigest()[:20]
-    row,created=enqueue(db,"campaign_enhance",payload={"campaign_id":campaign_id,"account_id":account_id,"stage":"enhance_texts","item_ids":ids,"remaining":ids,"prompt":prompt},
+    row,created=enqueue(db,"campaign_enhance",payload={"campaign_id":campaign_id,"account_id":account_id,"stage":"enhance_texts","item_ids":ids,"remaining":ids,"prompt":prompt,"expected_updated_at":dict(db.info.get("campaign_expected_versions") or {})},
                         owner_user_id=getattr(user,"id",None),account_id=account_id,fingerprint=f"campaign_enhance:{campaign_id}:{digest}",progress_total=len(ids))
     db.commit(); db.refresh(row)
     return {"status":"ok","job":job_public(row),"created":created,"persistent":True,"items":len(ids)}
@@ -5170,11 +9416,17 @@ def ff_workflow_enhance(campaign_id:int, body:FFEnhanceBody, db=Depends(_db), us
 
 @router.post("/{campaign_id}/workflow/texts")
 def ff_workflow_texts(campaign_id:int, body:FFTextBody, db=Depends(_db), user=Depends(get_current_user)):
+    from app.services.campaign_editor_jobs import maybe_enqueue
+    _queued = maybe_enqueue(db, user, campaign_id, 'texts', body)
+    if _queued is not None:
+        return _queued
     import os
     from app.api.avito import GenerateAdsRequest, generate_ads
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); _,ff=_ff_state_load(campaign)
-    _ff_assert_mutable(campaign)
-    if _ff_paid_qa_forbidden(campaign): return _ff_paid_qa_response()
+    _ff_assert_card_editor_mutable(campaign)
+    # QA campaigns must be able to exercise the zero-cost deterministic path,
+    # but they may never fall through to a paid/model provider.
+    _qa_local_only=_ff_paid_qa_forbidden(campaign)
     requested_ids=[int(x) for x in (body.item_ids or []) if int(x)>0]
     if not requested_ids:
         return {"status":"selection_required","changed":[],"errors":[],"code":"text_selection_required",
@@ -5191,8 +9443,22 @@ def ff_workflow_texts(campaign_id:int, body:FFTextBody, db=Depends(_db), user=De
                 "requested":len(rows),"normal_paid_cap":_text_cap,
                 "message":f"Защита бюджета остановила массовую генерацию {len(rows)} текстов. Подтвердите точный объём отдельно или запускайте подготовку BORIS — она работает безопасными порциями."}
     ctx=ff.get("account_context") or {}; brief=ff.get("brief") or ""; defaults=ff.get("defaults") or {}; refs=dict(ff.get("references") or {}); changed=[]; errors=[]
+    formula_memory_cache={}
     for row in rows:
         p=_ff_payload(row); topic=str(p.get("direction") or row.segment or p.get("title") or "").strip()
+        _ff_push_edit_history(
+            p,
+            "boris_text_edit",
+            actor="BORIS",
+            note=(str(body.instructions or "").strip()[:500] or "Новый вариант текста"),
+        )
+        row_account_id=str(getattr(row,"account_id","") or "").strip()
+        if row_account_id not in formula_memory_cache:
+            formula_memory_cache[row_account_id]=_ff_learned_formula(db,row_account_id)
+        if formula_memory_cache[row_account_id]:
+            p["learned_formula_id"]=formula_memory_cache[row_account_id]
+            p["formula_memory_source"]="campaign_item.optimization_versions"
+            p["formula_memory_version"]="optimization_versions:v1"
         if not topic: errors.append({"id":row.id,"message":"Нет направления"}); continue
         angle=str(p.get("creative_angle") or "").strip()
         angle_instruction=("Главный рекламный посыл этого варианта: "+angle) if angle else ""
@@ -5261,17 +9527,52 @@ def ff_workflow_texts(campaign_id:int, body:FFTextBody, db=Depends(_db), user=De
                 paid_fallback_enabled as _content_paid_fallback,
             )
             strict_bulk=_strict_requested and int(ff.get("quantity") or 0)>=10 and not str(body.instructions or "").strip() and len(_evidence_text.strip())<80
-            _use_local_text=bool(_content_local_text_first() or strict_bulk or not _content_paid_fallback())
+            _campaign_ai_policy=_ff_account_campaign_ai_policy(db,row_account_id)
+            _force_sales_v4=str(_campaign_ai_policy.get("copy_engine") or "").strip().lower()=="paid_sales_v4"
+            _use_local_text=bool(
+                _qa_local_only
+                or (not _force_sales_v4 and (
+                    _campaign_provider_call(_content_local_text_first, )
+                    or strict_bulk
+                    or not _content_paid_fallback()
+                ))
+            )
             result={}
+            # Formula metadata exists for BOTH local-first and paid/model paths.
+            # It is review/A-B metadata only and never part of the Avito payload.
+            p.update(_ff_formula_meta(p,topic))
             if _use_local_text:
                 bt,bd=_ff_bulk_safe_copy(topic,p,ff)
                 ad={"title":bt,"description":bd,"price":int(p.get("price") or 0)}
-                p["copy_provider"]="boris_deterministic_local_v1"
+                p["copy_provider"]="boris_deterministic_local_v2_formula"
                 p["copy_fallback_reason"]=("insufficient_verified_evidence" if strict_bulk else "local_first_policy")
             else:
                 _batch_idem=str(body.idempotency_key or "").strip()
-                _item_idem=((_batch_idem+":item:"+str(int(row.id))) if _batch_idem else "")
-                result=generate_ads(GenerateAdsRequest(topic=topic,count=1,price_from=int(p.get("price") or 0),price_to=int(p.get("price") or 0),extra=extra,goal=body.goal,length=body.length,use_my_ads=True,account_id=row.account_id,idempotency_key=_item_idem,single_paid_attempt=True,paid_provenance={"campaign_id":int(campaign_id),"item_id":int(row.id),"source":"feed_factory_text"}))
+                _row_id_before_provider=int(row.id)
+                _row_account_before_provider=str(row.account_id)
+                _item_idem=((_batch_idem+":item:"+str(_row_id_before_provider)) if _batch_idem else "")
+                # PAID_COPY_TX_BOUNDARY_V1:
+                # A provider round-trip may take tens of seconds. Never keep a
+                # PostgreSQL transaction/SSL session idle across that boundary.
+                # Persist only deterministic pre-provider metadata first, commit,
+                # then reacquire the exact campaign row after the provider returns.
+                row.payload_json=json.dumps(p,ensure_ascii=False)
+                row.content_hash=CS.content_hash(p)
+                db.commit()
+                result=_campaign_provider_call(generate_ads, GenerateAdsRequest(topic=topic,count=1,price_from=int(p.get("price") or 0),price_to=int(p.get("price") or 0),extra=extra,goal=body.goal,length=body.length,use_my_ads=True,account_id=_row_account_before_provider,idempotency_key=_item_idem,single_paid_attempt=True,paid_provenance={"campaign_id":int(campaign_id),"item_id":_row_id_before_provider,"source":"feed_factory_text"}))
+                # Reacquire through a fresh transaction after external I/O. This
+                # also makes a closed/stale provider-time DB connection harmless.
+                db.expire_all()
+                from app.models.campaign_item import CampaignItem as _PaidTextCampaignItem
+                row=(db.query(_PaidTextCampaignItem)
+                     .filter(_PaidTextCampaignItem.id==_row_id_before_provider,
+                             _PaidTextCampaignItem.campaign_id==int(campaign_id),
+                             _PaidTextCampaignItem.account_id==_row_account_before_provider)
+                     .first())
+                if row is None:
+                    errors.append({"id":_row_id_before_provider,"message":"Карточка исчезла после генерации текста"})
+                    continue
+                p=_ff_payload(row)
                 _generated_ads=(result.get("ads") or []) if isinstance(result,dict) else []
                 ad=_generated_ads[0] if _generated_ads else None
                 p["copy_provider"]="paid_single_attempt"
@@ -5285,7 +9586,7 @@ def ff_workflow_texts(campaign_id:int, body:FFTextBody, db=Depends(_db), user=De
             # only an emergency fallback for strict_bulk/no-evidence mode; previously
             # it overwrote every variant 2+ with generic «под ключ/консультация» copy.
             if strict_bulk and title_pool:
-                p["title"]=title_pool[(variant_no-1)%len(title_pool)]
+                p["title"]=_ff_select_title(topic,variant_no,brief)
             else:
                 p["title"]=generated_title
             p["description"]=_ff_plain_description_for_avito(ad.get("description") or p.get("description","") , brief=brief, price=int(p.get("price") or 0), price_mode=str(p.get("price_mode") or ""))
@@ -5299,7 +9600,7 @@ def ff_workflow_texts(campaign_id:int, body:FFTextBody, db=Depends(_db), user=De
             # Every text produced by the current Feed Factory copywriter must pass
             # the same acceptance contract before READY/approval. This converts
             # copy quality from a prompt preference into a production invariant.
-            p["copy_quality_contract"]="sales_v3"
+            p["copy_quality_contract"]="sales_v4"
             if __import__('re').search(r"(?:не\s+(?:выдум|придум|добав)|без\s+выдум)",brief,__import__('re').I):
                 # The generator already receives a strict-facts instruction. Sanitize
                 # its useful copy instead of replacing every variant with one generic
@@ -5309,11 +9610,17 @@ def ff_workflow_texts(campaign_id:int, body:FFTextBody, db=Depends(_db), user=De
             # Production invariant requested by the Campaign UI: every generated
             # description ends with its own concrete, factual example/scenario.
             # This is deterministic and free, so it cannot trigger another paid call.
+            _example,_example_meta=_ff_factual_example(topic,str(p.get("city") or p.get("address") or ""),p)
             p["description"]=_ff_append_uniqueness_footer(
                 p["description"], topic, str(p.get("city") or p.get("address") or ""),
-                variant=variant_no, item_id=int(row.id), max_chars=2400
+                variant=variant_no, item_id=int(row.id), max_chars=2400, payload=p
             )
-            p["uniqueness_footer"]={"present":True,"policy":"direction_geo_rotating_v1","position":"bottom"}
+            p["uniqueness_footer"]=_example_meta
+            p["seo_search_block"]={"present":True,"position":"before_uniqueness","policy":"search_phrase_block_v1"}
+            if _example_meta.get("needs_data"):
+                p["content_needs_data"]={"code":"factual_uniqueness_parameters_missing","message":"Для финального примера нужны подтверждённые параметры конкретного товара/услуги."}
+            else:
+                p.pop("content_needs_data",None)
             # Single-paid-attempt policy: quality validation may reject the first
             # draft, but BORIS must never silently buy a second model response.
             # The failed draft stays draft/fail-closed; an owner/job may submit a
@@ -5373,6 +9680,7 @@ def ff_workflow_texts(campaign_id:int, body:FFTextBody, db=Depends(_db), user=De
                     _city,
                     int(p.get("variant") or 1),
                     int(row.id),
+                    payload=p,
                 )
                 p["uniqueness_scenario"]={
                     "city":_city,
@@ -5394,12 +9702,97 @@ def ff_workflow_texts(campaign_id:int, body:FFTextBody, db=Depends(_db), user=De
                     observe_suppressed(__name__, _suppressed_exc, line=5369)
             row.payload_json=json.dumps(p,ensure_ascii=False); row.content_hash=CS.content_hash(p); row.status="draft"; changed.append(row.id)
         except Exception as exc: errors.append({"id":row.id,"message":str(exc)[:240]})
-    db.commit(); ff["step"]="media" if changed else "texts"; _ff_state_save(db,campaign,ff)
+    for changed_id in changed:
+        _ff_mark_post_publication_revision(ff,int(changed_id),["title","description"])
+    db.commit()
+    ff["step"]="validation" if ff.get("post_publication_revision") and changed else ("media" if changed else "texts")
+    if changed: ff["ready_for_owner_approval"]=False
+    _ff_state_save(db,campaign,ff)
     return {"status":"ok" if changed else "error","changed":changed,"errors":errors}
+
+
+def _ff_source_campaign_verified_media(db, row, payload, desired_count: int, allowed, rejected_media_ids=None):
+    """Reuse already-approved semantic gallery media from an explicit source campaign.
+
+    This is a local, account-scoped source accelerator only. The target card still
+    passes the normal ff_workflow_photo_stack semantic QA before any link mutation.
+    """
+    from app.models.media_asset import MediaAsset
+    try:
+        source_campaign_id=int((payload or {}).get("source_campaign_id") or 0)
+    except Exception:
+        source_campaign_id=0
+    if source_campaign_id<=0 or int(source_campaign_id)==int(getattr(row,"campaign_id",0) or 0):
+        return []
+    target_account=str(getattr(row,"account_id","") or "")
+    target_direction=" ".join(str((payload or {}).get("direction") or getattr(row,"segment","") or "").casefold().replace("ё","е").split())
+    if not target_account or not target_direction:
+        return []
+    rejected={int(x) for x in (rejected_media_ids or set()) if int(x or 0)>0}
+    source_rows=[]
+    try:
+        source_rows=[
+            r for r in _ff_items(db,source_campaign_id,allowed)
+            if str(getattr(r,"account_id","") or "")==target_account
+            and " ".join(str((_ff_payload(r).get("direction") or getattr(r,"segment","") or "")).casefold().replace("ё","е").split())==target_direction
+        ]
+    except Exception:
+        return []
+    if not source_rows:
+        return []
+    source_rows=sorted(source_rows,key=lambda r:int(getattr(r,"id",0) or 0))
+    offset=max(0,(int((payload or {}).get("variant") or getattr(row,"id",1) or 1)-1)%len(source_rows))
+    source_rows=source_rows[offset:]+source_rows[:offset]
+    out=[]; seen=set()
+    for src in source_rows:
+        sp=_ff_payload(src)
+        stack=[]
+        for raw in ((sp.get("photo_stack") or {}).get("media_ids") or []):
+            try: mid=int(raw)
+            except Exception: continue
+            if mid>0 and mid not in rejected:
+                stack.append(mid)
+        if not stack:
+            continue
+        evidence={}
+        for ev in (sp.get("media_semantic_evidence") or []):
+            if not isinstance(ev,dict) or not bool(ev.get("match")):
+                continue
+            try:
+                mid=int(ev.get("media_id") or 0); conf=float(ev.get("confidence") or 0)
+            except Exception:
+                continue
+            if mid>0 and conf>=0.80:
+                evidence[mid]=ev
+        verified=[mid for mid in stack if mid in evidence and mid not in seen]
+        if not verified:
+            continue
+        assets=(db.query(MediaAsset)
+            .filter(MediaAsset.id.in_(verified),
+                    MediaAsset.account_id==target_account,
+                    MediaAsset.deleted_at.is_(None),
+                    MediaAsset.status=="approved")
+            .all())
+        by_id={int(a.id):a for a in assets}
+        for mid in verified:
+            asset=by_id.get(mid)
+            if asset is None:
+                continue
+            # Banners/generated poster artifacts are not gallery-photo reuse.
+            if str(getattr(asset,"source_provider","") or "") in {"openai","boris_local"}:
+                continue
+            out.append({"id":mid}); seen.add(mid)
+            if len(out)>=max(1,min(int(desired_count or 1),8)):
+                return out
+    return out
 
 
 @router.post("/{campaign_id}/workflow/auto-media")
 def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db), user=Depends(get_current_user)):
+    from app.services.campaign_editor_jobs import maybe_enqueue
+    _queued = maybe_enqueue(db, user, campaign_id, 'auto_media', body)
+    if _queued is not None:
+        return _queued
     from app.api.media import StockCollectBody, collect_stock
     from app.models.media_asset import MediaAsset
     from app.models.media_link import MediaLink
@@ -5407,7 +9800,8 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
     from app.services.media_semantic_validator import classify_item_media_vision, stamp_item_semantic_evidence
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); _,ff=_ff_state_load(campaign)
     _ff_assert_mutable(campaign)
-    if _ff_paid_qa_forbidden(campaign): return _ff_paid_qa_response()
+    # Auto-media uses owner/approved stock only; QA must be able to test this zero-paid path.
+    # Paid image generation is not referenced anywhere in this endpoint.
     # IMPORTANT: empty item_ids must never silently become "all campaign items".
     # Every media mutation is explicitly scoped by the caller; stock selection itself
     # is not a paid image-generation operation.
@@ -5420,6 +9814,26 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
         }
     wanted=set(requested_ids); changed=[]; generated=[]; errors=[]
     _rows=[r for r in _ff_items(db,campaign_id,allowed) if r.id in wanted]
+    # CAMPAIGN_MEDIA_UNIQUE_ALLOCATION_V1:
+    # Build one campaign-wide ownership map before choosing any media. A photo
+    # already linked to another active card is unavailable to this card, and
+    # assets successfully assigned earlier in this same run are reserved too.
+    _all_campaign_rows=_ff_items(db,campaign_id,allowed)
+    _campaign_item_ids={int(r.id) for r in _all_campaign_rows}
+    _campaign_media_owners={}
+    if _campaign_item_ids:
+        _owner_links=(db.query(MediaLink)
+            .filter(MediaLink.entity_type=="campaign_item",
+                    MediaLink.entity_id.in_([str(x) for x in sorted(_campaign_item_ids)]))
+            .all())
+        for _lnk in _owner_links:
+            try:
+                _iid=int(_lnk.entity_id); _mid=int(_lnk.media_id)
+            except Exception:
+                continue
+            if _iid in _campaign_item_ids and _mid>0:
+                _campaign_media_owners.setdefault(_mid,set()).add(_iid)
+    _allocated_media_ids=set()
     # Stock/owner-media assignment is NOT an OpenAI image purchase.
     # Keep explicit item scoping, but never route this path through paid-image
     # confirmation/billing preflight copied from the banner endpoint.
@@ -5427,7 +9841,11 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
         if wanted and row.id not in wanted: continue
         p=_ff_payload(row); topic=str(p.get("direction") or row.segment or p.get("title") or "").strip()
         _row_id=int(row.id); _row_account_id=str(row.account_id)
-        desired_count=max(1,min(int(body.count_per_item or 1),3))
+        # ORDER_MEDIA_COUNT_PARITY_V1: the durable order may explicitly
+        # require up to eight gallery images per card. Keep auto-media's cap
+        # aligned with the worker/order contract; a lower local cap causes an
+        # impossible retry loop (worker asks for 8, auto-media can only return 3).
+        desired_count=max(1,min(int(body.count_per_item or 1),8))
         from app.services.media_semantic_validator import semantic_content_fingerprint as _semantic_media_fp
         _semantic_fp=_semantic_media_fp(p)
         _rejected_media_ids=set()
@@ -5435,6 +9853,15 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
             if not isinstance(_rej,dict) or str(_rej.get("content_fingerprint") or "")!=_semantic_fp: continue
             try: _rejected_media_ids.add(int(_rej.get("media_id") or 0))
             except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=5413)
+        _used_by_other_items={
+            int(_mid) for _mid,_owners in _campaign_media_owners.items()
+            if any(int(_owner)!=_row_id for _owner in (_owners or set()))
+        }
+        _campaign_excluded_media_ids=(
+            set(_rejected_media_ids)
+            | set(_used_by_other_items)
+            | set(_allocated_media_ids)
+        )
         if not topic: errors.append({"id":_row_id,"message":"Нет направления для подбора фотографии"}); continue
         try:
             # Reuse an already vision-approved asset for the exact topic before
@@ -5446,30 +9873,86 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
             # media can never leak here. Rotate the hero across variants for diversity.
             owner_folder=db.query(MediaFolder).filter(MediaFolder.account_id==row.account_id,MediaFolder.name==f"campaign_{campaign_id}_manual_photos",MediaFolder.deleted_at.is_(None)).order_by(MediaFolder.id.desc()).first()
             owner_assets=(db.query(MediaAsset).filter(MediaAsset.account_id==row.account_id,MediaAsset.folder_id==owner_folder.id,MediaAsset.deleted_at.is_(None),MediaAsset.source_type=="upload").order_by(MediaAsset.id.asc()).all()) if owner_folder else []
+            owner_assets=[a for a in owner_assets if int(a.id) not in _campaign_excluded_media_ids]
             if owner_assets:
                 _idx=max(0,(int(p.get("variant") or row.id)-1)%len(owner_assets))
                 rotated=owner_assets[_idx:]+owner_assets[:_idx]
                 items=[{"id":a.id} for a in rotated[:desired_count]]
             else:
+                # SOURCE_CAMPAIGN_VERIFIED_MEDIA_REUSE_V1:
+                # Campaign 538 and similar owner-prepared revisions can explicitly
+                # point at a previous campaign. Reuse only exact-direction,
+                # already-approved semantic gallery media from that source campaign
+                # before touching external stock. The target card still passes its
+                # own canonical semantic QA below.
+                items=_ff_source_campaign_verified_media(
+                    db,row,p,desired_count,allowed,_campaign_excluded_media_ids
+                )
                 folder=db.query(MediaFolder).filter(MediaFolder.account_id==row.account_id,MediaFolder.name==topic,MediaFolder.deleted_at.is_(None)).order_by(MediaFolder.id.desc()).first()
-                priors=(db.query(MediaAsset).filter(MediaAsset.account_id==row.account_id,MediaAsset.folder_id==folder.id,MediaAsset.deleted_at.is_(None),MediaAsset.status=="approved",~MediaAsset.id.in_(_rejected_media_ids) if _rejected_media_ids else True).order_by(MediaAsset.id.desc()).limit(desired_count).all()) if folder else []
-                if len(priors) >= desired_count:
-                    items=[{"id":a.id} for a in priors[:desired_count]]
-                else:
-                    # Stock discovery performs external HTTP. Persist/release all
-                    # campaign reads before it so a slow stock provider cannot leave
-                    # PostgreSQL idle in transaction. collect_stock owns its own
-                    # DB mutations through this same session and commits them.
+                priors=(db.query(MediaAsset).filter(MediaAsset.account_id==row.account_id,MediaAsset.folder_id==folder.id,MediaAsset.deleted_at.is_(None),MediaAsset.status=="approved",~MediaAsset.id.in_(_campaign_excluded_media_ids) if _campaign_excluded_media_ids else True).order_by(MediaAsset.id.desc()).limit(desired_count*2).all()) if folder else []
+                _prior_seen={int(x.get("id") or 0) for x in items}
+                for _asset in priors:
+                    if int(_asset.id) in _prior_seen:
+                        continue
+                    items.append({"id":int(_asset.id)}); _prior_seen.add(int(_asset.id))
+                    if len(items)>=desired_count:
+                        break
+                # ACCOUNT_MEDIA_REUSE_BEFORE_STOCK_V1:
+                # Prefer already-approved same-account media over fresh external
+                # stock. A folder name such as "Кухни" is valid evidence for the
+                # direction "Кухни на заказ"; exact semantic QA still runs later.
+                if len(items) < desired_count:
+                    _topic_norm=" ".join(topic.casefold().replace("ё","е").split())
+                    _account_folders=(db.query(MediaFolder)
+                        .filter(MediaFolder.account_id==row.account_id,MediaFolder.deleted_at.is_(None))
+                        .order_by(MediaFolder.id.asc()).all())
+                    _family_folder_ids=[]
+                    for _folder in _account_folders:
+                        _name_norm=" ".join(str(_folder.name or "").casefold().replace("ё","е").split())
+                        if len(_name_norm) < 4:
+                            continue
+                        if _name_norm in _topic_norm or _topic_norm in _name_norm:
+                            _family_folder_ids.append(int(_folder.id))
+                    if _family_folder_ids:
+                        _family_assets=(db.query(MediaAsset)
+                            .filter(
+                                MediaAsset.account_id==row.account_id,
+                                MediaAsset.folder_id.in_(_family_folder_ids),
+                                MediaAsset.deleted_at.is_(None),
+                                MediaAsset.status=="approved",
+                                MediaAsset.source_provider.notin_(["openai","boris_local"]),
+                                ~MediaAsset.id.in_(_campaign_excluded_media_ids) if _campaign_excluded_media_ids else True,
+                            )
+                            .order_by(MediaAsset.id.asc()).limit(400).all())
+                        if _family_assets:
+                            _offset=max(0,(int(p.get("variant") or row.id)-1)%len(_family_assets))
+                            _family_assets=_family_assets[_offset:]+_family_assets[:_offset]
+                            _seen={int(x.get("id") or 0) for x in items}
+                            for _asset in _family_assets:
+                                if int(_asset.id) in _seen:
+                                    continue
+                                items.append({"id":int(_asset.id)}); _seen.add(int(_asset.id))
+                                if len(items)>=desired_count:
+                                    break
+                if len(items) < desired_count:
+                    # External stock is a last resort after same-account approved
+                    # media reuse. Request only the missing count.
                     db.commit()
-                    stock=collect_stock(StockCollectBody(
-                        account_id=_row_account_id, topic=topic, count=desired_count,
+                    stock=_campaign_provider_call(collect_stock, StockCollectBody(
+                        account_id=_row_account_id, topic=topic, count=max(1,desired_count-len(items)),
+                        exclude_media_ids=sorted(_campaign_excluded_media_ids),
                         provenance={"source":"campaign_stock_collect","campaign_id":int(campaign_id),"item_id":_row_id},
                     ),db=db,user=user)
-                    items=list(stock.get("items") or []) if isinstance(stock,dict) else []
+                    _fresh=list(stock.get("items") or []) if isinstance(stock,dict) else []
+                    _seen={int(x.get("id") or 0) for x in items}
+                    for _candidate in _fresh:
+                        _mid=int(_candidate.get("id") or 0)
+                        if _mid and _mid not in _campaign_excluded_media_ids and _mid not in _seen:
+                            items.append({"id":_mid}); _seen.add(_mid)
             if len(items) < desired_count:
                 folder=db.query(MediaFolder).filter(MediaFolder.account_id==row.account_id,MediaFolder.name==topic,MediaFolder.deleted_at.is_(None)).order_by(MediaFolder.id.desc()).first()
                 if folder:
-                    more=(db.query(MediaAsset).filter(MediaAsset.account_id==row.account_id,MediaAsset.folder_id==folder.id,MediaAsset.deleted_at.is_(None),MediaAsset.status=="approved",~MediaAsset.id.in_(_rejected_media_ids) if _rejected_media_ids else True).order_by(MediaAsset.id.desc()).limit(desired_count*4).all())
+                    more=(db.query(MediaAsset).filter(MediaAsset.account_id==row.account_id,MediaAsset.folder_id==folder.id,MediaAsset.deleted_at.is_(None),MediaAsset.status=="approved",~MediaAsset.id.in_(_campaign_excluded_media_ids) if _campaign_excluded_media_ids else True).order_by(MediaAsset.id.desc()).limit(desired_count*4).all())
                     seen={int(x.get("id") or 0) for x in items}
                     for a in more:
                         if int(a.id) not in seen:
@@ -5483,7 +9966,7 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
                 # reuse without weakening the fail-closed category/image contract.
                 import re as _media_re
                 stems=[w[:4] for w in _media_re.findall(r"[а-яёa-z0-9]+",topic.lower()) if len(w)>=4 and w not in {"заказ","услуг","товар","город"}]
-                pool=(db.query(MediaAsset).filter(MediaAsset.account_id==row.account_id,MediaAsset.deleted_at.is_(None),MediaAsset.status=="approved",MediaAsset.source_provider=="pexels",~MediaAsset.id.in_(_rejected_media_ids) if _rejected_media_ids else True).order_by(MediaAsset.id.desc()).limit(160).all())
+                pool=(db.query(MediaAsset).filter(MediaAsset.account_id==row.account_id,MediaAsset.deleted_at.is_(None),MediaAsset.status=="approved",MediaAsset.source_provider=="pexels",~MediaAsset.id.in_(_campaign_excluded_media_ids) if _campaign_excluded_media_ids else True).order_by(MediaAsset.id.desc()).limit(160).all())
                 seen={int(x.get("id") or 0) for x in items}
                 for a in pool:
                     hay=(str(a.storage_key or "")+" "+" ".join(str(x) for x in (a.tags or []))).lower()
@@ -5498,7 +9981,7 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
                 if not mid or mid in mids:
                     continue
                 asset=db.query(MediaAsset).filter(MediaAsset.id==mid,MediaAsset.deleted_at.is_(None)).first()
-                if asset and mid not in _rejected_media_ids and (not asset.account_id or str(asset.account_id)==_row_account_id):
+                if asset and mid not in _campaign_excluded_media_ids and (not asset.account_id or str(asset.account_id)==_row_account_id):
                     mids.append(mid)
                 if len(mids)>=desired_count:
                     break
@@ -5519,14 +10002,43 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
                 db,
                 user,
             )
-            if str(stack_result.get("status") or "")!="ok" or _row_id not in set(stack_result.get("changed") or []):
+            if (str(stack_result.get("status") or "")!="ok"
+                    or _row_id not in set((stack_result.get("changed") or [])+(stack_result.get("skipped") or []))):
                 raise RuntimeError(str(stack_result.get("message") or "Не удалось применить проверенный фотостек"))
+            _allocated_media_ids.update(int(x) for x in mids)
             changed.append(_row_id)
             generated.append(_row_id)
         except Exception as exc:
             db.rollback(); errors.append({"id":row.id,"message":str(exc)[:240]})
     _,ff=_ff_state_load(campaign); ff["step"]="banners" if changed else "media"; _ff_state_save(db,campaign,ff)
     return {"status":"ok" if changed and not errors else ("partial" if changed else "error"),"changed":changed,"errors":errors,"policy":"strict_stock_vision_then_item_vision_fail_closed"}
+
+
+def _ff_is_existing_banner_asset(payload, link, asset) -> bool:
+    """Recognize every supported current/legacy banner representation."""
+    payload=payload or {}
+    _banner_url=str(payload.get("banner_url") or payload.get("banner") or "").strip()
+    _provider=str(getattr(asset,"source_provider","") or "").strip().lower()
+    _source_ref=str(getattr(asset,"source_ref","") or "").strip().lower()
+    _storage_key=str(getattr(asset,"storage_key","") or "").strip()
+    _media_type=str(getattr(asset,"media_type","") or "").strip().lower()
+    _asset_url="/images/"+_storage_key.lstrip("/") if _storage_key else ""
+    return bool(
+        _media_type=="banner"
+        or _source_ref.startswith("premium:")
+        or "/banners/campaign_openai/" in _storage_key
+        or _source_ref in {
+            "campaign_openai_gpt_image_2",
+            "campaign_openai_visual_local_text_v1",
+            "campaign_stock_visual_local_text_v1",
+        }
+        or (_banner_url and _asset_url==_banner_url)
+        or (
+            _provider in {"openai","openai_full_ai_premium","boris_local"}
+            and str(getattr(link,"role","") or "").strip().lower()=="hero"
+            and (_provider!="boris_local" or bool(_banner_url))
+        )
+    )
 
 
 @router.post("/{campaign_id}/workflow/photo-stack")
@@ -5537,16 +10049,23 @@ def ff_workflow_photo_stack(campaign_id:int, body:FFPhotoStackBody, db=Depends(_
     per-card random order so every ad gets a different gallery sequence. This is a
     pure CampaignItem/media mutation: it never publishes to Avito.
     """
-    import random, datetime
+    from app.services.campaign_editor_jobs import maybe_enqueue
+    _queued = maybe_enqueue(db, user, campaign_id, 'photo_stack', body)
+    if _queued is not None:
+        return _queued
+    import random, datetime, math
     from app.models.media_asset import MediaAsset
     from app.models.media_link import MediaLink
     from app.services import media_service as M
+    from app.services.campaign_card_revisions import lock_versions, conflict
+    from app.services.campaign_banner_media_contract import media_signature, asset_signature, linked_file_current
+    from app.services.job_execution_clock import assert_current_execution_owner
     from app.services.media_semantic_validator import (
         classify_item_media_vision, stamp_item_semantic_evidence,
         validate_linked_media_semantics,
     )
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed)
-    _ff_assert_mutable(campaign)
+    _ff_assert_card_editor_mutable(campaign)
     rows=_ff_items(db,campaign_id,allowed); wanted=set(body.item_ids or [r.id for r in rows]); rows=[r for r in rows if r.id in wanted]
     if not rows: raise HTTPException(400,"Не выбраны объявления")
     mids=[]
@@ -5554,20 +10073,42 @@ def ff_workflow_photo_stack(campaign_id:int, body:FFPhotoStackBody, db=Depends(_
         try: mid=int(raw)
         except Exception: continue
         a=db.query(MediaAsset).filter(MediaAsset.id==mid,MediaAsset.deleted_at.is_(None)).first()
-        if not a or (a.account_id and a.account_id not in allowed): raise HTTPException(403,"Нет доступа к фотографии")
-        if a.account_id and any(r.account_id!=a.account_id for r in rows): raise HTTPException(409,"Фотографии и объявления должны быть из одного аккаунта")
+        if not a or not a.account_id or a.account_id not in allowed: raise HTTPException(403,"Нет доступа к фотографии")
+        if any(r.account_id!=a.account_id for r in rows): raise HTTPException(409,"Фотографии и объявления должны быть из одного аккаунта")
+        if _ff_is_existing_banner_asset({},None,a):
+            raise HTTPException(422,detail={"code":"BANNER_IS_NOT_A_GALLERY_PHOTO",
+                "message":"Баннер сохраняется отдельно; выберите обычные фотографии."})
         mids.append(mid)
     mids=list(dict.fromkeys(mids))
     if not mids: raise HTTPException(400,"Загрузите хотя бы одну фотографию")
     per=max(1,min(int(body.photos_per_item or 6),9))
-    changed=[]
+    changed=[]; skipped=[]
     for row in rows:
+        _row_id=int(row.id); _row_account=str(row.account_id)
+        assert_current_execution_owner(db)
+        _before_version=(db.info.get("campaign_expected_versions") or {}).get(str(_row_id)) or row.updated_at.isoformat()
+        row=lock_versions(db,campaign_id,[_row_id],{str(_row_id):_before_version},[_row_account])[0]
         p=_ff_payload(row)
         links=(db.query(MediaLink,MediaAsset).join(MediaAsset,MediaAsset.id==MediaLink.media_id)
                .filter(MediaLink.entity_type=="campaign_item",MediaLink.entity_id==str(row.id),MediaAsset.deleted_at.is_(None))
                .order_by(MediaLink.position.asc(),MediaLink.id.asc()).all())
+        _before_media=media_signature(links)
         by_id={int(a.id):(l,a) for l,a in links}
-        banner_pair=next(((l,a) for l,a in links if str(getattr(a,"source_provider","") or "").lower()=="openai" or "/banners/campaign_openai/" in str(getattr(a,"storage_key","") or "")),None)
+        # PHOTO_STACK_CANONICAL_BANNER_URL_V1:
+        # The payload's exact current banner URL is authoritative. Legacy rows
+        # may have incomplete provider/source_ref metadata, so resolve the
+        # canonical storage key first and only then fall back to classification.
+        _banner_url=str(p.get("banner_url") or "").strip()
+        if not _banner_url:
+            _banner_url=str(p.get("banner") or "").strip()
+        _banner_key=_banner_url.split("/images/",1)[1] if "/images/" in _banner_url else ""
+        banner_pair=next(
+            ((l,a) for l,a in links
+             if _banner_key and str(getattr(a,"storage_key","") or "").lstrip("/")==_banner_key),
+            None,
+        )
+        if banner_pair is None:
+            banner_pair=next(((l,a) for l,a in links if _ff_is_existing_banner_asset(p,l,a)),None)
         chosen=list(mids)
         if body.randomize:
             random.Random(f"{campaign_id}:{row.id}:{','.join(map(str,mids))}").shuffle(chosen)
@@ -5583,49 +10124,742 @@ def ff_workflow_photo_stack(campaign_id:int, body:FFPhotoStackBody, db=Depends(_
         if banner_pair and not body.after_banner and all(int(x.id)!=int(banner_pair[1].id) for x in ordered):
             ordered.insert(0,banner_pair[1])
         ordered=ordered[:10]
+        if not ordered or any(not linked_file_current(a) for a in ordered):
+            db.rollback()
+            raise HTTPException(409,detail={"code":"MEDIA_ARTIFACT_CHANGED","message":"Файл фотографии требует сверки."})
+        _selected_assets=asset_signature(ordered)
         # Validate the intended gallery using detached scalar snapshots BEFORE
         # deleting/rebuilding MediaLink. External vision must never sit inside the
         # mutation transaction, and a failed verdict must leave the old gallery intact.
         from types import SimpleNamespace as _SNS
-        def _asnap(a): return _SNS(id=int(a.id),storage_key=str(a.storage_key),tags=list(a.tags or []),account_id=str(a.account_id or ''),source_provider=str(a.source_provider or ''),source_ref=str(a.source_ref or ''))
+        def _asnap(a): return _SNS(id=int(a.id),storage_key=str(a.storage_key),tags=list(a.tags or []),account_id=str(a.account_id or ''),source_provider=str(a.source_provider or ''),source_ref=str(a.source_ref or ''),sha256=str(a.sha256 or ''),media_type=str(a.media_type or ''))
         _planned=[(_SNS(position=pos),_asnap(a)) for pos,a in enumerate(ordered)]
         _row_id=int(row.id); _row_account=str(row.account_id); _ordered_ids=[int(a.id) for a in ordered]
         _planned_urls=[]
         for a in ordered:
             pub=M.asset_public(a); url=pub.get("original_url") or pub.get("preview_url")
             if url: _planned_urls.append(url)
+        _same_gallery=(
+            [int(a.id) for _,a in links]==_ordered_ids
+            and [int(l.position) for l,_ in links]==list(range(len(ordered)))
+            and [str(l.role) for l,_ in links]==["hero"]+["gallery"]*(len(ordered)-1)
+            and int(row.hero_media_id or 0)==int(ordered[0].id)
+            and list(p.get("images") or [])==_planned_urls
+            and all(linked_file_current(a) for a in ordered)
+        )
+        if _same_gallery and not validate_linked_media_semantics(db,row,p):
+            skipped.append(_row_id)
+            db.commit()
+            continue
+        # The Premium banner has its own exact-artifact QA. Photo selection
+        # must not purchase a second generic image verdict for that same hero.
+        _dedicated_banner_id=None
+        if banner_pair and str(banner_pair[1].source_provider or '')=='openai_full_ai_premium':
+            if not _ff_premium_banner_ready(db,row,p):
+                db.rollback()
+                raise HTTPException(409,detail={"code":"QA_RECEIPT_UPGRADE_REQUIRED",
+                    "message":"Сначала требуется сверка сохранённой проверки баннера; медиа не изменены."})
+            _dedicated_banner_id=int(banner_pair[1].id)
+        _qa_planned=[pair for pair in _planned if int(pair[1].id)!=_dedicated_banner_id]
         p["images"]=_planned_urls
         now=datetime.datetime.now(datetime.timezone.utc).isoformat()
         p["photo_stack"]={"media_ids":chosen,"randomize":bool(body.randomize),"after_banner":bool(body.after_banner),"updated_at":now}
         db.commit()
+        assert_current_execution_owner(db)
+        db.commit()
         try:
-            verdicts=classify_item_media_vision(p,_planned,account_id=_row_account,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_photo_stack"})
+            verdicts=_campaign_provider_call(classify_item_media_vision, p,_qa_planned,account_id=_row_account,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_photo_stack"})
         except Exception as exc:
             db.rollback()
             raise HTTPException(422, detail={"code":"gallery_semantic_check_failed","message":"Не удалось завершить смысловую проверку выбранных фотографий. Старую галерею BORIS не изменил.","item_id":_row_id}) from exc
-        semantic_bad=[v for v in verdicts if (not bool(v.get("match"))) or float(v.get("confidence") or 0)<0.80]
+        def _verdict_ok(v):
+            try:
+                confidence=float(v.get("confidence"))
+                return v.get("match") is True and math.isfinite(confidence) and 0.80<=confidence<=1.0
+            except (TypeError,ValueError,AttributeError):
+                return False
+        semantic_bad=[v for v in verdicts if not _verdict_ok(v)]
+        if len(verdicts)!=len(_qa_planned):
+            semantic_bad.append({"code":"gallery_qa_count_mismatch"})
         if semantic_bad:
             db.rollback()
             raise HTTPException(422, detail={"code":"gallery_semantic_mismatch","message":"Одна или несколько фотографий не соответствуют товару или услуге. BORIS ничего не применил.","item_id":_row_id,"rejected":len(semantic_bad)})
-        from app.models.campaign_item import CampaignItem
-        row=db.query(CampaignItem).filter(CampaignItem.id==_row_id).first()
+        from app.models.campaign import Campaign
+        assert_current_execution_owner(db)
+        campaign=(db.query(Campaign).filter(Campaign.id==campaign_id)
+                  .populate_existing().with_for_update().first())
+        current_ff=_ff_assert_media_commit_mutable(campaign)
+        row=lock_versions(db,campaign_id,[_row_id],{str(_row_id):_before_version},[_row_account])[0]
+        current_links=(db.query(MediaLink,MediaAsset).join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+            .filter(MediaLink.entity_type=="campaign_item",MediaLink.entity_id==str(_row_id),
+                    MediaAsset.deleted_at.is_(None))
+            .order_by(MediaLink.position.asc(),MediaLink.id.asc()).all())
+        if media_signature(current_links)!=_before_media:
+            db.rollback()
+            raise conflict(_row_id)
         _assets=db.query(MediaAsset).filter(MediaAsset.id.in_(_ordered_ids),MediaAsset.deleted_at.is_(None)).all()
         _amap={int(a.id):a for a in _assets}; ordered=[_amap[i] for i in _ordered_ids if i in _amap]
-        if len(ordered)!=len(_ordered_ids): raise RuntimeError("Фотографии изменились во время проверки")
+        if (len(ordered)!=len(_ordered_ids)
+                or asset_signature(ordered)!=_selected_assets
+                or any(str(a.account_id or '')!=_row_account or not linked_file_current(a) for a in ordered)):
+            db.rollback()
+            raise HTTPException(409,detail={"code":"MEDIA_ARTIFACT_CHANGED","message":"Фотографии изменились во время проверки."})
         db.query(MediaLink).filter(MediaLink.entity_type=="campaign_item",MediaLink.entity_id==str(row.id)).delete(synchronize_session=False); db.flush()
         for pos,a in enumerate(ordered):
             M.link(db,a,"campaign_item",str(row.id),"hero" if pos==0 else "gallery",pos,created_by=getattr(user,"id",None))
         db.flush(); row.hero_media_id=int(ordered[0].id) if ordered else None
         fresh_links=(db.query(MediaLink,MediaAsset).join(MediaAsset,MediaAsset.id==MediaLink.media_id).filter(MediaLink.entity_type=="campaign_item",MediaLink.entity_id==str(row.id),MediaAsset.deleted_at.is_(None)).order_by(MediaLink.position.asc(),MediaLink.id.asc()).all())
-        stamp_item_semantic_evidence(p,fresh_links,verdicts)
+        stamp_item_semantic_evidence(p,[pair for pair in fresh_links if int(pair[1].id)!=_dedicated_banner_id],verdicts)
         semantic_errors=validate_linked_media_semantics(db,row,p)
         if semantic_errors:
             db.rollback()
             raise HTTPException(422, detail={"code":"gallery_semantic_validation_failed","message":"Выбранная галерея не прошла финальную проверку соответствия объявлению. BORIS не сохранил изменение.","item_id":_row_id})
 
-        row.payload_json=json.dumps(p,ensure_ascii=False); row.content_hash=CS.content_hash(p); row.status="draft"; changed.append(row.id)
-    db.commit(); _,ff=_ff_state_load(campaign); ff["step"]="validation"; _ff_state_save(db,campaign,ff)
-    return {"status":"ok","changed":changed,"photos_per_item":per,"randomize":bool(body.randomize),"after_banner":bool(body.after_banner)}
+        row.payload_json=json.dumps(p,ensure_ascii=False); row.content_hash=CS.content_hash(p); row.status="draft"
+        _ff_mark_post_publication_revision(current_ff,_row_id,["images"])
+        current_ff["step"]="validation"
+        current_ff["ready_for_owner_approval"]=False
+        _ff_state_save(db,campaign,current_ff)
+        changed.append(_row_id)
+    db.commit()
+    return {"status":"ok","changed":changed,"skipped":skipped,"photos_per_item":per,"randomize":bool(body.randomize),"after_banner":bool(body.after_banner)}
+
+
+
+def _ff_account_campaign_ai_policy(db, account_id: str) -> dict:
+    """Owner-scoped Campaign AI routing policy.
+
+    Defaults preserve the global conservative local-first behavior. Only an
+    explicit account storage policy may opt into Premium FULL_AI / paid sales_v4.
+    """
+    try:
+        from app.models.storage import Storage as _PolicyStorage
+        row=(db.query(_PolicyStorage)
+             .filter(_PolicyStorage.account_id==str(account_id or ""),
+                     _PolicyStorage.key=="campaign_ai_policy")
+             .order_by(_PolicyStorage.id.desc()).first())
+        value=json.loads(row.value or "{}") if row and row.value else {}
+        return value if isinstance(value,dict) else {}
+    except Exception as _policy_exc:
+        observe_suppressed(__name__, _policy_exc, line=9884)
+        return {}
+
+
+def _ff_premium_paid_image_override(paid_count: int, confirmed: int, batch_idem: str):
+    """Return account-guard override only for an exact confirmed paid intent."""
+    return "all" if int(paid_count or 0) > 0 and int(confirmed or 0) == int(paid_count or 0) and str(batch_idem or "").strip() else False
+
+
+def _ff_premium_banner_ready(db, row, payload=None, expected_intent=None):
+    """Current exact-artifact PASS, not merely a populated banner URL."""
+    from app.models.media_asset import MediaAsset
+    from app.models.media_link import MediaLink
+    from app.services.banner_full_ai_premium import read_current_preview
+    from app.services.campaign_banner_media_contract import premium_link_proof
+    from app.services.media_service import asset_public
+    from app.services.media_semantic_validator import semantic_content_fingerprint
+    pairs=(db.query(MediaLink,MediaAsset).join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+           .filter(MediaLink.entity_type=="campaign_item",MediaLink.entity_id==str(row.id),
+                   MediaAsset.deleted_at.is_(None))
+           .order_by(MediaLink.position.asc(),MediaLink.id.asc()).all())
+    return premium_link_proof(
+        _ff_payload(row) if payload is None else payload, pairs,
+        account_id=str(row.account_id), hero_media_id=row.hero_media_id,
+        read_preview=read_current_preview, expected_intent=expected_intent,
+        public_url=asset_public(pairs[0][1]).get("original_url") if pairs else None,
+        content_fingerprint=semantic_content_fingerprint(_ff_payload(row) if payload is None else payload),
+        campaign_id=row.campaign_id, item_id=row.id,
+    )["ready"]
+
+
+def _ff_rebind_premium_gallery_evidence(payload, gallery_pairs):
+    """Move an existing gallery proof only when asset bytes and copy are unchanged."""
+    import copy
+    import hashlib
+    from collections import Counter
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from app.services.media_storage import abs_path
+    from app.services.media_semantic_validator import semantic_content_fingerprint
+
+    evidence = copy.deepcopy(payload.get("media_semantic_evidence") or [])
+    fingerprint = semantic_content_fingerprint(payload)
+    counts = Counter(int(asset.id) for _link, asset in gallery_pairs)
+    placements = {int(asset.id): (int(link.position or 0), position, asset)
+                  for position, (link, asset) in enumerate(gallery_pairs, 1)
+                  if counts[int(asset.id)] == 1}
+    verified = {}
+    for record in evidence:
+        if not isinstance(record, dict):
+            continue
+        try:
+            placement = placements.get(int(record.get("media_id") or 0))
+            old_position = int(record.get("position") or 0)
+            confidence = float(record.get("confidence") or 0)
+        except (ValueError, TypeError):
+            continue
+        if not placement:
+            continue
+        source_position, target_position, asset = placement
+        if (source_position != old_position or target_position == old_position
+                or record.get("match") is not True or not (0.80 <= confidence <= 1.0)
+                or not record.get("checked_at")
+                or record.get("content_fingerprint") != fingerprint):
+            continue
+        media_id = int(asset.id)
+        if media_id not in verified:
+            expected = str(getattr(asset, "sha256", "") or "").lower()
+            try:
+                actual = hashlib.sha256(Path(abs_path(str(asset.storage_key))).read_bytes()).hexdigest()
+            except (OSError, TypeError, ValueError):
+                actual = ""
+            verified[media_id] = expected if expected and actual == expected else ""
+        artifact_sha = verified[media_id]
+        proof_sha = str(record.get("artifact_sha256") or "").lower()
+        if not artifact_sha or (proof_sha and proof_sha != artifact_sha):
+            continue
+        record["position"] = target_position
+        record["placement_rebinding"] = {
+            "previous_position": source_position,
+            "rebound_at": datetime.now(timezone.utc).isoformat(),
+            "artifact_sha256": artifact_sha,
+            "reason": "same_asset_and_content_gallery_rebind",
+        }
+    return evidence
+
+
+def _ff_full_ai_premium_banner_batch(campaign_id, campaign, ff, rows, body, db, user):
+    """Campaign adapter for canonical Premium FULL_AI with Vision QA batch x4.
+
+    Generation is durable and exactly-once per item. New previews are first
+    persisted as VISION_QA_PENDING, then finalized in bounded groups of four,
+    then approved one-by-one. No stock/local fallback exists on this lane.
+    """
+    import hashlib as _hashlib_premium, os as _os_premium
+    from app.services.banner_full_ai_premium import (
+        create_preview as _premium_create_preview,
+        finalize_preview_vision_batch as _premium_finalize_vision_batch,
+        approve_preview as _premium_approve_preview,
+        reject_preview as _premium_reject_preview,
+        status_payload as _premium_status_payload,
+        read_current_preview as _premium_read_current_preview,
+    )
+    from app.models.media_asset import MediaAsset as _PremiumMediaAsset
+    from app.models.media_link import MediaLink as _PremiumMediaLink
+    from app.services import media_service as _PremiumMedia
+    from app.services import media_storage as _PremiumStorage
+    from app.services.campaign_card_revisions import lock_versions as _premium_lock_versions
+    from app.services.campaign_banner_media_contract import (
+        media_signature as _premium_media_signature,
+        linked_file_current as _premium_file_current,
+        preview_error as _premium_error,
+        request_intents as _premium_request_intents,
+        premium_creative_choices as _premium_creative_choices,
+        premium_v7_cta as _premium_v7_cta,
+        premium_v7_metadata as _premium_v7_metadata,
+    )
+    from app.services.job_execution_clock import assert_current_execution_owner
+    from app.services.media_semantic_validator import (
+        semantic_content_fingerprint as _premium_semantic_fp,
+    )
+
+    account_id=str(campaign.default_account_id or "").strip()
+    if not account_id or any(str(row.account_id or "") != account_id for row in rows):
+        return {"status":"blocked","code":"campaign_account_scope_mismatch",
+                "changed":[],"generated":[],"errors":[]}
+    _image_intents, _budget_intents = _premium_request_intents(body, [int(row.id) for row in rows])
+    from app.services.subscription_gate import base_subscription_access as _premium_subscription_access
+    _subscription=_premium_subscription_access(db,account_id,product="campaign")
+    if not _subscription.get("allowed"):
+        return {
+            "status":"blocked","code":"PREMIUM_SUBSCRIPTION_REQUIRED",
+            "changed":[],"generated":[],"errors":[],
+            "message":str(_subscription.get("message") or "Для Premium FULL_AI нужна активная подписка."),
+        }
+    engine=_premium_status_payload()
+    # Premium owns admission at the exact paid boundary. Its model/cost circuit
+    # can block new spend while an existing paid artifact is safely replayed or
+    # its receipt is reconciled. Do not block that free recovery here.
+
+    force=bool(getattr(body,"force",False))
+    batch_idem=str(getattr(body,"idempotency_key","") or "").strip()
+    paid=[]; skipped=[]; errors=[]
+    for row in rows:
+        p=_ff_payload(row)
+        already=(str(p.get("banner_provider") or "")=="openai_full_ai_premium"
+                 and bool(str(p.get("banner_url") or "").strip()))
+        _item_key = _image_intents.get(str(row.id)) or batch_idem
+        _same_intent = bool(_item_key and str(p.get("banner_regeneration_key") or "") == _item_key)
+        if already and (not force or _same_intent):
+            if _ff_premium_banner_ready(db, row, p, expected_intent=_item_key if force else None):
+                skipped.append(int(row.id))
+            else:
+                errors.append(_premium_error(row.id, "QA_RECEIPT_UPGRADE_REQUIRED"))
+        else:
+            paid.append(row)
+
+    paid_count=len(paid)
+    confirmed=max(0,int(getattr(body,"confirmed_paid_items",0) or 0))
+    if paid_count>1 and confirmed<paid_count:
+        return {
+            "status":"paid_confirmation_required","code":"premium_paid_batch_confirmation_required",
+            "changed":skipped,"generated":[],"errors":[],
+            "paid_images":paid_count,"requested":len(rows),
+            "estimated_cost_rub":round(paid_count*float(engine.get("estimated_cost_rub") or 0),2),
+            "message":f"Нужно подтвердить точный объём Premium FULL_AI: {paid_count} изображений.",
+        }
+    if force and not batch_idem:
+        return {
+            "status":"idempotency_required","code":"premium_force_idempotency_required",
+            "changed":skipped,"generated":[],"errors":[],
+            "message":"Для повторной Premium FULL_AI генерации нужен уникальный ключ операции.",
+        }
+
+    changed=[]; generated=[]; prepared=[]
+    _seen_premium_phashes=[]
+    _v7_family_history=[]
+    for _existing_row in _ff_items(db,campaign_id,[account_id]):
+        _existing_qa=(_ff_payload(_existing_row).get("banner_qa") or {})
+        _existing_hash=str((_existing_qa.get("technical_qa") or {}).get("perceptual_hash") or "")
+        if _existing_qa.get("passed") is True and _existing_hash:
+            _seen_premium_phashes.append({"row_id":int(_existing_row.id),"phash":_existing_hash})
+            _existing_family=str(_ff_payload(_existing_row).get("banner_composition_family") or "").strip().lower()
+            if _existing_family:
+                _v7_family_history.append(_existing_family)
+    # Exact owner-confirmed, idempotent Premium batches are bounded by the
+    # confirmed item count plus the existing per-banner cost circuit/retry guards.
+    # Let that durable order finish even when the generic account daily image cap
+    # was already consumed by earlier accepted work; unconfirmed/no-idempotency
+    # calls retain the ordinary burst+daily cap.
+    _premium_burst_override=_ff_premium_paid_image_override(
+        paid_count, min(confirmed,paid_count), batch_idem or (next(iter(_image_intents.values()), "")))
+    _batch_qa_diag={
+        "eligible":0,"batches":0,"provider_calls":0,"batch_provider_calls":0,
+        "recovery_calls":0,"cache_hits":0,"unresolved":[],"errors":[],
+    }
+
+    # Phase 1: exactly-once paid image generation, no per-item Vision call.
+    for _idx,row in enumerate(paid):
+        _row_id = int(row.id)
+        assert_current_execution_owner(db)
+        _expected = dict(db.info.get("campaign_expected_versions") or {})
+        _before_version = _expected.get(str(_row_id)) or row.updated_at.isoformat()
+        try:
+            row = _premium_lock_versions(db, campaign_id, [_row_id],
+                        {str(_row_id): _before_version}, [account_id])[0]
+        except HTTPException as _snapshot_exc:
+            db.rollback()
+            errors.append(_premium_error(_row_id,"CARD_VERSION_CONFLICT"))
+            continue
+        p=_ff_payload(row)
+        row_id=int(row.id)
+        title=" ".join(str(p.get("title") or p.get("direction") or row.segment or "Предложение").split())[:80]
+        direction=str(p.get("direction") or row.segment or title).strip()
+        desc=" ".join(str(p.get("description") or direction).split())[:2800]
+
+        links=(db.query(_PremiumMediaLink,_PremiumMediaAsset)
+               .join(_PremiumMediaAsset,_PremiumMediaAsset.id==_PremiumMediaLink.media_id)
+               .filter(_PremiumMediaLink.entity_type=="campaign_item",
+                       _PremiumMediaLink.entity_id==str(row_id),
+                       _PremiumMediaAsset.deleted_at.is_(None))
+               .order_by(_PremiumMediaLink.position.asc(),_PremiumMediaLink.id.asc()).all())
+        _before_media = _premium_media_signature(links)
+        if any(str(asset.account_id or "")!=account_id or not _premium_file_current(asset)
+               for _,asset in links):
+            db.rollback()
+            errors.append(_premium_error(row_id,"MEDIA_REFERENCE_SCOPE_OR_HASH_INVALID"))
+            continue
+        old_banner=str(p.get("banner_url") or "")
+        # This campaign lane creates a new FULL_AI creative from verified copy.
+        # The eight stock/gallery photographs are not an owner-requested image
+        # edit. Select the generation route before any request, within the 4 RUB
+        # image+QA budget; explicit reference edits keep their separate cost gate.
+        reference_path=None; gallery_pairs=[]
+        for link,asset in links:
+            public=_PremiumMedia.asset_public(asset)
+            url=str(public.get("original_url") or "")
+            provider=str(asset.source_provider or "")
+            is_banner=_ff_is_existing_banner_asset(p,link,asset)
+            if not is_banner:
+                gallery_pairs.append((link,asset))
+
+        content_key=str(getattr(row,"content_hash","") or _hashlib_premium.sha256(
+            json.dumps(p,ensure_ascii=False,sort_keys=True).encode()).hexdigest())
+        _row_intent = _image_intents.get(str(row_id)) or batch_idem
+        _budget_intent = _budget_intents.get(str(row_id)) or f"campaign:{campaign_id}:item:{row_id}"
+        idem=(f"campaign-premium:{campaign_id}:{row_id}:{_row_intent}"
+              if _row_intent else f"campaign-premium:{campaign_id}:{row_id}:{content_key[:24]}")
+        hypothesis, composition_family = _premium_creative_choices(
+            account_id,campaign_id,row_id,idem,existing_families=_v7_family_history)
+        _cta_type, _cta_text = _premium_v7_cta(composition_family)
+        if len(idem)>200:
+            db.rollback()
+            errors.append(_premium_error(row_id,"BANNER_IDEMPOTENCY_KEY_TOO_LONG"))
+            continue
+
+        # Do not keep the Campaign ORM transaction open across external AI latency.
+        db.commit()
+        assert_current_execution_owner(db)
+        db.commit()
+        preview=_premium_create_preview(
+            account_id=account_id,
+            description=desc,
+            exact_title=title,
+            exact_subtitle=(direction if direction!=title else ""),
+            exact_cta=_cta_text,
+            exact_price="",
+            advantages=[],
+            accent_color="#F97316",
+            fmt="1:1",
+            hypothesis=hypothesis,
+            composition_family=composition_family,
+            reference_style="premium commercial advertising; distinctive art direction; no generic photo plus bottom caption",
+            idempotency_key=idem,
+            parent_banner_id="",
+            edit_instruction=(
+                "Создай полноценный рекламный креатив, а не шаблон фото плюс плашка. "
+                "Соблюдай выбранное композиционное семейство, меняй визуальный центр, глубину и типографику. "
+                "Не добавляй неподтверждённые цены, скидки, гарантии, адреса или характеристики."
+            ),
+            reference_path=reference_path,
+            burst_override=_premium_burst_override,
+            defer_vision_qa=True,
+            provenance={"campaign_id":int(campaign_id),"item_id":row_id,
+                        "campaign_item_id":row_id,"budget_intent_key":_budget_intent,
+                        "content_fingerprint":_premium_semantic_fp(p),
+                        "reference_mode":"verified_brief_generation",
+                        "source":"campaign_premium_generate"},
+        )
+        composition_family=str(preview.get("composition_family") or composition_family).strip().lower()
+        if not (
+            preview.get("status")=="ok"
+            and preview.get("image_outcome")=="succeeded"
+            and preview.get("artifact_current") is True
+            and (preview.get("technical_qa") or {}).get("passed") is True
+        ):
+            errors.append(_premium_error(row_id,"premium_preview_failed",preview))
+            continue
+
+        _phash=str((preview.get("technical_qa") or {}).get("perceptual_hash") or "").strip()
+        _near_duplicate=None
+        if _phash:
+            for _seen in _seen_premium_phashes:
+                if int(_seen["row_id"])==row_id:
+                    continue
+                try:
+                    _distance=(int(_seen["phash"],16)^int(_phash,16)).bit_count()
+                except (TypeError,ValueError):
+                    _distance=64
+                if _distance<=6:
+                    _near_duplicate={**_seen,"distance":_distance}
+                    break
+        if _near_duplicate is not None:
+            try:
+                _premium_reject_preview(
+                    account_id,
+                    str(preview.get("banner_id") or ""),
+                    int(preview.get("version") or 0),
+                    reason=f"BANNER_DUPLICATE:near_pHash:item={int(_near_duplicate.get('row_id') or 0)}:distance={int(_near_duplicate.get('distance') or 0)}",
+                    quality_rejection=True,
+                )
+            except Exception as _reject_exc:
+                observe_suppressed(__name__,_reject_exc,line=10066)
+            _duplicate_preview = _premium_read_current_preview(
+                account_id,str(preview.get("banner_id") or ""),int(preview.get("version") or 0))
+            errors.append(_premium_error(row_id,"BANNER_DUPLICATE",_duplicate_preview,
+                duplicate_of_item=int(_near_duplicate.get("row_id") or 0),
+                phash_distance=int(_near_duplicate.get("distance") or 0)))
+            continue
+        if _phash:
+            _seen_premium_phashes.append({"row_id":row_id,"phash":_phash})
+        _v7_family_history.append(composition_family)
+        prepared.append({
+            "row":row,"payload":p,"row_id":row_id,"gallery_pairs":gallery_pairs,
+            "hypothesis":hypothesis,"composition_family":composition_family,
+            "idem":idem,"preview":preview,"item_intent":_row_intent or idem,
+            "budget_intent":_budget_intent,"before_version":_before_version,
+            "before_media":_before_media,
+        })
+
+    # Phase 2: one paid Vision call per up-to-four pending previews.
+    _batch_qa_diag["eligible"]=len(prepared)
+    for _start in range(0,len(prepared),4):
+        _chunk=prepared[_start:_start+4]
+        db.commit()
+        assert_current_execution_owner(db)
+        db.commit()
+        try:
+            _qa_out=_premium_finalize_vision_batch(
+                account_id=account_id,
+                entries=[
+                    {"banner_id":str(x["preview"].get("banner_id") or ""),
+                     "version":int(x["preview"].get("version") or 0)}
+                    for x in _chunk
+                ],
+                provenance={
+                    "campaign_id":int(campaign_id),
+                    "source":"campaign_premium_batch_qa",
+                    "batch_index":int(_start//4),
+                },
+            )
+            _batch_qa_diag["batches"]+=1
+            _batch_qa_diag["provider_calls"]+=int(_qa_out.get("provider_calls") or 0)
+            _batch_qa_diag["batch_provider_calls"]+=int(_qa_out.get("batch_provider_calls") or 0)
+            _batch_qa_diag["recovery_calls"]+=int(_qa_out.get("recovery_calls") or 0)
+            if bool(_qa_out.get("cache_hit")):
+                _batch_qa_diag["cache_hits"]+=1
+            _batch_qa_diag["unresolved"].extend(list(_qa_out.get("unresolved") or []))
+            if _qa_out.get("error"):
+                _batch_qa_diag["errors"].append(str(_qa_out.get("error"))[:180])
+            _previews=dict(_qa_out.get("previews") or {})
+            for _entry in _chunk:
+                _old=_entry["preview"]
+                _key=f"{str(_old.get('banner_id') or '')}:v{int(_old.get('version') or 0)}"
+                if _key in _previews:
+                    _entry["preview"]=_previews[_key]
+        except (RuntimeError,ValueError,TypeError,OSError,AttributeError) as _qa_exc:
+            observe_suppressed(__name__,_qa_exc,line=10078)
+            _batch_qa_diag["errors"].append(str(_qa_exc)[:180])
+            for _entry in _chunk:
+                _pv=_entry["preview"]
+                _batch_qa_diag["unresolved"].append(
+                    f"{str(_pv.get('banner_id') or '')}:v{int(_pv.get('version') or 0)}"
+                )
+
+    # Phase 3: no external provider runs under the short Campaign/card write locks.
+    # Accepted neighbors commit independently; unresolved assets remain in Premium.
+    from app.models.campaign import Campaign as _PremiumCampaign
+    from app.models.campaign_item import CampaignItem as _PremiumCampaignItem
+    from app.services.campaign_card_revisions import conflict as _premium_conflict
+    from sqlalchemy.orm.exc import StaleDataError as _PremiumStaleDataError
+    from app.services.job_execution_clock import assert_current_execution_owner
+    for _entry in prepared:
+        row_id=int(_entry["row_id"])
+        preview=_premium_read_current_preview(
+            account_id, str(_entry["preview"].get("banner_id") or ""),
+            int(_entry["preview"].get("version") or 0))
+        if not (preview.get("receipt_current") is True
+                and preview.get("artifact_current") is True
+                and preview.get("qa_passed") is True
+                and preview.get("cost_reconciled") is True
+                and preview.get("cost_sla_pass") is True):
+            errors.append(_premium_error(row_id,"premium_batch_qa_not_passed",preview))
+            continue
+        try:
+            assert_current_execution_owner(db)
+            campaign=(db.query(_PremiumCampaign).filter(
+                _PremiumCampaign.id==campaign_id,
+                _PremiumCampaign.default_account_id==account_id)
+                .populate_existing().with_for_update().first())
+            if campaign is None:
+                raise HTTPException(404,detail={"code":"campaign_not_found"})
+            current_ff=_ff_assert_media_commit_mutable(campaign)
+            row=_premium_lock_versions(db,campaign_id,[row_id],
+                {str(row_id):_entry["before_version"]},[account_id])[0]
+            p=_ff_payload(row)
+            current_links=(db.query(_PremiumMediaLink,_PremiumMediaAsset)
+                .join(_PremiumMediaAsset,_PremiumMediaAsset.id==_PremiumMediaLink.media_id)
+                .filter(_PremiumMediaLink.entity_type=="campaign_item",
+                        _PremiumMediaLink.entity_id==str(row_id),
+                        _PremiumMediaAsset.deleted_at.is_(None))
+                .order_by(_PremiumMediaLink.position.asc(),_PremiumMediaLink.id.asc()).all())
+            if _premium_media_signature(current_links)!=_entry["before_media"]:
+                raise _premium_conflict(row_id)
+            gallery_pairs=[(link,asset) for link,asset in current_links
+                           if not _ff_is_existing_banner_asset(p,link,asset)]
+            if any(str(asset.account_id or "")!=account_id or not _premium_file_current(asset)
+                   for _,asset in gallery_pairs):
+                raise HTTPException(409,detail={"code":"MEDIA_ARTIFACT_CHANGED",
+                    "message":"Фотографии изменились после проверки; галерея сохранена."})
+
+            # Serialize this check with all Premium commits for this campaign,
+            # so separate worker chunks cannot accept near-identical creatives.
+            phash=str((preview.get("technical_qa") or {}).get("perceptual_hash") or "")
+            duplicate=None
+            if phash:
+                others=db.query(_PremiumCampaignItem).filter(
+                    _PremiumCampaignItem.campaign_id==campaign_id,
+                    _PremiumCampaignItem.account_id==account_id,
+                    _PremiumCampaignItem.id!=row_id,
+                    _PremiumCampaignItem.status!="superseded").all()
+                for other in others:
+                    other_payload=_ff_payload(other)
+                    other_qa=other_payload.get("banner_qa") or {}
+                    other_hash=str((other_qa.get("technical_qa") or {}).get("perceptual_hash") or "")
+                    if other_qa.get("passed") is not True or not other_hash:
+                        continue
+                    try:
+                        distance=(int(phash,16)^int(other_hash,16)).bit_count()
+                    except (TypeError,ValueError):
+                        continue
+                    if distance<=6:
+                        duplicate={"row_id":int(other.id),"distance":distance}
+                        break
+            if duplicate is not None:
+                db.rollback()
+                _premium_reject_preview(account_id,str(preview["banner_id"]),int(preview["version"]),
+                    reason=f"BANNER_DUPLICATE:near_pHash:item={duplicate['row_id']}:distance={duplicate['distance']}",
+                    quality_rejection=True)
+                rejected=_premium_read_current_preview(account_id,str(preview["banner_id"]),int(preview["version"]))
+                errors.append(_premium_error(row_id,"BANNER_DUPLICATE",rejected,
+                    duplicate_of_item=duplicate["row_id"],phash_distance=duplicate["distance"]))
+                continue
+
+            approved=_premium_approve_preview(account_id,str(preview["banner_id"]),int(preview["version"]))
+            if approved.get("status")!="ok":
+                db.rollback()
+                errors.append(_premium_error(row_id,"premium_approve_failed",preview,detail=approved))
+                continue
+            media_id=int((approved.get("media") or {}).get("id") or 0)
+            premium_asset=db.query(_PremiumMediaAsset).filter(
+                _PremiumMediaAsset.id==media_id,_PremiumMediaAsset.account_id==account_id,
+                _PremiumMediaAsset.deleted_at.is_(None)).first()
+            if premium_asset is None or not _premium_file_current(premium_asset):
+                db.rollback()
+                errors.append(_premium_error(row_id,"premium_media_missing_after_approve",preview))
+                continue
+            assert_current_execution_owner(db)
+            gallery_evidence=_ff_rebind_premium_gallery_evidence(p,gallery_pairs)
+            db.query(_PremiumMediaLink).filter(
+                _PremiumMediaLink.entity_type=="campaign_item",
+                _PremiumMediaLink.entity_id==str(row_id)).delete(synchronize_session=False)
+            db.flush()
+            _PremiumMedia.link(db,premium_asset,"campaign_item",str(row_id),"hero",0,
+                               created_by=getattr(user,"id",None))
+            image_urls=[_PremiumMedia.asset_public(premium_asset).get("original_url")]
+            for pos,(_,asset) in enumerate(gallery_pairs,1):
+                _PremiumMedia.link(db,asset,"campaign_item",str(row_id),"gallery",pos,
+                                   created_by=getattr(user,"id",None))
+                image_urls.append(_PremiumMedia.asset_public(asset).get("original_url"))
+            image_urls=[str(url) for url in image_urls if url]
+            p["images"]=image_urls
+            p["banner_url"]=str(image_urls[0])
+            p["banner_provider"]="openai_full_ai_premium"
+            p["banner_engine"]="full_ai_premium"
+            p["banner_engine_source"]=str(preview.get("engine_source") or "")
+            p["banner_model"]="gpt-image-2"
+            p["banner_quality"]="low"
+            p["banner_reference_mode"]="verified_brief_generation"
+            p["banner_creative_hypothesis"]=_entry["hypothesis"]
+            p["banner_composition_family"]=_entry["composition_family"]
+            _v7=_premium_v7_metadata(_entry["composition_family"],preview)
+            p.update(_v7)
+            p["banner_v7_contract_version"]=_v7["contract_version"]
+            p["banner_qa"]={
+                "passed":True,"source":"premium_full_ai_batch_vision_qa",
+                "mode":str(preview.get("vision_qa_mode") or "batch_v1"),
+                "batch_size":int(preview.get("vision_qa_batch_size") or 1),
+                "banner_id":str(preview["banner_id"]),"version":int(preview["version"]),
+                "artifact_sha256":preview.get("artifact_sha256"),"qa_version":preview.get("qa_version"),
+                "content_fingerprint":_premium_semantic_fp(p),
+                "technical_qa":preview.get("technical_qa") or {},
+                "vision_qa":preview.get("vision_qa") or {},
+                "text_qa_status":preview.get("text_qa_status"),"visual_qa_status":preview.get("visual_qa_status"),
+                "cost_reconciled":preview.get("cost_reconciled"),
+                "cost_sla_pass":preview.get("cost_sla_pass"),"total_cost_rub":preview.get("total_cost_rub"),
+            }
+            p["banner_regeneration_key"]=_entry["item_intent"]
+            p["banner_budget_intent_key"]=_entry["budget_intent"]
+            p["media_semantic_evidence"]=gallery_evidence
+            row.payload_json=json.dumps(p,ensure_ascii=False)
+            row.content_hash=CS.content_hash(p)
+            row.hero_media_id=media_id
+            row.status="draft"
+            _ff_mark_post_publication_revision(current_ff,row_id,["images","banner"])
+            current_ff["step"]="validation"
+            current_ff["ready_for_owner_approval"]=False
+            _ff_state_save(db,campaign,current_ff)
+            changed.append(row_id)
+            generated.append({"id":row_id,"url":p["banner_url"],"engine":"full_ai_premium",
+                "model":"gpt-image-2","quality":"low","total_cost_rub":preview.get("total_cost_rub"),
+                "hypothesis":_entry["hypothesis"],"composition_family":_entry["composition_family"],
+                "visual_signature":_v7["visual_signature"],"text_position":_v7["text_position"],
+                "object_position":_v7["object_position"],"cta_type":_v7["cta_type"],
+                "background_family":_v7["background_family"],
+                "main_composition_class":_v7["main_composition_class"],
+                "vision_qa_mode":str(preview.get("vision_qa_mode") or "batch_v1")})
+        except (HTTPException,_PremiumStaleDataError) as exc:
+            db.rollback()
+            detail=exc.detail if isinstance(exc,HTTPException) and isinstance(exc.detail,dict) else {}
+            errors.append(_premium_error(row_id,str(detail.get("code") or "CARD_VERSION_CONFLICT"),preview,
+                retry_action="blocked",retry_allowed=False,message=str(detail.get("message") or "Карточка изменена во время подготовки баннера.")))
+
+    db.commit()
+    _batch_qa_diag["unresolved"]=sorted(set(str(x) for x in _batch_qa_diag["unresolved"] if str(x)))
+    return {
+        "status":"ok" if not errors else ("partial" if changed or skipped else "error"),
+        "changed":sorted(set(changed)),"skipped":sorted(set(skipped)),"generated":generated,"errors":errors,
+        "engine":"full_ai_premium","stock_fallback":False,
+        "model":"gpt-image-2","quality":"low","banner_batch_qa":_batch_qa_diag,
+    }
+
+
+def _ff_banner_item_context(campaign_id: int, row, payload: dict, idem: str = "") -> dict:
+    """One deterministic banner artifact identity used by preflight and persistence."""
+    import hashlib, json, os
+    from app.services.media_semantic_validator import semantic_content_fingerprint
+    raw_title=str(payload.get("title") or "").replace("{","").replace("}","")
+    title_candidates=[x.strip() for x in raw_title.split("|") if x.strip()]
+    title=(title_candidates[0] if title_candidates else str(payload.get("direction") or getattr(row,"segment","") or "Предложение")).strip()
+    title=" ".join(title.split()[:6])[:60] or "Предложение"
+    desc=str(payload.get("description") or "").strip()
+    if not desc:
+        desc=" · ".join(x for x in [
+            str(payload.get("direction") or getattr(row,"segment","") or "").strip(),
+            str(payload.get("category_path") or payload.get("category") or "").strip()
+        ] if x) or title
+    theme=". ".join(x for x in [title,desc[:1200],str(payload.get("city") or "").strip()] if x)
+    row_id=int(row.id); account_id=str(row.account_id)
+    if str(idem or "").strip():
+        artifact_intent=f"explicit:{int(campaign_id)}:{row_id}:{str(idem).strip()}"
+    else:
+        normal_basis={
+            "campaign_id":int(campaign_id),"item_id":row_id,
+            "title":title,"theme":theme,
+            "variant":int(payload.get("variant") or 1),
+            "semantic_fingerprint":semantic_content_fingerprint(payload),
+        }
+        artifact_intent="normal:"+json.dumps(normal_basis,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+    artifact_op=hashlib.sha256(artifact_intent.encode("utf-8")).hexdigest()[:20]
+    rel=f"{account_id}/banners/campaign_openai/campaign_{int(campaign_id)}_item_{row_id}_op_{artifact_op}.png"
+    fpath=os.path.join("/root/BORIS/backend/images",rel)
+    visual_dir="/root/BORIS/backend/images/_generated_cache/campaign_visual"
+    visual_path=os.path.join(visual_dir,f"{account_id}_{int(campaign_id)}_{row_id}_{artifact_op}.png")
+    return {
+        "row_id":row_id,"account_id":account_id,
+        "title":title,"description":desc,"theme":theme,
+        "artifact_intent":artifact_intent,"artifact_op":artifact_op,
+        "rel":rel,"fpath":fpath,"visual_dir":visual_dir,"visual_path":visual_path,
+        "clean_visual_path":os.path.join(visual_dir,f"{account_id}_{int(campaign_id)}_{row_id}_{artifact_op}_clean_v1.png"),
+    }
+
+
+def _ff_banner_asset_semantic_proven(payload: dict, asset) -> bool:
+    """Require a durable positive semantic proof before batch/local banner fast-path."""
+    try:
+        aid=int(getattr(asset,"id",0) or 0)
+    except (TypeError,ValueError):
+        aid=0
+    for ev in (payload.get("media_semantic_evidence") or []):
+        if not isinstance(ev,dict):
+            continue
+        try:
+            mid=int(ev.get("media_id") or 0); conf=float(ev.get("confidence") or 0)
+        except (TypeError,ValueError):
+            continue
+        if aid>0 and mid==aid and bool(ev.get("match")) and conf>=0.80:
+            return True
+    tags=[str(x) for x in (getattr(asset,"tags",None) or [])]
+    family=any(x.startswith("vision_family_confirmed:") for x in tags)
+    semantic_reviewed=("semantic_reviewed" in tags)
+    conf=0.0
+    for tag in tags:
+        if tag.startswith(("vision_family_confidence:","semantic_confidence:")):
+            try:
+                conf=max(conf,float(tag.split(":",1)[1]))
+            except (TypeError,ValueError,IndexError) as _tag_exc:
+                observe_suppressed(__name__,_tag_exc,line=10194)
+    return bool((family or semantic_reviewed) and conf>=0.80)
 
 
 @router.post("/{campaign_id}/workflow/banners")
@@ -5635,11 +10869,46 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
     Existing ad copy is preserved. OpenAI is forbidden from rendering visible
     text; the final headline is composed locally for mobile readability.
     """
+    from app.services.campaign_editor_jobs import maybe_enqueue
+    _queued = maybe_enqueue(db, user, campaign_id, 'banners', body)
+    if _queued is not None:
+        return _queued
     import hashlib, os, re, time
 
+    def _banner_semantic_asset_score(pair) -> tuple:
+        """Prefer the strongest already-proven product photo for local banner composition."""
+        link, asset = pair
+        tags=[str(x) for x in (getattr(asset,"tags",None) or [])]
+        family_confirmed=1 if any(x.startswith("vision_family_confirmed:") for x in tags) else 0
+        vision_conf=0.0
+        semantic_conf=0.0
+        for tag in tags:
+            if tag.startswith("vision_family_confidence:"):
+                try:
+                    vision_conf=max(vision_conf,float(tag.split(":",1)[1]))
+                except (TypeError,ValueError,IndexError):
+                    vision_conf=max(vision_conf,0.0)
+            elif tag.startswith("semantic_confidence:"):
+                try:
+                    semantic_conf=max(semantic_conf,float(tag.split(":",1)[1]))
+                except (TypeError,ValueError,IndexError):
+                    semantic_conf=max(semantic_conf,0.0)
+        return (
+            family_confirmed,
+            vision_conf,
+            semantic_conf,
+            -int(getattr(link,"position",0) or 0),
+            -int(getattr(asset,"id",0) or 0),
+        )
+
+    def _best_banner_semantic_pair(pairs):
+        pairs=list(pairs or [])
+        return max(pairs,key=_banner_semantic_asset_score) if pairs else None
+
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); _,ff=_ff_state_load(campaign)
-    _ff_assert_mutable(campaign)
-    if _ff_paid_qa_forbidden(campaign): return _ff_paid_qa_response()
+    _ff_assert_card_editor_mutable(campaign)
+    # QA campaigns may exercise local composition, but must never call a paid image provider.
+    _qa_local_only=_ff_paid_qa_forbidden(campaign)
     if bool(getattr(body, "force", False)) and not str(getattr(body, "idempotency_key", "") or "").strip():
         raise HTTPException(409, "Для повторной платной генерации нужен уникальный ключ операции")
     # IMPORTANT: empty item_ids must never silently become "all campaign items"
@@ -5664,6 +10933,9 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
         return {"status":"account_scope_mismatch","changed":[],"errors":[],"code":"campaign_account_scope_mismatch",
                 "accounts":_row_accounts,"message":"Одна платная операция баннеров может относиться только к одному аккаунту."}
     _account_for_billing=_row_accounts[0]
+    _campaign_ai_policy=_ff_account_campaign_ai_policy(db,_account_for_billing)
+    if str(_campaign_ai_policy.get("banner_engine") or "").strip().lower()=="full_ai_premium":
+        return _ff_full_ai_premium_banner_batch(campaign_id,campaign,ff,_rows,body,db,user)
 
     _pending_banner_charge=max(0,int(ff.get("billing_pending_banners") or 0))
     _pending_banner_billing_key=str(ff.get("billing_pending_banners_key") or "").strip()
@@ -5700,6 +10972,29 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
             continue
         _paid_rows.append(_r)
     _paid_count=len(_paid_rows)
+    # CAMPAIGN_BANNER_LOW_ONLY_COST_CAP_V1:
+    # All paid Campaign banner fallbacks use the same approved production preset
+    # as Premium AI: gpt-image-2 / low / one image. Fail closed before any
+    # provider call if the conservative estimate ever exceeds the owner cap.
+    from app.services import image_service as _CampaignBannerCostIMG
+    _campaign_banner_quality="low"
+    _campaign_banner_model=str(_CampaignBannerCostIMG.PREMIUM_MODEL or "")
+    _campaign_banner_est_rub=round(
+        float(_CampaignBannerCostIMG.estimate_kopeks(
+            1, model=_campaign_banner_model, quality=_campaign_banner_quality, with_reference=False
+        )) / 100.0,
+        4,
+    )
+    if (_campaign_banner_model!="gpt-image-2"
+            or _campaign_banner_quality!="low"
+            or _campaign_banner_est_rub>4.0):
+        return {
+            "status":"cost_cap_exceeded","changed":[],"generated":[],"errors":[],
+            "code":"CAMPAIGN_BANNER_COST_CAP_EXCEEDED",
+            "model":_campaign_banner_model,"quality":_campaign_banner_quality,
+            "estimated_cost_rub":_campaign_banner_est_rub,"max_cost_rub":4.0,
+            "message":"Платная генерация баннеров заблокирована до вызова: разрешён только gpt-image-2/low с прогнозом не выше 4 ₽ за изображение.",
+        }
     from app.services.avito_content_policy import (
         local_banner_first_enabled as _content_local_banner_first,
         paid_fallback_enabled as _content_paid_fallback,
@@ -5708,7 +11003,7 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
     # contains zero authorized paid image intents even when cards still need a
     # banner. Each card must use owner/approved media locally or fail closed and
     # return to the media stage; it must never turn a retry into a purchase.
-    if _content_local_banner_first() and not _content_paid_fallback():
+    if _qa_local_only or (_campaign_provider_call(_content_local_banner_first, ) and not _content_paid_fallback()):
         _paid_count=0
     _normal_paid_cap=max(1,min(10,int(os.environ.get("BORIS_PAID_IMAGE_BATCH_CAP","10") or 10)))
     # Economic confirmation is intentionally stricter than the technical burst
@@ -5741,6 +11036,102 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
             return {"status":"billing_pending","changed":[],"generated":[],"errors":[],
                     "code":"billing_pending","unit":"banners","retryable":True,
                     "message":"BORIS временно не смог подтвердить тарифный лимит. Платная генерация не запускалась; проверка повторится автоматически."}
+    # CAMPAIGN_BANNER_BATCH_QA_PREFLIGHT_V1:
+    # Cache-seeding only. All billing/media persistence remains authoritative in
+    # the existing per-item loop below.
+    _batch_qa_diag={"eligible":0,"provider_batches":0,"cache_hits":0,"seeded":0,"unresolved":0,"errors":[]}
+    _batch_preflight_composed={}
+    try:
+        _batch_local_enabled=bool(_campaign_provider_call(_content_local_banner_first, ))
+    except (RuntimeError,ValueError,TypeError) as _batch_policy_exc:
+        observe_suppressed(__name__,_batch_policy_exc,line=10308)
+        _batch_local_enabled=False
+    if _batch_local_enabled and not _force:
+        try:
+            from types import SimpleNamespace as _BatchBannerSnapshot
+            from app.models.media_asset import MediaAsset as _BatchMediaAsset
+            from app.models.media_folder import MediaFolder as _BatchMediaFolder
+            from app.models.media_link import MediaLink as _BatchMediaLink
+            from app.services import media_storage as _batch_storage
+            from app.services.avito_premium_compositor import compose_premium_avito_banner as _batch_compose
+            from app.services.media_semantic_validator import validate_campaign_banners_vision_batch as _batch_banner_qa
+
+            _batch_folder=(db.query(_BatchMediaFolder)
+                .filter(_BatchMediaFolder.account_id==_account_for_billing,
+                        _BatchMediaFolder.name==f"campaign_{campaign_id}_manual_photos",
+                        _BatchMediaFolder.deleted_at.is_(None))
+                .order_by(_BatchMediaFolder.id.desc()).first())
+            _owner_reference_exists=bool(_batch_folder and db.query(_BatchMediaAsset.id).filter(
+                _BatchMediaAsset.account_id==_account_for_billing,
+                _BatchMediaAsset.folder_id==_batch_folder.id,
+                _BatchMediaAsset.deleted_at.is_(None),
+                _BatchMediaAsset.source_type=="upload",
+            ).first())
+            _batch_entries=[]
+            if not _owner_reference_exists:
+                for _br in _rows:
+                    _bp=_ff_payload(_br)
+                    if str(_bp.get("banner_url") or "").strip():
+                        continue
+                    _bctx=_ff_banner_item_context(campaign_id,_br,_bp,_idem)
+                    if os.path.isfile(_bctx["clean_visual_path"]) and os.path.getsize(_bctx["clean_visual_path"])>0:
+                        continue
+                    _pairs=(db.query(_BatchMediaLink,_BatchMediaAsset)
+                        .join(_BatchMediaAsset,_BatchMediaAsset.id==_BatchMediaLink.media_id)
+                        .filter(_BatchMediaLink.entity_type=="campaign_item",
+                                _BatchMediaLink.entity_id==str(_br.id),
+                                _BatchMediaAsset.deleted_at.is_(None),
+                                _BatchMediaAsset.status=="approved",
+                                _BatchMediaAsset.source_provider!="openai")
+                        .order_by(_BatchMediaLink.position.asc(),_BatchMediaLink.id.asc()).all())
+                    _pair=_best_banner_semantic_pair(_pairs)
+                    if not _pair or not _ff_banner_asset_semantic_proven(_bp,_pair[1]):
+                        continue
+                    _src=_batch_storage.abs_path(str(_pair[1].storage_key))
+                    _composed=_batch_compose(_src,_bctx["fpath"],_bctx["title"])
+                    if not _composed.get("ok") or not os.path.isfile(_bctx["fpath"]) or os.path.getsize(_bctx["fpath"])<=0:
+                        continue
+                    _qa_payload=dict(_bp)
+                    _qa_payload.update({
+                        "banner_identity_policy":"approved_semantic_gallery_visual",
+                        "banner_visual_renderer":"approved_semantic_media",
+                        "banner_text_renderer":"local_pillow",
+                        "banner_text_source":"verified_title_prefix",
+                        "banner_layout":str(_composed.get("layout") or "premium_photo_bottom_caption_v3"),
+                        "banner_display_title":str(_composed.get("display_title") or ""),
+                        "banner_mobile_text_policy":str(_composed.get("text_policy") or ""),
+                        "banner_font_size":int(_composed.get("font_size") or 0),
+                        "banner_line_count":int(_composed.get("line_count") or 0),
+                    })
+                    _qa_asset=_BatchBannerSnapshot(id=0,storage_key=_bctx["rel"],account_id=str(_br.account_id))
+                    _batch_entries.append({"item_id":int(_br.id),"payload":_qa_payload,
+                                           "banner_asset":_qa_asset,"reference_asset":None})
+                    _batch_preflight_composed[int(_br.id)]=dict(_composed)
+            _batch_qa_diag["eligible"]=len(_batch_entries)
+            for _start in range(0,len(_batch_entries),4):
+                _chunk=_batch_entries[_start:_start+4]
+                db.commit()
+                try:
+                    _bout=_campaign_provider_call(
+                        _batch_banner_qa,_chunk,account_id=_account_for_billing,
+                        provenance={"campaign_id":int(campaign_id),"source":"campaign_banner_batch_preflight",
+                                    "batch_index":int(_start//4)},
+                    )
+                    if bool(_bout.get("provider_called")):
+                        _batch_qa_diag["provider_batches"]+=1
+                    _batch_qa_diag["cache_hits"]+=len(_bout.get("cache_hits") or [])
+                    _batch_qa_diag["seeded"]+=len(_bout.get("verdicts") or {})
+                    _batch_qa_diag["unresolved"]+=len(_bout.get("unresolved") or [])
+                    if _bout.get("error"):
+                        _batch_qa_diag["errors"].append(str(_bout.get("error"))[:180])
+                except (RuntimeError,ValueError,TypeError,OSError,AttributeError) as _batch_exc:
+                    observe_suppressed(__name__,_batch_exc,line=10402)
+                    _batch_qa_diag["unresolved"]+=len(_chunk)
+                    _batch_qa_diag["errors"].append(str(_batch_exc)[:180])
+        except (RuntimeError,ValueError,TypeError,OSError,AttributeError) as _batch_setup_exc:
+            observe_suppressed(__name__,_batch_setup_exc,line=10406)
+            _batch_qa_diag["errors"].append(str(_batch_setup_exc)[:180])
+
     for row in _rows:
         if wanted and row.id not in wanted: continue
         p=_ff_payload(row)
@@ -5753,44 +11144,13 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
         if (not _force and str(p.get("banner_url") or "").strip() and str(p.get("banner_provider") or "").lower() in ("openai","openai_visual_local_text","stock_visual_local_text")) or (_force and _idem and _prior_idem==_idem and str(p.get("banner_url") or "").strip()):
             changed.append(row.id)
             continue
-        raw_title=str(p.get("title") or "").replace("{","").replace("}","")
-        title_candidates=[x.strip() for x in raw_title.split("|") if x.strip()]
-        title=(title_candidates[0] if title_candidates else str(p.get("direction") or row.segment or "Предложение")).strip()
-        title=" ".join(title.split()[:6])[:60] or "Предложение"
-        desc=str(p.get("description") or "").strip()
-        if not desc:
-            desc=" · ".join(x for x in [str(p.get("direction") or row.segment or "").strip(), str(p.get("category_path") or p.get("category") or "").strip()] if x) or title
-        theme=". ".join(x for x in [title, desc[:1200], str(p.get("city") or "").strip()] if x)
+        _ctx=_ff_banner_item_context(campaign_id,row,p,_idem)
+        title=_ctx["title"]; desc=_ctx["description"]; theme=_ctx["theme"]
         old_banner=str(p.get("banner_url") or "").strip()
-        # Same operation key must resolve to the same artifact path. This makes
-        # an HTTP retry after an ambiguous disconnect converge on the existing
-        # paid bytes even if payload persistence had not completed yet. A new
-        # owner intent gets a new key and therefore a new creative path.
-        if _idem:
-            _artifact_intent=f"explicit:{campaign_id}:{_row_id}:{_idem}"
-        else:
-            # Normal first generation is also a stable economic intent. A provider
-            # success followed by an HTTP/DB disconnect must converge on the same
-            # artifact instead of creating a new timestamp path and paying again.
-            # Copy/content changes intentionally create a new normal intent; an
-            # explicit regeneration still requires the owner supplied key above.
-            from app.services.media_semantic_validator import semantic_content_fingerprint as _semantic_banner_fp
-            _normal_basis={
-                "campaign_id":int(campaign_id), "item_id":_row_id,
-                "title":title, "theme":theme,
-                "variant":int(p.get("variant") or 1),
-                "semantic_fingerprint":_semantic_banner_fp(p),
-            }
-            _artifact_intent="normal:"+json.dumps(_normal_basis,ensure_ascii=False,sort_keys=True,separators=(",",":"))
-        _artifact_op=hashlib.sha256(_artifact_intent.encode("utf-8")).hexdigest()[:20]
-        rel=f"{_row_account_id}/banners/campaign_openai/campaign_{campaign_id}_item_{_row_id}_op_{_artifact_op}.png"
-        fpath=os.path.join("/root/BORIS/backend/images",rel)
-        # AI is allowed to create ONLY the photographic visual. Visible Russian
-        # copy is rendered locally afterwards by the deterministic Avito compositor.
-        # Keep the intermediate visual outside the account/public banner folder.
-        _visual_dir="/root/BORIS/backend/images/_generated_cache/campaign_visual"
-        os.makedirs(_visual_dir,exist_ok=True)
-        _visual_path=os.path.join(_visual_dir,f"{_row_account_id}_{campaign_id}_{_row_id}_{_artifact_op}.png")
+        _artifact_intent=_ctx["artifact_intent"]; _artifact_op=_ctx["artifact_op"]
+        rel=_ctx["rel"]; fpath=_ctx["fpath"]
+        _visual_dir=_ctx["visual_dir"]; os.makedirs(_visual_dir,exist_ok=True)
+        _visual_path=_ctx["visual_path"]
         try:
             from types import SimpleNamespace as _BannerSnapshot
             from app.services.media_semantic_validator import validate_campaign_banner_vision
@@ -5811,7 +11171,7 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                 _reference_path=_banner_storage.abs_path(_reference_storage_key)
                 _reference_asset_id=int(_reference_asset.id)
                 _reference_qa_asset=_BannerSnapshot(id=_reference_asset_id,storage_key=_reference_storage_key)
-                if _content_local_banner_first():
+                if _campaign_provider_call(_content_local_banner_first, ):
                     # Owner media is already the strongest identity source. Do not
                     # spend credits restyling it by default: compose the verified
                     # title locally on the real photo and keep the object truthful.
@@ -5824,7 +11184,7 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                     p["banner_text_source"]="verified_title_prefix"
                     db.commit()
                 else:
-                    if not _content_paid_fallback():
+                    if _qa_local_only or not _content_paid_fallback():
                         raise RuntimeError("CONTENT_PAID_FALLBACK_DISABLED")
                     from app.services import image_service as _IMG
                     # Image generation is an external/paid network operation and can
@@ -5839,7 +11199,7 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                         "CRITICAL: NO TEXT, NO LETTERS, NO WORDS, NO NUMBERS, NO PRICE BADGES, NO LOGOS, NO UI, NO POSTER LAYOUT. "
                         "The final Russian headline will be rendered later by BORIS locally. Business context only: "+theme[:1200]
                     )
-                    _out=_IMG.generate(db,_row_account_id,_banner_ref_prompt,_visual_path,model=_IMG.PREMIUM_MODEL,quality="medium",size="1024x1024",operation="campaign_openai_reference_visual",reference_path=_reference_path,burst_override=_burst_override)
+                    _out=_campaign_provider_call(_IMG.generate, db,_row_account_id,_banner_ref_prompt,_visual_path,model=_IMG.PREMIUM_MODEL,quality=_campaign_banner_quality,size="1024x1024",operation="campaign_openai_reference_visual",reference_path=_reference_path,burst_override=_burst_override)
                     if not _out.get("ok"):
                         raise RuntimeError(_out.get("error") or "REFERENCE_BANNER_FAILED")
                     p["banner_reference_media_id"]=_reference_asset_id
@@ -5868,14 +11228,15 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                     # only when the card has no verified visual yet.
                     from app.models.media_link import MediaLink as _ExistingVisualLink
                     from app.models.media_asset import MediaAsset as _ExistingVisualAsset
-                    _verified_pair=(db.query(_ExistingVisualLink,_ExistingVisualAsset)
+                    _verified_candidates=(db.query(_ExistingVisualLink,_ExistingVisualAsset)
                         .join(_ExistingVisualAsset,_ExistingVisualAsset.id==_ExistingVisualLink.media_id)
                         .filter(_ExistingVisualLink.entity_type=="campaign_item",
                                 _ExistingVisualLink.entity_id==str(row.id),
                                 _ExistingVisualAsset.deleted_at.is_(None),
                                 _ExistingVisualAsset.status=="approved",
                                 _ExistingVisualAsset.source_provider!="openai")
-                        .order_by(_ExistingVisualLink.position.asc(),_ExistingVisualLink.id.asc()).first())
+                        .order_by(_ExistingVisualLink.position.asc(),_ExistingVisualLink.id.asc()).all())
+                    _verified_pair=_best_banner_semantic_pair(_verified_candidates)
                     if _verified_pair:
                         from app.services import media_storage as _verified_storage
                         _visual_path=_verified_storage.abs_path(str(_verified_pair[1].storage_key))
@@ -5886,7 +11247,7 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                         p["banner_text_source"]="verified_title_prefix"
                         db.commit()
                     else:
-                        if not _content_paid_fallback():
+                        if _qa_local_only or not _content_paid_fallback():
                             raise RuntimeError("CONTENT_PAID_FALLBACK_DISABLED_NO_VERIFIED_MEDIA")
                         from app.services import image_service as _IMG
                         db.commit()
@@ -5897,9 +11258,9 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                             "CRITICAL: NO TEXT, NO LETTERS, NO WORDS, NO NUMBERS, NO PRICE BADGES, NO LOGOS, NO UI, NO POSTER LAYOUT. "
                             "The final Russian headline will be rendered later by BORIS locally. Business context only: "+theme[:1200]
                         )
-                        _out=_IMG.generate_banner_financially_guarded(
+                        _out=_campaign_provider_call(_IMG.generate_banner_financially_guarded, 
                             db,_row_account_id,_banner_prompt,_visual_path,model=_IMG.PREMIUM_MODEL,
-                            quality="medium",size="1024x1024",operation="campaign_openai_visual_only",
+                            quality=_campaign_banner_quality,size="1024x1024",operation="campaign_openai_visual_only",
                             burst_override=_burst_override, provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_visual"}
                         )
                         if not _out.get("ok"):
@@ -5909,7 +11270,9 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
             # Deterministic local typography is the only allowed visible-text layer.
             # This removes AI-generated Cyrillic, tiny copy and skewed poster artifacts.
             from app.services.avito_premium_compositor import compose_premium_avito_banner
-            _composed=compose_premium_avito_banner(_visual_path,fpath,title)
+            _composed=_batch_preflight_composed.get(_row_id)
+            if not _composed:
+                _composed=compose_premium_avito_banner(_visual_path,fpath,title)
             if not _composed.get("ok") or not os.path.isfile(fpath) or os.path.getsize(fpath)<=0:
                 raise RuntimeError("CAMPAIGN_LOCAL_TEXT_COMPOSITOR_FAILED")
             p["banner_layout"]=str(_composed.get("layout") or "premium_photo_bottom_caption_v3")
@@ -5925,7 +11288,7 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
             # using detached scalar snapshots. A rejected creative leaves no DB
             # mutation behind and cannot hold PostgreSQL idle in transaction.
             _banner_qa_asset=_BannerSnapshot(id=0,storage_key=rel)
-            banner_qa=validate_campaign_banner_vision(p,_banner_qa_asset,_reference_qa_asset,account_id=_row_account_id,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_final_qa"})
+            banner_qa=_campaign_provider_call(validate_campaign_banner_vision, p,_banner_qa_asset,_reference_qa_asset,account_id=_row_account_id,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_final_qa"})
 
             # A semantic-approved stock photo can still be compositionally too busy
             # for an advertising banner. Do not hot-loop the same stock composition.
@@ -5934,9 +11297,14 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
             # visual intent, then keep the same local verified-title compositor. The
             # save_path is stable, so retries are free cache hits and cannot repurchase.
             if (not banner_qa.get("pass") and _used_stock_visual_fallback and _reference_asset is None
-                    and _content_paid_fallback()
-                    and bool(banner_qa.get("mobile_ok")) and bool(banner_qa.get("claims_ok"))
-                    and (not bool(banner_qa.get("composition_ok")) or not bool(banner_qa.get("visual_hierarchy_ok")))):
+                    and not _qa_local_only and _content_paid_fallback()
+                    and bool(banner_qa.get("claims_ok"))
+                    and (
+                        not bool(banner_qa.get("mobile_ok"))
+                        or not bool(banner_qa.get("composition_ok"))
+                        or not bool(banner_qa.get("professional_ok"))
+                        or not bool(banner_qa.get("visual_hierarchy_ok"))
+                    )):
                 from app.services import image_service as _CleanIMG
                 _clean_visual_path=os.path.join(_visual_dir,f"{_row_account_id}_{campaign_id}_{_row_id}_{_artifact_op}_clean_v1.png")
                 _clean_prompt=(
@@ -5947,9 +11315,9 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                     "NO TEXT, NO LETTERS, NO WORDS, NO NUMBERS, NO LOGOS, NO PRICE, NO UI, NO POSTER, NO COLLAGE, NO BADGES."
                 )
                 db.commit()
-                _clean_out=_CleanIMG.generate_banner_financially_guarded(
+                _clean_out=_campaign_provider_call(_CleanIMG.generate_banner_financially_guarded, 
                     db,_row_account_id,_clean_prompt,_clean_visual_path,model=_CleanIMG.PREMIUM_MODEL,
-                    quality="medium",size="1024x1024",operation="campaign_banner_clean_visual_fallback",
+                    quality=_campaign_banner_quality,size="1024x1024",operation="campaign_banner_clean_visual_fallback",
                     burst_override=_burst_override,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_clean_visual_fallback"}
                 )
                 if _clean_out.get("ok"):
@@ -5965,7 +11333,7 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                         _clean_payload["banner_mobile_text_policy"]=str(_clean_composed.get("text_policy") or "complete_title_prefix_max4_two_lines_min58")
                         _clean_payload["banner_font_size"]=int(_clean_composed.get("font_size") or 0)
                         _clean_payload["banner_line_count"]=int(_clean_composed.get("line_count") or 0)
-                        _clean_qa=validate_campaign_banner_vision(_clean_payload,_clean_qa_asset,None,account_id=_row_account_id,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_clean_visual_qa"})
+                        _clean_qa=_campaign_provider_call(validate_campaign_banner_vision, _clean_payload,_clean_qa_asset,None,account_id=_row_account_id,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_clean_visual_qa"})
                         if _clean_qa.get("pass"):
                             banner_qa=_clean_qa; _banner_qa_asset=_clean_qa_asset
                             _used_stock_visual_fallback=False; _used_clean_ai_visual_fallback=True
@@ -5990,14 +11358,15 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                 from app.models.media_link import MediaLink as _FallbackMediaLink
                 from app.models.media_asset import MediaAsset as _FallbackMediaAsset
                 from app.services import media_storage as _fallback_storage
-                _fallback_pair=(db.query(_FallbackMediaLink,_FallbackMediaAsset)
+                _fallback_candidates=(db.query(_FallbackMediaLink,_FallbackMediaAsset)
                     .join(_FallbackMediaAsset,_FallbackMediaAsset.id==_FallbackMediaLink.media_id)
                     .filter(_FallbackMediaLink.entity_type=="campaign_item",
                             _FallbackMediaLink.entity_id==str(row.id),
                             _FallbackMediaAsset.deleted_at.is_(None),
                             _FallbackMediaAsset.status=="approved",
                             _FallbackMediaAsset.source_provider!="openai")
-                    .order_by(_FallbackMediaLink.position.asc(),_FallbackMediaLink.id.asc()).first())
+                    .order_by(_FallbackMediaLink.position.asc(),_FallbackMediaLink.id.asc()).all())
+                _fallback_pair=_best_banner_semantic_pair(_fallback_candidates)
                 if _fallback_pair:
                     _fallback_asset=_fallback_pair[1]
                     _fallback_source=_fallback_storage.abs_path(str(_fallback_asset.storage_key))
@@ -6006,7 +11375,7 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                     _fallback_composed=compose_premium_avito_banner(_fallback_source,_fallback_fpath,title)
                     if _fallback_composed.get("ok") and os.path.isfile(_fallback_fpath) and os.path.getsize(_fallback_fpath)>0:
                         _fallback_qa_asset=_BannerSnapshot(id=0,storage_key=_fallback_rel)
-                        _fallback_qa=validate_campaign_banner_vision(p,_fallback_qa_asset,None,account_id=_row_account_id,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_fallback_qa"})
+                        _fallback_qa=_campaign_provider_call(validate_campaign_banner_vision, p,_fallback_qa_asset,None,account_id=_row_account_id,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_fallback_qa"})
                         if _fallback_qa.get("pass"):
                             rel=_fallback_rel; fpath=_fallback_fpath; _banner_qa_asset=_fallback_qa_asset
                             banner_qa=_fallback_qa; _used_stock_visual_fallback=True
@@ -6054,8 +11423,34 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
                 _next_gallery_pos+=1
             _row_id=int(row.id); _row_account=str(row.account_id)
             db.commit()
-            _semantic_verdicts=classify_item_media_vision(p,_planned,account_id=_row_account,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_regeneration"})
-            _semantic_bad=[v for v in _semantic_verdicts if (not bool(v.get("match"))) or float(v.get("confidence") or 0)<0.80]
+            # CAMPAIGN_BANNER_DEDICATED_QA_AUTHORITY_V1:
+            # The banner has already passed the stricter banner-specific QA above.
+            # Do not send it through the generic photo classifier a second time:
+            # local text/caption composition can make that classifier describe a
+            # perfectly valid banner as a "blurred interior" even though the
+            # underlying product photo and dedicated banner QA both passed.
+            # Generic semantic QA remains mandatory for every preserved gallery
+            # photo; the banner receives explicit evidence from its dedicated QA.
+            _gallery_planned=list(_planned[1:])
+            _gallery_verdicts=(
+                _campaign_provider_call(
+                    classify_item_media_vision,
+                    p,
+                    _gallery_planned,
+                    account_id=_row_account,
+                    provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_banner_gallery_semantic_qa"},
+                )
+                if _gallery_planned else []
+            )
+            _banner_semantic_verdict={
+                "match":True,
+                "confidence":1.0,
+                "subject":"QA-approved campaign banner",
+                "reason":"dedicated campaign banner QA passed; generic photo QA applies only to gallery photos",
+                "checker":"campaign_banner_qa",
+            }
+            _semantic_verdicts=[_banner_semantic_verdict]+list(_gallery_verdicts)
+            _semantic_bad=[v for v in _gallery_verdicts if (not bool(v.get("match"))) or float(v.get("confidence") or 0)<0.80]
             if _semantic_bad:
                 # Persist exact rejected gallery IDs before returning. This turns a
                 # probabilistic banner retry loop into deterministic self-repair:
@@ -6159,30 +11554,65 @@ def ff_workflow_banners(campaign_id:int, body:FFBannerBody, db=Depends(_db), use
         ff["billing_pending_banners_key"]=""
 
     ff["step"]="category" if changed else "media"; _ff_state_save(db,campaign,ff)
-    return {"status":"ok" if changed else "error","changed":changed,"generated":generated,"errors":errors,"banner_engine":"openai_visual_local_text_v1","banner_model":"gpt-image-2+local-pillow","text_renderer":"local_pillow"}
+    return {"status":"ok" if changed else "error","changed":changed,"generated":generated,"errors":errors,
+            "banner_engine":"openai_visual_local_text_v1","banner_model":"gpt-image-2+local-pillow",
+            "text_renderer":"local_pillow","banner_batch_qa":_batch_qa_diag}
 
 
 @router.post("/{campaign_id}/workflow/category/{item_id}")
 def ff_workflow_category(campaign_id:int,item_id:int,body:dict,db=Depends(_db),user=Depends(get_current_user)):
     from app.api.feed_contract import resolve_feed_contract, resolve_applicable_params, SYSTEM_FIELDS
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); row=_ff_item_by_id(db,campaign_id,item_id,allowed)
-    _ff_assert_mutable(campaign)
+    _editor_ff=_ff_assert_card_editor_mutable(campaign)
     if not row: raise HTTPException(404,"Объявление не найдено")
-    p=_ff_payload(row); tid=str(body.get("template_id") or p.get("template_id") or "").strip(); contract=resolve_feed_contract(tid,_db=db)
+    p=_ff_payload(row); old_tid=str(p.get("template_id") or "").strip(); old_path=str(p.get("category_path") or "").strip(); old_params=dict(p.get("params") or {})
+    tid=str(body.get("template_id") or p.get("template_id") or "").strip(); contract=resolve_feed_contract(tid,_db=db)
     if not contract.get("ok"): raise HTTPException(422,{"message":"Категория не найдена","code":contract.get("code")})
     p["template_id"]=tid; p["category_path"]=contract.get("category_path") or p.get("category_path",""); parts=[x.strip() for x in str(p["category_path"]).split(">") if x.strip()]; p["category"]=parts[1] if len(parts)>=2 else (parts[0] if parts else p.get("category",""))
     incoming=dict(body.get("params") or {}); fields=contract.get("fields") or {}
     unknown=[k for k in incoming if k not in fields and k not in SYSTEM_FIELDS]
     if unknown: raise HTTPException(422,{"message":"Есть параметры, которых нет в выбранной подкатегории Avito","fields":unknown})
-    params=dict(p.get("params") or {})
+    # CATEGORY_PARAM_RESET_V1: params belong to a concrete Avito
+    # subcategory contract. When template_id changes, never carry values from
+    # the previous category into the new one merely because field keys happen
+    # to overlap. Start clean and let missing_required drive truthful intake.
+    params={} if tid != old_tid else dict(p.get("params") or {})
     for k,v in incoming.items():
         if v in (None,""): params.pop(k,None)
         else: params[k]=v
     coverage=resolve_applicable_params(params,contract); params=coverage.get("params") or {}; p["params"]=params
     p["intake_contract_version"]=contract.get("contract_version") or ""
     p["parameter_coverage"]={"available":coverage.get("available_fields",0),"filled":coverage.get("filled_fields",0),"removed_non_applicable":coverage.get("removed_non_applicable") or []}
-    row.payload_json=json.dumps(p,ensure_ascii=False); row.content_hash=CS.content_hash(p); row.status="draft"; db.commit()
-    missing=_ff_contract_missing(db,tid,params); _,ff=_ff_state_load(campaign); ff["step"]="settings"; _ff_state_save(db,campaign,ff)
+    category_changed=(tid != old_tid) or (str(p.get("category_path") or "").strip() != old_path)
+    params_changed=(params != old_params)
+    if category_changed:
+        p["media_semantic_evidence"]=[]
+    if (category_changed or params_changed) and p.get("banner_url") and isinstance(p.get("banner_qa"),dict) and p.get("banner_qa"):
+        p["banner_qa"]={**dict(p.get("banner_qa") or {}),"passed":False,"reason":"category_or_params_changed_requires_recheck"}
+    _editor_activation=str((_editor_ff.get("owner_activation") or {}).get("status") or "").lower()
+    _editor_terminal=_editor_activation in {"completed","partial"} or str(_editor_ff.get("step") or "").lower() in {"publication_completed","publication_partial"}
+    row.payload_json=json.dumps(p,ensure_ascii=False); row.content_hash=CS.content_hash(p)
+    if not _editor_terminal:
+        row.status="draft"
+    if category_changed or params_changed:
+        _ff_mark_post_publication_revision(_editor_ff,int(row.id),["category","params"])
+    db.commit()
+    missing=_ff_contract_missing(db,tid,params); _,ff=_ff_state_load(campaign)
+    if _editor_terminal:
+        if _editor_ff.get("post_publication_revision"):
+            ff["post_publication_revision"]=dict(_editor_ff.get("post_publication_revision") or {})
+    else:
+        ff["step"]="settings"
+    _ff_state_save(db,campaign,ff)
+    if category_changed or params_changed:
+        log_action(
+            account_id=str(row.account_id or ""),action="Изменил параметры Avito",
+            object_kind="объявление",object_name=str(p.get("title") or "Объявление")[:120],
+            before_val=("Категория: "+(old_path or "—")+" · параметров: "+str(len(old_params)))[:900],
+            after_val=("Категория: "+str(p.get("category_path") or p.get("category") or "—")+" · параметров: "+str(len(params)))[:900],
+            reason="Категория или характеристики изменены в редакторе BORIS",
+            actor=ACTOR_USER,user_id=getattr(user,"id",None),source="campaign.category_edit",
+        )
     return {"status":"ok","item":CS.item_public(row),"missing_required":missing,"parameter_coverage":p["parameter_coverage"]}
 
 
@@ -6234,3 +11664,138 @@ def campaign_publication_identity(campaign_id: int, body: FFPublicationIdentityB
         raise HTTPException(status_code=409, detail=result)
     db.commit()
     return {**result, "external_upload": False, "campaign_id": campaign_id}
+
+
+@router.get("/{campaign_id}/item/{item_id}/revisions")
+def campaign_card_revisions(campaign_id:int, item_id:int, cursor:int=0,
+                            limit:int=Query(30, ge=1, le=100),
+                            db=Depends(_db), user=Depends(get_current_user)):
+    from app.models.storage import Storage
+    allowed = _allowed_accounts(db, user)
+    _campaign_or_404(db, campaign_id, allowed)
+    row = _ff_item_by_id(db, campaign_id, item_id, allowed)
+    if not row:
+        raise HTTPException(404, "Объявление не найдено")
+    query = db.query(Storage).filter(Storage.account_id == row.account_id,
+        Storage.key.like(f"campaign_card_revision:{item_id}:%"))
+    if cursor:
+        query = query.filter(Storage.id < cursor)
+    rows = query.order_by(Storage.id.desc()).limit(limit + 1).all()
+    records = []
+    for stored in rows[:limit]:
+        value = json.loads(stored.value)
+        if int(value.get("campaign_id") or 0) == campaign_id:
+            records.append({**value, "changed_at":value.get("created_at"), "cursor": stored.id})
+    legacy = []
+    if not cursor:
+        for old in reversed(_ff_payload(row).get("edit_history") or []):
+            legacy.append({"created_at": old.get("at"), "actor": old.get("actor"),
+                           "reason": old.get("note"),
+                           "snapshot_available": False,
+                           "message": "Полный снимок до и после для этой старой записи не сохранён."})
+    return {"status": "ok", "items": records, "legacy": legacy,
+            "next_cursor": rows[limit-1].id if len(rows) > limit else None}
+
+
+@router.post("/{campaign_id}/item/{item_id}/revisions/{revision}/restore")
+def campaign_restore_card_revision(campaign_id:int, item_id:int, revision:str,
+        body:dict, db=Depends(_db), user=Depends(get_current_user)):
+    from app.services.campaign_editor_jobs import maybe_enqueue
+    _queued = maybe_enqueue(db, user, campaign_id, 'restore', body, item_id=item_id, revision=revision)
+    if _queued is not None:
+        return _queued
+    from app.models.storage import Storage
+    from app.models.media_link import MediaLink
+    from app.models.media_asset import MediaAsset
+    from app.services import media_service as M
+    from app.services.campaign_card_revisions import lock_versions, _snapshot, CONTENT_KEYS
+    allowed = _allowed_accounts(db, user)
+    campaign = _campaign_or_404(db, campaign_id, allowed)
+    row = _ff_item_by_id(db, campaign_id, item_id, allowed)
+    if not row:
+        raise HTTPException(404, "Объявление не найдено")
+    _require_manage_ads(db, user, row.account_id)
+    record = db.query(Storage).filter(Storage.account_id == row.account_id,
+        Storage.key == f"campaign_card_revision:{item_id}:{revision}").first()
+    if not record:
+        raise HTTPException(404, "Версия не найдена")
+    value = json.loads(record.value)
+    if int(value.get("campaign_id") or 0) != campaign_id:
+        raise HTTPException(404, "Версия не найдена")
+    side = body.get("side") or "after"
+    if side not in {"before", "after"} or not isinstance(value.get(side), dict):
+        raise HTTPException(422, "Полный снимок этой версии недоступен")
+    target = value[side]
+    current = _snapshot(db.connection(), item_id)
+    assets = {}
+    unavailable = []
+    target_media_ids={int(link["media_id"]) for link in target.get("media") or []}
+    if target.get("hero_media_id") is not None: target_media_ids.add(int(target["hero_media_id"]))
+    for media_id in target_media_ids:
+        asset = db.query(MediaAsset).filter(MediaAsset.id == media_id,
+                                           MediaAsset.deleted_at.is_(None)).first()
+        if (asset is None or (asset.account_id and asset.account_id != row.account_id)
+                or (not asset.account_id and asset.owner_user_id != getattr(user,"id",None))):
+            unavailable.append(media_id)
+        else:
+            assets[media_id] = asset
+    changed = [key for key in target if target.get(key) != current["content"].get(key)]
+    if body.get("preview_only", True):
+        return {"status": "ok", "before": current["content"], "after": target,
+                "changed_fields": changed, "unavailable_media": unavailable,
+                "expected_updated_at": current["version"],
+                "message": "Откат изменит только карточку в BORIS. Затем нужны проверка и подтверждение размещения."}
+    if not body.get("confirmed"):
+        raise HTTPException(422, "Сначала просмотрите и подтвердите откат")
+    if unavailable:
+        raise HTTPException(409, {"message": "Часть фотографий версии недоступна. Откат не выполнен.",
+                                  "code": "REVISION_MEDIA_UNAVAILABLE"})
+    row = lock_versions(db, campaign_id, [item_id], body.get("expected_updated_at"), allowed)[0]
+    ff = _ff_assert_card_editor_mutable(campaign)
+    payload = _ff_payload(row)
+    for key in CONTENT_KEYS:
+        if target.get(key) is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = target[key]
+    # Old evidence is not proof for a restored combination of fields and media.
+    payload["media_semantic_evidence"] = []
+    payload["verified_price"] = False
+    payload["price_verified"] = False
+    payload["price_status"] = "NEEDS_DATA"
+    if payload.get("banner_qa"):
+        payload["banner_qa"] = {**dict(payload["banner_qa"]), "passed": False,
+                               "reason": "restored_revision_requires_recheck"}
+    for link in db.query(MediaLink).filter(MediaLink.entity_type == "campaign_item",
+                                           MediaLink.entity_id == str(item_id)).all():
+        db.delete(link)
+    db.flush()
+    for link in target.get("media") or []:
+        M.link(db, assets[int(link["media_id"])], "campaign_item", str(item_id),
+               link["role"], int(link["position"]), created_by=getattr(user, "id", None))
+    row.hero_media_id = target.get("hero_media_id")
+    row.geo = str(target.get("city") or "")
+    row.payload_json = json.dumps(payload, ensure_ascii=False)
+    row.content_hash = CS.content_hash(payload)
+    row.analysis_hash = None
+    row.status = "draft"
+    db.info["campaign_revision_reason"] = "Восстановление сохранённой версии карточки"
+    _ff_mark_post_publication_revision(ff, item_id, changed)
+    ff["step"] = "validation"
+    ff["ready_for_owner_approval"] = False
+    db.commit()
+    _ff_state_save(db, campaign, ff)
+    return {"status": "ok", "item": CS.item_public(row),
+            "message": "Версия восстановлена в BORIS. Проверьте карточку и подтвердите размещение отдельно."}
+
+
+@router.get("/{campaign_id}/editor-jobs/{job_id}")
+def campaign_editor_job_status(campaign_id:int, job_id:int, db=Depends(_db), user=Depends(get_current_user)):
+    from app.models.background_job import BackgroundJob
+    from app.services.campaign_editor_jobs import public_job as job_public
+    allowed=_allowed_accounts(db,user)
+    _campaign_or_404(db,campaign_id,allowed)
+    row=db.query(BackgroundJob).filter(BackgroundJob.id==job_id,BackgroundJob.account_id.in_(allowed)).first()
+    if not row or int((row.payload_json or {}).get("campaign_id") or 0)!=campaign_id or row.kind!="campaign_editor":
+        raise HTTPException(404,"Задача не найдена")
+    return {"status":"ok","job":job_public(row),"result":row.result_json or {}}

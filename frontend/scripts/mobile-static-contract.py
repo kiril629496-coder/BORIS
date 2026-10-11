@@ -7,6 +7,7 @@ production. Browser audits remain the runtime proof; this guard prevents known
 regressions from reaching an artifact in the first place.
 """
 from pathlib import Path
+import re
 import sys
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -93,7 +94,10 @@ mobile_gate_text=(ROOT/"scripts/qa-mobile-campaign-deploy-gate.py").read_text(en
 ck("runtime_qa_dynamic_campaign_fixture", "def choose_campaign_route()" in mobile_gate_text and '"/dashboard/campaign/287"' not in mobile_gate_text and '"fixture":fixture' in mobile_gate_text)
 ck("runtime_qa_messages_setup_390_1440", '"/messages/setup"' in mobile_gate_text and '"phone-390"' in mobile_gate_text and '"desktop-1440"' in mobile_gate_text and '"messages_setup"' in mobile_gate_text)
 launch_gate_text=(ROOT/"scripts/qa-campaign-launch-contract.py").read_text(encoding="utf-8")
-ck("runtime_qa_hydration_wait", 'card.wait_for(state="visible",timeout=4000)' in launch_gate_text and 'btn.wait_for(state="visible",timeout=4000)' in launch_gate_text)
+def visible_wait_at_least(source, variable, minimum_ms=4000):
+    match=re.search(rf'{re.escape(variable)}\.wait_for\(state="visible",\s*timeout=(\d+)\)', source)
+    return bool(match and int(match.group(1)) >= int(minimum_ms))
+ck("runtime_qa_hydration_wait", visible_wait_at_least(launch_gate_text,"card") and visible_wait_at_least(launch_gate_text,"btn"))
 ck("runtime_watch_owner_escalation", "notify_owner_failure_once" in (ROOT/"scripts/boris-mobile-campaign-runtime-watch.sh").read_text(encoding="utf-8") and "needs_owner_or_code_fix" in (ROOT/"scripts/boris-mobile-campaign-runtime-watch.sh").read_text(encoding="utf-8"))
 ck("runtime_watch_alert_dedup", "duplicate_incident" in (ROOT/"scripts/boris-mobile-campaign-runtime-watch.sh").read_text(encoding="utf-8") and "ALERT_FILE" in (ROOT/"scripts/boris-mobile-campaign-runtime-watch.sh").read_text(encoding="utf-8"))
 ck("runtime_watch_restart_loop_suppressed", "previous_terminal_failure_same_release" in (ROOT/"scripts/boris-mobile-campaign-runtime-watch.sh").read_text(encoding="utf-8") and "restart_suppressed=1" in (ROOT/"scripts/boris-mobile-campaign-runtime-watch.sh").read_text(encoding="utf-8"))

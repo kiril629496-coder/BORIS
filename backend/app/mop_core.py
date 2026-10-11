@@ -27,7 +27,7 @@ TRANSITIONS = {
             "human_required", "no_reply_required"),
     "analyzing": ("new", "draft_ready", "waiting_external", "deleted", "human_required", "sent"),
     "draft_ready": ("editing", "custom_waiting", "analyzing", "sending",
-                    "deleted", "human_required", "no_reply_required",
+                    "deleted", "human_required", "waiting_external", "no_reply_required",
                     "in_progress", "sent"),
     "in_progress": ("editing", "custom_waiting", "waiting_confirm", "sending",
                     "analyzing", "deleted", "human_required",
@@ -107,16 +107,30 @@ def deterministic_no_reply_reason(text_value):
 
     if "?" in low:
         return None
+
+    # MOP_TERMINAL_REFUSAL_FULL_MESSAGE_V1:
+    # A short standalone statement that the customer has already bought/ordered/
+    # found the solution is a completed sales outcome, not a question for a
+    # manager. Full-message matching is intentionally strict: mixed requests such
+    # as "already ordered measurement, need delivery" stay in the normal pipeline.
+    terminal_refusal_patterns=(
+        r"(?:спасибо )?(?:я |мы |все )?уже (?:заказал(?:а|и)?|купил(?:а|и)?|приобрел(?:а|и)?|нашел(?:а|и)?)(?: в ?другом месте)?(?: спасибо)?",
+        r"(?:спасибо )?(?:заказал(?:а|и)?|купил(?:а|и)?|приобрел(?:а|и)?|нашел(?:а|и)?) в ?другом месте(?: спасибо)?",
+    )
+    if any(re.fullmatch(p,soft) for p in terminal_refusal_patterns):
+        return "terminal_refusal"
+
     gratitude_patterns=(
         r"(?:отлично |хорошо |понял |поняла |ясно |ок |окей )?(?:большое )?спасибо",
         r"(?:большое )?спасибо(?: вам)?",
         r"благодарю(?: вас)?",
+        r"благодарю за уделенное время",
     )
     if any(re.fullmatch(p,soft) for p in gratitude_patterns):
         return "gratitude_ack"
     simple_ack_patterns=(
         r"хорошо", r"ок", r"окей", r"понял", r"поняла", r"ясно",
-        r"договорились", r"ладно", r"принято", r"отлично", r"супер",
+        r"договорились", r"ладно", r"принято", r"принял", r"приняла", r"отлично", r"супер",
     )
     if any(re.fullmatch(p,soft) for p in simple_ack_patterns):
         return "simple_ack"
@@ -167,20 +181,50 @@ def log_event(db, draft_id, event, from_status=None, to_status=None,
               channel=None, actor_type=None, actor_id=None, payload=None, meta=None):
     """Пишет строку в append-only журнал. Коммит делает вызывающий."""
     import json
-    db.execute(text(
+    event_meta = dict(meta or {})
+    ledger_event = event in {"draft_created", "ai_generated", "generation_failed", "provider_deferred",
+        "send_started", "sent", "send_recovered", "send_failed", "handed_to_human", "closed_no_reply",
+        "answered_externally", "returned_to_ai"}
+    if ledger_event:
+        event_meta["control_rule_writer"] = "control_rule_event_v1"
+        try:
+            from app.services.control_rule_runtime import capture_mop_context
+            with db.begin_nested():
+                event_meta["control_rule_runtime"] = capture_mop_context(db, draft_id, event)
+        except Exception as exc:
+            # Keep the actual domain outcome even if its evidence adapter is
+            # unavailable. Never relabel it as evaluated from a later version.
+            event_meta["control_rule_runtime_error"] = type(exc).__name__
+            observe_suppressed(__name__, exc, line=166)
+    event_id = db.execute(text(
         "INSERT INTO mop_draft_events (draft_id, event, from_status, to_status, channel,"
         " actor_type, actor_id, payload, metadata)"
-        " VALUES (:d, :e, :f, :t, :c, :at, :ai, :p, CAST(:m AS JSONB))"
+        " VALUES (:d, :e, :f, :t, :c, :at, :ai, :p, CAST(:m AS JSONB)) RETURNING id"
     ), {"d": draft_id, "e": event, "f": from_status, "t": to_status, "c": channel,
         "at": actor_type, "ai": actor_id, "p": payload,
-        "m": json.dumps(meta, ensure_ascii=False) if meta else None})
+        "m": json.dumps(event_meta, ensure_ascii=False) if event_meta else None}).scalar_one()
+    if ledger_event:
+        try:
+            from app.services.control_rule_runtime import record_mop_event
+            with db.begin_nested():
+                record_mop_event(db, event_id)
+        except Exception as exc:
+            observe_suppressed(__name__, exc, line=166)
+            try:
+                from app.services.control_rule_runtime import record_mop_gap
+                with db.begin_nested():
+                    record_mop_gap(db, event_id, type(exc).__name__)
+            except Exception as gap_exc:
+                observe_suppressed(__name__, gap_exc, line=166)
+    return event_id
 
 
 # ------------------------------------------------------------- смена статуса
 
 def set_status(db, draft_id, to_status, allowed_from, event,
                channel=None, actor_type=None, actor_id=None,
-               payload=None, meta=None, extra_sql="", extra_params=None):
+               payload=None, meta=None, extra_sql="", extra_params=None,
+               commit: bool = True):
     """Атомарный захват: условный UPDATE ... RETURNING.
 
     Кто получил строку — тот и работает. Кто получил None — опоздал,
@@ -204,12 +248,16 @@ def set_status(db, draft_id, to_status, allowed_from, event,
     params.update(extra_params or {})
     row = db.execute(q, params).fetchone()
     if row is None:
-        db.commit()
-        return None, prev
+        current = db.execute(text("SELECT status FROM mop_drafts WHERE id = :id"),
+                             {"id": draft_id}).scalar()
+        if commit:
+            db.commit()
+        return None, current or prev
     log_event(db, draft_id, event, from_status=prev, to_status=to_status,
               channel=channel, actor_type=actor_type, actor_id=actor_id,
               payload=payload, meta=meta)
-    db.commit()
+    if commit:
+        db.commit()
     return dict(row._mapping), to_status
 
 
@@ -244,13 +292,13 @@ def create_draft(db, account_id, avito_chat_id, avito_message_id, incoming_text,
     return new_id, True
 
 
-def claim_for_send(db, draft_id, actor_type, actor_id, channel):
+def claim_for_send(db, draft_id, actor_type, actor_id, channel, meta=None):
     """Захват под отправку. Второй нажавший получает (None, текущий_статус)."""
     return set_status(
         db, draft_id, "sending",
         allowed_from=("draft_ready", "in_progress", "waiting_confirm", "send_failed"),
         event="send_started", channel=channel,
-        actor_type=actor_type, actor_id=actor_id,
+        actor_type=actor_type, actor_id=actor_id, meta=meta,
         extra_sql=", locked_at = now(), locked_by = :lb",
         extra_params={"lb": str(actor_id)},
     )
@@ -263,10 +311,14 @@ def _initiator(actor_id, actor_type="telegram_user"):
     return {"initiated_by_type": actor_type, "initiated_by_id": str(actor_id)}
 
 
-def mark_sent(db, draft_id, outgoing_text, channel=None, actor_id=None):
+def mark_sent(db, draft_id, outgoing_text, channel=None, actor_id=None, provider_receipt=None):
+    meta = dict(_initiator(actor_id) or {})
+    if provider_receipt:
+        meta["provider_receipt"] = provider_receipt
+        meta["canonical_sender"] = "app.api.messenger:send_message"
     return set_status(
         db, draft_id, "sent", allowed_from=("sending",), event="sent",
-        channel=channel, actor_type="system", meta=_initiator(actor_id),
+        channel=channel, actor_type="system", meta=meta,
         extra_sql=", sent_at = now(), outgoing_text_hash = :h, send_error = NULL, locked_at = NULL, locked_by = NULL",
         extra_params={"h": text_hash(outgoing_text)},
     )
@@ -810,6 +862,19 @@ def retry_send_readback_decision(draft_message_id: str, reply_text: str, provide
     return "unknown"
 
 
+def _send_receipt(row, provider_result, body):
+    """Identity from the existing POST response; no new provider request."""
+    message = provider_result.get("avito_message") if isinstance(provider_result, dict) else None
+    if not isinstance(message, dict) or not message.get("id"):
+        return None
+    content = message.get("content")
+    returned_text = content.get("text") if isinstance(content, dict) else message.get("text")
+    if returned_text is not None and (not isinstance(returned_text, str) or text_hash(returned_text) != text_hash(body)):
+        return None
+    return {"account_id": str(row["account_id"]), "chat_id": str(row["avito_chat_id"]),
+            "message_id": str(message["id"]), "text_hash": text_hash(body), "source": "avito_post_response"}
+
+
 def do_send(db, draft_id, actor_id, channel="telegram"):
     """Единственный путь отправки. Захват атомарный, второй нажавший опоздал.
 
@@ -941,8 +1006,70 @@ def do_send(db, draft_id, actor_id, channel="telegram"):
         except Exception as _suppressed_exc:
             observe_suppressed(__name__, _suppressed_exc, line=940)
         return False, "incoming_superseded_before_mop_send"
+    # MOP_HUMAN_RACE_UNKNOWN_FAIL_CLOSED_V2:
+    # The provider readback is the final authority immediately before POST.
+    # Missing/incomplete evidence is never permission to send. Keep the draft
+    # untouched so the next normal cycle may perform a fresh targeted read;
+    # do not create a human task and do not blind POST.
+    if _race_decision != "safe_to_send":
+        return False, "provider_readback_unknown_before_mop_send"
 
-    row, st = claim_for_send(db, draft_id, "telegram_user", actor_id, channel)
+    # MOP_SAME_CHAT_EXACT_REPEAT_REGEN_V1:
+    # Never send the exact same MOP text twice in a row to the same chat.
+    # One bounded clarifying regeneration is allowed; if it still repeats or
+    # fails, hand the draft to a human instead of looping or annoying the buyer.
+    _candidate_body = str(current.get("reply_text") or "")
+    if _candidate_body.strip():
+        _last_sent_hash = db.execute(text("""
+            SELECT outgoing_text_hash
+              FROM mop_drafts
+             WHERE account_id=:a AND avito_chat_id=:c
+               AND id<>:i AND status='sent'
+               AND outgoing_text_hash IS NOT NULL AND outgoing_text_hash<>''
+             ORDER BY sent_at DESC,id DESC LIMIT 1
+        """), {
+            "a": str(current.get("account_id") or ""),
+            "c": str(current.get("avito_chat_id") or ""),
+            "i": int(draft_id),
+        }).scalar()
+        if _last_sent_hash and str(_last_sent_hash) == text_hash(_candidate_body):
+            _regen_ok, _regen_note = _generate(
+                db, draft_id, "4", actor_id="same_chat_repeat_guard"
+            )
+            _after_regen = _draft(db, draft_id) or {}
+            _after_body = str(_after_regen.get("reply_text") or "")
+            if (not _regen_ok) or (not _after_body.strip()) or text_hash(_after_body) == str(_last_sent_hash):
+                try:
+                    set_status(
+                        db, draft_id, "human_required",
+                        ("draft_ready", "in_progress", "editing", "custom_waiting",
+                         "waiting_confirm", "send_failed", "new", "analyzing"),
+                        "handed_to_human", channel=channel, actor_type="system",
+                        actor_id="same_chat_repeat_guard",
+                        payload="exact same-chat reply repeated after bounded regeneration",
+                        meta={
+                            "policy_version": "MOP_SAME_CHAT_EXACT_REPEAT_REGEN_V1",
+                            "external_action": False,
+                            "regeneration_note": str(_regen_note or "")[:180],
+                        },
+                    )
+                except Exception as _suppressed_exc:
+                    observe_suppressed(__name__, _suppressed_exc, line=996)
+                return False, "duplicate_reply_same_chat"
+            current = _after_regen
+
+    _message_send_meta = None
+    try:
+        from app.services.control_message_rule_facts import capture_send_rule_facts
+        _message_send_meta = {"message_send_rule_facts": capture_send_rule_facts(
+            account_id=current.get("account_id"), chat_id=current.get("avito_chat_id"),
+            inbound_id=incoming_message_id, reply_text=current.get("reply_text"),
+            module_allowed=not blocked, takeover_active=takeover.get("active"),
+            readback_decision=_race_decision, actor_id=actor_id, channel=channel,
+        )}
+    except Exception as _rule_fact_exc:
+        observe_suppressed(__name__, _rule_fact_exc, line=950)
+    row, st = claim_for_send(db, draft_id, "telegram_user", actor_id, channel, meta=_message_send_meta)
     if row is None:
         return False, "уже в работе или отправлено (%s)" % st
     body = row.get("reply_text") or ""
@@ -1008,7 +1135,8 @@ def do_send(db, draft_id, actor_id, channel="telegram"):
     except Exception as e:
         res, ok = {"status": "error", "message": str(e)}, False
     if ok:
-        mark_sent(db, draft_id, body, channel=channel, actor_id=actor_id)
+        mark_sent(db, draft_id, body, channel=channel, actor_id=actor_id,
+                  provider_receipt=_send_receipt(row, res, body))
         return True, "отправлено"
     reason = classify_send_error(res)
     mark_send_failed(db, draft_id, reason, channel=channel, actor_id=actor_id)
@@ -1384,7 +1512,7 @@ HOOKS["generate"] = _generate
 
 def begin_incoming(db, account_id, avito_chat_id, avito_message_id, incoming_text,
                    item_id=None, item_title=None, client_name=None,
-                   ai_enabled=True):
+                   ai_enabled=True, incoming_created_at=None):
     """Шаг 1. Создаёт/находит карточку и захватывает право на генерацию.
 
     Сессию вызывающий закрывает СРАЗУ после этого вызова — сеть идёт без неё.
@@ -1399,6 +1527,25 @@ def begin_incoming(db, account_id, avito_chat_id, avito_message_id, incoming_tex
         # Fail closed: if ownership cannot be verified, never risk a parallel
         # customer reply from MOP.
         _takeover = {"active": True, "reason": "takeover_check_failed:" + type(_takeover_exc).__name__}
+    # MOP_EXTERNAL_HUMAN_OUTGOING_TURN_BOUNDARY_V1:
+    # A non-attributed seller message from Avito owns only the turn it answered.
+    # The current provider inbound may not yet be committed to messenger_messages
+    # when this check runs, so compare against the exact inbound timestamp passed
+    # by the caller. A newer client turn re-opens MOP; explicit TAKE / attributed
+    # employee ownership remains sticky and is not affected here.
+    if _takeover and _takeover.get("active") and str(_takeover.get("reason") or "") == "external_human_outgoing":
+        try:
+            _incoming_epoch = int(incoming_created_at or 0)
+            _human_epoch = int(_takeover.get("at_epoch") or 0)
+        except Exception:
+            _incoming_epoch, _human_epoch = 0, 0
+        if _incoming_epoch and _human_epoch and _incoming_epoch > _human_epoch:
+            _takeover = {
+                "active": False,
+                "reason": "new_client_turn_after_external_human_outgoing",
+                "previous_human_epoch": _human_epoch,
+                "incoming_epoch": _incoming_epoch,
+            }
     if _takeover and _takeover.get("active"):
         draft_id, created = create_draft(
             db, account_id, avito_chat_id, avito_message_id,
@@ -1579,6 +1726,76 @@ def reconcile_trivial_human_required(db, limit=100):
         if got is not None:
             topic_resolved+=1
 
+    # MOP_SYSTEM_EMPTY_CHAT_STALE_HUMAN_REPAIR_V1:
+    # A synthetic empty-chat greeting is not a buyer inbound lead. If bounded
+    # send/readback retries exhausted without a confirmed send, close the stale
+    # technical handoff instead of creating permanent human/CRM work.
+    system_empty_rows=db.execute(text("""
+      SELECT d.id
+        FROM mop_drafts d
+       WHERE d.status='human_required'
+         AND d.sent_at IS NULL
+         AND coalesce(trim(d.incoming_text),'')=''
+         AND coalesce(d.avito_message_id,'') LIKE 'system:empty_chat:%'
+         AND EXISTS (
+           SELECT 1 FROM mop_draft_events e
+            WHERE e.draft_id=d.id
+              AND e.to_status='human_required'
+              AND e.event='handed_to_human'
+              AND coalesce(e.metadata->>'policy_version','')='MOP_SEND_FAILED_SELFHEAL_V1'
+              AND coalesce(e.metadata->>'owner_action_required','false')='false'
+         )
+       ORDER BY d.updated_at,d.id
+       LIMIT :lim
+    """),{"lim":int(limit)}).mappings().all()
+    system_empty_closed=0
+    for _empty in system_empty_rows:
+        got,_=set_status(
+            db,int(_empty["id"]),"no_reply_required",("human_required",),"closed_no_reply",
+            channel="mop_recovery",actor_type="system",actor_id="system_empty_chat_repair",
+            payload="synthetic empty-chat delivery remained unconfirmed after bounded retries",
+            meta={"reason":"system_empty_chat_delivery_unconfirmed",
+                  "policy_version":"MOP_SYSTEM_EMPTY_CHAT_STALE_HUMAN_REPAIR_V1",
+                  "external_action":False},
+            extra_sql=", locked_at=NULL, locked_by=NULL",
+        )
+        if got is not None:
+            system_empty_closed+=1
+
+    # MOP_PROVIDER_402_HUMAN_HANDOFF_REPAIR_V1:
+    # Older Guardian revisions incorrectly converted persistent provider 402 waits
+    # into human_required. Requeue only those exact technical handoffs; no external
+    # message is sent and real human/business handoffs remain untouched.
+    provider_402_rows=db.execute(text("""
+      SELECT d.id
+        FROM mop_drafts d
+       WHERE d.status='human_required'
+         AND d.sent_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM mop_draft_events e
+            WHERE e.draft_id=d.id
+              AND e.to_status='human_required'
+              AND e.actor_id='provider_402_stale_guard'
+              AND coalesce(e.metadata->>'policy_version','') LIKE 'MOP_PROVIDER_402_STALE_GUARD_V%'
+         )
+       ORDER BY d.updated_at,d.id
+       LIMIT :lim
+    """),{"lim":int(limit)}).mappings().all()
+    provider_402_requeued=0
+    for _p402 in provider_402_rows:
+        got,_=set_status(
+            db,int(_p402["id"]),"waiting_external",("human_required",),"provider_deferred",
+            channel="mop_recovery",actor_type="system",actor_id="provider_402_handoff_repair",
+            payload="legacy provider-402 human handoff returned to bounded automatic reprobe",
+            meta={"reason":"avito_messenger_subscription_required",
+                  "policy_version":"MOP_PROVIDER_402_HUMAN_HANDOFF_REPAIR_V1",
+                  "dependency_state":"waiting_external","auto_reprobe":True,
+                  "external_action":False},
+            extra_sql=", send_error='Avito 402 — provider wait; auto-reprobe active', locked_at=NULL, locked_by=NULL",
+        )
+        if got is not None:
+            provider_402_requeued+=1
+
     rows=db.execute(text("""
       SELECT d.id,d.account_id,d.avito_chat_id,d.avito_message_id,d.incoming_text,d.reply_text,d.sent_at
         FROM mop_drafts d
@@ -1609,7 +1826,12 @@ def reconcile_trivial_human_required(db, limit=100):
         """),{"i":int(d["id"])}).mappings().first()
         _hp=str((last_handoff or {}).get("payload") or "").lower()
         _he=str((last_handoff or {}).get("event") or "")
-        technical=(_he=="generation_failed" and any(x in _hp for x in ("local ollama","local_mop_busy","лимит ai","provider temporarily deferred","rate limit","quota")))
+        technical=(_he=="generation_failed" and any(x in _hp for x in (
+            "local ollama","local_mop_busy","лимит ai","provider temporarily deferred",
+            "rate limit","quota","salesaibudgetblocked","internal ai budget blocked",
+            "no sales ai provider enabled","openai transport unavailable","providerdeferred",
+            "circuit open",
+        )))
         if technical and not d.get("sent_at") and not str(d.get("reply_text") or "").strip():
             got,_=set_status(
                 db,int(d["id"]),"waiting_external",("human_required",),"provider_deferred",
@@ -1868,7 +2090,12 @@ def generation_failed(db, draft_id, note=""):
     """MOP_PROVIDER_DEFERRED_WAIT_V2: transient provider failures never sit in analyzing."""
     note_s=str(note or "")[:500]; low=note_s.lower()
     local_defer=("local_mop_busy" in low or "local ollama fast mop failed: timed out" in low or "local ollama returned invalid json" in low or "ollama returned empty response" in low or ("local ollama" in low and "retry=timed out" in low))
-    external_defer=any(x in low for x in ("лимит ai","provider temporarily deferred","rate limit","insufficient_quota","quota exceeded","billing hard limit"))
+    external_defer=any(x in low for x in (
+        "лимит ai","provider temporarily deferred","rate limit","insufficient_quota",
+        "quota exceeded","billing hard limit","salesaibudgetblocked",
+        "internal ai budget blocked","no sales ai provider enabled",
+        "openai transport unavailable","providerdeferred","circuit open",
+    ))
     failed_before=db.execute(text("SELECT count(*) FROM mop_draft_events WHERE draft_id=:i AND event='generation_failed'"),{"i":draft_id}).scalar() or 0
     if local_defer or external_defer:
         reason="local_provider_busy_timeout" if local_defer else "ai_provider_or_budget_deferred"
@@ -1957,6 +2184,26 @@ def human_takeover_state(db, account_id: str, avito_chat_id: str) -> dict:
             "actor_id": human.get("user_id"),
         }
 
+    # An explicit Unified Inbox TAKE pauses MOP before the employee sends.
+    # The event is account/chat scoped and is cleared only by the explicit
+    # returned_to_ai action above; no parallel ownership state is introduced.
+    taken = db.execute(_sql("""
+        SELECT e.at,e.actor_id
+          FROM mop_draft_events e
+          JOIN mop_drafts d ON d.id=e.draft_id
+         WHERE d.account_id=:a AND d.avito_chat_id=:c
+           AND e.event='human_takeover'
+           AND COALESCE(e.actor_type,'')='user'
+         ORDER BY e.at DESC,e.id DESC LIMIT 1
+    """), {"a": account_id, "c": avito_chat_id}).mappings().first()
+    if taken and (return_at is None or taken.get("at") > return_at):
+        return {
+            "active": True,
+            "reason": "employee_take",
+            "at": taken.get("at"),
+            "actor_id": taken.get("actor_id"),
+        }
+
     # Direct Avito replies are not attributed by the provider. Treat the most
     # recent seller message as human when its normalized hash does not belong
     # to any MOP-sent draft. Ignore old seller messages before an explicit return.
@@ -1968,6 +2215,27 @@ def human_takeover_state(db, account_id: str, avito_chat_id: str) -> dict:
         """), {"a": account_id, "c": avito_chat_id}).fetchall()
         if r and r[0]
     }
+    # MOP_DIRECT_AVITO_TAKEOVER_UNTIL_NEXT_INBOUND_V2:
+    # Direct Avito seller messages have no reliable author identity. They may
+    # pause MOP for the current client turn, but they must not freeze the chat
+    # forever. A later real client inbound opens a new turn for MOP unless an
+    # explicit Unified Inbox TAKE / attributed employee ownership above remains.
+    latest_client_inbound = db.execute(_sql("""
+        SELECT avito_created_at
+          FROM messenger_messages
+         WHERE account_id=:a AND avito_chat_id=:c
+           AND lower(coalesce(direction,'')) LIKE 'in%'
+           AND coalesce(msg_type,'')<>'system'
+           AND coalesce(text,'') NOT LIKE '[Системное сообщение]%'
+         ORDER BY avito_created_at DESC,id DESC LIMIT 1
+    """), {"a": account_id, "c": avito_chat_id}).first()
+    try:
+        latest_client_inbound_epoch = int(
+            (latest_client_inbound[0] if latest_client_inbound else 0) or 0
+        )
+    except Exception:
+        latest_client_inbound_epoch = 0
+
     seller_rows = db.execute(_sql("""
         SELECT text,avito_created_at
           FROM messenger_messages
@@ -1984,23 +2252,26 @@ def human_takeover_state(db, account_id: str, avito_chat_id: str) -> dict:
             created_i = 0
         if return_epoch and created_i <= return_epoch:
             break
+        if latest_client_inbound_epoch and created_i <= latest_client_inbound_epoch:
+            break
         body = str(body or "")
         if body.strip() and text_hash(body) not in mop_hashes:
             return {
                 "active": True,
                 "reason": "external_human_outgoing",
                 "at_epoch": created_i,
+                "latest_client_inbound_epoch": latest_client_inbound_epoch or None,
             }
     return {"active": False, "reason": "no_human_takeover"}
 
 
-def record_human_takeover(db, account_id: str, avito_chat_id: str, actor_id: str = "") -> dict:
+def record_human_takeover(db, account_id: str, avito_chat_id: str, actor_id: str = "", commit: bool = True) -> dict:
     """Persist employee ownership using the latest draft event when available."""
     from sqlalchemy import text as _sql
     row = db.execute(_sql("""
         SELECT id FROM mop_drafts
          WHERE account_id=:a AND avito_chat_id=:c
-         ORDER BY COALESCE(updated_at,created_at) DESC,id DESC LIMIT 1
+         ORDER BY COALESCE(updated_at,created_at) DESC,id DESC LIMIT 1 FOR UPDATE
     """), {"a": str(account_id), "c": str(avito_chat_id)}).first()
     if not row:
         return {"recorded": False, "reason": "no_draft"}
@@ -2011,16 +2282,17 @@ def record_human_takeover(db, account_id: str, avito_chat_id: str, actor_id: str
         payload="live employee replied; MOP suspended for chat until explicit return",
         meta={"policy_version": "MOP_HUMAN_TAKEOVER_V1", "external_action": False},
     )
-    db.commit()
+    if commit:
+        db.commit()
     return {"recorded": True, "draft_id": did}
 
 
-def record_return_to_ai(db, account_id: str, avito_chat_id: str, actor_id: str = "") -> dict:
+def record_return_to_ai(db, account_id: str, avito_chat_id: str, actor_id: str = "", commit: bool = True) -> dict:
     from sqlalchemy import text as _sql
     row = db.execute(_sql("""
         SELECT id FROM mop_drafts
          WHERE account_id=:a AND avito_chat_id=:c
-         ORDER BY COALESCE(updated_at,created_at) DESC,id DESC LIMIT 1
+         ORDER BY COALESCE(updated_at,created_at) DESC,id DESC LIMIT 1 FOR UPDATE
     """), {"a": str(account_id), "c": str(avito_chat_id)}).first()
     if not row:
         return {"recorded": False, "reason": "no_draft"}
@@ -2031,5 +2303,6 @@ def record_return_to_ai(db, account_id: str, avito_chat_id: str, actor_id: str =
         payload="employee explicitly returned dialog to MOP",
         meta={"policy_version": "MOP_HUMAN_TAKEOVER_V1", "external_action": False},
     )
-    db.commit()
+    if commit:
+        db.commit()
     return {"recorded": True, "draft_id": did}

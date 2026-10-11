@@ -498,6 +498,14 @@ def analyze_call(account_id: str, body: dict = Body(...)):
         return {"status": "not_ready", "message": "Запись ещё не готова (появляется до 30 мин после звонка)"}
     if code != 200 or not audio:
         return {"status": "error", "code": code, "message": "запись недоступна"}
+    _pilot_minutes = _mins
+    if _rop_owner_pilot_balance(account_id, "rop_seconds") is not None:
+        # Client body.minutes is not authority for a finite pilot quota.
+        # Unknown provider duration stays closed before ASR.
+        _pilot_minutes = _talk_minutes(token, call_id, account_id=account_id)
+    _pilot_reservation = _rop_owner_pilot_call_reserve(account_id, call_id, _pilot_minutes)
+    if not _pilot_reservation.get("allowed"):
+        return {"status": "no_minutes", "message": _pilot_reservation.get("reason") or "pilot_quota"}
     ext = "mp3" if "mpeg" in ctype or "mp3" in ctype else "wav"
     try:
         transcript = _asr_fix(account_id, _transcribe(audio, f"call_{call_id}.{ext}", _asr_hint(account_id), account_id))
@@ -745,6 +753,11 @@ def calltracking_report(account_id: str, date_from: str = None, date_to: str = N
         managers.append(m)
     managers.sort(key=lambda x: -x["total"])
 
+    _pilot_report_intent = "calls-report:" + str(date_from) + ":" + str(date_to) + ":" + str(max_calls)
+    _pilot_report = _rop_owner_pilot_reserve(account_id, "rop_reports_calls", 1, _pilot_report_intent)
+    if not _pilot_report.get("allowed"):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=402, content={"status": "no_reports", "reason": _pilot_report.get("reason")})
     totals = {"total": total, "answered": answered, "missed": missed, "minutes": total_min}
     recs = _report_recommendations(account_id, managers, totals)
 
@@ -769,6 +782,9 @@ def calltracking_report(account_id: str, date_from: str = None, date_to: str = N
                 break
             rc, audio, ctype = _get_record(token, cid)
             if rc != 200 or not audio:
+                continue
+            _pilot_call = _rop_owner_pilot_call_reserve(account_id, cid, g(c, "talkDuration", 0) / 60)
+            if not _pilot_call.get("allowed"):
                 continue
             ext = "mp3" if ("mpeg" in ctype or "mp3" in ctype) else "wav"
             tr = _asr_fix(account_id, _transcribe(audio, f"call_{cid}.{ext}", _asr_hint(account_id), account_id))
@@ -969,7 +985,8 @@ def calltracking_report(account_id: str, date_from: str = None, date_to: str = N
     _WHTML(string=html).write_pdf(out)
     out.seek(0)
     fname = f"otchet_zvonki_{date_from[:10]}_{date_to[:10]}.pdf"
-    consume_rop_report(account_id, "calls")
+    if not _pilot_report.get("owner_pilot"):
+        consume_rop_report(account_id, "calls")
     try:
         _tg_notify(account_id, f"\U0001F4C4 Готов отчёт по звонкам\n\nПериод: {date_from[:10]} \u2014 {date_to[:10]}\nЗвонков: {total} \u00b7 разобрано: {len(call_reviews)}\n\nСкачать можно в кабинете: Продажи \u2192 РОП \u2192 Отчёты", topic="sales")
     except Exception as _suppressed_exc:
@@ -1242,6 +1259,9 @@ def _is_owner_account(account_id: str) -> bool:
 
 def get_rop_minutes(account_id: str) -> dict:
     """Остаток пакета минут РОП. У владельца — безлимит."""
+    _pilot_balance = _rop_owner_pilot_balance(account_id, 'rop_seconds')
+    if _pilot_balance is not None:
+        return _pilot_balance
     if _is_own_account(account_id):
         return {"purchased": 0, "used": 0, "left": 999999, "active": True, "unlimited": True}
     import json as _j
@@ -1316,32 +1336,27 @@ def minutes_balance(account_id: str):
 
 
 # ============ ЛИМИТ ОТЧЁТОВ РОП (30 по звонкам + 30 по перепискам) ============
-def _billing_get(account_id: str) -> dict:
+def _billing_get(account_id: str, db=None) -> dict:
     import json as _j
     from app.db.session import SessionLocal
     from app.models.storage import Storage
-    db = SessionLocal()
+    owned_db = db is None
+    db = db or SessionLocal()
     try:
         row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "billing").first()
         if not row: return {}
         try: return _j.loads(row.value)
         except Exception: return {}
     finally:
-        db.close()
+        if owned_db:
+            db.close()
 
 
-def _billing_set(account_id: str, data: dict):
-    import json as _j
-    from app.db.session import SessionLocal
-    from app.models.storage import Storage
-    db = SessionLocal()
-    try:
-        row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "billing").first()
-        if row: row.value = _j.dumps(data, ensure_ascii=False)
-        else: db.add(Storage(account_id=account_id, key="billing", value=_j.dumps(data, ensure_ascii=False)))
-        db.commit()
-    finally:
-        db.close()
+def _billing_set(account_id: str, data: dict, *, db=None, commit: bool = True):
+    # Canonical merge preserves newer owner_pilot metadata across paid ROP writes.
+    from app.api.billing import _save_billing
+    return _save_billing(account_id, {k: v for k, v in data.items() if k != "owner_pilot"},
+                         db=db, commit=commit)
 
 
 def add_rop_reports(account_id: str, amount: int) -> dict:
@@ -1354,6 +1369,9 @@ def add_rop_reports(account_id: str, amount: int) -> dict:
 
 def get_rop_reports(account_id: str, kind: str = "calls") -> dict:
     """Остаток отчётов: kind='calls' (звонки) или 'chats' (переписки). У владельца — безлимит."""
+    _pilot_balance = _rop_owner_pilot_balance(account_id, "rop_reports_" + str(kind))
+    if _pilot_balance is not None:
+        return _pilot_balance
     if _is_own_account(account_id):
         return {"purchased": 0, "used": 0, "left": 999999, "active": True, "unlimited": True}
     d = _billing_get(account_id)
@@ -1365,8 +1383,12 @@ def get_rop_reports(account_id: str, kind: str = "calls") -> dict:
             "active": (purchased - used) > 0}
 
 
-def consume_rop_report(account_id: str, kind: str = "calls") -> bool:
+def consume_rop_report(account_id: str, kind: str = "calls", idempotency_key=None) -> bool:
     """Списывает один отчёт. False — если лимит исчерпан."""
+    trial = _rop_owner_pilot_balance(account_id, "rop_reports_" + str(kind))
+    if trial is not None:
+        return bool(_rop_owner_pilot_reserve(
+            account_id, "rop_reports_" + str(kind), 1, idempotency_key).get("allowed"))
     if _is_own_account(account_id):
         return True
     b = get_rop_reports(account_id, kind)
@@ -1408,6 +1430,12 @@ def _rop_period(account_id: str) -> dict:
     """Текущий период пакета РОП."""
     from datetime import datetime
     d = _billing_get(account_id)
+    from app.api.billing import owner_pilot_state, owner_pilot_paid_scope_readback
+    if not owner_pilot_paid_scope_readback(d)["rop"]["covered"]:
+        pilot = owner_pilot_state(d)
+        if pilot.get("configured") and "rop" in pilot.get("services", []):
+            return {"active": bool(pilot["active"]), "start": pilot["starts_at"],
+                    "until": pilot["expires_at"], "owner_pilot": True, "days_left": 0}
     st, un = d.get("rop_period_start"), d.get("rop_paid_until")
     if not st or not un:
         return {"active": False, "start": None, "until": None, "days_left": 0}
@@ -1423,6 +1451,8 @@ def _rop_period(account_id: str) -> dict:
 
 def _add_overflow_minutes(account_id: str, n: float = 1.0):
     """Списывает n минут за то, что израсходовано сверх своего лимита (переписка или отчёт)."""
+    if _rop_owner_pilot_balance(account_id, "rop_seconds") is not None:
+        return False
     try:
         d = _billing_get(account_id)
         d["rop_overflow_minutes"] = float(d.get("rop_overflow_minutes", 0) or 0) + float(n)
@@ -1433,6 +1463,9 @@ def _add_overflow_minutes(account_id: str, n: float = 1.0):
 
 def get_rop_chats(account_id: str) -> dict:
     """Пакет разборов переписок: куплено / израсходовано за период / остаток."""
+    _pilot_balance = _rop_owner_pilot_balance(account_id, 'rop_chats')
+    if _pilot_balance is not None:
+        return _pilot_balance
     if _is_own_account(account_id):
         return {"purchased": 999999, "used": 0, "left": 999999, "unlimited": True}
     d = _billing_get(account_id)
@@ -1452,27 +1485,46 @@ def get_rop_chats(account_id: str) -> dict:
     return {"purchased": purchased, "used": used, "left": max(0, purchased - used), "unlimited": False}
 
 
-def add_rop_package(account_id: str, minutes: int = 0, chats: int = 0, rep_calls: int = 0, rep_chats: int = 0, days: int = 0):
+def add_rop_package(account_id: str, minutes: int = 0, chats: int = 0, rep_calls: int = 0, rep_chats: int = 0, days: int = 0, *, db=None, commit: bool = True):
     """days>0 — базовый пакет: новый период, счётчики с нуля. days=0 — докупка внутрь текущего периода."""
-    from datetime import datetime, timedelta
-    d = _billing_get(account_id)
-    if days > 0:
-        now = datetime.utcnow()
-        d["rop_period_start"] = now.isoformat()
-        d["rop_paid_until"] = (now + timedelta(days=int(days))).isoformat()
-        d["rop_minutes_purchased"] = int(minutes)
-        d["rop_chats_purchased"] = int(chats)
-        d["rop_reports_purchased_calls"] = int(rep_calls)
-        d["rop_reports_purchased_chats"] = int(rep_chats)
-        d["rop_overflow_minutes"] = 0
-        d["rop_reports_used_calls"] = 0
-        d["rop_reports_used_chats"] = 0
-    else:
-        for k, v in (("rop_minutes_purchased", minutes), ("rop_chats_purchased", chats),
-                     ("rop_reports_purchased_calls", rep_calls), ("rop_reports_purchased_chats", rep_chats)):
-            d[k] = int(d.get(k, 0) or 0) + int(v)
-    _billing_set(account_id, d)
-    return d
+    if db is None and not commit:
+        raise ValueError("caller_db_required_for_no_commit")
+    from app.db.session import SessionLocal
+    from sqlalchemy import text as _grant_sql
+    owned_db = db is None
+    db = db or SessionLocal()
+    try:
+        if not db.execute(_grant_sql("SELECT account_id FROM accounts WHERE account_id=:a FOR UPDATE"),
+                          {"a":str(account_id)}).first():
+            raise ValueError("account_not_found")
+        from datetime import datetime, timedelta
+        d = _billing_get(account_id, db=db)
+        if days > 0:
+            now = datetime.utcnow()
+            d["rop_period_start"] = now.isoformat()
+            d["rop_paid_until"] = (now + timedelta(days=int(days))).isoformat()
+            d["rop_minutes_purchased"] = int(minutes)
+            d["rop_chats_purchased"] = int(chats)
+            d["rop_reports_purchased_calls"] = int(rep_calls)
+            d["rop_reports_purchased_chats"] = int(rep_chats)
+            d["rop_overflow_minutes"] = 0
+            d["rop_reports_used_calls"] = 0
+            d["rop_reports_used_chats"] = 0
+        else:
+            for k, v in (("rop_minutes_purchased", minutes), ("rop_chats_purchased", chats),
+                         ("rop_reports_purchased_calls", rep_calls), ("rop_reports_purchased_chats", rep_chats)):
+                d[k] = int(d.get(k, 0) or 0) + int(v)
+        _billing_set(account_id, d, db=db, commit=False)
+        if commit:
+            db.commit()
+        return d
+    except Exception:
+        if owned_db:
+            db.rollback()
+        raise
+    finally:
+        if owned_db:
+            db.close()
 
 
 @router.get("/limits")
@@ -1689,6 +1741,10 @@ def chats_report(account_id: str, days: int = 30, max_chats: int = 15, owner: bo
     if not chats:
         return JSONResponse(status_code=404, content={"status": "empty", "message": "Нет диалогов для разбора"})
 
+    _pilot_report_intent = "chats-report:" + str(days) + ":" + str(max_chats) + ":" + datetime.datetime.utcnow().date().isoformat()
+    _pilot_report = _rop_owner_pilot_reserve(account_id, "rop_reports_chats", 1, _pilot_report_intent)
+    if not _pilot_report.get("allowed"):
+        return JSONResponse(status_code=402, content={"status": "no_reports", "reason": _pilot_report.get("reason")})
     reviews = []
     _day_used = _chat_day_used(account_id)
     _day_stop = False
@@ -1706,6 +1762,11 @@ def chats_report(account_id: str, days: int = 30, max_chats: int = 15, owner: bo
                     continue
             if _day_used >= _CHAT_DAY_LIMIT:
                 _day_stop = True
+                continue
+            _pilot_chat = _rop_owner_pilot_reserve(
+                account_id, "rop_chats", 1, "chat-analysis:" + str(ch["chat_id"]))
+            if not _pilot_chat.get("allowed"):
+                _pack_stop = True
                 continue
             an = _analyze_chat(ch["convo"], account_id, provenance={"source":"calltracking_chat_analysis","chat_id":str(ch["chat_id"])})
             if an.get("error"):
@@ -1809,7 +1870,8 @@ def chats_report(account_id: str, days: int = 30, max_chats: int = 15, owner: bo
     out = io.BytesIO()
     _WHTML(string=html).write_pdf(out)
     out.seek(0)
-    consume_rop_report(account_id, "chats")
+    if not _pilot_report.get("owner_pilot"):
+        consume_rop_report(account_id, "chats")
     try:
         _tg_notify(account_id, f"\U0001F4AC Готов отчёт по перепискам\n\nДиалогов разобрано: {len(reviews)} \u00b7 средний балл: {avg}/100\n\nСкачать можно в кабинете: Продажи \u2192 РОП \u2192 Отчёты", topic="sales")
     except Exception as _suppressed_exc:
@@ -2637,3 +2699,38 @@ def analyzed_chats(account_id: str, days: int = 7, limit: int = 50):
                     "зоны_роста":a.get("growth_points") or [],"стоп_слова":a.get("stop_words") or [],
                     "советы_по_речи":a.get("speech_tips") or []})
     return {"status":"ok","переписки":out,"всего":len(out)}
+
+
+def _rop_owner_pilot_balance(account_id, resource):
+    from app.api.billing import owner_pilot_access, owner_pilot_paid_scope_readback
+    b = _billing_get(account_id)
+    if owner_pilot_paid_scope_readback(b)["rop"]["covered"]:
+        return None
+    trial = owner_pilot_access(b, "rop", resource=resource)
+    if not trial.get("configured") or not (
+            trial.get("selected") or "rop" in ((b.get("owner_pilot") or {}).get("services") or [])):
+        return None
+    divisor = 60 if resource == "rop_seconds" else 1
+    return {"purchased": trial["limit"] / divisor, "used": trial["used"] / divisor,
+            "left": trial["left"] / divisor, "active": bool(trial["allowed"]),
+            "expired": trial["state"] == "EXPIRED", "owner_pilot": True,
+            "unlimited": False, "until": trial.get("until"), "reason": trial.get("reason")}
+
+
+def _rop_owner_pilot_reserve(account_id, resource, amount, intent):
+    from app.api.billing import consume_owner_pilot_unit
+    trial = _rop_owner_pilot_balance(account_id, resource)
+    if trial is None:
+        return {"allowed": True, "owner_pilot": False}
+    return consume_owner_pilot_unit(account_id, resource, amount, idempotency_key=intent)
+
+
+def _rop_owner_pilot_call_reserve(account_id, call_id, minutes):
+    import math
+    try:
+        seconds = int(math.ceil(float(minutes) * 60))
+    except (TypeError, ValueError, OverflowError):
+        seconds = 0
+    return _rop_owner_pilot_reserve(account_id, "rop_seconds", seconds,
+                                     "call-analysis:" + str(call_id))
+

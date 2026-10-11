@@ -259,6 +259,45 @@ def _enrich(db, rid, account_id=None, audio_seconds=None):
         _log.warning("[usage] контекст не дописан: %s", str(e)[:150])
 
 
+def _usage_provenance(usage_details=None):
+    details = usage_details if isinstance(usage_details, dict) else {}
+    prov = {}
+    try:
+        from app.services.job_execution_clock import current_job_provenance
+        job_prov = current_job_provenance() or {}
+    except (ImportError, AttributeError):
+        job_prov = {}
+
+    def merge(values):
+        if not isinstance(values, dict):
+            return
+        for key, value in values.items():
+            if not isinstance(value, (str, int, float, bool)) and value is not None:
+                continue
+            clean_key = str(key)[:64]
+            if clean_key.lower() in {"token","secret","password","authorization","api_key","api_secret"}:
+                continue
+            prov[clean_key] = (str(value)[:256] if isinstance(value, str) else value)
+
+    merge(job_prov)
+    intent = details.get("boris_intent_key")
+    if isinstance(intent, (str, int, float, bool)) and str(intent).strip():
+        prov["intent_key"] = str(intent)[:192]
+    merge(details.get("boris_provenance"))
+
+    if prov.get("item_id") and not prov.get("campaign_item_id"):
+        try:
+            canonical_item_id = int(prov.get("item_id"))
+        except (TypeError, ValueError):
+            canonical_item_id = 0
+        if canonical_item_id > 0:
+            prov["campaign_item_id"] = canonical_item_id
+
+    if str(prov.get("job_kind") or "").startswith("campaign_") and not prov.get("campaign_id"):
+        prov["attribution_missing"] = "campaign_id"
+    return prov
+
+
 def log_usage(account_id, provider, model=None, operation=None,
               prompt_tokens=0, completion_tokens=0, images=0,
               cost_rub=None, request_id=None, size=None, quality=None,
@@ -292,19 +331,7 @@ def log_usage(account_id, provider, model=None, operation=None,
         # remain excluded; this is a compact extension of the canonical api_usage
         # ledger so a paid call can be traced to its campaign/item/intent later.
         _details = usage_details if isinstance(usage_details, dict) else {}
-        _prov = {}
-        _intent = _details.get("boris_intent_key")
-        if isinstance(_intent, (str, int, float, bool)) and str(_intent).strip():
-            _prov["intent_key"] = str(_intent)[:192]
-        _raw_prov = _details.get("boris_provenance")
-        if isinstance(_raw_prov, dict):
-            for _k, _v in _raw_prov.items():
-                if not isinstance(_v, (str, int, float, bool)) and _v is not None:
-                    continue
-                _key = str(_k)[:64]
-                if _key.lower() in {"token","secret","password","authorization","api_key","api_secret"}:
-                    continue
-                _prov[_key] = (str(_v)[:256] if isinstance(_v, str) else _v)
+        _prov = _usage_provenance(_details)
         db = UsageSession()
         try:
             row=db.execute(text("""INSERT INTO api_usage
@@ -323,6 +350,34 @@ def log_usage(account_id, provider, model=None, operation=None,
                 if existing and existing[0] is not None:
                     cost=float(existing[0])
             db.commit()
+            if row is not None and _prov.get("attribution_missing"):
+                try:
+                    from app.services.reliability import record_event
+                    record_event(
+                        db,
+                        module="campaign_cost",
+                        event_type="cost_attribution_missing",
+                        severity="warning",
+                        account_id=str(account_id or "") or None,
+                        message="Campaign provider usage missing required provenance",
+                        details={
+                            "request_id": str(rid)[:128],
+                            "operation": str(operation or "")[:128],
+                            "provider": str(provider or "")[:96],
+                            "job_id": _prov.get("job_id"),
+                            "job_kind": _prov.get("job_kind"),
+                            "stage": _prov.get("stage"),
+                            "missing": _prov.get("attribution_missing"),
+                        },
+                    )
+                    db.commit()
+                except Exception as _incident_exc:
+                    observe_suppressed(__name__, _incident_exc, line=374)
+                    try:
+                        db.rollback()
+                    except Exception as _rollback_exc:
+                        observe_suppressed(__name__, _rollback_exc, line=377)
+                    _log.warning("[usage] cost attribution incident not recorded: %s", str(_incident_exc)[:150])
             _enrich(db, rid, account_id, audio_seconds)
         finally:
             db.close()

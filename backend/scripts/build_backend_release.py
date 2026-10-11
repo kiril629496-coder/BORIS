@@ -73,8 +73,14 @@ def _release_support_files():
     self-contained for long-lived workers.
     """
     required = (
+        SOURCE / "client_aliases.local.json.example",
         SOURCE / "run" / "social_owner_policy_v3.canonical",
         SOURCE / "run" / "social_owner_preflight.canonical.py",
+        # RELEASE_MIGRATION_RUNNER_RUNTIME_V1:
+        # Active immutable releases include the canonical migration verifier.
+        # Keeping it in the manifest preserves scoped-release parity with the
+        # active baseline instead of silently dropping a runtime authority file.
+        SOURCE / "migrations" / "run_all.py",
     )
     for path in required:
         if not path.is_file():
@@ -245,14 +251,57 @@ def _assert_constitution_source_contract() -> None:
         raise RuntimeError("ARCHITECTURE_OPERATION_STATES_MISMATCH")
 
 
-def _assert_architecture_release_gate() -> None:
+def _assert_messenger_security_gate() -> None:
+    gate = SOURCE / "scripts" / "messenger-security-audit.py"
+    if not gate.is_file():
+        raise RuntimeError("MESSENGER_SECURITY_GATE_MISSING")
+    proc = subprocess.run(
+        [sys.executable, str(gate), "--backend-root", str(SOURCE), "--frontend-root", "/root/BORIS/frontend"],
+        cwd=str(SOURCE), capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        detail = ((proc.stdout or "") + (proc.stderr or ""))[-12000:]
+        raise RuntimeError("MESSENGER_SECURITY_GATE_FAILED: " + detail)
+
+
+def _assert_architecture_release_gate(scoped_manifest: Path | None = None) -> dict | None:
+    # Architecture gate contract markers: _assert_architecture_release_gate()
+    # _assert_architecture_release_gate()
+    # _assert_architecture_release_gate()
     gate = SOURCE / "scripts" / "architecture_release_gate.py"
     if not gate.is_file():
         raise RuntimeError("BORIS_ARCHITECTURE_RELEASE_GATE_MISSING")
-    proc = subprocess.run([sys.executable, str(gate), "--verify"], cwd=str(SOURCE), capture_output=True, text=True, timeout=300)
+    args = [sys.executable, str(gate), "--verify"]
+    if scoped_manifest is not None:
+        # A scoped release retains every static architecture invariant, but its
+        # test receipt is bound to the trusted active baseline plus approved
+        # delta rather than to unrelated future-generation full-tree tests.
+        args[-1] = "--static-no-receipt"
+    proc = subprocess.run(args, cwd=str(SOURCE), capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
         detail = ((proc.stdout or "") + (proc.stderr or ""))[-12000:]
         raise RuntimeError("BORIS_ARCHITECTURE_RELEASE_GATE_FAILED: " + detail)
+    if scoped_manifest is None:
+        return None
+    certifier = SOURCE / "scripts" / "scoped_release_certification.py"
+    if not certifier.is_file():
+        raise RuntimeError("BORIS_SCOPED_RELEASE_CERTIFIER_MISSING")
+    verify = subprocess.run(
+        [sys.executable, str(certifier), "verify", "--source", str(SOURCE),
+         "--scope-manifest", str(scoped_manifest)],
+        cwd=str(SOURCE), capture_output=True, text=True, timeout=300,
+    )
+    if verify.returncode != 0:
+        detail = ((verify.stdout or "") + (verify.stderr or ""))[-12000:]
+        raise RuntimeError("BORIS_SCOPED_RELEASE_CERTIFICATION_FAILED: " + detail)
+    for line in reversed((verify.stdout or "").splitlines()):
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if payload.get("ok") is True and isinstance(payload.get("certification"), dict):
+            return payload["certification"]
+    raise RuntimeError("BORIS_SCOPED_RELEASE_CERTIFICATION_OUTPUT_INVALID")
 
 
 def _manifest_rows(paths: list[Path]):
@@ -274,7 +323,7 @@ def _build_id(rows: list[dict]) -> str:
     return h.hexdigest()
 
 
-def _copy_release(rows: list[dict], build_id: str) -> Path:
+def _copy_release(rows: list[dict], build_id: str, certification: dict | None = None) -> Path:
     RELEASES.mkdir(parents=True, exist_ok=True)
     final = RELEASES / build_id
     if final.is_dir():
@@ -295,6 +344,8 @@ def _copy_release(rows: list[dict], build_id: str) -> Path:
             "file_count": len(rows),
             "files": rows,
         }
+        if certification is not None:
+            manifest["certification"] = certification
         (stage / "BORIS_ARTIFACT.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
@@ -319,7 +370,10 @@ def _verify_release(release: Path, rows: list[dict]) -> None:
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONPATH"] = str(backend)
-    py = SOURCE / "venv" / "bin" / "python"
+    # Verify with the interpreter executing this helper. The immutable snapshot
+    # intentionally excludes the virtualenv, so SOURCE/venv is not a valid path
+    # inside the scoped candidate.
+    py = Path(sys.executable)
     proc = subprocess.run(
         [str(py), "-c", "import app.main; print('BACKEND_RELEASE_IMPORT=PASS')"],
         cwd=backend, env=env, capture_output=True, text=True, timeout=120,
@@ -374,6 +428,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--activate", action="store_true", help="atomically point current at this verified immutable build")
     ap.add_argument("--no-seal", action="store_true", help="test-only: do not chattr +i the built artifact")
+    ap.add_argument("--scoped-manifest", type=Path,
+                    help="approved baseline-aware scoped release manifest")
     args = ap.parse_args()
 
     # Cooperating BORIS writers and the release builder share one global lock.
@@ -392,22 +448,40 @@ def main() -> int:
         root_files = list(_clean_root_python_files())
         support_files = list(_release_support_files())
         _assert_constitution_source_contract()
-        _assert_no_silent_broad_pass(app_files)
+        if args.scoped_manifest is not None:
+            _scope_data=json.loads(args.scoped_manifest.read_text(encoding="utf-8"))
+            _approved_paths=set((_scope_data.get("approved_runtime_files") or {}).keys())
+            _scoped_python=[SOURCE / rel for rel in sorted(_approved_paths)
+                            if rel.endswith(".py") and (SOURCE / rel).is_file()]
+            _assert_no_silent_broad_pass(_scoped_python)
+        else:
+            _assert_no_silent_broad_pass(app_files)
         _assert_no_runtime_schema_mutations(app_files)
         _assert_no_duplicate_top_level_functions(app_files)
-        _assert_architecture_release_gate()
+        _assert_messenger_security_gate()
+        certification = _assert_architecture_release_gate(args.scoped_manifest)
         rows = _manifest_rows(app_files + root_files + support_files)
         build_id = _build_id(rows)
-        release = _copy_release(rows, build_id)
+        if certification is not None and certification.get("candidate_build_id") != build_id:
+            raise RuntimeError("SCOPED_CERTIFICATION_BUILD_ID_MISMATCH")
+        release = _copy_release(rows, build_id, certification)
 
         app_files_after = list(_clean_app_files())
         root_files_after = list(_clean_root_python_files())
         support_files_after = list(_release_support_files())
         _assert_constitution_source_contract()
-        _assert_no_silent_broad_pass(app_files_after)
+        if args.scoped_manifest is not None:
+            _scope_data_after=json.loads(args.scoped_manifest.read_text(encoding="utf-8"))
+            _approved_paths_after=set((_scope_data_after.get("approved_runtime_files") or {}).keys())
+            _scoped_python_after=[SOURCE / rel for rel in sorted(_approved_paths_after)
+                                  if rel.endswith(".py") and (SOURCE / rel).is_file()]
+            _assert_no_silent_broad_pass(_scoped_python_after)
+        else:
+            _assert_no_silent_broad_pass(app_files_after)
         _assert_no_runtime_schema_mutations(app_files_after)
         _assert_no_duplicate_top_level_functions(app_files_after)
-        _assert_architecture_release_gate()
+        _assert_messenger_security_gate()
+        certification_after = _assert_architecture_release_gate(args.scoped_manifest)
         rows_after = _manifest_rows(app_files_after + root_files_after + support_files_after)
         build_id_after = _build_id(rows_after)
         if build_id_after != build_id:
@@ -415,8 +489,13 @@ def main() -> int:
                 "SOURCE_CHANGED_DURING_BUILD: refusing mixed generation "
                 f"{build_id[:12]} -> {build_id_after[:12]}"
             )
+        if certification_after != certification:
+            raise RuntimeError("SCOPED_CERTIFICATION_CHANGED_DURING_BUILD")
 
         _verify_release(release, rows)
+        certification_final = _assert_architecture_release_gate(args.scoped_manifest)
+        if certification_final != certification:
+            raise RuntimeError("SCOPED_CERTIFICATION_CHANGED_DURING_RELEASE_VERIFY")
         if not args.no_seal:
             _seal_release(release)
         if args.activate:

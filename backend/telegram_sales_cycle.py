@@ -285,18 +285,12 @@ def run_cycle(run_id: str, started_monotonic: float, cycle_started_at: datetime,
         stages['queue']=124; stages['queue_sec']=120
 
     try:
-        _r=run('replies', ['telegram_sales_replies.py'], 180); results.append(_r); stages['replies']=_r[0]; stages['replies_sec']=_r[2]
+        _r=run('replies', ['telegram_sales_replies.py'], 90); results.append(_r); stages['replies']=_r[0]; stages['replies_sec']=_r[2]
     except subprocess.TimeoutExpired:
         print('[replies] timeout')
         results.append((124, 'timeout'))
-        stages['replies']=124; stages['replies_sec']=180
-
-    try:
-        _r=run('sender', ['hot_lead_auto_sender.py'], 120); results.append(_r); stages['sender']=_r[0]; stages['sender_sec']=_r[2]
-    except subprocess.TimeoutExpired:
-        print('[sender] timeout')
-        results.append((124, 'timeout'))
-        stages['sender']=124; stages['sender_sec']=120
+        stages['replies']=124; stages['replies_sec']=90
+    stages['reply_pipeline_degraded']=1 if int(stages.get('replies',0) or 0)!=0 else 0
 
     # The current cycle itself is the candidate PASS, so its health stage must
     # not require an older completed cycle PASS. Standalone health/watchdog runs
@@ -316,7 +310,10 @@ def run_cycle(run_id: str, started_monotonic: float, cycle_started_at: datetime,
     # A production PASS means the whole core chain completed. Telegram-side
     # transient failures are retried by the timer, but must still be visible as
     # DEGRADED instead of being hidden behind a successful sender step.
-    critical_order=('scheduler_guard','discovery','identity_repair','rank_sources','scan','queue','replies','sender','health')
+    # Reply ingestion is isolated from the fresh outbound contract. A slow
+    # historical reply scan remains visible in details but cannot mark the
+    # revenue-critical send cycle failed after scan/queue/send/health succeeded.
+    critical_order=('scheduler_guard','discovery','identity_repair','rank_sources','scan','queue','sender','health')
     final_rc=0
     for stage in critical_order:
         rc=int(stages.get(stage,0) or 0)
@@ -364,6 +361,17 @@ def main() -> int:
     initial_stages={}
     scheduler_rc, _scheduler_detail = scheduler_conflict_guard()
     initial_stages['scheduler_guard']=scheduler_rc
+
+    # Revenue-critical fast lane: consume an already-qualified ready lead before
+    # discovery/scan. Slow discovery refreshes the NEXT cycle but cannot delay
+    # today's send quota.
+    try:
+        rc, out, sec = run('sender', ['hot_lead_auto_sender.py'], 120)
+        initial_stages['sender']=rc; initial_stages['sender_sec']=sec
+    except subprocess.TimeoutExpired:
+        initial_stages['sender']=124; initial_stages['sender_sec']=120
+        print('[sender] timeout')
+
     try:
         rc, out, sec = run('discovery', ['monitor_source_discovery.py', '--apply', '--dialogs', '0', '--messages', '0'], 600)
         initial_stages['discovery']=rc; initial_stages['discovery_sec']=sec

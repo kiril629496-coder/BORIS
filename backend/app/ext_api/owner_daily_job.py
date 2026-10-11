@@ -15,6 +15,20 @@ from sqlalchemy import text
 from app.api.inbox_daily import MSK, SessionLocal, _active_owner_accounts, send_owner_daily_report
 
 
+def _sweep_client_pilot_lifecycle():
+    """Run the idempotent pilot notification sweep on every 15-minute timer tick."""
+    try:
+        from app.services.client_pilot_lifecycle import sweep_client_pilots
+        return sweep_client_pilots()
+    except Exception as exc:
+        # Pilot notification delivery must never suppress the ordinary owner
+        # report. Surface the failure in the scheduler result and retry next tick.
+        return {
+            "status": "error",
+            "error": type(exc).__name__ + ":" + str(exc)[:180],
+        }
+
+
 def _already_sent(report_date, slot):
     db = SessionLocal()
     try:
@@ -25,6 +39,18 @@ def _already_sent(report_date, slot):
             "SELECT status FROM owner_daily_report_delivery_slots WHERE report_date=:d AND slot=:s"
         ), {"d": report_date, "s": slot}).scalar()
         return status == "ok"
+    finally:
+        db.close()
+
+
+def _has_previous_daily_stats(account_id: str) -> bool:
+    """A stale snapshot is safer than dropping the whole owner report."""
+    db = SessionLocal()
+    try:
+        return bool(db.execute(text(
+            "SELECT 1 FROM storage WHERE account_id=:a "
+            "AND key LIKE 'daily_stats:%' ORDER BY id DESC LIMIT 1"
+        ), {"a": str(account_id)}).first())
     finally:
         db.close()
 
@@ -46,9 +72,12 @@ def _refresh_avito_sources(report_date):
             if result.get('status') != 'ok':
                 message = result.get('message') or result.get('status')
                 preserved_previous = bool(
-                    result.get('status') == 'degraded'
-                    and result.get('retryable')
-                    and 'предыдущая статистика сохранена' in str(message or '').lower()
+                    (
+                        result.get('status') == 'degraded'
+                        and result.get('retryable')
+                        and 'предыдущая статистика сохранена' in str(message or '').lower()
+                    )
+                    or _has_previous_daily_stats(account_id)
                 )
                 errors.append({
                     'account_id': account_id,
@@ -61,12 +90,21 @@ def _refresh_avito_sources(report_date):
                 })
                 continue
             if spending.get('status') != 'ok' or spending.get('date') != report_date.isoformat():
-                errors.append({'account_id': account_id, 'reason': 'spendings_not_fresh',
-                               'spending_status': spending.get('status'), 'spending_date': spending.get('date')})
+                errors.append({
+                    'account_id': account_id,
+                    'reason': 'spendings_not_fresh',
+                    'spending_status': spending.get('status'),
+                    'spending_date': spending.get('date'),
+                    'preserved_previous': _has_previous_daily_stats(account_id),
+                })
                 continue
             refreshed.append(account_id)
         except Exception as exc:
-            errors.append({'account_id': account_id, 'reason': type(exc).__name__})
+            errors.append({
+                'account_id': account_id,
+                'reason': type(exc).__name__,
+                'preserved_previous': _has_previous_daily_stats(account_id),
+            })
     degraded_only = bool(errors) and all(
         bool(item.get('preserved_previous')) for item in errors
     )
@@ -80,9 +118,11 @@ def _refresh_avito_sources(report_date):
 
 
 def main():
+    pilot_lifecycle = _sweep_client_pilot_lifecycle()
     now = dt.datetime.now(tz=MSK)
     if now.hour < 9:
-        print(json.dumps({'status': 'idle', 'reason': 'before_09_msk', 'now': now.isoformat()}, ensure_ascii=False))
+        print(json.dumps({'status': 'idle', 'reason': 'before_09_msk', 'now': now.isoformat(),
+                          'pilot_lifecycle': pilot_lifecycle}, ensure_ascii=False))
         return 0
     slot = 'morning' if now.hour < 17 else 'evening'
     report_date = now.date()

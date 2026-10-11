@@ -356,6 +356,7 @@ RECOVERABLE_REGISTRATION_CHECKPOINTS = {
     "login_failed",
     "login_result_unclear",
     "registration_adapter_error",
+    "registration_gateway_error",
     "preflight_timeout",
 }
 
@@ -925,49 +926,95 @@ def _fresh_rule_snapshot(platform: str) -> dict:
     return {"allowed": False, "reason": f"rules_{decision or 'unknown'}", "decision": decision, "checked_at": snap.get("checked_at")}
 
 def validate_publication_content(draft: dict) -> dict:
-    """Global content/landing guard used by every publication channel."""
-    title=str(draft.get("title") or "")
-    body=str(draft.get("text") or "")
-    target=str(draft.get("target_url") or "").strip()
-    combined=f"{title}\n{body}".casefold()
+    """Global content/landing guard used by every publication channel.
 
-    paragraphs=[x.strip() for x in re.split(r"\n\s*\n", body) if x.strip()]
-    last=paragraphs[-1] if paragraphs else ""
-    m=re.match(r"^(?:Ключевые фразы|Keyword phrases):\s*(.+)$", last, re.I|re.S)
-    if not m:
-        return {"ok":False,"reason":"keyword_block_not_last"}
-    keywords=[x.strip().strip(".") for x in m.group(1).split(";") if x.strip()]
+    Crowd SEO drafts are host-bound. A draft may target only the same host as
+    its project/site_url. The retired BORIS /software-dev tree is redirect-only
+    and must never receive fresh backlinks for SYSTEMS.
+    """
+    title = str(draft.get("title") or "")
+    body = str(draft.get("text") or "")
+    target = str(draft.get("target_url") or "").strip()
+    site_url = str(draft.get("site_url") or "").strip()
+    combined = f"{title}\n{body}".casefold()
+
+    # Prefer structured keyword evidence so publication copy does not need a
+    # visible SEO keyword dump. Legacy drafts with a final keyword paragraph
+    # remain supported for backward compatibility.
+    structured = draft.get("keyword_phrases")
+    keywords = []
+    if isinstance(structured, list):
+        seen = set()
+        for value in structured:
+            text = str(value or "").strip().strip(".")
+            key = text.casefold()
+            if text and key not in seen:
+                seen.add(key)
+                keywords.append(text)
+    if not keywords:
+        paragraphs = [x.strip() for x in re.split(r"\n\s*\n", body) if x.strip()]
+        last = paragraphs[-1] if paragraphs else ""
+        m = re.match(r"^(?:Ключевые фразы|Keyword phrases):\s*(.+)$", last, re.I | re.S)
+        if not m:
+            return {"ok": False, "reason": "keyword_block_not_last"}
+        keywords = [x.strip().strip(".") for x in m.group(1).split(";") if x.strip()]
     if not (10 <= len(keywords) <= 20):
-        return {"ok":False,"reason":"keyword_count_invalid","keyword_count":len(keywords)}
+        return {"ok": False, "reason": "keyword_count_invalid", "keyword_count": len(keywords)}
 
-    product_markers=(
-        "готовые модули","готовая crm","ии-менеджер","автозагрузка avito",
-        "автоматизация avito","яндекс директ","реактивация клиентской базы",
-        "коллтрекинг","сквозная аналитика","мультиаккаунт","панель руководителя",
+    target_host = (urlparse(target).hostname or "").lower().removeprefix("www.")
+    site_host = (urlparse(site_url).hostname or "").lower().removeprefix("www.") if site_url else ""
+    if not target.startswith(("https://", "http://")) or not target_host:
+        return {"ok": False, "reason": "invalid_target_landing", "target": target}
+    if site_host and target_host != site_host:
+        return {
+            "ok": False,
+            "reason": "target_host_mismatch",
+            "target_host": target_host,
+            "site_host": site_host,
+        }
+
+    if target_host == "boris-ai.pro" and "/software-dev" in urlparse(target).path:
+        return {"ok": False, "reason": "retired_software_dev_target_forbidden", "target": target}
+
+    product_markers = (
+        "boris ai", "ai-маркетолог", "ai маркетолог", "ai-менеджер", "ai менеджер",
+        "ai-моп", "ai-роп", "crm", "авито", "avito", "автоматизация рекламы",
+        "сквозная аналитика", "телефония", "реактивац", "лид",
     )
-    looks_product=any(x in combined for x in product_markers)
-    looks_development=any(x in combined for x in (
-        "разработ","под заказ","создаём","создаем","создание собственной",
-        "кастомн","mvp","web app","saas","api-интеграц","api интеграц",
-        "development","custom development","integration development",
-    ))
+    development_markers = (
+        "разработ", "под заказ", "создаём", "создаем", "создание собственной",
+        "кастомн", "mvp", "web app", "saas", "api-интеграц", "api интеграц",
+        "development", "custom development", "integration development",
+        "telegram", "telegram-бот", "telegram бот", "1с", "интеграц",
+    )
+    avito_service_markers = (
+        "авитолог", "авито", "avito", "продвиж", "ведение", "аудит",
+        "объявлен", "реклам", "заяв", "продаж",
+    )
+    looks_product = any(x in combined for x in product_markers)
+    looks_development = any(x in combined for x in development_markers)
+    looks_avito_service = any(x in combined for x in avito_service_markers)
 
-    if target.rstrip("/") == "https://boris-ai.pro/software-dev":
-        return {"ok":False,"reason":"generic_software_dev_landing_forbidden"}
-
-    if "/software-dev/services/" in target:
-        if looks_product and not looks_development:
-            return {"ok":False,"reason":"product_copy_on_development_landing"}
+    if target_host == "systems-ai-oko.ru":
         if not looks_development:
-            return {"ok":False,"reason":"development_landing_without_development_intent"}
-        return {"ok":True,"family":"development","keyword_count":len(keywords)}
+            return {"ok": False, "reason": "development_landing_without_development_intent"}
+        return {"ok": True, "family": "development", "keyword_count": len(keywords)}
 
-    if target.rstrip("/") == "https://boris-ai.pro":
+    if target_host == "boris-ai.pro":
         if looks_development and not looks_product:
-            return {"ok":False,"reason":"development_copy_on_product_landing"}
-        return {"ok":True,"family":"product","keyword_count":len(keywords)}
+            return {"ok": False, "reason": "development_copy_on_product_landing"}
+        return {"ok": True, "family": "product", "keyword_count": len(keywords)}
 
-    return {"ok":False,"reason":"unsupported_target_landing","target":target}
+    if target_host == "avito-specialist.ru":
+        if not looks_avito_service:
+            return {"ok": False, "reason": "avito_landing_without_avito_intent"}
+        return {"ok": True, "family": "avito_service", "keyword_count": len(keywords)}
+
+    # Generic multi-client fallback. Other rule/relevance gates still apply.
+    if site_host and target_host == site_host:
+        return {"ok": True, "family": "client_same_host", "keyword_count": len(keywords)}
+
+    return {"ok": False, "reason": "unsupported_target_landing", "target": target}
 
 
 def mark_posted(draft_id: str, url: str) -> dict:
@@ -1548,7 +1595,8 @@ def _discovered_platform_objects() -> list[Platform]:
 def _publication_discovered_platform_objects() -> list[Platform]:
     """Strong non-forum publication candidates discovered at scale.
 
-    Only Yandex-IKS medium/high domains are admitted here. They still require a
+    Autonomous candidates are admitted regardless of IKS; human-assisted
+    candidates still require medium/high IKS. Every candidate still requires a
     rule audit before outreach is enabled; discovery alone never authorizes a
     post.
     """
@@ -1579,7 +1627,16 @@ def _publication_discovered_platform_objects() -> list[Platform]:
         )
         if duplicate_static:
             continue
-        if str(row.get("iks_tier") or "") not in {"high", "medium"}:
+        curated_direct = "curated_direct_verification" in set(row.get("search_engines") or [])
+        if (
+            str(row.get("delivery_lane") or "") != "autonomous_candidate"
+            and str(row.get("iks_tier") or "") not in {"high", "medium"}
+            and not (
+                curated_direct
+                and str(row.get("iks_tier") or "") == "low"
+                and int(row.get("iks") or 0) > 0
+            )
+        ):
             continue
 
         url = str(row.get("url") or "").strip()
@@ -1899,43 +1956,64 @@ VERIFIED_PUBLICATION_SURFACES = {
 
 
 def _publication_discovery_surface(candidate: dict) -> list[dict]:
-    """Convert only an exact own-listing route into the existing placement model."""
+    """Convert a proven direct authoring route into the placement model.
+
+    Discovery itself never authorizes publication: platform_policy still has to
+    pass the fresh rule audit. Vendor/SaaS/AI directories are intentionally IT
+    only, so they can help BORIS/SYSTEMS without polluting the Avito-specialist
+    marketing project with irrelevant product directories.
+    """
     if not candidate:
         return []
     url = str(candidate.get("url") or "").strip()
     kind = str(candidate.get("kind") or "").strip().lower()
-    if not url or kind not in {"catalog", "classified", "services", "ugc_article"}:
+    supported = {"catalog", "classified", "services", "ugc_article", "vendor_directory"}
+    if not url or kind not in supported:
         return []
+
+    evidence = {str(x) for x in (candidate.get("authoring_evidence") or [])}
+    if "authoring_route" not in evidence:
+        try:
+            from app.services import publication_discovery
+            _, detected = publication_discovery._authoring_score(
+                url,
+                str(candidate.get("title") or ""),
+                str(candidate.get("snippet") or ""),
+            )
+            evidence.update(str(x) for x in detected)
+        except Exception:
+            return []
+    if "authoring_route" not in evidence:
+        return []
+
     parsed = urlparse(url)
-    route = f"{parsed.path}?{parsed.query}".lower()
-    signal = " ".join([
-        str(candidate.get("title") or ""),
-        str(candidate.get("snippet") or ""),
-        route,
-    ]).lower()
-    own_listing_markers = (
-        "добавить компанию", "разместить компанию", "добавить организацию",
-        "подать бесплатное объявление", "разместить объявление бесплатно",
-        "add company", "add business", "create listing", "submit listing",
-    )
-    author_route_markers = (
-        "/company/create", "/cabinet/create", "/add-company", "/add_company",
-        "/post", "/add-listing", "/create-listing", "/submit-listing",
-    )
-    if not (
-        any(marker in signal for marker in own_listing_markers)
-        and any(marker in route for marker in author_route_markers)
-    ):
-        return []
+    configured_niches = [
+        str(x).strip().lower()
+        for x in (candidate.get("niches") or [])
+        if str(x).strip()
+    ]
+    if configured_niches:
+        niches = list(dict.fromkeys(configured_niches))
+        language = str(candidate.get("language") or "en").strip().lower() or "en"
+    elif kind == "vendor_directory":
+        niches = ["it"]
+        language = "en"
+    else:
+        niches = ["business", "services", "marketing", "it"]
+        language = "ru"
+
     return [{
         "id": "publication_discovery_own_listing",
         "name": str(candidate.get("title") or parsed.netloc)[:160],
         "url": url,
         "post_url": url,
-        "niches": ["it", "business", "services"],
+        "niches": niches,
         "required_terms": [],
-        "language": "ru",
-        "evidence": "Publication Discovery: exact same-domain own-listing route; rule audit still required.",
+        "language": language,
+        "evidence": (
+            f"Publication Discovery: {kind} exact same-domain authoring route; "
+            "fresh rule audit is still mandatory."
+        ),
     }]
 
 
@@ -1981,25 +2059,55 @@ def list_platforms():
         row["registration_terminal_blocked"] = registration_is_terminally_blocked(reg)
         row["registration_warming"] = registration_is_warming(reg)
         row["registration_recoverable"] = registration_is_recoverable(reg)
-        # PUBLICATION_READY_RESPECTS_REGISTRATION_CHECKPOINT_V1
-        # Non-forum direct-post surfaces may legitimately support guest posting,
-        # but once registration discovery has found an unresolved CAPTCHA,
-        # terms/SMS/SSO/phone checkpoint they are not publication-ready.
-        # Forum accounts remain strict: they must be fully ready.
+        publication_candidate = publication_candidates.get(p.key) or {}
+        for score_key in (
+            "quality_score", "seo_score", "relevance_score",
+            "publication_surface_score", "link_policy_score",
+            "autonomy_score", "friction_score", "acquisition_score",
+        ):
+            row[score_key] = publication_candidate.get(score_key)
+        row["delivery_lane"] = publication_candidate.get("delivery_lane") or (
+            "human_assisted" if p.key in publication_keys else None
+        )
+        row["autonomy_evidence"] = list(publication_candidate.get("autonomy_evidence") or [])
+        row["friction_evidence"] = list(publication_candidate.get("friction_evidence") or [])
+        # AUTONOMOUS_GUEST_READY_V1
+        # A rules-allowed exact authoring route with explicit no-account evidence
+        # can publish as a guest. Any observed checkpoint still fails closed.
+        explicit_guest_route = bool(
+            p.key in publication_keys
+            and row["delivery_lane"] == "autonomous_candidate"
+            and row["autonomy_evidence"]
+            and not row["friction_evidence"]
+        )
+        rule_requirements = set(row["free_policy"].get("rule_requirements") or [])
+        verified_guest_submission = bool(
+            explicit_guest_route
+            and "free_guest_submission_verified" in rule_requirements
+        )
         requires_ready_account = bool(
-            row["channel_type"] == "forum" or p.key in publication_keys
+            row["channel_type"] == "forum"
+            or (
+                p.key in publication_keys
+                and not verified_guest_submission
+            )
         )
         row["publication_ready"] = bool(
             row["enabled_for_outreach"]
             and (
                 row["registration_status"] == "ready"
+                or verified_guest_submission
                 or (
                     not requires_ready_account
                     and not row["registration_checkpoint"]
                 )
             )
         )
-        rule_requirements = set(row["free_policy"].get("rule_requirements") or [])
+        row["autonomous_ready"] = bool(
+            row["publication_ready"]
+            and explicit_guest_route
+            and verified_guest_submission
+        )
         row["publication_surfaces"] = [
             dict(x)
             for x in VERIFIED_PUBLICATION_SURFACES.get(p.key, [])
@@ -2068,6 +2176,8 @@ def registration_plan(email: str | None = None) -> list[dict]:
 HUMAN_PLATFORM_BOOTSTRAP_CHECKPOINTS = {
     "manual_verification": "Один раз пройти обычную регистрацию/вход на площадке",
     "captcha_required": "Пройти антибот-проверку площадки один раз",
+    "captcha_terms_registration_required": "Один раз создать аккаунт, принять условия площадки и пройти CAPTCHA",
+    "math_antibot_required": "Один раз пройти простой математический anti-bot challenge площадки",
     "captcha_age_and_terms_required": "Один раз пройти CAPTCHA, указать дату рождения и принять условия регистрации площадки",
     "captcha_age_declaration_required": "Один раз пройти CAPTCHA и самостоятельно указать требуемый площадкой возраст/дату рождения",
     "registration_agreement_required": "Один раз принять правила регистрации площадки",
@@ -2091,7 +2201,7 @@ HUMAN_PLATFORM_BOOTSTRAP_CHECKPOINTS = {
 # площадку в обычный verify -> READY/WARMING -> Crowd SEO поток.
 INTERACTIVE_BROWSER_CHECKPOINTS = {
     "manual_verification",
-    "captcha_required", "captcha_age_and_terms_required", "captcha_age_declaration_required",
+    "captcha_required", "captcha_terms_registration_required", "math_antibot_required", "captcha_age_and_terms_required", "captcha_age_declaration_required",
     "terms_acceptance_required", "registration_agreement_required",
     "age_and_terms_declaration_required", "age_declaration_required",
     "business_email_required", "real_identity_required",

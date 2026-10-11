@@ -42,3 +42,23 @@ class RuntimeGenerationCtimeGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_backend_generation_rejects_different_immutable_release_even_if_runtime_is_newer():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "runtime_source.py"
+        p.write_text("x=1\n", encoding="utf-8")
+        newest = max(p.stat().st_mtime, p.stat().st_ctime)
+        groups = {"backend_runtime_generation": (["boris-backend.service"], [p])}
+        missing_cert = Path(td) / "missing-content-cert"
+        active_id = C.BACKEND_ACTIVE_ROOT.parent.name
+        with (
+            patch.object(C, "RUNTIME_GROUPS", groups),
+            patch.object(C, "BACKEND_GENERATION_CERT", missing_cert),
+            patch.object(C, "_service_started_epoch", return_value=newest + 60.0),
+            patch.object(C, "_service_backend_release_id", return_value="different-build-id"),
+        ):
+            state, stale = C._runtime_generation_state()
+        assert active_id != "different-build-id"
+        assert state["backend_runtime_generation"] is False
+        assert stale["backend_runtime_generation"] == ["boris-backend.service"]

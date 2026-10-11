@@ -492,50 +492,10 @@ def _pending_mass_write_exists(account_id: str | None) -> bool:
         db.close()
 
 
-def _auto_release_hag_flow(rec: dict[str, Any]) -> None:
-    """Finish the HAG client task automatically once a safe Gateway is online.
-
-    Stage 1 retries exactly one pilot. Stage 2 releases the 578-item remainder
-    only after that pilot is durably verified after save/reopen.
-    """
-    account_id = str(rec.get("account_id") or "")
-    if account_id != "evgeniy_peregorodki_12447":
-        return
-    if rec.get("identity_verified") is not True or rec.get("identity_mismatch"):
-        return
-    if not _gateway_version_at_least(rec.get("extension_version")):
-        return
-    pilot_key = "mass_editor_job:massedit_hag_livepilot_8dc574b8e8c1"
-    main_key = "mass_editor_job:massedit_aa9a44f2122a"
-    pilot = _db_get(account_id, pilot_key) or {}
-    main = _db_get(account_id, main_key) or {}
-    if not pilot or not main:
-        return
-    pitems = pilot.get("items") or []
-    pilot_ok = bool(pitems) and all(str(x.get("run_status") or "") in {"verified", "verified_external"} for x in pitems)
-    if not pilot_ok:
-        active = str(pilot.get("status") or "") in {"waiting_gateway", "queued_gateway", "claimed_gateway", "running_gateway", "resume_gateway"}
-        if not active:
-            for item in pitems:
-                item["run_status"] = ""
-                item["attempts"] = 0
-                item["error"] = None
-                for k in ["changed_fields","verified_fields","save_trace","terminal_url","diagnostics","last_failed_at","duration_ms"]:
-                    item.pop(k, None)
-            pilot.update({"status":"waiting_gateway","processed":0,"changed":0,"verified":0,"skipped":0,"failed":0,"error":None,"gateway_id":None,"updated_at":_iso()})
-            pilot["route"] = {"executor":"browser_gateway","reason":"hag_2_1_11_autopilot_single_verified_pilot"}
-            pilot["metadata"] = {**(pilot.get("metadata") or {}), "diagnostic_capture": True, "autofinish": True}
-            _db_put(account_id, pilot_key, pilot)
-        return
-    if str(main.get("status") or "") in {"paused_pilot_validation", "paused_for_fix", "paused_gateway_upgrade"}:
-        main["status"] = "waiting_gateway"
-        main["error"] = None
-        main["gateway_id"] = None
-        main["updated_at"] = _iso()
-        main["route"] = {"executor":"browser_gateway","reason":"hag_pilot_verified_auto_release_remaining"}
-        main["metadata"] = {**(main.get("metadata") or {}), "autofinish": True, "pilot_job_id": pilot.get("job_id")}
-        _db_put(account_id, main_key, main)
-
+# Legacy HAG pilot/remainder state is intentionally never advanced from a
+# read/poll endpoint. A persisted paused job can only become dispatchable after
+# an explicit control-plane action changes its status through the normal job
+# lifecycle; alias resolution alone remains read-safe.
 
 def _mass_write_upgrade_state(rec: dict[str, Any]) -> dict[str, Any] | None:
     current = str(rec.get("extension_version") or "0")
@@ -570,7 +530,8 @@ def next_job(authorization: str | None = Header(default=None)):
             reason = "identity_mismatch" if rec.get("identity_mismatch") else "identity_verification_pending"
             return {"status": "blocked", "reason": reason, "retry_after_seconds": 30}
     else:
-        _auto_release_hag_flow(rec)
+        # Polling is a read/dispatch boundary: it must not change paused legacy
+        # jobs merely because an account alias now resolves to a live account.
         # Mass writes require the gateway build that knows how to commit Avito's
         # nested Characteristics drawer and then the main Save changes step.
         # Older builds may open the editor successfully but silently leave the

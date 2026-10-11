@@ -84,6 +84,8 @@ def _sanitize_question(value: str) -> str:
     s = re.sub(r"\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b", "[email]", s, flags=re.I)
     s = re.sub(r"(?:\+?7|8)[\s()\-]*\d{3}[\s\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}", "[телефон]", s)
     s = re.sub(r"\b\d[\d\s.,]{3,}\s*(?:₽|руб(?:лей|ля|\.?)?|тыс(?:яч[аи]?)?|млн|миллион\w*)", "[сумма]", s, flags=re.I)
+    s = re.sub(r"\b\d{1,3}(?:[ .]\d{3})+\b", "[сумма]", s)
+    s = re.sub(r"(?<!\w)(?:\+?\d[\d\s()\-]{5,}\d)(?!\w)", "[телефон]", s)
     parts = re.findall(r"[^.!?]{2,220}\?", s)
     q = (parts[-1] if parts else s).strip()
     q = re.sub(r"^(?:ru|en)\s+", "", q, flags=re.I).strip()
@@ -93,6 +95,207 @@ def _sanitize_question(value: str) -> str:
     if len(re.findall(r"[а-яёa-z0-9]+", q, re.I)) < 2:
         return ""
     return q[:220]
+
+
+def _behavioral_question_tail(value: str) -> str:
+    """Keep only a reusable question, stripping stale factual/canned preambles."""
+    q=" ".join(str(value or "").split()).strip()
+    if not q or "?" not in q:
+        return ""
+    low=q.lower().replace("ё","е")
+    starters=list(re.finditer(
+        r"\b(?:подскажите\b|какой|какая|какие|какое|что|где|когда|сколько|"
+        r"есть\s+ли|нужен\s+ли|нужна\s+ли|нужно\s+ли|"
+        r"аренда\s+или|покупка\s+или|вам\s+нужн|вас\s+интерес)\b",
+        low,
+        re.I,
+    ))
+    noisy_markers=(
+        "[телефон]","[email]","[ссылка]","[сумма]",
+        "наши контакты","контактный номер","номер на базе",
+        "график работ","адрес","ул.","улица","ежедневно",
+    )
+    has_numeric_preamble=bool(re.search(r"\d{1,2}[:.-]\d{2}|\d+[а-я]?\b", low))
+    if starters and (
+        any(x in low for x in noisy_markers)
+        or has_numeric_preamble
+        or len(q)>140
+    ):
+        q=q[starters[-1].start():].strip(" ,;:-")
+    if any(x in q for x in ("[телефон]","[email]","[ссылка]","[сумма]","[число]","[время]")):
+        return ""
+    if len(re.findall(r"[а-яёa-z0-9]+",q,re.I))<2:
+        return ""
+    return q[:220]
+
+
+CLIENT_INTENT_RULES = [
+    ("human_request", "Просьба подключить человека", (
+        r"менеджер|оператор|человек|сотрудник|специалист",
+    )),
+    ("complaint", "Претензия/проблема", (
+        r"претензи|жалоб|обман|ужас|плохо|не доволен|недоволен|верните|возврат",
+    )),
+    ("price", "Цена/расчёт", (
+        r"сколько.*сто|стоимост|цена|прайс|рассчит|расчет|расчёт|смет",
+    )),
+    ("discount", "Скидка/торг", (
+        r"скидк|дешевле|торг|уступ|акци",
+    )),
+    ("availability", "Наличие", (
+        r"в налич|есть ли|готов.*сейчас|под заказ",
+    )),
+    ("timing", "Срок", (
+        r"срок|когда.*готов|как быстро|за сколько|к какому",
+    )),
+    ("delivery", "Доставка/выезд", (
+        r"достав|самовывоз|привез|выезд|замер",
+    )),
+    ("material", "Материал/характеристики", (
+        r"материал|цвет|фурнитур|характерист|модель|бренд|ral|размер",
+    )),
+    ("location", "География", (
+        r"город|район|адрес|метро|где",
+    )),
+    ("budget", "Бюджет", (
+        r"бюджет|рассчитыва|сумм",
+    )),
+    ("contact", "Контакт/созвон", (
+        r"телефон|номер|позвон|созвон|whats|ватсап|telegram|телеграм",
+    )),
+    ("photo", "Фото/пример", (
+        r"фото|фотограф|картин|изображ|пример|вот такой|вот такая",
+    )),
+    ("ready", "Готовность к следующему шагу", (
+        r"готов|давайте|оформ|закаж|когда можно|запишите",
+    )),
+    ("greeting", "Первичное обращение", (
+        r"^\s*(?:здравствуйте|привет|добрый день|добрый вечер|доброе утро)\b",
+    )),
+]
+
+
+def classify_client_intent(value: str) -> tuple[str, str]:
+    """Cheap account-local retrieval key for the current buyer turn."""
+    low = " ".join(str(value or "").lower().replace("ё", "е").split())
+    if not low:
+        return "general", "Общий вопрос"
+    for key, label, patterns in CLIENT_INTENT_RULES:
+        if any(re.search(p, low, re.I) for p in patterns):
+            return key, label
+    return "general", "Общий вопрос"
+
+
+def _sanitize_response(value: str) -> str:
+    """Sanitize a historical human reply before using it as style evidence.
+
+    Historical replies are never business truth. Exact contact details, URLs,
+    monetary values and long identifiers are replaced before persistence.
+    """
+    s = " ".join(str(value or "").replace("\n", " ").split()).strip()
+    if not s:
+        return ""
+    s = re.sub(r"https?://\S+|www\.\S+", "[ссылка]", s, flags=re.I)
+    s = re.sub(r"\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b", "[email]", s, flags=re.I)
+    s = re.sub(
+        r"(?:\+?7|8)[\s()\-]*\d{3}[\s\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}",
+        "[телефон]", s,
+    )
+    s = re.sub(
+        r"\b\d[\d\s.,]{2,}\s*(?:₽|руб(?:лей|ля|\.?|л)?|тыс(?:яч[аи]?)?|млн|миллион\w*)",
+        "[сумма]", s, flags=re.I,
+    )
+    # Catch grouped thousands, landlines, long IDs and dates even without a suffix.
+    s = re.sub(r"\b\d{1,3}(?:[ .]\d{3})+\b", "[число]", s)
+    s = re.sub(r"(?<!\w)(?:\+?\d[\d\s()\-]{5,}\d)(?!\w)", "[число]", s)
+    s = re.sub(r"\b(?:[01]?\d|2[0-3])[:.-][0-5]\d\b", "[время]", s)
+    s = re.sub(r"\d{6,}", "[число]", s)
+    # Do not carry a previous buyer's personal name into another conversation.
+    s = re.sub(
+        r"^[А-ЯЁ][а-яё-]{1,24},\s*(?=(?:здравствуйте|добрый|привет))",
+        "", s,
+    )
+    s = re.sub(
+        r"^((?:Здравствуйте|Добрый\s+(?:день|вечер)|Доброе\s+утро|Привет))[!, ]+"
+        r"[А-ЯЁ][а-яё-]{1,24}[,!]?\s*",
+        r"\1. ", s,
+    )
+    low = s.lower().replace("ё", "е")
+    if re.search(r"\b(?:boris|борис)\b|\b(?:я|это)\s+(?:бот|ии|нейросет)", low):
+        return ""
+    tokens = re.findall(r"[а-яёa-z0-9]+", s, re.I)
+    if len(tokens) < 2:
+        return ""
+    return s[:420]
+
+
+def response_pattern_safe(value: str) -> bool:
+    """True only for a reusable conversational pattern, never a stale fact."""
+    s=_sanitize_response(value)
+    low=s.lower().replace("ё","е").strip(" .,!?:;-")
+    if not s:
+        return False
+    if any(x in s for x in ("[телефон]","[email]","[ссылка]","[сумма]","[число]","[время]")):
+        return False
+    if low in {
+        "здравствуйте","привет","добрый день","добрый вечер","доброе утро",
+        "спасибо","пожалуйста","не за что","да","нет",
+    }:
+        return False
+    dynamic_markers=(
+        "сегодня","завтра","послезавтра","в наличии","нет в наличии",
+        "самовывоз","не доставляем","доставляем","скидк","акци","подар",
+        "гарантия ","свободное время","свободные окна","свободный окош",
+        "ссылка на","каталог -",
+    )
+    if any(x in low for x in dynamic_markers):
+        return False
+
+    # Literal examples are behavioral scaffolding only. Plain historical facts
+    # (e.g. "Да есть", availability, old policy) stay out even if sanitized.
+    behavioral=(
+        "?" in s
+        or bool(re.search(
+            r"(?:подскажите|напишите|пришлите|уточните|давайте|оставьте|"
+            r"когда\s+удоб|можем\s+запис|предлагаю\s+(?:уточнить|выбрать|обсудить)|"
+            r"передам|передаю|подключу|подключится|свяжется|перезвонит|позвонит)",
+            low,
+        ))
+    )
+    return bool(behavioral)
+
+
+def _norm_response_template(value: str) -> str:
+    s = _sanitize_response(value).lower().replace("ё", "е")
+    s = re.sub(r"\[[^\]]+\]", " [x] ", s)
+    s = re.sub(r"\b\d+\b", " # ", s)
+    return " ".join(re.findall(r"[а-яa-z0-9#\[\]]+", s, re.I))[:260]
+
+
+def response_style_features(value: str) -> dict[str, Any]:
+    """Deterministic style/handoff features for one human reply."""
+    s = _sanitize_response(value)
+    low = s.lower().replace("ё", "е")
+    return {
+        "chars": len(s),
+        "sentences": max(1, len(re.findall(r"[.!?]+", s))) if s else 0,
+        "questions": s.count("?"),
+        "greeting": bool(re.match(
+            r"^\s*(?:здравствуйте|привет|добрый\s+(?:день|вечер)|доброе\s+утро)\b",
+            low,
+        )),
+        "cta": bool(re.search(
+            r"(?:оставьте|пришлите|напишите|подскажите|давайте|можем\s+запис|"
+            r"когда\s+удоб|позвон|созвон|замер|оформ)",
+            low,
+        )),
+        "handoff": bool(re.search(
+            r"(?:передам|передаю|подключу|подключится|свяжется|перезвонит|"
+            r"позвонит|менеджер\s+(?:уточнит|продолжит|свяжется)|"
+            r"специалист\s+(?:уточнит|продолжит|свяжется|позвонит))",
+            low,
+        )),
+    }
 
 
 def _norm_template(q: str) -> str:
@@ -132,44 +335,256 @@ def account_dialogue_payload(account_id: str) -> dict[str,Any]:
         db.close()
 
 
-def dialogue_context(account_id: str, max_chars: int=5000) -> str:
+def dialogue_context(
+    account_id: str,
+    current_client_text: str = "",
+    max_chars: int = 5000,
+) -> str:
+    """Account-private adaptive dialogue guidance for the live MOP reply.
+
+    Literal response examples are drawn only from this account. Niche fallback
+    remains semantic/statistical and never copies another company's phrases.
+    """
     account_id=str(account_id or "").strip()
     db=SessionLocal()
     try:
         ensure_tables(db)
         acc=_payload(db,ACCOUNT_TABLE,"account_id",account_id)
-        row=db.execute(text("SELECT coalesce(name,''),coalesce(company_niche,''),coalesce(company_description,'') FROM accounts WHERE account_id=:a"),{"a":account_id}).first()
+        row=db.execute(text(
+            "SELECT coalesce(name,''),coalesce(company_niche,''),"
+            "coalesce(company_description,'') FROM accounts WHERE account_id=:a"
+        ),{"a":account_id}).first()
         nk=niche_key(*(row or ("","","")))
         niche=_payload(db,NICHE_TABLE,"niche_key",nk) if nk else {}
+        owner_feedback=[]
+        try:
+            _feedback_rows=db.execute(text(
+                "SELECT value FROM storage WHERE account_id=:a "
+                "AND key LIKE 'mop_control_feedback:%' ORDER BY id DESC LIMIT 30"
+            ), {"a": account_id}).fetchall()
+            for (_raw_feedback,) in _feedback_rows:
+                try:
+                    _fb=json.loads(str(_raw_feedback or "{}"))
+                    if isinstance(_fb,dict):
+                        owner_feedback.append(_fb)
+                except Exception:
+                    continue
+        except Exception as _feedback_exc:
+            observe_suppressed(__name__, _feedback_exc, line=367)
+            owner_feedback=[]
     except Exception:
         try: db.rollback()
-        except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=175)
+        except Exception as _suppressed_exc:
+            observe_suppressed(__name__, _suppressed_exc, line=175)
         return ""
     finally:
         db.close()
 
+    intent_key,intent_label=classify_client_intent(current_client_text)
     parts=[
         "ДИАЛОГОВЫЙ МОЗГ ТЕКУЩЕГО АККАУНТА.",
-        "Это подсказка по порядку разговора, выученная из его собственной истории. Не повторяй уже отвеченные вопросы и не копируй механически старые фразы.",
+        "Он учится на истории только этой компании. Исторические ответы — примеры манеры и хода разговора, а НЕ источник актуальных цен, сроков, наличия или других бизнес-фактов.",
+        "Никогда не копируй из примеров персональные данные, суммы, ссылки или неподтверждённые обещания. Подтверждённые знания и safety/business rules всегда важнее обучения.",
     ]
+    if current_client_text:
+        parts.append(f"Текущий тип обращения клиента: {intent_label}.")
+
+    relevant_owner_feedback=[]
+    for _fb in owner_feedback:
+        _fb_intent,_ = classify_client_intent(str(_fb.get("incoming") or ""))
+        if _fb_intent == intent_key or _fb_intent == "general":
+            relevant_owner_feedback.append(_fb)
+    if relevant_owner_feedback:
+        parts.append(
+            "ОБРАТНАЯ СВЯЗЬ ВЛАДЕЛЬЦА — высокий приоритет над статистическим обучением, "
+            "но ниже safety, подтверждённых фактов и текущей переписки. Это примеры поведения, не источник цен/сроков/наличия."
+        )
+        for _fb in relevant_owner_feedback[:6]:
+            _action=str(_fb.get("action") or "")
+            _reply=_sanitize_response(str(_fb.get("reply") or ""))
+            _correction=_sanitize_response(str(_fb.get("correction") or ""))
+            _comment=" ".join(str(_fb.get("comment") or "").split())[:400]
+            if _action == "approve" and _reply:
+                parts.append(f"- Владелец подтвердил как удачный ход/тон: «{_reply}». Перенимай ход, не факты и цифры.")
+            elif _action == "correct" and _correction:
+                parts.append(f"- Владелец исправил ответ. Ориентир: «{_correction}»." + (f" Комментарий: {_comment}." if _comment else ""))
+            elif _action == "reject":
+                parts.append("- Владелец отметил прошлый ответ как неверный." + (f" Не повторяй: «{_reply}»." if _reply else "") + (f" Причина: {_comment}." if _comment else ""))
+            elif _action == "handoff":
+                parts.append("- Владелец указал: в похожей ситуации нужен живой менеджер." + (f" Комментарий: {_comment}." if _comment else ""))
+
     if acc:
-        s=acc.get("summary") or {}
-        parts.append(f"История: {int(s.get('messages') or 0)} сообщений, {int(s.get('chats') or 0)} диалогов.")
+        summ=acc.get("summary") or {}
+        parts.append(
+            "История аккаунта: "
+            f"{int(summ.get('messages') or 0)} сообщений, "
+            f"{int(summ.get('chats') or 0)} диалогов; "
+            f"human-only ответов для обучения: {int(summ.get('human_replies') or 0)}; "
+            f"AI/MOP ответов исключено: {int(summ.get('mop_replies_excluded') or 0)}."
+        )
+
+        style=acc.get("style_profile") or {}
+        if style:
+            length_label=str(style.get("preferred_length") or "normal")
+            sentences=int(style.get("typical_sentences") or 1)
+            parts.append(
+                "Манера менеджеров этой компании: "
+                f"длина={length_label}; обычно {sentences} предлож.; "
+                f"вопрос в ответе ~{int(style.get('question_rate_pct') or 0)}%; "
+                f"CTA ~{int(style.get('cta_rate_pct') or 0)}%; "
+                f"приветствие в первом ответе ~{int(style.get('first_turn_greeting_rate_pct') or 0)}%, "
+                f"в продолжении ~{int(style.get('followup_greeting_rate_pct') or 0)}%."
+            )
+            parts.append(
+                "Подстрой длину, темп, количество вопросов и CTA под эту манеру, "
+                "но не повторяй плохие привычки и не нарушай правило максимум одного полезного вопроса за ход."
+            )
+            if length_label == "short":
+                median_chars = max(20, int(style.get("median_chars") or 60))
+                short_limit = max(70, min(140, median_chars * 3))
+                parts.append(
+                    f"Стиль этой компании короткий: обычно одно короткое предложение, ориентир до {short_limit} символов. "
+                    "Не добавляй длинное пояснение после вопроса и не пиши рекламную подводку."
+                )
+
         seq=acc.get("recommended_sequence") or []
         if seq:
             parts.append("Обычная последовательность этапов этого аккаунта:")
             for i,x in enumerate(seq[:10],1):
                 parts.append(f"{i}. {x.get('label')}")
+
         tmpls=acc.get("question_templates") or []
         if tmpls:
             parts.append("Безопасные примеры вопросов из собственной истории аккаунта:")
-            for x in tmpls[:10]:
-                parts.append(f"- {x.get('question')} (встречалось: {int(x.get('support') or 0)})")
+            for x in tmpls[:8]:
+                parts.append(
+                    f"- {x.get('question')} "
+                    f"(встречалось: {int(x.get('support') or 0)})"
+                )
+
+        intent_profile=next((
+            x for x in (acc.get("intent_profiles") or [])
+            if str(x.get("intent") or "")==intent_key
+        ),None)
+        if intent_profile:
+            parts.append(
+                "Поведенческий профиль для этого типа запроса у данной компании: "
+                f"длина={intent_profile.get('preferred_length')}; "
+                f"вопрос ~{int(intent_profile.get('question_rate_pct') or 0)}%; "
+                f"CTA ~{int(intent_profile.get('cta_rate_pct') or 0)}%; "
+                f"handoff ~{int(intent_profile.get('handoff_rate_pct') or 0)}%; "
+                f"support={int(intent_profile.get('support') or 0)}."
+            )
+            parts.append(
+                "Используй этот рисунок поведения как ориентир манеры, но не копируй исторические факты или обещания."
+            )
+
+        intent_profiles=list(acc.get("intent_profiles") or [])
+        current_intent_profile=next(
+            (
+                x for x in intent_profiles
+                if str(x.get("intent") or "")==intent_key
+                and int(x.get("support") or 0)>=2
+            ),
+            None,
+        )
+        if current_intent_profile:
+            _ip=current_intent_profile
+            parts.append(
+                "Как менеджеры этой компании обычно ведут именно такой тип запроса: "
+                f"support={int(_ip.get('support') or 0)}; "
+                f"длина={str(_ip.get('preferred_length') or 'normal')}; "
+                f"вопрос в ответе ~{int(_ip.get('question_rate_pct') or 0)}%; "
+                f"CTA ~{int(_ip.get('cta_rate_pct') or 0)}%; "
+                f"передача человеку ~{int(_ip.get('handoff_rate_pct') or 0)}%."
+            )
+            if int(_ip.get("support") or 0)>=5:
+                if int(_ip.get("question_rate_pct") or 0)>=45:
+                    parts.append(
+                        "Для такого запроса эта компания часто отвечает через один уточняющий вопрос; "
+                        "если ответ ещё не известен из истории — задай один следующий полезный вопрос."
+                    )
+                elif int(_ip.get("question_rate_pct") or 0)<=15:
+                    parts.append(
+                        "Для такого запроса эта компания обычно сначала даёт прямой короткий ответ, "
+                        "а не превращает сообщение в анкету."
+                    )
+                if int(_ip.get("cta_rate_pct") or 0)>=45:
+                    parts.append(
+                        "Для такого запроса у компании часто есть мягкий CTA; "
+                        "добавь следующий шаг только если он логически уместен."
+                    )
+                if int(_ip.get("handoff_rate_pct") or 0)>=50:
+                    parts.append(
+                        "Исторически такой запрос часто передавался человеку. "
+                        "Если сейчас действительно нужен живой менеджер/подтверждение по правилам компании, "
+                        "выставь human_handoff=true; одна статистика сама по себе не отменяет safety и confirmed facts."
+                    )
+
+        response_patterns=list(acc.get("response_patterns") or [])
+        relevant=[
+            x for x in response_patterns
+            if str(x.get("intent") or "")==intent_key
+        ]
+        if not relevant:
+            relevant=[
+                x for x in response_patterns
+                if str(x.get("intent") or "") in {"general","greeting"}
+            ]
+        if relevant:
+            parts.append(
+                "Релевантные HUMAN-ONLY примеры ответа этой компании "
+                "(копируй логику и тон, не факты/цифры):"
+            )
+            for x in relevant[:5]:
+                outcome=x.get("avg_crm_outcome")
+                outcome_text=(
+                    f", CRM outcome≈{float(outcome):.0f}"
+                    if outcome is not None else ""
+                )
+                parts.append(
+                    f"- «{x.get('response')}» "
+                    f"(support={int(x.get('support') or 0)}, "
+                    f"continuation={int(x.get('client_continue_rate') or 0)}%{outcome_text})"
+                )
+
+        handoffs=[
+            x for x in (acc.get("handoff_patterns") or [])
+            if str(x.get("intent") or "")==intent_key
+            and int(x.get("support") or 0)>=2
+        ]
+        if handoffs:
+            parts.append(
+                "Повторяющийся паттерн передачи человеку у этой компании:"
+            )
+            for x in handoffs[:3]:
+                parts.append(
+                    f"- {x.get('label')} → человек "
+                    f"(support={int(x.get('support') or 0)}"
+                    + (
+                        f", CRM outcome≈{float(x.get('avg_crm_outcome')):.0f}"
+                        if x.get("avg_crm_outcome") is not None else ""
+                    )
+                    + ")."
+                )
+            parts.append(
+                "Если текущий запрос действительно совпадает и требует живого решения/подтверждения, "
+                "можно выставить human_handoff=true. Один старый пример сам по себе не является правилом."
+            )
+
     if niche and int(niche.get("accounts") or 0)>=2:
-        parts.append(f"Нишевой резерв: агрегат по {int(niche.get('accounts') or 0)} независимым аккаунтам этой ниши.")
+        parts.append(
+            f"Нишевой резерв: только обезличенные этапы по "
+            f"{int(niche.get('accounts') or 0)} независимым аккаунтам этой ниши; "
+            "чужие фразы и факты не используются."
+        )
         for x in (niche.get("recommended_sequence") or [])[:8]:
             parts.append(f"- {x.get('label')}")
-    parts.append("Локальные подтверждённые факты, цены и правила текущего account_id всегда важнее этой статистики.")
+
+    parts.append(
+        "Локальные подтверждённые факты, цены, ограничения, handoff rules и текущая история "
+        "этого account_id всегда важнее статистики и исторических примеров."
+    )
     return "\n".join(parts)[:max(1200,int(max_chars))]
 
 

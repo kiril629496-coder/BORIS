@@ -63,6 +63,19 @@ def generate_image_http(
             "status_code": None,
         }
 
+    # OPENAI_IMAGE_INTL_PROXY_V1:
+    # Use BORIS' explicit international proxy pool for OpenAI Images just like
+    # the sales/OpenAI text transport. Do not inherit ambient host proxy state.
+    _session = requests.Session()
+    _session.trust_env = False
+    try:
+        from proxy_pool import get_intl_requests_proxies
+        _proxies = get_intl_requests_proxies() or {}
+    except Exception:
+        _proxies = {}
+    if _proxies:
+        _session.proxies.update(_proxies)
+
     # Paid image transport is intentionally single-attempt by default.
     # The caller owns any explicit retry as a new economic intent; ambiguous
     # transport/provider failures must never silently multiply image charges.
@@ -70,7 +83,7 @@ def generate_image_http(
     for attempt in range(1, max_attempts + 1):
         try:
             response = dependency_call(
-                "openai.images", requests.post, OPENAI_IMAGES_URL,
+                "openai.images", _session.post, OPENAI_IMAGES_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",

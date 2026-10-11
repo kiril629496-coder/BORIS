@@ -54,11 +54,76 @@ def main() -> int:
     STATUS.parent.mkdir(parents=True, exist_ok=True)
     TMP.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     TMP.replace(STATUS)
+
+    # SEO_FINAL_CLOSURE_OWNER_REPORT_V1
+    # Generate owner-facing truth immediately after each certificate. This
+    # report counts only real public URLs with the target link present and
+    # keeps LIVE / VERIFIED / HUMAN_PENDING / READY separate.
+    owner_report = ROOT / "tools" / "owner_seo_reporting.py"
+    owner_report_result = {
+        "returncode": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+    if owner_report.exists():
+        try:
+            reporting = subprocess.run(
+                [str(ROOT / "venv" / "bin" / "python"), str(owner_report)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                timeout=45,
+                check=False,
+                env={**__import__("os").environ, "PYTHONPATH": str(ROOT)},
+            )
+            owner_report_result = {
+                "returncode": reporting.returncode,
+                "stdout_tail": (reporting.stdout or "")[-2000:],
+                "stderr_tail": (reporting.stderr or "")[-2000:],
+            }
+        except Exception as exc:
+            owner_report_result = {
+                "returncode": -1,
+                "stdout_tail": "",
+                "stderr_tail": f"{type(exc).__name__}: {exc}",
+            }
+
+    indexnow_result = {
+        "returncode": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+    indexnow_sync = ROOT / "tools" / "seo_indexnow_sync.py"
+    if indexnow_sync.exists():
+        try:
+            sync = subprocess.run(
+                [str(ROOT / "venv" / "bin" / "python"), str(indexnow_sync)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+                env={**__import__("os").environ, "PYTHONPATH": str(ROOT)},
+            )
+            indexnow_result = {
+                "returncode": sync.returncode,
+                "stdout_tail": (sync.stdout or "")[-3000:],
+                "stderr_tail": (sync.stderr or "")[-1000:],
+            }
+        except Exception as exc:
+            indexnow_result = {
+                "returncode": -1,
+                "stdout_tail": "",
+                "stderr_tail": f"{type(exc).__name__}: {exc}",
+            }
+
     print(json.dumps({
         "state": state,
         "infrastructure_ok": bool(payload.get("infrastructure_ok")),
         "delivery_ready": bool(payload.get("delivery_ready")),
         "status_file": str(STATUS),
+        "owner_report": owner_report_result,
+        "indexnow_sync": indexnow_result,
     }, ensure_ascii=False))
     return 1 if state == "FAIL" else 0
 

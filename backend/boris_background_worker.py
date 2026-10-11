@@ -24,6 +24,10 @@ from app.main import _background_jobs_loop
 from app.services.lead_notifications import dispatch_pending as _dispatch_lead_notifications, queue_operational_notifications as _queue_operational_notifications
 
 _stop = threading.Event()
+
+
+def _worker_suppressed(where: str, exc: Exception) -> None:
+    print("WORKER_SUPPRESSED %s: %s" % (str(where), type(exc).__name__), flush=True)
 _SINGLETON_LOCK_KEY = "boris:background-singleton-pollers:v1"
 _singleton_lock_engine = create_engine(
     DATABASE_URL,
@@ -49,7 +53,8 @@ def _try_singleton_leader_lock():
             return conn
     except Exception:
         try: conn.rollback()
-        except Exception: pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_inline_best_effort", suppressed_exc)
     conn.close()
     return None
 
@@ -64,10 +69,12 @@ def _release_singleton_leader_lock(conn) -> None:
         conn.commit()
     except Exception:
         try: conn.rollback()
-        except Exception: pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_inline_best_effort", suppressed_exc)
     finally:
         try: conn.close()
-        except Exception: pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_inline_best_effort", suppressed_exc)
 
 
 def _singleton_lock_alive(conn) -> bool:
@@ -79,7 +86,8 @@ def _singleton_lock_alive(conn) -> bool:
         return True
     except Exception:
         try: conn.rollback()
-        except Exception: pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_inline_best_effort", suppressed_exc)
         return False
 
 
@@ -105,8 +113,8 @@ def _new_ad_bid_watch_loop():
             print("NEW_AD_BID_WATCH_LOOP_ERROR:", str(exc)[:240], flush=True)
         try:
             heartbeat("runtime", "new_ad_bid_watchdog", state=state, details=details)
-        except Exception:
-            pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_best_effort", suppressed_exc)
         _stop.wait(300)
 
 
@@ -260,8 +268,8 @@ def _mapping_recovery_rescue_once(limit: int = 2) -> dict:
     finally:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_best_effort", suppressed_exc)
         lock_file.close()
 
 
@@ -295,9 +303,102 @@ def _mapping_recovery_rescue_loop():
                 state=state,
                 details=details,
             )
-        except Exception:
-            pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_best_effort", suppressed_exc)
         _stop.wait(60)
+
+
+
+def _campaign_inventory_scheduler_once() -> dict:
+    """Queue at most one auto-apply maintenance pass per account/policy/day."""
+    import hashlib
+    import json
+
+    from app.db.session import SessionLocal
+    from app.models.account import Account
+    from app.models.background_job import BackgroundJob
+    from app.models.storage import Storage
+    from app.services.jobs import enqueue
+    from app.services.marketing_clock import marketing_today_iso
+
+    db=SessionLocal()
+    queued=[]
+    skipped=[]
+    try:
+        rows=(db.query(Storage)
+              .filter(Storage.key=="campaign_inventory_policy_v1")
+              .order_by(Storage.id.asc()).all())
+        for row in rows:
+            aid=str(row.account_id or "").strip()
+            if not aid:
+                continue
+            try:
+                policy=json.loads(row.value or "{}")
+            except Exception:
+                skipped.append({"account_id":aid,"reason":"policy_invalid"})
+                continue
+            if not isinstance(policy,dict) or not bool(policy.get("enabled")) or not bool(policy.get("auto_apply")):
+                continue
+            if int(policy.get("target_active_ads") or 0)<=0:
+                skipped.append({"account_id":aid,"reason":"target_not_set"})
+                continue
+            account=db.query(Account).filter(Account.account_id==aid).first()
+            if not account or not account.owner_user_id:
+                skipped.append({"account_id":aid,"reason":"owner_missing"})
+                continue
+            basis=json.dumps({
+                "account_id":aid,
+                "date":marketing_today_iso(),
+                "policy":policy,
+                "source":"auto",
+            },ensure_ascii=False,sort_keys=True,separators=(",",":"))
+            fingerprint="campaign_inventory_maintain:"+hashlib.sha256(basis.encode("utf-8")).hexdigest()[:40]
+            # Never reset a completed same-day automatic pass. The normal enqueue
+            # helper intentionally reuses terminal fingerprints for explicit retries,
+            # but the scheduler must be once-per-policy/day.
+            existing=db.query(BackgroundJob).filter(BackgroundJob.fingerprint==fingerprint).first()
+            if existing is not None:
+                skipped.append({"account_id":aid,"reason":"already_scheduled","job_id":int(existing.id)})
+                continue
+            job,created=enqueue(
+                db,"campaign_inventory_maintain",
+                payload={
+                    "account_id":aid,
+                    "stage":"snapshot",
+                    "execute":True,
+                    "source":"auto",
+                    "policy_snapshot":policy,
+                },
+                owner_user_id=int(account.owner_user_id),
+                account_id=aid,
+                fingerprint=fingerprint,
+                progress_total=4,
+            )
+            db.commit()
+            if created:
+                queued.append({"account_id":aid,"job_id":int(job.id)})
+        return {"status":"ok","queued":queued,"skipped":skipped,"checked":len(rows)}
+    finally:
+        db.close()
+
+
+def _campaign_inventory_scheduler_loop():
+    """Singleton scheduler for owner-authorized daily active-inventory policies."""
+    while not _stop.is_set():
+        state="ok"
+        details={}
+        try:
+            details=_campaign_inventory_scheduler_once()
+        except Exception as exc:
+            state="degraded"
+            details={"error_type":type(exc).__name__,"error":str(exc)[:240]}
+            print("CAMPAIGN_INVENTORY_SCHEDULER_ERROR:",str(exc)[:240],flush=True)
+        try:
+            heartbeat("runtime","campaign_inventory_scheduler",state=state,details=details)
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_best_effort", suppressed_exc)
+        # Fifteen-minute discovery. Fingerprints make this once-per-policy/day.
+        _stop.wait(900)
 
 
 def _campaign_post_publish_watch_loop():
@@ -317,8 +418,8 @@ def _campaign_post_publish_watch_loop():
                           state="degraded",
                           details={"error_type": type(exc).__name__,
                                    "error": str(exc)[:240]})
-            except Exception:
-                pass
+            except Exception as suppressed_exc:
+                _worker_suppressed("runtime_nested_best_effort", suppressed_exc)
             print("CAMPAIGN_POST_PUBLISH_WATCH_ERROR:", str(exc)[:240], flush=True)
         _stop.wait(900)
 
@@ -335,7 +436,8 @@ def _incident_reconcile_loop():
             state = "degraded"; details = {"error_type": type(exc).__name__, "error": str(exc)[:240]}
             print("INCIDENT_RECONCILE_LOOP_ERROR:", str(exc)[:240], flush=True)
         try: heartbeat("runtime", "control_incident_reconciler", state=state, details=details)
-        except Exception: pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_inline_best_effort", suppressed_exc)
         _stop.wait(60)
 
 
@@ -439,8 +541,8 @@ def _social_posting_loop():
                     "owner_action_required": False,
                 },
             )
-        except Exception:
-            pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_best_effort", suppressed_exc)
         _stop.wait(60)
         source_guard = _social_owner_policy_source_guard()
         consumer_guard = _social_owner_policy_consumer_guard()
@@ -534,7 +636,7 @@ def _social_posting_loop():
                 and consumer_guard.get("ok")
                 and project_policy.get("ok")
                 and media_floor.get("ok")
-                and media_floor.get("image_source") == "reuse"
+                and media_floor.get("image_source") == "ai"
                 and boundary.get("ok")
             )
             if not boundary_ok:
@@ -807,8 +909,8 @@ def _social_posting_loop():
             print("SOCIAL_POSTING_LOOP_ERROR:", str(exc)[:300], flush=True)
         try:
             heartbeat("runtime", "social_posting_scheduler", state=state, details=details)
-        except Exception:
-            pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_best_effort", suppressed_exc)
         _stop.wait(60)
 
 
@@ -830,8 +932,8 @@ def _lead_notification_loop():
             print("LEAD_NOTIFICATION_LOOP_ERROR:",str(exc)[:240],flush=True)
         try:
             heartbeat("runtime","lead_notifications",state=state,details=details)
-        except Exception:
-            pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_best_effort", suppressed_exc)
         _stop.wait(2)
 
 
@@ -850,9 +952,39 @@ def _client_contract_guardian_loop():
             print("CLIENT_CONTRACT_GUARDIAN_ERROR:",str(exc)[:240],flush=True)
         try:
             heartbeat("runtime","client_contract_guardian",state=state,details=details)
-        except Exception:
-            pass
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_best_effort", suppressed_exc)
         _stop.wait(30)
+
+
+def _mop_dialogue_learning_loop():
+    """Singleton refresh of account-private dialogue profiles; no paid AI calls."""
+    try:
+        interval=max(300,min(int(os.environ.get("BORIS_MOP_DIALOGUE_BRAIN_INTERVAL_SEC","1800") or 1800),21600))
+    except Exception:
+        interval=1800
+    try:
+        initial=max(30,min(int(os.environ.get("BORIS_MOP_DIALOGUE_BRAIN_INITIAL_DELAY_SEC","120") or 120),900))
+    except Exception:
+        initial=120
+    if _stop.wait(initial):
+        return
+    while not _stop.is_set():
+        state="ok"; details={}
+        try:
+            from mop_dialogue_brain_runner import build as _build_dialogue_brain
+            details=_build_dialogue_brain() or {}
+            if str(details.get("status") or "pass")!="pass":
+                state="degraded"
+        except Exception as exc:
+            state="degraded"
+            details={"error_type":type(exc).__name__,"error":str(exc)[:240]}
+            print("MOP_DIALOGUE_LEARNING_ERROR:",str(exc)[:240],flush=True)
+        try:
+            heartbeat("runtime","mop_dialogue_learning",state=state,details=details)
+        except Exception as suppressed_exc:
+            _worker_suppressed("runtime_best_effort", suppressed_exc)
+        _stop.wait(interval)
 
 
 def main():
@@ -877,6 +1009,7 @@ def main():
             ("cpx_reconcile", lambda: cpx_reconciliation_loop(_stop, 30)),
             ("new_ad_bid_watch", _new_ad_bid_watch_loop),
             ("mapping_recovery_rescue", _mapping_recovery_rescue_loop),
+            ("campaign_inventory_scheduler", _campaign_inventory_scheduler_loop),
             # POST_PUBLISH_WATCH_SINGLE_OWNER_V2: the durable background_jobs
             # singleton is the only executor. The old direct 15-minute loop used
             # to run the same DB reconciliation a second time and could race the
@@ -885,6 +1018,7 @@ def main():
             ("social_posting", _social_posting_loop),
             ("lead_notifications", _lead_notification_loop),
             ("client_contract_guardian", _client_contract_guardian_loop),
+            ("mop_dialogue_learning", _mop_dialogue_learning_loop),
         ):
             t = threading.Thread(target=target, daemon=True, name=name)
             t.start(); threads.append(t); singleton_threads.append(t)

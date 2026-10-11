@@ -9,7 +9,7 @@ const OWNER_OPTOUT_KEY = "boris_metrika_owner_optout_v1";
 
 // Счётчик работает ТОЛЬКО на публичных страницах.
 // В кабинете клиента Метрики нет — Вебвизор не должен писать данные клиентов.
-const PUBLIC_EXACT = ["/", "/login", "/verify", "/privacy", "/oferta"];
+const PUBLIC_EXACT = ["/", "/login", "/verify", "/privacy", "/oferta", "/audit"];
 const PUBLIC_PREFIX = ["/r"];
 
 function isOwnerOptedOut() {
@@ -175,7 +175,7 @@ export default function Metrika() {
         k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)
     })(window, document,'script','https://mc.yandex.ru/metrika/tag.js?id=${COUNTER_ID}', 'ym');
 
-    ym(${COUNTER_ID}, 'init', {ssr:true, webvisor:true, clickmap:true, referrer: document.referrer, url: location.href, accurateTrackBounce:true, trackLinks:true});
+    ym(${COUNTER_ID}, 'init', {ssr:true, webvisor:(location.pathname!='/audit'), clickmap:true, referrer: document.referrer, url: location.href, accurateTrackBounce:true, trackLinks:true});
 })();
         `}
       </Script>

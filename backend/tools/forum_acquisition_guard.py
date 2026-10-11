@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -20,6 +21,8 @@ from app.services import service_marketplace as marketplace
 from app.services import forum_discovery
 from app.services import publication_discovery
 from app.services import crowd_seo
+from app.services import seo_moderation_reconciler
+from app.services import external_moderation_reconciler
 from app.services import crowd_seo_reserve_policy as reserve_policy
 
 # A guardian runs every 10 minutes. Keep each pass bounded so it releases the
@@ -77,7 +80,10 @@ def _daily_execution_snapshot(now: datetime, *, mark_run: bool = True) -> dict:
     """
     policy = reserve_policy.daily_execution_policy()
     interval = int(policy["guard_interval_minutes"])
-    today = now.date().isoformat()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    business_tz = ZoneInfo(str(policy["business_timezone"]))
+    today = now.astimezone(business_tz).date().isoformat()
     row = {}
     if DAILY_EXECUTION_FILE.exists():
         try:
@@ -157,8 +163,12 @@ PUBLICATION_DISCOVERY_CLOCK_SKEW = timedelta(minutes=15)
 # or registration windows. A timed-out pass leaves its state untouched and is
 # automatically retried on a later guardian tick.
 PUBLICATION_DISCOVERY_WALL_TIMEOUT_S = 70
-PUBLICATION_DISCOVERY_DEFICIT_QUERIES = 6
+PUBLICATION_DISCOVERY_DEFICIT_QUERIES = 24
 PUBLICATION_DISCOVERY_IDLE_QUERIES = 3
+# FORUM_DISCOVERY_BOUNDED_EXECUTION_V1: forum search and directory inspection
+# run in a child process so a slow external surface cannot consume the whole
+# 250-second systemd start budget and suppress onboarding/publishing work.
+FORUM_DISCOVERY_WALL_TIMEOUT_S = 90
 CROWD_VERIFY_INTERVAL = timedelta(hours=24)
 REGISTRATION_RETRY_INTERVAL = timedelta(hours=24)
 REGISTRATION_TRANSIENT_RETRY_INTERVAL = timedelta(hours=2)
@@ -193,7 +203,11 @@ _MULTIPART_SITE_SUFFIXES = {
 
 
 def _site_domain(url: str | None) -> str:
-    host = urlparse(str(url or "")).hostname or ""
+    raw = str(url or "").strip()
+    parsed = urlparse(raw)
+    host = parsed.hostname or ""
+    if not host and raw and "://" not in raw and "/" not in raw and " " not in raw:
+        host = urlparse(f"//{raw}").hostname or ""
     host = host.lower().removeprefix("www.")
     parts = host.split(".")
     if len(parts) <= 2:
@@ -467,9 +481,156 @@ def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def _business_day_bounds(now: datetime | None = None) -> tuple[datetime, datetime, str]:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    tz = ZoneInfo(reserve_policy.BUSINESS_TIMEZONE)
+    local = current.astimezone(tz)
+    start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    return (
+        start_local.astimezone(timezone.utc),
+        end_local.astimezone(timezone.utc),
+        local.date().isoformat(),
+    )
+
+
+def _daily_submission_domains(now: datetime | None = None) -> set[str]:
+    """Return unique accepted submission FACT domains in the business day."""
+    start_utc, end_utc, _ = _business_day_bounds(now)
+    domains: set[str] = set()
+
+    def in_window(value: str | None) -> bool:
+        parsed = _parse_iso(value)
+        return bool(parsed and start_utc <= parsed.astimezone(timezone.utc) < end_utc)
+
+    for row in marketplace.list_attempts(limit=1000):
+        if not in_window(row.get("created_at")):
+            continue
+        action = str(row.get("action") or "")
+        status = str(row.get("status") or "")
+        meta = row.get("meta") or {}
+        accepted = bool(
+            (
+                status in {"submitted_pending_moderation", "submitted_pending_email"}
+                and action in {"guest_catalog_submit", "guest_catalog_email_submit", "guest_tool_submit"}
+            )
+            or (
+                status == "success"
+                and action == "publish"
+                and meta.get("publication_verified")
+            )
+        )
+        if accepted:
+            domain = _site_domain(row.get("url"))
+            if domain:
+                domains.add(domain)
+
+    for row in marketplace.list_publications():
+        if in_window(row.get("posted_at")):
+            domain = _site_domain(row.get("url"))
+            if domain:
+                domains.add(domain)
+    return domains
+
+
+def _recent_submission_domains_for_project(
+    project_id: str,
+    now: datetime | None = None,
+    *,
+    cooldown_days: int = reserve_policy.SUBMISSION_DOMAIN_COOLDOWN_DAYS,
+) -> set[str]:
+    """Domains recently accepted for this project are not re-submitted.
+
+    This is a spam/duplicate guard, not a verification state: pending
+    moderation still counts as used for the cooldown window.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(days=max(1, int(cooldown_days or 1)))
+    domains: set[str] = set()
+    for row in marketplace.list_attempts(limit=1000):
+        meta = row.get("meta") or {}
+        if str(meta.get("project_id") or "") != str(project_id or ""):
+            continue
+        created = _parse_iso(row.get("created_at"))
+        if not created or created.astimezone(timezone.utc) < cutoff:
+            continue
+        action = str(row.get("action") or "")
+        status = str(row.get("status") or "")
+        accepted = bool(
+            (
+                status in {"submitted_pending_moderation", "submitted_pending_email"}
+                and action in {"guest_catalog_submit", "guest_catalog_email_submit", "guest_tool_submit"}
+            )
+            or (
+                status == "success"
+                and action == "publish"
+                and meta.get("publication_verified")
+            )
+        )
+        if accepted:
+            domain = _site_domain(meta.get("domain") or row.get("url"))
+            if domain:
+                domains.add(domain)
+    return domains
+
+
+def _recent_submission_domains_global(
+    now: datetime | None = None,
+    *,
+    cooldown_days: int = reserve_policy.SUBMISSION_DOMAIN_COOLDOWN_DAYS,
+) -> set[str]:
+    """Domains with any accepted FACT in the cooldown window.
+
+    This powers the next-day reserve metric: a one-time directory that already
+    accepted a submission must not remain counted as fresh autonomous READY.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(days=max(1, int(cooldown_days or 1)))
+    domains: set[str] = set()
+    for row in marketplace.list_attempts(limit=1000):
+        created = _parse_iso(row.get("created_at"))
+        if not created or created.astimezone(timezone.utc) < cutoff:
+            continue
+        action = str(row.get("action") or "")
+        status = str(row.get("status") or "")
+        meta = row.get("meta") or {}
+        accepted = bool(
+            (
+                status in {"submitted_pending_moderation", "submitted_pending_email"}
+                and action in {"guest_catalog_submit", "guest_catalog_email_submit", "guest_tool_submit"}
+            )
+            or (
+                status == "success"
+                and action == "publish"
+                and meta.get("publication_verified")
+            )
+        )
+        if not accepted:
+            continue
+        domain = _site_domain(meta.get("domain") or row.get("url"))
+        if domain:
+            domains.add(domain)
+    for row in marketplace.list_publications():
+        posted = _parse_iso(row.get("posted_at"))
+        if not posted or posted.astimezone(timezone.utc) < cutoff:
+            continue
+        domain = _site_domain(row.get("url"))
+        if domain:
+            domains.add(domain)
+    return domains
+
 
 def _crowd_link_due(placement: dict, now: datetime) -> bool:
     if not placement.get("publication_url"):
@@ -484,6 +645,22 @@ def _crowd_link_due(placement: dict, now: datetime) -> bool:
         return checked is None or now - checked >= TRANSIENT_AUDIT_RETRY_INTERVAL
     if placement.get("status") != "verified":
         return False
+
+    # SEO_FINAL_CLOSURE_LINK_WATCH_V1
+    # Verified backlinks are re-checked on guarantee milestones instead of
+    # burning verification budget every day: day 1, 3, 7, 14 and 30.
+    # A milestone is due only when the latest check happened before that
+    # milestone timestamp.
+    started = _parse_iso(placement.get("published_at"))
+    if started is not None:
+        for days in (1, 3, 7, 14, 30):
+            due_at = started + timedelta(days=days)
+            if now >= due_at and (checked is None or checked < due_at):
+                return True
+        return False
+
+    # Historical rows without a publication timestamp keep the conservative
+    # daily fallback until their evidence is normalized.
     return checked is None or now - checked >= CROWD_VERIFY_INTERVAL
 
 def _crowd_in_guarantee(project: dict, placement: dict, now: datetime) -> bool:
@@ -595,6 +772,7 @@ def _registration_retry_due(row: dict | None, now: datetime) -> bool:
         "registration_form_error",
         "registration_adapter_error",
         "registration_unavailable",
+        "registration_gateway_error",
     }:
         return updated is None or now - updated >= REGISTRATION_TECHNICAL_RETRY_INTERVAL
     return updated is None or now - updated >= REGISTRATION_RETRY_INTERVAL
@@ -648,36 +826,58 @@ def _registration_verification_due(row: dict | None, now: datetime) -> bool:
     return updated is None or now - updated >= interval
 
 def _development_draft_target_safe(project: dict, placement: dict, draft_id: str) -> bool:
-    """Fail closed if a software-development post can publish with a stale root URL."""
+    """Final publish gate: project, placement and draft must share one target host."""
     project_site = str(project.get("site") or "")
-    if "/software-dev" not in project_site:
-        return True
-    target = str(placement.get("target_url") or "")
-    if "/software-dev" not in target:
-        return False
+    target = str(placement.get("target_url") or "").strip()
     draft = next(
         (x for x in marketplace.list_drafts() if str(x.get("id") or "") == str(draft_id or "")),
         None,
     )
     if not draft or str(draft.get("status") or "") != "approved":
         return False
-    if str(draft.get("target_url") or "") != target:
+    if str(draft.get("target_url") or "").strip() != target:
         return False
+    try:
+        project_host = (urlparse(project_site).hostname or "").lower().removeprefix("www.")
+        target_host = (urlparse(target).hostname or "").lower().removeprefix("www.")
+        draft_site_host = (urlparse(str(draft.get("site_url") or "")).hostname or "").lower().removeprefix("www.")
+    except Exception:
+        return False
+    if not project_host or target_host != project_host:
+        return False
+    if draft_site_host and draft_site_host != project_host:
+        return False
+    if project_host == "systems-ai-oko.ru" and "boris-ai.pro/software-dev" in target:
+        return False
+    # The actual publication copy must carry the exact destination too. This
+    # catches stale root-link text even when draft metadata itself is correct.
     return target in str(draft.get("text") or "")
 
 
 def run_crowd_seo_cycle(assistant_script: str) -> dict:
     """Drive approved Crowd SEO projects without owner-as-operator work."""
     now = datetime.now(timezone.utc)
-    publish_budget = MAX_CROWD_PUBLISHES_PER_RUN
+    submitted_domains_today = _daily_submission_domains(now)
+    daily_target = reserve_policy.DAILY_UNIQUE_SUBMISSION_TARGET
+    daily_remaining = max(0, daily_target - len(submitted_domains_today))
+    publish_budget = min(MAX_CROWD_PUBLISHES_PER_RUN, daily_remaining)
     verify_budget = MAX_CROWD_VERIFICATIONS_PER_RUN
     attempted_domains_this_run: set[str] = set()
+    _, _, business_date = _business_day_bounds(now)
     out = {
         "projects": 0,
+        "business_timezone": reserve_policy.BUSINESS_TIMEZONE,
+        "business_date": business_date,
+        "daily_target_unique_domains": daily_target,
+        "submitted_unique_domains_today": len(submitted_domains_today),
+        "remaining_unique_domains_today": daily_remaining,
+        "daily_target_reached": daily_remaining == 0,
         "analysis_refreshed": 0,
         "refreshed": 0,
         "drafts_synced": 0,
         "publication_sync_changes": 0,
+        "moderation_checked": 0,
+        "moderation_reconciled": 0,
         "publish_attempts": 0,
         "published_verified": 0,
         "link_checks": 0,
@@ -704,6 +904,14 @@ def run_crowd_seo_cycle(assistant_script: str) -> dict:
 
             draft_sync = crowd_seo.sync_project_drafts(project_id)
             out["drafts_synced"] += int(draft_sync.get("drafts") or 0)
+
+            # MODERATION_RECONCILIATION_V1
+            # Resolve already-submitted moderated placements to their public
+            # URLs before ordinary publication sync/verification. This path is
+            # read-only against the external site and never re-submits a form.
+            moderation = seo_moderation_reconciler.reconcile_project(project_id)
+            out["moderation_checked"] += int(moderation.get("checked") or 0)
+            out["moderation_reconciled"] += int(moderation.get("reconciled") or 0)
 
             pub_sync = crowd_seo.sync_publications(project_id)
             out["publication_sync_changes"] += int(pub_sync.get("changed") or 0)
@@ -747,13 +955,23 @@ def run_crowd_seo_cycle(assistant_script: str) -> dict:
                 for placement in list(project.get("placements") or [])
                 if placement.get("publication_url")
             }
+            # Manual/API FACTs may be pending moderation and therefore have no
+            # public URL in the Crowd project yet. They still consume the domain
+            # cooldown and must not be submitted again on the following day.
+            used_domains.update(_recent_submission_domains_for_project(project_id, now))
             used_domains.discard("")
             fresh_domain_placements = [
                 placement
                 for placement in ready_placements
                 if _site_domain(placement.get("forum_url")) not in used_domains
             ]
-            publish_queue = fresh_domain_placements or ready_placements
+            out.setdefault("cooldown_blocked_ready", 0)
+            out["cooldown_blocked_ready"] += max(
+                0, len(ready_placements) - len(fresh_domain_placements)
+            )
+            # Never fall back to a recently used domain merely because the
+            # fresh queue is empty. Daily SLO is unique-domain delivery.
+            publish_queue = fresh_domain_placements
 
             for placement in publish_queue:
                 if publish_budget <= 0:
@@ -774,12 +992,9 @@ def run_crowd_seo_cycle(assistant_script: str) -> dict:
                     out["errors"].append({"project": project_id, "placement": placement.get("id"), "error": "draft_missing"})
                     continue
 
-                # DEVELOPMENT_DRAFT_TARGET_GATE_V1
-                # Guard the last irreversible step too: even if project state or
-                # an old draft drifts later, software-development outreach must
-                # never publish a generic BORIS-root link. Re-sync once, then
-                # fail closed and continue with other work if the invariant is
-                # still not satisfied.
+                # CROWD_FINAL_TARGET_AND_CONTENT_GATE_V2
+                # The last irreversible step is fully host-bound for every
+                # project, not just the retired /software-dev architecture.
                 if not _development_draft_target_safe(project, placement, draft_id):
                     crowd_seo.sync_project_drafts(project_id)
                     project = crowd_seo.get_project(project_id)
@@ -794,13 +1009,45 @@ def run_crowd_seo_cycle(assistant_script: str) -> dict:
                         action="publish",
                         status_value="blocked",
                         draft_id=draft_id,
-                        error_code="development_draft_target_mismatch",
-                        error_detail="Software-development draft does not contain its exact approved /software-dev target URL.",
+                        error_code="draft_target_host_mismatch",
+                        error_detail="Draft/placement target does not match the active project host.",
                     )
                     out["errors"].append({
                         "project": project_id,
                         "placement": placement.get("id"),
-                        "error": "development_draft_target_mismatch",
+                        "error": "draft_target_host_mismatch",
+                    })
+                    continue
+
+                # Deterministic local content validation must happen BEFORE an
+                # external browser is opened and BEFORE publish budget is
+                # consumed. Re-sync once to self-heal stale draft metadata.
+                draft_obj = next(
+                    (x for x in marketplace.list_drafts() if str(x.get("id") or "") == draft_id),
+                    None,
+                )
+                content_gate = marketplace.validate_publication_content(draft_obj or {})
+                if not content_gate.get("ok"):
+                    crowd_seo.sync_project_drafts(project_id)
+                    draft_obj = next(
+                        (x for x in marketplace.list_drafts() if str(x.get("id") or "") == draft_id),
+                        None,
+                    )
+                    content_gate = marketplace.validate_publication_content(draft_obj or {})
+                if not content_gate.get("ok"):
+                    marketplace.record_attempt(
+                        platform=str(placement.get("platform") or "unknown"),
+                        action="prepare_post",
+                        status_value="blocked",
+                        draft_id=draft_id,
+                        error_code=str(content_gate.get("reason") or "content_landing_guard"),
+                        error_detail="Local pre-publish content gate blocked this draft before publish budget was consumed.",
+                        meta={"content_gate": content_gate},
+                    )
+                    out["errors"].append({
+                        "project": project_id,
+                        "placement": placement.get("id"),
+                        "error": str(content_gate.get("reason") or "content_landing_guard"),
                     })
                     continue
 
@@ -875,6 +1122,10 @@ def run_crowd_seo_cycle(assistant_script: str) -> dict:
         except Exception as exc:
             out["errors"].append({"project": project_id, "error": f"{type(exc).__name__}: {exc}"})
 
+    final_domains = _daily_submission_domains(now)
+    out["submitted_unique_domains_today"] = len(final_domains)
+    out["remaining_unique_domains_today"] = max(0, daily_target - len(final_domains))
+    out["daily_target_reached"] = len(final_domains) >= daily_target
     return out
 
 def _crowd_capacity_snapshot() -> list[dict]:
@@ -952,6 +1203,45 @@ def _publication_discovery_urgency(capacity_rows: list[dict], base_deficit: int)
     return max(int(base_deficit or 0), autonomous)
 
 
+def _autonomous_reserve_snapshot(now: datetime | None = None) -> dict:
+    """Measure fresh reusable no-human-step inventory.
+
+    Raw platform readiness is not enough for next-day SLO capacity: a domain
+    that already accepted a FACT inside the cooldown window is not fresh READY.
+    """
+    rows = marketplace.list_platforms()
+    autonomous = [x for x in rows if x.get("delivery_lane") == "autonomous_candidate"]
+    allowed = [
+        x for x in autonomous
+        if bool((x.get("free_policy") or {}).get("free"))
+        and str((x.get("free_policy") or {}).get("rule_decision") or "") == "allowed"
+    ]
+    ready_raw = [x for x in autonomous if bool(x.get("autonomous_ready"))]
+    cooldown_domains = _recent_submission_domains_global(now)
+    ready = [
+        x for x in ready_raw
+        if _site_domain(x.get("url") or x.get("forum_url")) not in cooldown_domains
+    ]
+    cooldown_blocked = [
+        x for x in ready_raw
+        if _site_domain(x.get("url") or x.get("forum_url")) in cooldown_domains
+    ]
+    return {
+        "candidate_target": reserve_policy.AUTONOMOUS_CANDIDATE_TARGET,
+        "allowed_target": reserve_policy.ALLOWED_AUTONOMOUS_TARGET,
+        "ready_target": reserve_policy.AUTONOMOUS_READY_TARGET,
+        "cooldown_days": reserve_policy.SUBMISSION_DOMAIN_COOLDOWN_DAYS,
+        "candidates": len(autonomous),
+        "allowed": len(allowed),
+        "ready_raw": len(ready_raw),
+        "ready": len(ready),
+        "cooldown_blocked_ready": len(cooldown_blocked),
+        "candidate_deficit": max(0, reserve_policy.AUTONOMOUS_CANDIDATE_TARGET - len(autonomous)),
+        "allowed_deficit": max(0, reserve_policy.ALLOWED_AUTONOMOUS_TARGET - len(allowed)),
+        "ready_deficit": max(0, reserve_policy.AUTONOMOUS_READY_TARGET - len(ready)),
+    }
+
+
 def _publication_discovery_schedule(
     state: dict,
     capacity_deficit: int,
@@ -975,6 +1265,61 @@ def _publication_discovery_schedule(
         "capacity_deficit": int(capacity_deficit or 0),
         "clock_skew_detected": clock_skew,
     }
+
+
+def _run_forum_discovery_bounded(
+    *,
+    max_queries: int,
+    per_query: int,
+    priority_niches: list[str],
+    directory_max_inspections: int,
+    findaforum_max_inspections: int,
+) -> dict:
+    """Run forum discovery in a hard-bounded child process."""
+    request = {
+        "max_queries": int(max_queries),
+        "per_query": int(per_query),
+        "sleep_s": 0.15,
+        "priority_niches": list(priority_niches or []),
+        "directory_max_inspections": int(directory_max_inspections),
+        "findaforum_max_inspections": int(findaforum_max_inspections),
+    }
+    code = (
+        "import json,sys; "
+        "from app.services import forum_discovery as f; "
+        "p=json.loads(sys.argv[1]); "
+        "r=f.discover(**p); "
+        "print(json.dumps(r, ensure_ascii=False))"
+    )
+    proc = subprocess.run(
+        [
+            str(BACKEND_ROOT / "venv" / "bin" / "python"),
+            "-c",
+            code,
+            json.dumps(request, ensure_ascii=False),
+        ],
+        cwd=str(BACKEND_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=FORUM_DISCOVERY_WALL_TIMEOUT_S,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"forum_discovery_exit_{proc.returncode}: "
+            f"{(proc.stderr or proc.stdout or '')[-500:]}"
+        )
+    lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("forum_discovery_empty_output")
+    payload = json.loads(lines[-1])
+    if not isinstance(payload, dict):
+        raise RuntimeError("forum_discovery_invalid_payload")
+    payload["bounded_execution"] = {
+        **request,
+        "wall_timeout_seconds": FORUM_DISCOVERY_WALL_TIMEOUT_S,
+    }
+    return payload
 
 
 def _run_publication_discovery_bounded(capacity_deficit: int) -> dict:
@@ -1017,15 +1362,15 @@ def _run_publication_discovery_bounded(capacity_deficit: int) -> dict:
 
 
 PUBLICATION_DEVELOPMENT_ROUTES_V1 = (
-    ("Разработка веб-приложений и сервисов под заказ", "https://boris-ai.pro/software-dev/services/web-app-development"),
-    ("Разработка SaaS-платформ под ключ", "https://boris-ai.pro/software-dev/services/saas-development"),
-    ("Разработка CRM под бизнес-процессы компании", "https://boris-ai.pro/software-dev/services/crm-development"),
-    ("Разработка AI-автоматизации для бизнеса", "https://boris-ai.pro/software-dev/services/ai-automation"),
-    ("Разработка API-интеграций между бизнес-системами", "https://boris-ai.pro/software-dev/services/api-integration"),
-    ("Интеграция 1С с CRM, сайтом и внешними сервисами", "https://boris-ai.pro/software-dev/services/1c-integration"),
-    ("Разработка мобильных приложений под ключ", "https://boris-ai.pro/software-dev/services/mobile-app-development"),
-    ("Разработка Telegram-ботов для бизнеса", "https://boris-ai.pro/software-dev/services/telegram-bots"),
-    ("Разработка и интеграция IP-телефонии", "https://boris-ai.pro/software-dev/services/ip-telephony"),
+    ("Разработка веб-приложений и сервисов под заказ", "https://systems-ai-oko.ru/services/web-app-development"),
+    ("Разработка SaaS-платформ под ключ", "https://systems-ai-oko.ru/services/saas-development"),
+    ("Разработка CRM под бизнес-процессы компании", "https://systems-ai-oko.ru/services/crm-development"),
+    ("Разработка AI-автоматизации для бизнеса", "https://systems-ai-oko.ru/services/ai-automation"),
+    ("Разработка API-интеграций между бизнес-системами", "https://systems-ai-oko.ru/services/api-integration"),
+    ("Интеграция 1С с CRM, сайтом и внешними сервисами", "https://systems-ai-oko.ru/services/1c-integration"),
+    ("Разработка мобильных приложений под ключ", "https://systems-ai-oko.ru/services/mobile-app-development"),
+    ("Разработка Telegram-ботов для бизнеса", "https://systems-ai-oko.ru/services/telegram-bots"),
+    ("Разработка и интеграция IP-телефонии", "https://systems-ai-oko.ru/services/ip-telephony"),
 )
 PUBLICATION_DEVELOPMENT_KEYWORDS_V1 = (
     "разработка ПО под заказ", "разработка программного обеспечения",
@@ -1240,13 +1585,26 @@ def main() -> int:
                 discovery_query_budget, discovery_per_query = 30, 6
                 directory_inspection_budget = 0
                 findaforum_inspection_budget = 0
-            discovery_result = forum_discovery.discover(
+            discovery_result = _run_forum_discovery_bounded(
                 max_queries=discovery_query_budget,
                 per_query=discovery_per_query,
-                sleep_s=0.15,
                 priority_niches=priority_niches,
                 directory_max_inspections=directory_inspection_budget,
                 findaforum_max_inspections=findaforum_inspection_budget,
+            )
+        except subprocess.TimeoutExpired:
+            discovery_result = forum_discovery.record_timeout(
+                FORUM_DISCOVERY_WALL_TIMEOUT_S
+            )
+            marketplace.record_attempt(
+                platform="forum_discovery",
+                action="discover",
+                status_value="failed",
+                error_code="discovery_timeout",
+                error_detail=(
+                    "forum discovery exceeded "
+                    f"{FORUM_DISCOVERY_WALL_TIMEOUT_S}s wall timeout"
+                ),
             )
         except Exception as exc:
             discovery_result = {"error": f"{type(exc).__name__}: {exc}"}
@@ -1258,8 +1616,10 @@ def main() -> int:
                 error_detail=discovery_result["error"],
             )
 
-    publication_discovery_urgency = _publication_discovery_urgency(
-        capacity_before, urgent_discovery_deficit
+    autonomous_reserve_before = _autonomous_reserve_snapshot()
+    publication_discovery_urgency = max(
+        _publication_discovery_urgency(capacity_before, urgent_discovery_deficit),
+        int(autonomous_reserve_before.get("ready_deficit") or 0),
     )
     publication_discovery_state = publication_discovery.load()
     publication_discovery_schedule = _publication_discovery_schedule(
@@ -1640,6 +2000,11 @@ def main() -> int:
 
     rows = marketplace.save_drafts(drafts)
 
+    # External catalog moderation reconciliation is read-only. Check only a
+    # bounded number of the oldest due submissions per guardian pass; each
+    # platform has its own six-hour cooldown inside the reconciler.
+    external_moderation = external_moderation_reconciler.run(max_checks=4)
+
     # Client Crowd SEO is serviced by the same guardian. The client supplies
     # only the site; BORIS validates generated content, deduplicates retries and
     # moves safe projects forward without an owner approval click.
@@ -1653,6 +2018,7 @@ def main() -> int:
         for x in capacity_after
     ), default=0)
     strategic_reserve_after = _strategic_reserve_snapshot()
+    autonomous_reserve_after = _autonomous_reserve_snapshot()
 
     daily_execution = _daily_execution_snapshot(datetime.now(timezone.utc), mark_run=True)
     summary = {
@@ -1673,12 +2039,17 @@ def main() -> int:
         "discovery": discovery_result or forum_discovery.status(),
         "publication_discovery": publication_discovery_result or publication_discovery.load(),
         "publication_discovery_schedule": publication_discovery_schedule,
+        "autonomous_reserve": {
+            "before": autonomous_reserve_before,
+            "after": autonomous_reserve_after,
+        },
         "auto_discovered_candidates": len(forum_discovery.list_candidates()),
         "terminal_reactivated": terminal_reactivated,
         "project_reconcile": project_reconcile,
         "platform_bootstrap": bootstrap_state,
         "active_project_bootstrap": active_project_bootstrap,
         "platform_warmup": warmup_state,
+        "external_moderation_reconciliation": external_moderation,
         "crowd_capacity": {
             "before": capacity_before,
             "placement_deficit_before": placement_deficit,

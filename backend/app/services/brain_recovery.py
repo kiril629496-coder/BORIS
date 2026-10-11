@@ -68,7 +68,7 @@ def _ensure_mop_handoff_manager_tasks(db) -> dict:
        ORDER BY md.updated_at,md.id LIMIT 100
     """)).mappings().all()
 
-    created=updated=already_managed=skipped_unpaid=skipped_disabled=missing_manager=missing_deal=0
+    created=updated=promoted=deduped=already_managed=skipped_unpaid=skipped_disabled=missing_manager=missing_deal=0
     items=[]
     for r in rows:
         aid=str(r.get('account_id') or '')
@@ -98,24 +98,44 @@ def _ensure_mop_handoff_manager_tasks(db) -> dict:
             missing_manager+=1
             continue
 
+        # CRM_HANDOFF_TASK_CROSS_SOURCE_DEDUPE_V1:
+        # A generic brain_auto_recovery follow-up and a MOP human handoff are the
+        # same operator obligation. Reuse/promote the generic task instead of
+        # creating a second open "Связаться с клиентом" task for the same deal.
         task=db.execute(text("""
-          SELECT id,assigned_user_id,due_at FROM boris_crm_tasks
-           WHERE deal_id=:d AND status='open' AND source='mop_handoff_recovery'
-           ORDER BY id DESC LIMIT 1
+          SELECT id,assigned_user_id,due_at,source,title FROM boris_crm_tasks
+           WHERE deal_id=:d AND status='open'
+             AND (
+               source='mop_handoff_recovery'
+               OR (source='brain_auto_recovery' AND title='Связаться с клиентом')
+             )
+           ORDER BY CASE WHEN source='mop_handoff_recovery' THEN 0 ELSE 1 END,
+                    id DESC
+           LIMIT 1
         """),{'d':deal_id}).mappings().first()
         due=db.execute(text("SELECT now()+interval '15 minutes'")).scalar()
         if task:
-            if task.get('assigned_user_id') is None or task.get('due_at') is None:
+            task_id=int(task['id'])
+            if str(task.get('source') or '')=='brain_auto_recovery':
+                db.execute(text("""
+                  UPDATE boris_crm_tasks
+                     SET source='mop_handoff_recovery',
+                         description='Передано BORIS после безопасной MOP-эскалации: требуется действие менеджера',
+                         assigned_user_id=COALESCE(assigned_user_id,:m),
+                         due_at=LEAST(COALESCE(due_at,:due),:due)
+                   WHERE id=:i
+                """),{'m':manager_id,'due':due,'i':task_id})
+                promoted+=1
+            elif task.get('assigned_user_id') is None or task.get('due_at') is None:
                 db.execute(text("""
                   UPDATE boris_crm_tasks
                      SET assigned_user_id=COALESCE(assigned_user_id,:m),
                          due_at=COALESCE(due_at,:due)
                    WHERE id=:i
-                """),{'m':manager_id,'due':due,'i':task['id']})
+                """),{'m':manager_id,'due':due,'i':task_id})
                 updated+=1
             else:
                 already_managed+=1
-            task_id=int(task['id'])
         else:
             task_id=int(db.execute(text("""
               INSERT INTO boris_crm_tasks(
@@ -129,6 +149,32 @@ def _ensure_mop_handoff_manager_tasks(db) -> dict:
             """),{'u':r.get('owner_user_id'),'d':deal_id,'c':r.get('contact_id'),
                    'm':manager_id,'due':due}).scalar())
             created+=1
+
+        # Clean cross-source duplicates left by older runtime generations.
+        _dup_ids=[int(x[0]) for x in db.execute(text("""
+          UPDATE boris_crm_tasks
+             SET status='cancelled',completed_at=now()
+           WHERE deal_id=:d AND status='open'
+             AND source='brain_auto_recovery'
+             AND title='Связаться с клиентом'
+             AND id<>:keep
+          RETURNING id
+        """),{'d':deal_id,'keep':task_id}).all()]
+        for _dup_id in _dup_ids:
+            _ref=f"brain_handoff_cross_source_dedupe:{_dup_id}"
+            db.execute(text("""
+              INSERT INTO boris_crm_activities(
+                owner_user_id,deal_id,contact_id,activity_type,channel,title,body,
+                source,source_ref,actor_type,created_at
+              ) VALUES(
+                :o,:d,:c,'task_cancelled','crm',
+                'Дубликат задачи передачи менеджеру снят',
+                'Generic follow-up superseded by active MOP human handoff task.',
+                'brain_task_reconcile',:r,'system',now()
+              ) ON CONFLICT DO NOTHING
+            """),{'o':r.get('owner_user_id'),'d':deal_id,'c':r.get('contact_id'),'r':_ref})
+        deduped+=len(_dup_ids)
+
         db.execute(text("""
           UPDATE boris_crm_deals
              SET next_action_at=CASE
@@ -142,11 +188,12 @@ def _ensure_mop_handoff_manager_tasks(db) -> dict:
     if created or updated or items:
         db.commit()
     return {
-      'policy_version':'MOP_HUMAN_HANDOFF_MANAGER_TASK_V1',
+      'policy_version':'MOP_HUMAN_HANDOFF_MANAGER_TASK_V2',
       'scanned':len(rows),'created':created,'updated':updated,
+      'promoted':promoted,'deduped':deduped,
       'already_managed':already_managed,'skipped_unpaid':skipped_unpaid,
       'skipped_disabled':skipped_disabled,'missing_manager':missing_manager,
-      'missing_deal':missing_deal,'changed':created+updated,'items':items,
+      'missing_deal':missing_deal,'changed':created+updated+promoted+deduped,'items':items,
     }
 
 
@@ -2109,9 +2156,9 @@ def _safe_crm_overdue_queue_recovery(db) -> dict:
     reminded=0
     skipped_inactive=max(0,total_overdue-eligible_total)
     levels={}
+    pending=[]
     for r in rows:
         aid=str(r.get("avito_account_id") or "")
-
         due=r.get("due_at")
         if due is None:
             continue
@@ -2127,18 +2174,55 @@ def _safe_crm_overdue_queue_recovery(db) -> dict:
         else:
             level="manager_critical"; interval_sec=12*3600
         bucket=max(1,int(age_sec//interval_sec))
-        target_user_id=r.get("assigned_user_id") or r.get("responsible_user_id")
-        ref=f"brain_crm_overdue:{int(r['id'])}:{interval_sec}:{bucket}"
+        pending.append({
+            "row":r,"account_id":aid,"due":due,"age_sec":age_sec,
+            "level":level,
+            "target_user_id":r.get("assigned_user_id") or r.get("responsible_user_id"),
+            "ref":f"brain_crm_overdue:{int(r['id'])}:{interval_sec}:{bucket}",
+            "task_id":str(int(r["id"])),
+        })
 
-        db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k,0))"),{"k":ref})
-        if db.execute(text("SELECT 1 FROM boris_crm_activities WHERE source_ref=:r LIMIT 1"),{"r":ref}).first():
-            continue
-        prior=int(db.execute(text("""
-          SELECT count(*) FROM boris_crm_activities
+    # CRM_OVERDUE_HISTORY_BATCH_V1:
+    # Lock every deterministic source ref before one history read. This keeps
+    # writer idempotency while removing two correlated activity reads per row.
+    refs=sorted({item["ref"] for item in pending})
+    task_ids=sorted({item["task_id"] for item in pending})
+    existing_refs=set()
+    prior_by_task={}
+    if refs:
+        db.execute(text("""
+          SELECT pg_advisory_xact_lock(hashtextextended(k,0))
+            FROM unnest(CAST(:refs AS text[])) AS u(k)
+           ORDER BY k
+        """),{"refs":refs})
+        history=db.execute(text("""
+          SELECT source_ref,COALESCE(metadata_json->>'task_id','') AS task_id
+            FROM boris_crm_activities
            WHERE source='brain_crm_overdue_reminder'
-             AND COALESCE(metadata_json->>'task_id','')=:task_id
-        """),{"task_id":str(int(r["id"]))}).scalar() or 0)
-        reminder_count=prior+1
+             AND (
+               source_ref=ANY(CAST(:refs AS text[]))
+               OR COALESCE(metadata_json->>'task_id','')=ANY(CAST(:task_ids AS text[]))
+             )
+        """),{"refs":refs,"task_ids":task_ids}).mappings().all()
+        for item in history:
+            source_ref=str(item.get("source_ref") or "")
+            task_id=str(item.get("task_id") or "")
+            if source_ref in refs:
+                existing_refs.add(source_ref)
+            if task_id in task_ids:
+                prior_by_task[task_id]=int(prior_by_task.get(task_id) or 0)+1
+
+    for item in pending:
+        if item["ref"] in existing_refs:
+            continue
+        r=item["row"]
+        aid=item["account_id"]
+        due=item["due"]
+        age_sec=item["age_sec"]
+        level=item["level"]
+        task_id=item["task_id"]
+        target_user_id=item["target_user_id"]
+        reminder_count=int(prior_by_task.get(task_id) or 0)+1
         hours=max(1,age_sec//3600)
         body=(
           f"Задача просрочена примерно на {hours} ч. "
@@ -2165,8 +2249,10 @@ def _safe_crm_overdue_queue_recovery(db) -> dict:
         """),{
           "o":r["owner_user_id"],"d":r["deal_id"],"c":r["contact_id"],
           "title":"Напоминание менеджеру: просрочена CRM-задача",
-          "body":body,"ref":ref,"meta":meta,
+          "body":body,"ref":item["ref"],"meta":meta,
         })
+        existing_refs.add(item["ref"])
+        prior_by_task[task_id]=reminder_count
         reminded+=1
         levels[level]=int(levels.get(level) or 0)+1
 

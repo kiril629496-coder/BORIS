@@ -508,6 +508,7 @@ _DEAL_TRIGGERS = {
     "after_qualification",
     "after_contact",
     "after_target_action",
+    "meaningful_engagement",
 }
 
 
@@ -527,6 +528,12 @@ def _account_sales_settings(db, account_id: str) -> dict:
     trigger = str(data.get("deal_trigger") or "first_inquiry")
     if trigger not in _DEAL_TRIGGERS:
         trigger = "first_inquiry"
+    if trigger == "meaningful_engagement":
+        trigger = "after_engaged"
+    # PLANETA_CRM_TRIGGER_CANONICAL_V1:
+    # Planeta deals start only after meaningful engagement, regardless of stale UI/bootstrap state.
+    if str(account_id or "") == "planetazayavki_65985":
+        trigger = "after_engaged"
     return {"deal_trigger": trigger}
 
 
@@ -601,14 +608,40 @@ def _latest_mop_qualification(db, account_id: str, chat_id: str) -> dict:
         return {}
 
 
+def _meaningful_inbound_text(body: str) -> bool:
+    """Deterministic evidence that a first inbound contains a real sales request."""
+    low = " ".join(str(body or "").lower().replace("ё", "е").split())
+    if not low or low.startswith("[системное сообщение]"):
+        return False
+    tokens = re.findall(r"[а-яa-z0-9]+", low, re.I)
+    if not tokens:
+        return False
+    trivial = {
+        "здравствуйте", "привет", "добрый", "день", "вечер", "утро",
+        "актуально", "цена", "стоимость", "сколько", "стоит", "прием",
+    }
+    meaningful_tokens = [t for t in tokens if t not in trivial]
+    if not meaningful_tokens:
+        return False
+    intent_markers = (
+        "нуж", "хочу", "ищ", "заказ", "проект", "расчет", "расчёт",
+        "замер", "размер", "бюджет", "город", "кухн", "мебел", "шкаф",
+        "гардероб", "прихож", "ванн", "достав", "установ", "собир",
+    )
+    if any(marker in low for marker in intent_markers) and len(tokens) >= 2:
+        return True
+    return len(meaningful_tokens) >= 3
+
+
 def _deal_gate(db, account_id: str, chat_id: str, rows: list[dict]) -> tuple[bool, str, dict]:
     settings = _account_sales_settings(db, account_id)
     trigger = settings["deal_trigger"]
-    incoming_count = sum(
-        1 for r in rows
+    incoming_rows = [
+        r for r in rows
         if _normal_direction(r.get("direction")) == "in"
         and not str(r.get("body") or "").lstrip().startswith("[Системное сообщение]")
-    )
+    ]
+    incoming_count = len(incoming_rows)
     lead = db.execute(text("""
         SELECT has_phone,stage,msg_count FROM messenger_leads
          WHERE account_id=:a AND avito_chat_id=:c ORDER BY id DESC LIMIT 1
@@ -619,19 +652,37 @@ def _deal_gate(db, account_id: str, chat_id: str, rows: list[dict]) -> tuple[boo
     phone = bool(lead.get("has_phone") or q.get("phone_received"))
     target = stage == "TARGET_ACTION" or str(q.get("crm_action") or "").lower() == "create_deal"
     qualified = stage in {"QUALIFIED", "TARGET_ACTION"}
-    engaged = incoming_count >= 2
-    # CRM capture invariant: every real inbound Avito inquiry creates a deal.
-    # Qualification still controls stage/next action, but must never suppress the CRM card.
-    allow = incoming_count > 0
+    meaningful_first = any(_meaningful_inbound_text(r.get("body") or "") for r in incoming_rows)
+    engaged = (
+        incoming_count >= 2
+        or meaningful_first
+        or stage in {"ENGAGED", "QUALIFIED", "TARGET_ACTION"}
+        or phone
+        or target
+    )
+
+    if trigger == "first_inquiry":
+        allow = incoming_count > 0
+    elif trigger == "after_engaged":
+        allow = engaged
+    elif trigger == "after_qualification":
+        allow = qualified
+    elif trigger == "after_contact":
+        allow = phone
+    elif trigger == "after_target_action":
+        allow = target
+    else:
+        allow = incoming_count > 0
+
     return allow, trigger, {
         "incoming_count": incoming_count,
+        "meaningful_first": meaningful_first,
         "engaged": engaged,
         "qualified": qualified,
         "phone_received": phone,
         "target_action": target,
         "qualification": q,
     }
-
 
 def _manager_next_action(db, account_id: str, chat_id: str, maturity: dict, lead: dict | None, mop: dict | None, rop: dict | None, tasks: list, deal: dict | None) -> dict:
     """Deterministic product recommendation from existing dialog/CRM state. No new engine/storage."""
@@ -769,6 +820,107 @@ def _mop_job_seeker_evidence(db, account_id: str, chat_id: str):
          ORDER BY ev.id DESC
          LIMIT 1
     """), {"account_id": account_id, "chat": chat_id}).mappings().first()
+
+
+def _mop_terminal_refusal_current_evidence(db, account_id: str, chat_id: str):
+    """Return exact terminal-refusal evidence only while it is the latest inbound truth."""
+    return db.execute(text("""
+        SELECT md.id AS draft_id,ev.id AS event_id,mi.avito_created_at AS refusal_at
+          FROM mop_drafts md
+          JOIN mop_draft_events ev ON ev.draft_id=md.id
+          JOIN messenger_messages mi
+            ON mi.account_id=md.account_id
+           AND mi.avito_message_id=md.avito_message_id
+         WHERE md.account_id=:account_id
+           AND md.avito_chat_id=:chat
+           AND md.status='no_reply_required'
+           AND ev.event='closed_no_reply'
+           AND COALESCE(ev.metadata->>'reason','')='terminal_refusal'
+           AND COALESCE(ev.metadata->>'policy_version','')='MOP_DETERMINISTIC_NO_REPLY_V1'
+           AND NOT EXISTS (
+             SELECT 1 FROM messenger_messages newer
+              WHERE newer.account_id=md.account_id
+                AND newer.avito_chat_id=md.avito_chat_id
+                AND lower(COALESCE(newer.direction,'')) IN ('in','incoming')
+                AND COALESCE(newer.msg_type,'')<>'system'
+                AND newer.avito_created_at>mi.avito_created_at
+           )
+         ORDER BY mi.avito_created_at DESC,ev.id DESC
+         LIMIT 1
+    """), {"account_id": account_id, "chat": chat_id}).mappings().first()
+
+
+def _exclude_terminal_refusal_open_deals(db, owner: int, account_id: str, chat_id: str, evidence) -> int:
+    """Close only auto-open sales deals contradicted by current exact refusal evidence."""
+    if not evidence:
+        return 0
+    rows=db.execute(text("""
+        SELECT id,pipeline_id,contact_id
+          FROM boris_crm_deals
+         WHERE owner_user_id=:owner
+           AND avito_account_id=:account_id
+           AND avito_chat_id=:chat
+           AND status='open'
+         ORDER BY id
+         FOR UPDATE
+    """), {
+        "owner": owner, "account_id": account_id, "chat": chat_id,
+    }).mappings().all()
+    changed=0
+    for row in rows:
+        lost_stage=db.execute(text("""
+            SELECT id FROM boris_crm_stages
+             WHERE pipeline_id=:pipeline_id AND semantic_type='lost'
+             ORDER BY position,id LIMIT 1
+        """), {"pipeline_id": row["pipeline_id"]}).scalar()
+        if not lost_stage:
+            raise RuntimeError("CRM_TERMINAL_REFUSAL_LOST_STAGE_NOT_READY")
+        db.execute(text("""
+            UPDATE boris_crm_tasks
+               SET status='cancelled',completed_at=COALESCE(completed_at,NOW())
+             WHERE deal_id=:deal_id AND status='open'
+        """), {"deal_id": int(row["id"])})
+        reason="Клиент сообщил, что покупка/заказ уже выполнены"
+        db.execute(text("""
+            UPDATE boris_crm_deals
+               SET status='lost',stage_id=:stage_id,lost_reason=:reason,
+                   next_action_at=NULL,last_activity_at=NOW(),updated_at=NOW()
+             WHERE id=:deal_id AND owner_user_id=:owner AND status='open'
+        """), {
+            "stage_id": int(lost_stage), "reason": reason,
+            "deal_id": int(row["id"]), "owner": owner,
+        })
+        ref=f"crm_terminal_refusal_guard:{int(evidence['draft_id'])}:{int(row['id'])}"
+        if not db.execute(text("""
+            SELECT 1 FROM boris_crm_activities
+             WHERE owner_user_id=:owner AND source_ref=:ref LIMIT 1
+        """), {"owner": owner, "ref": ref}).first():
+            db.execute(text("""
+                INSERT INTO boris_crm_activities(
+                    owner_user_id,deal_id,contact_id,activity_type,channel,title,body,
+                    source,source_ref,actor_type,actor_id,metadata_json,created_at
+                ) VALUES(
+                    :owner,:deal_id,:contact_id,'lead_lost','crm',
+                    'Клиент уже решил задачу',
+                    'Текущий последний входящий содержит подтверждённый terminal_refusal. '
+                    'Автоматическое повторное открытие сделки подавлено.',
+                    'crm_terminal_refusal_guard',:ref,'system','boris',
+                    CAST(:meta AS jsonb),NOW()
+                )
+            """), {
+                "owner": owner, "deal_id": int(row["id"]),
+                "contact_id": row.get("contact_id"), "ref": ref,
+                "meta": json.dumps({
+                    "draft_id": int(evidence["draft_id"]),
+                    "evidence_event_id": int(evidence["event_id"]),
+                    "account_id": account_id, "avito_chat_id": chat_id,
+                    "reason": "terminal_refusal",
+                    "policy_version": "CRM_TERMINAL_REFUSAL_REOPEN_GUARD_V1",
+                    "external_action": False, "owner_action_required": False,
+                }, ensure_ascii=False),
+            })
+        changed+=1
+    return changed
 
 
 def _exclude_job_seeker_open_deals(db, owner: int, account_id: str, chat_id: str, evidence) -> int:
@@ -1304,6 +1456,20 @@ def _sync_dialog(
         )
 
     latest = rows[-1]
+    _rule_context = None
+    try:
+        from app.services.control_rule_runtime import capture_crm_sync_context
+        with db.begin_nested():
+            _rule_context = capture_crm_sync_context(db, account_id, chat_id, rows)
+    except Exception as _rule_exc:
+        from app.services.control_rule_runtime import _observe_rule_failure
+        _observe_rule_failure(_rule_exc)
+        try:
+            from app.services.control_rule_runtime import record_crm_capture_failure
+            with db.begin_nested():
+                record_crm_capture_failure(db, account_id, chat_id, latest, _rule_exc)
+        except Exception as _gap_exc:
+            _observe_rule_failure(_gap_exc)
 
     client_name = next(
         (
@@ -1376,6 +1542,19 @@ def _sync_dialog(
             db, owner, account_id, chat_id, _job_seeker_evidence
         )
 
+    # CRM_TERMINAL_REFUSAL_REOPEN_GUARD_V1:
+    # A deterministic "already bought/ordered/found" outcome stays terminal while
+    # it is the latest real inbound. Background sync may preserve contact/history
+    # but must not recreate a sales deal. An explicit force_deal is a human override.
+    _terminal_refusal_evidence = (
+        None if force_deal else
+        _mop_terminal_refusal_current_evidence(db, account_id, chat_id)
+    )
+    if _terminal_refusal_evidence:
+        _exclude_terminal_refusal_open_deals(
+            db, owner, account_id, chat_id, _terminal_refusal_evidence
+        )
+
     existing_deal = db.execute(text("""
         SELECT id FROM boris_crm_deals
          WHERE owner_user_id=:owner AND avito_account_id=:account_id
@@ -1386,6 +1565,9 @@ def _sync_dialog(
     if _job_seeker_evidence:
         deal_allowed = False
         deal_trigger = "mop_job_seeker_excluded"
+    if _terminal_refusal_evidence:
+        deal_allowed = False
+        deal_trigger = "mop_terminal_refusal_closed"
     if existing_deal is not None:
         deal_id, deal_created = int(existing_deal), False
     elif (deal_allowed or force_deal) and not _job_seeker_evidence:
@@ -1436,6 +1618,12 @@ def _sync_dialog(
     _goal_text = db.execute(text("SELECT COALESCE(client_goal_text,client_goal,'') FROM accounts WHERE account_id=:a"), {"a": account_id}).scalar() or ""
     _sync_goal_side_effects(db, owner, account_id, chat_id, deal_id, contact_id, maturity, str(_goal_text))
 
+    if _rule_context is not None:
+        from app.services.control_rule_runtime import observe_crm_sync
+        observe_crm_sync(db, _rule_context, {
+            "deal_id": deal_id, "deal_eligible": bool(deal_allowed), "deal_created": bool(deal_created),
+            "conversation_id": conversation_id, "phone_received": bool(maturity.get("phone_received")),
+        })
     db.commit()
 
     return {
@@ -1829,6 +2017,8 @@ def _context(
 ###############################################################################
 # INTERNAL PRODUCTION BRIDGE
 ###############################################################################
+# CRM capture invariant: every persisted real inbound dialogue is reconciled
+# through the canonical tenant-owned CRM bridge; no external CRM write occurs here.
 
 
 def sync_dialog_for_account(account_id: str, chat_id: str):

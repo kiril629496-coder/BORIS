@@ -41,6 +41,7 @@ EST_KOPEKS = {("gpt-image-2", "medium"): 501, ("gpt-image-2", "high"): 900,
               ("gpt-image-2", "low"): 260, ("gpt-image-1-mini", "low"): 21,
               ("gpt-image-1-mini", "medium"): 81}
 EST_REFERENCE_EXTRA = 200
+BANNER_MAX_COST_KOPEKS = 400
 RETRY_OVERHEAD = 1.0   # paid images: one economic intent = one provider attempt
 MAX_AUTO_RETRY = 0
 HARD_MAX_RETRY = 1
@@ -144,6 +145,30 @@ def estimate_kopeks(shots, model=MODEL, quality="medium", with_reference=True):
     return int(base + (shots - 1) * (base + extra)) if shots else 0
 
 
+def banner_reference_cost_guard(operation, model=MODEL, quality="medium"):
+    """Fail closed before a new paid banner reference edit can exceed 4 RUB.
+
+    Cache hits are handled before this guard in generate() and remain free.
+    Non-banner reference workflows keep their existing budget policy.
+    """
+    op = str(operation or "").strip().lower()
+    applies = op.startswith("banner_") or op.startswith("campaign_openai_")
+    estimated_kopeks = int(
+        estimate_kopeks(1, model=model, quality=quality, with_reference=False)
+        + EST_REFERENCE_EXTRA
+    )
+    return {
+        "applies": bool(applies),
+        "allowed": bool((not applies) or estimated_kopeks <= BANNER_MAX_COST_KOPEKS),
+        "estimated_kopeks": estimated_kopeks,
+        "estimated_cost_rub": round(estimated_kopeks / 100.0, 4),
+        "max_cost_rub": round(BANNER_MAX_COST_KOPEKS / 100.0, 2),
+        "model": str(model or ""),
+        "quality": str(quality or ""),
+        "operation": str(operation or ""),
+    }
+
+
 def _filter_kwargs(fn, kwargs):
     """Зовём чужой контракт только теми аргументами, которые он объявляет."""
     try:
@@ -237,28 +262,34 @@ def _paid_image_account_guard(db, account_id, override=False):
     conn.execute(_t("SELECT pg_advisory_lock(:k)"), {"k": lock_key})
     try:
         cap, window, daily = _paid_image_burst_limits()
-        if not override:
-            import datetime as _dt
-            now=_dt.datetime.now(_dt.timezone.utc)
-            cutoff = now - _dt.timedelta(minutes=window)
-            day_start=now.replace(hour=0,minute=0,second=0,microsecond=0)
-            row = conn.execute(_t(
-                "SELECT count(*), coalesce(sum(cost_rub),0) "
-                "FROM api_usage WHERE account_id=:a AND coalesce(images,0)>0 AND created_at>=:cut"
-            ), {"a": str(account_id), "cut": cutoff}).fetchone()
-            used = int((row[0] if row else 0) or 0)
-            spent = float((row[1] if row else 0) or 0)
-            day_row=conn.execute(_t("SELECT count(*),coalesce(sum(cost_rub),0) FROM api_usage WHERE account_id=:a AND coalesce(images,0)>0 AND created_at>=:day"),{"a":str(account_id),"day":day_start}).fetchone()
-            day_used=int((day_row[0] if day_row else 0) or 0); day_spent=float((day_row[1] if day_row else 0) or 0)
-            if day_used >= daily:
-                yield {"allowed":False,"code":"PAID_IMAGE_DAILY_CAP","used":used,"cap":cap,"window_min":window,
-                       "daily_used":day_used,"daily_cap":daily,"spent_rub":round(spent,2),"daily_spent_rub":round(day_spent,2)}
-                return
-            if used >= cap:
-                yield {"allowed":False,"code":"PAID_IMAGE_BURST_CAP","used":used,"cap":cap,"window_min":window,
-                       "daily_used":day_used,"daily_cap":daily,"spent_rub":round(spent,2),"daily_spent_rub":round(day_spent,2)}
-                return
-        yield {"allowed": True, "override": bool(override), "cap": cap, "window_min": window, "daily_cap":daily}
+        _override_mode=("all" if override is True else str(override or "").strip().lower())
+        if _override_mode not in {"all","burst_only"}:
+            _override_mode="none"
+        import datetime as _dt
+        now=_dt.datetime.now(_dt.timezone.utc)
+        cutoff = now - _dt.timedelta(minutes=window)
+        day_start=now.replace(hour=0,minute=0,second=0,microsecond=0)
+        row = conn.execute(_t(
+            "SELECT count(*), coalesce(sum(cost_rub),0) "
+            "FROM api_usage WHERE account_id=:a AND coalesce(images,0)>0 AND created_at>=:cut"
+        ), {"a": str(account_id), "cut": cutoff}).fetchone()
+        used = int((row[0] if row else 0) or 0)
+        spent = float((row[1] if row else 0) or 0)
+        day_row=conn.execute(_t("SELECT count(*),coalesce(sum(cost_rub),0) FROM api_usage WHERE account_id=:a AND coalesce(images,0)>0 AND created_at>=:day"),{"a":str(account_id),"day":day_start}).fetchone()
+        day_used=int((day_row[0] if day_row else 0) or 0); day_spent=float((day_row[1] if day_row else 0) or 0)
+        if _override_mode!="all" and day_used >= daily:
+            yield {"allowed":False,"code":"PAID_IMAGE_DAILY_CAP","used":used,"cap":cap,"window_min":window,
+                   "daily_used":day_used,"daily_cap":daily,"spent_rub":round(spent,2),"daily_spent_rub":round(day_spent,2),
+                   "override_mode":_override_mode}
+            return
+        if _override_mode=="none" and used >= cap:
+            yield {"allowed":False,"code":"PAID_IMAGE_BURST_CAP","used":used,"cap":cap,"window_min":window,
+                   "daily_used":day_used,"daily_cap":daily,"spent_rub":round(spent,2),"daily_spent_rub":round(day_spent,2),
+                   "override_mode":_override_mode}
+            return
+        yield {"allowed": True, "override": bool(override), "override_mode":_override_mode,
+               "cap": cap, "window_min": window, "daily_cap":daily,
+               "daily_used":day_used,"daily_spent_rub":round(day_spent,2)}
     finally:
         try: conn.execute(_t("SELECT pg_advisory_unlock(:k)"), {"k": lock_key})
         except Exception as _suppressed_exc: observe_suppressed(__name__, _suppressed_exc, line=263)
@@ -557,7 +588,7 @@ def _generate_banner_after_artifact_lock(
 
 def generate(db, account_id, prompt, save_path, model=MODEL, quality="medium",
              size=DEFAULT_SIZE, operation="photo_master", reference_path=None,
-             burst_override=False):
+             burst_override=False, provenance=None):
     """Один платный кадр. reference_path -> ветка edits, иначе generations."""
     if reference_path:
         output_path = Path(save_path)
@@ -598,6 +629,21 @@ def generate(db, account_id, prompt, save_path, model=MODEL, quality="medium",
                         "cost_rub": None, "operation_used": "edits",
                         "error": "PAID_IMAGE_OUTCOME_UNCERTAIN",
                         "ambiguous_provider_outcome": True, "intent": uncertain}
+            _reference_cost_guard = banner_reference_cost_guard(operation, model=model, quality=quality)
+            if not _reference_cost_guard.get("allowed"):
+                _audit_ai_guard(
+                    account_id=account_id, source="image_edit", operation=operation,
+                    event_code="BANNER_REFERENCE_COST_CAP_EXCEEDED", status="blocked",
+                    intent_key="image-edit:"+hashlib.sha256((str(account_id)+":"+str(save_path)).encode("utf-8","ignore")).hexdigest()[:32],
+                    details=_reference_cost_guard,
+                )
+                return {
+                    "ok": False, "path": None, "request_id": None, "cost_rub": None,
+                    "operation_used": "edits", "error": "BANNER_REFERENCE_COST_CAP_EXCEEDED",
+                    "estimated_cost_rub": _reference_cost_guard.get("estimated_cost_rub"),
+                    "max_cost_rub": _reference_cost_guard.get("max_cost_rub"),
+                    "cost_guard": _reference_cost_guard,
+                }
             with _paid_image_account_guard(db, account_id, override=burst_override) as _burst:
                 if not _burst.get("allowed"):
                     _code=str(_burst.get("code") or "PAID_IMAGE_BURST_CAP")
@@ -645,7 +691,8 @@ def generate(db, account_id, prompt, save_path, model=MODEL, quality="medium",
                     result = _edit_with_reference(account_id, prompt, save_path, reference_path,
                                                   model, quality, size, operation,
                                                   allow_attempt=None,
-                                                  on_paid_request=_commit_paid_edit)
+                                                  on_paid_request=_commit_paid_edit,
+                                                  provenance=provenance)
                     if isinstance(result, dict) and result.get("ambiguous_provider_outcome"):
                         _write_uncertain_intent(save_path, {
                             "schema": 1,
@@ -685,7 +732,7 @@ def generate(db, account_id, prompt, save_path, model=MODEL, quality="medium",
         res = generate_banner_financially_guarded(
             db=db, account_id=account_id, prompt=prompt, save_path=save_path,
             model=model, quality=quality, size=size, operation=operation,
-            burst_override=burst_override,
+            burst_override=burst_override, provenance=provenance,
         )
         if isinstance(res, dict):
             res.setdefault("operation_used", "generations")
@@ -696,7 +743,7 @@ def generate(db, account_id, prompt, save_path, model=MODEL, quality="medium",
 
 def _edit_with_reference(account_id, prompt, save_path, reference_path, model,
                          quality, size, operation, allow_attempt=None,
-                         on_paid_request=None):
+                         on_paid_request=None, provenance=None):
     """Ветка /v1/images/edits: мастер-кадр уходит как reference.
 
     Именно это даёт согласованность серии: модель видит исходное изделие, а не
@@ -774,7 +821,13 @@ def _edit_with_reference(account_id, prompt, save_path, reference_path, model,
                              images=1, request_id=rid,
                              size=body.get("size") or size,
                              quality=body.get("quality") or quality,
-                             usage_details=body.get("usage"))
+                             usage_details={
+                                 **(body.get("usage") if isinstance(body.get("usage"), dict) else {}),
+                                 "boris_provenance": {
+                                     str(k)[:64]: v for k, v in (provenance or {}).items()
+                                     if isinstance(v, (str, int, float, bool)) or v is None
+                                 },
+                             })
             # The provider has already charged this response. Commit financial
             # fact before local persistence so a disk/write failure cannot erase cost.
             if on_paid_request is not None:

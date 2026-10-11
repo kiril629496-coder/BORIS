@@ -279,16 +279,35 @@ class TelegramScanner:
         return out
 
 
-def build_client(session_string: str, api_id: int, api_hash: str) -> Any:
+def build_client(
+    session_string: str,
+    api_id: int,
+    api_hash: str,
+    *,
+    timeout: int = 10,
+    request_retries: int = 5,
+    connection_retries: int = 5,
+    retry_delay: int = 1,
+) -> Any:
     """
     Собирает TelegramClient из расшифрованной строки сессии.
-    Вызывается только из monitor_runner.py, когда ключи уже есть.
+    Параметры по умолчанию сохраняют старое поведение; bounded consumers
+    (например reply-reader) могут явно уменьшить timeout/retries.
     Ни api_hash, ни session_string НЕ логируются.
     """
     from telethon.sync import TelegramClient          # ленивый импорт
     from telethon.sessions import StringSession
 
-    client = TelegramClient(StringSession(session_string), api_id, api_hash, use_ipv6=True)
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+        use_ipv6=True,
+        timeout=max(3,int(timeout)),
+        request_retries=max(0,int(request_retries)),
+        connection_retries=max(0,int(connection_retries)),
+        retry_delay=max(0,int(retry_delay)),
+    )
     client.connect()
     if not client.is_user_authorized():
         raise ScannerError("Сессия Telegram недействительна — нужна повторная авторизация")

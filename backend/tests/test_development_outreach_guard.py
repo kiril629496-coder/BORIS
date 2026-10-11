@@ -44,13 +44,13 @@ def test_offer_families_are_separate():
 
 def test_development_contract_accepts_clean_personalized_mail():
     subject = 'По цифровой системе Example Logistics'
-    body = '''Добрый день!\n\nПосмотрел Example Logistics.\n\nГипотеза по типу бизнеса: заявки, маршруты, статусы и кабинет клиента. Требует подтверждения на первом контакте.\n\nМы занимаемся заказной разработкой SaaS-платформ и мобильных приложений.\n\nПодробнее: https://boris-ai.pro/software-dev/\n\nЕсли предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.\n\nКирилл'''
+    body = '''Добрый день!\n\nПосмотрел Example Logistics.\n\nГипотеза по типу бизнеса: заявки, маршруты, статусы и кабинет клиента. Требует подтверждения на первом контакте.\n\nМы занимаемся заказной разработкой SaaS-платформ и мобильных приложений.\n\nПодробнее: https://systems-ai-oko.ru/\n\nЕсли предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.\n\nКирилл'''
     banner, cid, _ = _development_outreach_banner(1)
     assert banner and cid
     html = _html_email(
         body, '', '', brand_subtitle='Разработка программных продуктов', brand_note='',
         marketing_banner_cid=cid,
-        marketing_banner_href='https://boris-ai.pro/software-dev/',
+        marketing_banner_href='https://systems-ai-oko.ru/',
         marketing_banner_alt='Разработка программных продуктов под бизнес',
     )
     assert _development_outreach_contract(subject, body, html, [banner]) == []
@@ -59,7 +59,7 @@ def test_development_contract_accepts_clean_personalized_mail():
 
 def test_development_contract_rejects_boris_product_copy_and_artwork():
     subject = 'По цифровой системе'
-    body = '''Добрый день!\n\nЯ создал BORIS — виртуальную команду маркетинга.\nhttps://boris-ai.pro/go/boris\nhttps://boris-ai.pro/software-dev/\n\nЕсли предложение не актуально, ответьте «не интересно».'''
+    body = '''Добрый день!\n\nЯ создал BORIS — виртуальную команду маркетинга.\nhttps://boris-ai.pro/go/boris\nhttps://systems-ai-oko.ru/\n\nЕсли предложение не актуально, ответьте «не интересно».'''
     html = _html_email(body, '', '')
     errors = _development_outreach_contract(subject, body, html, [{'path': '/tmp/a.png'}])
     assert any('development_forbidden_boris_copy' in e for e in errors)
@@ -81,7 +81,7 @@ def test_development_contract_requires_software_link_and_optout():
 def test_development_six_copy_rotation_uses_new_landing_and_four_banners():
     assert [x['label'] for x in DEVELOPMENT_EMAIL_VARIANTS] == list('ABCDEF')
     assert len(DEVELOPMENT_EMAIL_VARIANTS) == 6
-    landing = 'https://boris-ai.pro/software-dev/'
+    landing = 'https://systems-ai-oko.ru/'
     filenames = []
     for i, variant in enumerate(DEVELOPMENT_EMAIL_VARIANTS, start=1):
         assert landing in variant['body']

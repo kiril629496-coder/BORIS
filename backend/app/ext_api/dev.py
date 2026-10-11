@@ -744,7 +744,7 @@ def reconcile_superseded_dependencies(limit=1000):
             successor=None
             if dep and dep.get("status")=="cancelled":
                 marker=(str(dep.get("blocked_reason") or "")+" "+str(dep.get("wait_reason") or ""))
-                m=re.search(r"superseded(?:_by| by|_BY| BY)(?:_dev)?[_: ]*(?:dev_)?(\d+)", marker, re.I)
+                m=re.search(r"superseded(?:_by| by)(?:_canonical_owner)?(?:_dev)?[_: ]*(?:dev_)?(\d+)", marker, re.I)
                 if m:
                     successor=int(m.group(1))
             if successor and successor != dep_id:

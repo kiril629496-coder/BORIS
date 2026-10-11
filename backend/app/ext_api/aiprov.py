@@ -653,6 +653,11 @@ def reprobe_openai_billing(min_interval_min=360):
     retry_ambiguous = max(900, int(os.environ.get("BORIS_OPENAI_BILLING_PROBE_RETRY_SEC", "3600") or 3600))
     try:
         import requests
+        try:
+            from proxy_pool import get_intl_requests_proxies
+            _openai_proxies = get_intl_requests_proxies()
+        except Exception:
+            _openai_proxies = None
         response = requests.post(
             "https://api.openai.com/v1/responses",
             headers={
@@ -665,6 +670,7 @@ def reprobe_openai_billing(min_interval_min=360):
                 "max_output_tokens": 16,
             },
             timeout=max(3, min(20, int(os.environ.get("BORIS_OPENAI_BILLING_PROBE_TIMEOUT_SEC", "10") or 10))),
+            proxies=_openai_proxies,
         )
         status_code = int(getattr(response, "status_code", 0) or 0)
         if 200 <= status_code < 300:

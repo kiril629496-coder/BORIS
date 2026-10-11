@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import os
 
 from sqlalchemy import text
 
@@ -30,12 +31,56 @@ def status() -> dict:
         now = datetime.now(ZoneInfo(TZ))
         params = {"tz": TZ, "d": now.date()}
 
+        tg_daily_cap = max(1, int(os.getenv("HOT_LEAD_AUTO_DAILY_CAP", "10") or 10))
+        tg_initial_sent = int(_scalar(db, """SELECT count(*) FROM boris_sales_hot_leads
+            WHERE outbound_transport='telegram_personal'
+              AND timezone(:tz,contacted_at)::date=:d""", params))
+        tg_followup_sent = int(_scalar(db, """SELECT count(*) FROM boris_sales_hot_leads
+            WHERE followup_sent_at IS NOT NULL
+              AND timezone(:tz,followup_sent_at)::date=:d""", params))
+        tg_sent_total = tg_initial_sent + tg_followup_sent
+        tg_ready = int(_scalar(db, """SELECT count(*) FROM boris_sales_hot_leads l
+            WHERE l.status='new'
+              AND l.monitor_intent='buy_service'
+              AND COALESCE(l.boris_fit,0)>=75
+              AND COALESCE(l.approval_required,false)=false
+              AND COALESCE(l.source_posted_at,l.discovered_at)>=NOW()-interval '72 hours'
+              AND (COALESCE(l.contact_username,'')<>'' OR
+                   (l.contact_peer_id IS NOT NULL AND l.contact_access_hash IS NOT NULL))"""))
+        tg_stuck = int(_scalar(db, """SELECT count(*) FROM boris_sales_hot_leads
+            WHERE status='approved' AND contacted_at IS NULL AND outbound_message_id IS NULL
+              AND approved_at<NOW()-interval '20 minutes'"""))
+        tg_failed_today = int(_scalar(db, """SELECT count(*) FROM boris_sales_hot_leads
+            WHERE COALESCE(outbound_error,'')<>''
+              AND contacted_at IS NULL
+              AND status NOT IN ('skipped','declined','lost','ignored')
+              AND timezone(:tz,updated_at)::date=:d""", params))
+        tg_cooldown = str(_scalar(db, """SELECT value_text FROM monitor_runtime_state
+            WHERE key='tg_personal_peer_flood_cooldown_until'""", default="") or "")
+        tg_cooldown_active = bool(_scalar(db, """SELECT CASE
+            WHEN value_text ~ '^[0-9]{4}-' THEN value_text::timestamptz>NOW()
+            ELSE false END
+            FROM monitor_runtime_state WHERE key='tg_personal_peer_flood_cooldown_until'""", default=False))
+        tg_reply_degraded = bool(_scalar(db, """SELECT COALESCE((details->>'reply_pipeline_degraded')::int,0)
+            FROM telegram_sales_cycle_runs ORDER BY started_at DESC LIMIT 1""", default=0))
+        tg_latest_cycle = str(_scalar(db, """SELECT status FROM telegram_sales_cycle_runs
+            ORDER BY started_at DESC LIMIT 1""", default="") or "")
+
         telegram = {
             "active_sources": int(_scalar(db, "SELECT count(*) FROM monitor_sources WHERE platform='telegram' AND is_active=TRUE")),
             "waiting": int(_scalar(db, "SELECT count(*) FROM boris_sales_hot_leads WHERE status='new' AND COALESCE(approval_required,false)=false")),
-            "sent_today": int(_scalar(db, """SELECT count(*) FROM boris_sales_hot_leads
-                WHERE outbound_transport='telegram_personal'
-                  AND timezone(:tz,contacted_at)::date=:d""", params)),
+            "ready_to_send": tg_ready,
+            "daily_cap": tg_daily_cap,
+            "initial_sent_today": tg_initial_sent,
+            "followup_sent_today": tg_followup_sent,
+            "sent_today": tg_sent_total,
+            "remaining_today": max(0, tg_daily_cap - tg_sent_total),
+            "approved_stuck": tg_stuck,
+            "failed_today": tg_failed_today,
+            "cooldown_until": tg_cooldown or None,
+            "external_rate_limit": tg_cooldown_active,
+            "reply_pipeline_degraded": tg_reply_degraded,
+            "latest_cycle_status": tg_latest_cycle,
             "replies_today": int(_scalar(db, "SELECT count(DISTINCT hot_lead_id) FROM boris_sales_tg_replies WHERE timezone(:tz,received_at)::date=:d", params)),
             "qualified_total": int(_scalar(db, "SELECT count(*) FROM boris_sales_hot_leads WHERE status='qualified'")),
         }

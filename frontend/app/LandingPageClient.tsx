@@ -446,11 +446,17 @@ export const LandingPage: React.FC<LandingPageProps> = ({ previewContent }) => {
 
  <div className="flex flex-wrap gap-4 pt-2">
  <a
+ href="/audit"
+ className="inline-flex items-center justify-center gap-2 bg-[var(--boris-blue)] hover:bg-[#2058D0] text-white py-[14px] px-[28px] rounded-full font-semibold text-center transition-colors text-[13px] sm:text-[14px] shadow-sm"
+ >
+ Проверить потери бесплатно
+ <ArrowRight size={18} />
+ </a>
+ <a
  href="#register"
- className="inline-flex items-center justify-center gap-2 bg-[var(--boris-blue)] hover:bg-[#2058D0] text-white py-[14px] px-[28px] rounded-[8px] font-semibold text-center transition-colors text-[13px] sm:text-[14px] sm:text-[13px] sm:text-[14px] sm:text-[14px] shadow-sm"
+ className="inline-flex items-center justify-center gap-2 border border-[#D7E0EE] bg-white hover:bg-[#F7F9FC] text-[var(--boris-text)] py-[14px] px-[24px] rounded-full font-semibold text-center transition-colors text-[13px] sm:text-[14px] shadow-sm"
  >
  {content['hero.cta']}
- <ArrowRight size={18} />
  </a>
  <div className="flex flex-col justify-center">
  <span className="text-[13px] sm:text-[14px] sm:text-[13px] sm:text-[14px] sm:text-[14px] font-bold text-[var(--boris-text)]">4 дня бесплатно</span>

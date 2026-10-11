@@ -46,3 +46,11 @@ class CampaignPaidTextGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_qa_campaigns_force_zero_paid_local_text_path():
+    import inspect
+    src=inspect.getsource(C.ff_workflow_texts)
+    assert "_qa_local_only=_ff_paid_qa_forbidden(campaign)" in src
+    assert "_use_local_text=bool(_qa_local_only or" in src
+    assert "if _ff_paid_qa_forbidden(campaign): return _ff_paid_qa_response()" not in src

@@ -22,7 +22,7 @@ import hashlib as _hashlib
 
 # Общие поля объявления. К категорийным параметрам не относятся и здесь не проверяются.
 SYSTEM_FIELDS = {
-    "Id", "id", "avitoid", "Отчет об автозагрузке",
+    "Id", "id", "AvitoId", "avitoid", "AuctionPrice", "AuctionPriceLastDate", "Отчет об автозагрузке",
     "Title", "Description", "Price", "Images", "ImageNames", "Address",
     "DateBegin", "DateEnd", "Category", "ListingFee", "AdStatus", "Promo",
     "ImageUrls", "VideoUrls", "VideoURL", "VideoFileURL", "SellerAddressID", "Latitude", "Longitude",
@@ -118,14 +118,14 @@ def _dep_clause_matches(clause, fields, params):
     m = re.search(r"если\s+поле\s+(.+?)\s+заполнено", text, re.I)
     if m:
         tag = _field_tag_by_label(fields, m.group(1).strip())
-        return bool(tag and str(params.get(tag) or "").strip())
+        return bool(tag and not _empty_param(params.get(tag)))
     m = re.search(r"если\s+в\s+поле\s+(.+?)\s+указано\s+значение\s+'([^']+)'", text, re.I)
     if m:
         tag = _field_tag_by_label(fields, m.group(1).strip())
         current=params.get(tag) if tag else None
         if isinstance(current,(list,tuple,set)):
             return m.group(2).strip() in [str(x).strip() for x in current]
-        return bool(tag and str(current or "").strip() == m.group(2).strip())
+        return bool(tag and str("" if current is None else current).strip() == m.group(2).strip())
     m = re.search(r"если\s+в\s+поле\s+(.+?)\s+указаны\s+значения:\s*(.+)$", text, re.I)
     if m:
         tag = _field_tag_by_label(fields, m.group(1).strip())
@@ -134,7 +134,7 @@ def _dep_clause_matches(clause, fields, params):
         current=params.get(tag) if tag else None
         if isinstance(current,(list,tuple,set)):
             return any(str(x).strip() in vals for x in current)
-        return bool(tag and str(current or "").strip() in vals)
+        return bool(tag and str("" if current is None else current).strip() in vals)
     return False
 
 
@@ -165,12 +165,28 @@ def _required_now(name, spec, fields, params):
     return True
 
 
+def _empty_param(value):
+    """Missing input is distinct from explicit zero or a false enum value."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return isinstance(value, (list, tuple, set, dict)) and not value
+
+
 def resolve_applicable_params(params, contract):
     """Keep every valid known category parameter that is currently applicable.
     Unknown/system fields are not silently invented; explicit non-applicable fields are omitted from XML params.
     """
     fields = contract.get("fields") or {}
     src = dict(params or {})
+    # A single official enum value is a category constant, not a question.
+    # Seed all constants before applicability checks so dependencies are
+    # independent of the order of fields in the official contract.
+    for name, spec in fields.items():
+        allowed = spec.get("allowed") or []
+        if name not in SYSTEM_FIELDS and len(allowed) == 1 and _empty_param(src.get(name)):
+            src[name] = allowed[0]
     out = {}
     removed = []
     for name, value in src.items():
@@ -182,7 +198,7 @@ def resolve_applicable_params(params, contract):
         if not _applicable_now(name, spec, fields, src):
             removed.append(name)
             continue
-        if value not in (None, ""):
+        if not _empty_param(value):
             out[name] = value
     return {"params": out, "removed_non_applicable": removed,
             "available_fields": len([k for k in fields if k not in SYSTEM_FIELDS]),
@@ -193,6 +209,34 @@ def _fmt_ok(value, rule):
     нет правила — нет проверки формата."""
     if not rule:
         return True
+    numeric_rule = rule if isinstance(rule, dict) else None
+    if numeric_rule is None:
+        try:
+            parsed = _json.loads(str(rule))
+            numeric_rule = parsed if isinstance(parsed, dict) else None
+        except (ValueError, TypeError):
+            pass
+    if numeric_rule and any(numeric_rule.get(k) is not None for k in ("min", "max")):
+        # Official category templates express dimension bounds as JSON. Treat
+        # these as inclusive numeric bounds, never as free text or a default.
+        from decimal import Decimal, InvalidOperation
+        if isinstance(value, bool):
+            return False
+        try:
+            number = Decimal(str(value).strip().replace(" ", "").replace("\u00a0", "").replace(",", "."))
+            if not number.is_finite():
+                return False
+            for key, is_minimum in (("min", True), ("max", False)):
+                raw_bound = numeric_rule.get(key)
+                if raw_bound is None:
+                    continue
+                if isinstance(raw_bound, bool):
+                    return False
+                bound = Decimal(str(raw_bound).strip().replace(",", "."))
+                if not bound.is_finite() or (number < bound if is_minimum else number > bound):
+                    return False
+        except (InvalidOperation, ValueError, TypeError):
+            return False
     r = str(rule).lower()
     v = str(value).strip()
     if "целое" in r or "integer" in r:
@@ -217,6 +261,15 @@ def validate_feed_item(item, contract, seller_defaults=None):
         return out
     fields = contract.get("fields") or {}
     params = dict(item.get("params") or {})
+    # A present-but-empty key must reach the ordinary required-field check.
+    # Unknown keys remain visible so the strict category-name guard still runs.
+    params = {name: value for name, value in params.items()
+              if name not in fields or name in SYSTEM_FIELDS or not _empty_param(value)}
+    constants = resolve_applicable_params(params, contract)["params"]
+    for name, value in constants.items():
+        if _empty_param(params.get(name)) and len(fields[name].get("allowed") or []) == 1:
+            params[name] = value
+            out["filled"].append({"field": name, "value": value, "source": SRC_CONST})
 
     for name, value in params.items():
         if name in SYSTEM_FIELDS:
@@ -243,19 +296,26 @@ def validate_feed_item(item, contract, seller_defaults=None):
                                   "format_rule": spec.get("format_rule"),
                                   "message": "Значение не соответствует формату"})
             continue
-        out["filled"].append({"field": name, "value": value, "source": SRC_DRAFT})
+        if not any(x["field"] == name for x in out["filled"]):
+            out["filled"].append({"field": name, "value": value, "source": SRC_DRAFT})
 
     for name, spec in fields.items():
         if name in SYSTEM_FIELDS or name in params:
             continue
         allowed = spec.get("allowed") or []
-        if name in seller_defaults and str(seller_defaults[name]).strip():
+        if name in seller_defaults and not _empty_param(seller_defaults[name]):
             val = seller_defaults[name]
             if allowed and str(val) not in [str(a) for a in allowed]:
                 out["errors"].append({"field": name, "code": CODE_ENUM_NOT_ALLOWED,
                                       "label": spec.get("name_ru") or name,
                                       "value": val, "allowed_values": allowed,
                                       "message": "Настройка продавца вне списка допустимых"})
+                continue
+            if not _fmt_ok(val, spec.get("format_rule")):
+                out["errors"].append({"field": name, "code": CODE_FORMAT, "value": val,
+                                      "label": spec.get("name_ru") or name, "allowed_values": [],
+                                      "format_rule": spec.get("format_rule"),
+                                      "message": "Настройка продавца не соответствует формату"})
                 continue
             out["filled"].append({"field": name, "value": val, "source": SRC_SELLER})
             params[name] = val

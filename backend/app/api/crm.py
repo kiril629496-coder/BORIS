@@ -7,9 +7,11 @@
 """
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from app.db.session import SessionLocal
 from app.services import crm_service as svc
+from app.services.exception_observability import observe_suppressed
 
 try:
     from app.api.auth import get_current_user
@@ -28,11 +30,23 @@ def _uid(user):
 
 
 def _own(db, user, account_id):
-    """Аккаунт принадлежит текущему пользователю — иначе чужие задачи не отдаём."""
+    """Аккаунт доступен текущему пользователю для чтения."""
     uid = _uid(user)
     if not svc.own(db, uid, account_id):
         raise HTTPException(status_code=403, detail="Аккаунт недоступен")
     return uid
+
+
+def _write(db, user, account_id):
+    """CRM mutation requires reply permission; VIEWER remains strictly read-only."""
+    uid = _own(db, user, account_id)
+    if db.execute(text(
+        "select 1 from accounts where account_id=:a and owner_user_id=:u "
+        "union select 1 from user_account_access "
+        "where user_id=:u and account_id=:a and can_reply=TRUE limit 1"
+    ), {"a": account_id, "u": uid}).fetchone():
+        return uid
+    raise HTTPException(status_code=403, detail="Роль только для просмотра: изменение CRM недоступно")
 
 
 def _bad(e):
@@ -75,7 +89,7 @@ class TaskIn(BaseModel):
 def create_task(body: TaskIn, _cur=Depends(get_current_user)):
     db = SessionLocal()
     try:
-        uid = _own(db, _cur, body.account_id)
+        uid = _write(db, _cur, body.account_id)
         try:
             new_id = svc.create_task(db, uid, body.account_id, body.title,
                                      body.due_date, chat_id=body.chat_id,
@@ -83,6 +97,30 @@ def create_task(body: TaskIn, _cur=Depends(get_current_user)):
                                      comment=body.comment)
         except ValueError as e:
             raise _bad(e)
+        from app.api.internal_messenger import emit_messenger_event
+        emit_messenger_event(db, body.account_id, "crm.task.changed", "crm_task", new_id, {
+            "action": "created", "task_id": new_id, "chat_id": body.chat_id,
+        })
+        db.commit()
+        try:
+            from app.services import lead_notifications as notification_service
+            notification_service.queue_event(
+                body.account_id,
+                f"crm-task-created:{body.account_id}:{new_id}",
+                "crm_task",
+                "CRM · Новая задача",
+                body.title.strip()[:500],
+                url=f"/messenger?account_id={body.account_id}&client_chat_id={body.chat_id}&task_id={new_id}",
+                payload={
+                    "target_user_ids": [uid] if uid else [],
+                    "task_id": new_id,
+                    "client_chat_id": body.chat_id,
+                },
+            )
+        except Exception as _push_exc:
+            # Push is secondary: task persistence/realtime must stay successful,
+            # but the failure remains observable.
+            observe_suppressed(__name__, _push_exc, line=119)
         return {"status": "ok", "id": new_id}
     finally:
         db.close()
@@ -102,8 +140,13 @@ class TaskAction(BaseModel):
 def done_task(body: TaskAction, _cur=Depends(get_current_user)):
     db = SessionLocal()
     try:
-        _own(db, _cur, body.account_id)
+        _write(db, _cur, body.account_id)
         svc.done_task(db, body.account_id, body.task_id, body.comment)
+        from app.api.internal_messenger import emit_messenger_event
+        emit_messenger_event(db, body.account_id, "crm.task.changed", "crm_task", body.task_id, {
+            "action": "done", "task_id": body.task_id,
+        })
+        db.commit()
         return {"status": "ok"}
     finally:
         db.close()
@@ -114,7 +157,7 @@ def update_task(body: TaskAction, _cur=Depends(get_current_user)):
     """Перенос срока и правка — одной ручкой: меняем только присланные поля."""
     db = SessionLocal()
     try:
-        _own(db, _cur, body.account_id)
+        _write(db, _cur, body.account_id)
         try:
             changed = svc.update_task(db, body.account_id, body.task_id,
                                       due_date=body.due_date, due_time=body.due_time,
@@ -122,6 +165,11 @@ def update_task(body: TaskAction, _cur=Depends(get_current_user)):
                                       comment=body.comment)
         except ValueError as e:
             raise _bad(e)
+        from app.api.internal_messenger import emit_messenger_event
+        emit_messenger_event(db, body.account_id, "crm.task.changed", "crm_task", body.task_id, {
+            "action": "updated", "task_id": body.task_id, "changed": changed,
+        })
+        db.commit()
         return {"status": "ok", "changed": changed}
     finally:
         db.close()
@@ -131,8 +179,13 @@ def update_task(body: TaskAction, _cur=Depends(get_current_user)):
 def delete_task(body: TaskAction, _cur=Depends(get_current_user)):
     db = SessionLocal()
     try:
-        _own(db, _cur, body.account_id)
+        _write(db, _cur, body.account_id)
         svc.delete_task(db, body.account_id, body.task_id)
+        from app.api.internal_messenger import emit_messenger_event
+        emit_messenger_event(db, body.account_id, "crm.task.changed", "crm_task", body.task_id, {
+            "action": "deleted", "task_id": body.task_id,
+        })
+        db.commit()
         return {"status": "ok"}
     finally:
         db.close()

@@ -4,7 +4,7 @@ import asyncio
 import os
 import random
 import threading
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 load_dotenv()
 
 PROXY_HOST = os.getenv("PROXY_HOST")
@@ -106,27 +106,57 @@ PROXY_INTL_PASS = os.getenv("PROXY_INTL_PASS")
 
 INTL_PROXY_COST_PER_GB_RUB = 340.0
 
+# INTERNATIONAL_PROXY_SECRET_HOT_RELOAD_V1:
+# PROXY_INTL credentials are operational secrets and may rotate independently
+# of an immutable backend release. Read only these three values from the
+# root-owned runtime env file on each call; ordinary Avito PROXY_* remains
+# process-static and unchanged.
+_INTL_ENV_PATH = os.getenv("BORIS_RUNTIME_ENV_FILE", "/root/BORIS/backend/.env")
 _intl_host_lock = threading.Lock()
-# Стартуем со случайного хоста, а дальше - строго по кругу: у старого кода был баг,
-# когда прокси выбирался один раз до retry-цикла и повторные попытки долбились в тот
-# же самый мёртвый IP. Теперь каждый вызов (= каждая retry-попытка) гарантированно
-# отдаёт СЛЕДУЮЩИЙ хост из списка, а не тот же самый.
 _intl_host_idx = [random.randrange(len(PROXY_INTL_HOSTS))] if PROXY_INTL_HOSTS else [0]
 
 
-def _next_intl_host():
+def _current_intl_config():
+    hosts = list(PROXY_INTL_HOSTS)
+    user = PROXY_INTL_USER
+    password = PROXY_INTL_PASS
+    try:
+        vals = dotenv_values(_INTL_ENV_PATH)
+        raw_hosts = vals.get("PROXY_INTL_HOSTS")
+        if raw_hosts is not None:
+            parsed = [h.strip() for h in str(raw_hosts).split(",") if h.strip()]
+            if parsed:
+                hosts = parsed
+        if vals.get("PROXY_INTL_USER") is not None:
+            user = str(vals.get("PROXY_INTL_USER") or "").strip()
+        if vals.get("PROXY_INTL_PASS") is not None:
+            password = str(vals.get("PROXY_INTL_PASS") or "").strip()
+    except (OSError, ValueError, TypeError):
+        # Runtime env remains the safe fallback when the file is temporarily
+        # unavailable; never log credential values.
+        pass
+    return hosts, user, password
+
+
+def _next_intl_host(hosts=None):
+    pool = list(hosts or PROXY_INTL_HOSTS)
+    if not pool:
+        return None
     with _intl_host_lock:
-        host = PROXY_INTL_HOSTS[_intl_host_idx[0] % len(PROXY_INTL_HOSTS)]
+        host = pool[_intl_host_idx[0] % len(pool)]
         _intl_host_idx[0] += 1
         return host
 
 
 def get_intl_requests_proxies():
-    """Прокси для requests, дающий не-российский (США) IP — нужен для Pexels и других
-    зарубежных API, заблокированных по гео на уровне Cloudflare."""
-    if not all([PROXY_INTL_HOSTS, PROXY_INTL_USER, PROXY_INTL_PASS]):
+    """HTTP(S) proxy for foreign APIs, with secret rotation without restart."""
+    hosts, user, password = _current_intl_config()
+    if not all([hosts, user, password]):
         return None
-    url = f"http://{PROXY_INTL_USER}:{PROXY_INTL_PASS}@{_next_intl_host()}"
+    host = _next_intl_host(hosts)
+    if not host:
+        return None
+    url = f"http://{user}:{password}@{host}"
     return {"http": url, "https": url}
 
 

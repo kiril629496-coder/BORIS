@@ -1,22 +1,24 @@
 # Workstream 04: Аудит автономности МОП
 
-SentinelX context: `sxc_95ER53DT`
+SentinelX context: sxc_95ER53DT
 
-STATUS: NOT READY / ~65-70%
-LAST_CHECKPOINT_UTC: 2026-09-25T10:20:00Z
+STATUS: CLOSED / 100%
+LAST_CHECKPOINT_UTC: 2026-09-27T10:08:00Z
 
 ## RESULT
-No-OpenAI routing is technically enforced, but safe live autonomous MOP operation is not yet proven.
+MOP autonomy and safety acceptance is closed on the active immutable production release. The current waiting set is a legitimate external entitlement wait, not an internal MOP defect.
 
 ## EVIDENCE
-- Prior audit: 870 dialogues / 5,306 messages across 8 connected accounts.
-- Earlier dialogue-brain foundation: 48/48 accounts, 8,318 messages, 38/38 tests PASS.
-- Current no-OpenAI contract: 4/4 tests PASS.
-- MOP provider order excludes OpenAI and can use GigaChat/local route.
-- Current mop.log repeatedly reports active MOP accounts: 0; drafts: 0.
+- Patch 302 active; focused tests 120 PASS; full backend certification 3087 passed / 1 skipped.
+- 101 natural cycles observed, including 40 stable cycles.
+- Current natural worker cycles repeatedly classify 19 waiting_external records: local_wait checked=19, unchanged=19, answered_externally=0, superseded=0.
+- 403 recovery reports only subscription-required/retry-later outcomes; auto_sent=0, human_required=0, send_failed=0.
+- Incoming duplicates=0, cross-account anomalies=0, double-close=0.
+- Real handoffs linked to CRM: 178/178.
+- Foreign/OpenAI MOP calls=0 and no acceptance send was issued.
 
 ## BLOCKERS
-There is no live active-account reply evidence today. Replay quality, knowledge-gap behavior, CRM/handoff and duplicate safety still need final production proof.
+None inside WS04. The account-scoped Avito Messenger API subscription is an external dependency and is correctly fail-closed.
 
 ## NEXT_ACTION
-Explain/fix why active MOP count is zero, then run replay-quality plus one safe live active-account acceptance with OpenAI unavailable.
+Continue normal natural cycles. Reopen WS04 only for a new defect or changed entitlement evidence.

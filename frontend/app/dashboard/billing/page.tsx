@@ -10,10 +10,25 @@ function authHeaders() {
   const token = typeof window === "undefined" ? "" : localStorage.getItem("boris_token") || "";
   return { Authorization: `Bearer ${token}` };
 }
+function printableError(value: unknown) {
+  if (value == null || value === "") return "—";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+function errorAccountId(path: string) {
+  try { return new URL(path, typeof window === "undefined" ? "https://boris.local" : window.location.origin).searchParams.get("account_id") || "—"; }
+  catch { return "—"; }
+}
 async function api(path: string, init?: RequestInit) {
   const res = await fetch(path, { ...init, headers: { ...authHeaders(), ...(init?.headers || {}) }, cache: "no-store" });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok || data?.status === "error") throw new Error(data?.message || data?.detail || `HTTP ${res.status}`);
+  if (!res.ok || data?.status === "error") {
+    const message = printableError(data?.message);
+    const detail = printableError(data?.detail);
+    const endpoint = path.split("?")[0];
+    const timestamp = new Date().toISOString();
+    throw new Error(`endpoint=${endpoint}; status=${res.status}; account_id=${errorAccountId(path)}; message=${message}; detail=${detail}; timestamp=${timestamp}`);
+  }
   return data;
 }
 function rub(v: unknown) { return typeof v === "number" && Number.isFinite(v) ? `${new Intl.NumberFormat("ru-RU").format(v)} ₽` : "—"; }

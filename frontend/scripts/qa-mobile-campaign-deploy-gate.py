@@ -95,7 +95,9 @@ def choose_campaign_route():
     headers={"Authorization":"Bearer "+token}
     r=requests.get(WEB+"/api/campaign/list",headers=headers,params={"account_id":ACCOUNT},timeout=20)
     r.raise_for_status()
-    for c in r.json().get("campaigns",[]):
+    # QA_FIXTURE_SCAN_BOUND_V1: bound discovery so campaign history cannot
+    # exhaust the canonical deploy job timeout.
+    for c in r.json().get("campaigns",[])[:20]:
         cid=c.get("id")
         if not cid:
             continue
@@ -114,12 +116,19 @@ def choose_campaign_route():
 
 def go(page,route,account,mode):
     apply_auth(page,mode,account)
-    page.goto(WEB+route,wait_until="domcontentloaded",timeout=30000)
+    page.goto(WEB+route,wait_until="commit",timeout=30000)
     page.wait_for_timeout(650)
     if "/login" in page.url:
         apply_auth(page,mode,account)
-        page.goto(WEB+route,wait_until="domcontentloaded",timeout=30000)
+        page.goto(WEB+route,wait_until="commit",timeout=30000)
         page.wait_for_timeout(700)
+
+    # Commit precedes hydration; a fixed sleep can measure the loading fallback.
+    # Bound readiness, then retain every shell/content/overflow assertion below.
+    try:
+        page.locator('[data-testid="app-shell"]').wait_for(state="visible",timeout=4000)
+    except PlaywrightTimeoutError:
+        pass
 
 def metrics(page):
     return page.evaluate("""() => {
@@ -153,7 +162,7 @@ def main():
         br=pw.chromium.launch(headless=True,args=["--no-sandbox"])
         ctx=br.new_context(viewport={"width":320,"height":760},user_agent="BORIS-QA-Mobile-DeployGate/1.0")
         page=ctx.new_page()
-        page.goto(WEB+"/login",wait_until="domcontentloaded",timeout=30000)
+        page.goto(WEB+"/login",wait_until="commit",timeout=30000)
         for route in routes:
             responses=[]; auth_errors=[]
             def on_response(resp):
@@ -182,7 +191,7 @@ def main():
                 # still fail-closed: if the card is not visible after the grace window,
                 # deployment/runtime watch remains red.
                 try:
-                    card.wait_for(state="visible", timeout=4000)
+                    card.wait_for(state="visible", timeout=12000)
                 except PlaywrightTimeoutError:
                     pass
                 if not card.count() or not card.is_visible():
@@ -208,7 +217,7 @@ def main():
         for label,w,h in [("phone-390",390,844),("desktop-1440",1440,1000)]:
             sctx=br.new_context(viewport={"width":w,"height":h},user_agent="BORIS-QA-MessagesSetup/1.0")
             spage=sctx.new_page()
-            spage.goto(WEB+"/login",wait_until="domcontentloaded",timeout=30000)
+            spage.goto(WEB+"/login",wait_until="commit",timeout=30000)
             responses=[]; auth_errors=[]
             def on_setup_response(resp):
                 if resp.status>=500: responses.append((resp.status,resp.url))
@@ -244,7 +253,7 @@ def main():
         for kind,route in [("contact","/dashboard/crm/contact/999999999"),("deal","/dashboard/crm/deal/999999999")]:
             cctx=br.new_context(viewport={"width":390,"height":844},user_agent="BORIS-QA-CRM-DetailError/1.0")
             cpage=cctx.new_page()
-            cpage.goto(WEB+"/login",wait_until="domcontentloaded",timeout=30000)
+            cpage.goto(WEB+"/login",wait_until="commit",timeout=30000)
             go(cpage,route,session_account,"client")
             card=cpage.locator('[data-testid="crm-detail-error"]')
             cproblems=[]

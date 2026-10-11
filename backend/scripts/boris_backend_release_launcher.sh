@@ -31,6 +31,10 @@ export_release_env(){
   local rel="$1" build
   build="$(basename "$(dirname "$rel")")"
   export BORIS_RUNTIME_BACKEND_ROOT="$rel"
+  # SEO_STATE_ROOT_V1: immutable releases execute code, while Crowd SEO /
+  # Service Marketplace / Forum Quality state remains in the canonical
+  # writable backend workspace shared by both API generations and workers.
+  export BORIS_STATE_BACKEND_ROOT="$LIVE_BACKEND"
   export BORIS_RELEASE_BUILD_ID="$build"
   export PYTHONPATH="$rel"
   export PYTHONDONTWRITEBYTECODE=1

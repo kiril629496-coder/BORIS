@@ -47,6 +47,7 @@ from app.models.media_asset import MediaAsset  # create_all: media_assets
 from app.models.media_link import MediaLink  # create_all: media_links
 from app.models.background_job import BackgroundJob  # create_all: background_jobs
 from app.api.landing import router as landing_router
+from app.api.viral import router as viral_router
 from app.api.billing import router as billing_router
 from app.api.software_site import router as software_site_router, admin_router as software_site_admin_router
 from app.telegram_bot import _telegram_poll_loop
@@ -57,6 +58,9 @@ from app.api.messenger_prompts import router as messenger_prompts_router
 from app.api.auth import router as auth_router, get_current_user_or_internal, check_account_access
 from app.api.onboarding import router as onboarding_router
 from app.models.user import User  # импорт на уровне модуля — чтобы create_all() увидел таблицу users при старте
+from app.models.internal_messenger import (InternalConversation, InternalConversationMember,
+                                            InternalMessage, InternalMessageReaction,
+                                            InternalMessagePin, InternalMessageAttachment)
 from app.models.revenue_event import RevenueEvent  # create_all: revenue_events
 from app.models.reliability import (ReliabilityCircuit, ReliabilityEvent, ReliabilityFlag,
                                     ReliabilityKillSwitch, ReliabilityHeartbeat)  # create_all: reliability control plane
@@ -139,17 +143,76 @@ async def boris_trace_middleware(request, call_next):
         raise
 
 
+def _resume_due_campaign_system_waits(limit: int = 100) -> int:
+    """Requeue retryable Campaign system waits without owner/browser intervention."""
+    from datetime import datetime, timezone
+    from app.db.session import SessionLocal
+    from app.models.background_job import BackgroundJob
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        rows = (
+            db.query(BackgroundJob)
+            .filter(
+                BackgroundJob.kind.in_(("campaign_prepare","campaign_enhance","campaign_banners")),
+                BackgroundJob.status == "awaiting_confirmation",
+                BackgroundJob.scheduled_at.isnot(None),
+                BackgroundJob.scheduled_at <= now,
+            )
+            .order_by(BackgroundJob.id)
+            .limit(max(1, min(int(limit or 100), 500)))
+            .all()
+        )
+        changed = 0
+        # CAMPAIGN_SYSTEM_WAIT_AUTO_RESUME_V1:
+        # These stages are provider/system backoff, not owner confirmation.
+        # needs_input, billing_limit and Avito-access blockers remain fail-closed.
+        allowed = {"media_source_wait","media_retry","billing_pending"}
+        for job in rows:
+            result = dict(job.result_json or {})
+            stage = str(result.get("stage") or "")
+            if not bool(result.get("retryable")) or stage not in allowed:
+                continue
+            job.status = "queued"
+            job.result_json = None
+            job.error_text = None
+            job.started_at = None
+            job.finished_at = None
+            job.scheduled_at = None
+            payload = dict(job.payload_json or {})
+            payload["stage"] = "queued"
+            payload["_system_wait_resumed_at"] = now.isoformat()
+            payload["_system_wait_resumed_stage"] = stage
+            job.payload_json = payload
+            changed += 1
+        if changed:
+            db.commit()
+        return changed
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def _background_jobs_loop(slot: int):
     """Persistent DB-backed worker. Multiple slots are safe via SKIP LOCKED in jobs.run_once."""
     import time as _time
     from app.services.jobs import run_once
     from app.services.reliability import heartbeat
     _next_browser_maintenance = 0.0
+    _next_campaign_wait_reconcile = 0.0
     while True:
         try:
+            resumed = 0
+            if slot == 0 and _time.monotonic() >= _next_campaign_wait_reconcile:
+                resumed = _resume_due_campaign_system_waits()
+                _next_campaign_wait_reconcile = _time.monotonic() + 10.0
             processed = run_once(verbose=False)
             heartbeat("jobs", f"background_jobs_{slot}",
-                      details={"processed_last_tick": int(processed or 0)})
+                      details={"processed_last_tick": int(processed or 0),
+                               "campaign_system_waits_resumed": int(resumed or 0)})
             # Slot 0 also maintains the authoritative Browser Gateway session vault
             # and releases stale leases. This reuses the existing worker engine rather
             # than creating a second scheduler/daemon.
@@ -166,13 +229,30 @@ def _background_jobs_loop(slot: int):
             _time.sleep(5.0)
 
 
+_cors_origins = ["https://boris-ai.pro"]
+for _origin in str(_os.environ.get("BORIS_ALLOWED_ORIGINS", "") or "").split(","):
+    _origin = _origin.strip()
+    if _origin and _origin not in _cors_origins:
+        _cors_origins.append(_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-BORIS-Trace-ID", "Last-Event-ID"],
 )
+
+
+@app.middleware("http")
+async def boris_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+    return response
 
 
 
@@ -288,6 +368,17 @@ from app.api.team import router as team_router
 # без _protected: check_account_access требует одиночный account_id,
 # а здесь работа со списком аккаунтов; права проверяются внутри ручек
 app.include_router(team_router)
+from app.api.internal_messenger import router as internal_messenger_router
+from app.api.messenger_workspace import router as messenger_workspace_router
+from app.api.messenger_reports import router as messenger_reports_router
+from app.api.mop_control import router as mop_control_router
+# Employee chat owns only internal conversations; customer Inbox/Avito contracts remain unchanged.
+app.include_router(internal_messenger_router)
+app.include_router(messenger_workspace_router)
+# Read-only fact facade for compact Messenger reports; auth/legal/tenant/report
+# permissions are enforced inside the router.
+app.include_router(messenger_reports_router)
+app.include_router(mop_control_router)
 from app.api.action_log_api import router as action_log_router
 # без _protected: check_account_access требует одиночный account_id,
 # а доступ здесь проверяется внутри ручек по связям
@@ -299,6 +390,8 @@ app.include_router(lead_notifications_router, dependencies=_protected)
 app.include_router(lead_notifications_public_router)
 app.include_router(prompts_router, dependencies=_protected)
 app.include_router(landing_router)
+# Public, client-safe viral acquisition loop. Endpoints implement their own rate limits and expose no account PII.
+app.include_router(viral_router)
 app.include_router(software_site_router)
 app.include_router(software_site_admin_router)
 app.include_router(billing_router, dependencies=_protected)
@@ -409,6 +502,9 @@ app.include_router(prospecting_router.router, dependencies=_protected)
 app.include_router(prospecting_discovery_router.router, dependencies=_protected)
 app.include_router(prospecting_scale_router.public_router)
 app.include_router(prospecting_scale_router.router, dependencies=_protected)
+# BORIS_OUTREACH_AGENT_SCOPED_V1: independent token auth, fail-closed until provisioned.
+from app.api import outreach_agent_service
+app.include_router(outreach_agent_service.router)
 app.include_router(service_marketplace_router.router, dependencies=_protected)
 app.include_router(yandex_webmaster_router.router, dependencies=_protected)
 app.include_router(prospecting_unified_router.router, dependencies=_protected)

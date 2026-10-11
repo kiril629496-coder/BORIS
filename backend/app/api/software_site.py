@@ -6,6 +6,7 @@ import smtplib
 import ssl
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -17,6 +18,8 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from app.services.exception_observability import observe_suppressed
+from app.db.session import SessionLocal
+from sqlalchemy import text
 
 
 def _require_loopback_admin(request: Request) -> None:
@@ -248,9 +251,27 @@ class SoftwareLead(BaseModel):
     budget: str = Field(default="Не указан", max_length=120)
     source: str = Field(default="software-dev", max_length=120)
     page: str = Field(default="", max_length=500)
+    session_id: Optional[str] = Field(default=None, max_length=120)
+    utm_source: Optional[str] = Field(default=None, max_length=180)
+    utm_medium: Optional[str] = Field(default=None, max_length=180)
+    utm_campaign: Optional[str] = Field(default=None, max_length=180)
+    utm_content: Optional[str] = Field(default=None, max_length=180)
+    utm_term: Optional[str] = Field(default=None, max_length=180)
     privacy_consent: bool = False
     consent_version: str = Field(default="2026-09-09", max_length=32)
     honeypot: Optional[str] = Field(default="", max_length=120)
+
+
+class SoftwareEvent(BaseModel):
+    event: str = Field(min_length=2, max_length=80)
+    channel: Optional[str] = Field(default=None, max_length=40)
+    page: str = Field(default="", max_length=500)
+    session_id: Optional[str] = Field(default=None, max_length=120)
+    utm_source: Optional[str] = Field(default=None, max_length=180)
+    utm_medium: Optional[str] = Field(default=None, max_length=180)
+    utm_campaign: Optional[str] = Field(default=None, max_length=180)
+    utm_content: Optional[str] = Field(default=None, max_length=180)
+    utm_term: Optional[str] = Field(default=None, max_length=180)
 
 
 class LeadUpdate(BaseModel):
@@ -291,6 +312,106 @@ def _traffic_from_page(page: str) -> dict[str, str]:
         "utm_content": first("utm_content"),
         "utm_term": first("utm_term"),
     }
+
+
+
+_SOFTWARE_EVENT_ALLOWED = {
+    "development_landing_view",
+    "development_contact_click",
+    "development_form_started",
+    "development_form_submit",
+    "development_lead_created",
+}
+
+
+def _traffic_from_payload(payload: Any) -> dict[str, str]:
+    page_traffic = _traffic_from_page(str(getattr(payload, "page", "") or ""))
+    out = {}
+    for key in ("utm_source","utm_medium","utm_campaign","utm_content","utm_term"):
+        explicit = str(getattr(payload, key, None) or "").strip()[:240]
+        out[key] = explicit or page_traffic.get(key, "")
+    return out
+
+
+def _record_software_event(payload: SoftwareEvent | SoftwareLead, *, event: str | None = None,
+                           channel: str | None = None, lead_id: str | None = None,
+                           crm_lead_id: int | None = None) -> str:
+    event_name = str(event or getattr(payload, "event", "") or "").strip()
+    if event_name not in _SOFTWARE_EVENT_ALLOWED:
+        raise ValueError("software_event_not_allowed")
+    traffic = _traffic_from_payload(payload)
+    event_id = "sse_" + uuid.uuid4().hex
+    body = {
+        "event_id": event_id,
+        "event": event_name,
+        "channel": str(channel or getattr(payload, "channel", None) or "").strip()[:40] or None,
+        "page": str(getattr(payload, "page", "") or "")[:500],
+        "session_id": str(getattr(payload, "session_id", None) or "").strip()[:120] or None,
+        **traffic,
+        "lead_id": lead_id,
+        "crm_lead_id": int(crm_lead_id) if crm_lead_id else None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+          INSERT INTO storage(account_id,key,value)
+          VALUES('software_site_event',:k,:v)
+        """), {
+            "k": "event:" + event_id,
+            "v": json.dumps(body, ensure_ascii=False, separators=(",", ":")),
+        })
+        db.commit()
+    finally:
+        db.close()
+    return event_id
+
+
+def _create_software_crm_lead(lead: SoftwareLead, lead_id: str) -> int | None:
+    traffic = _traffic_from_payload(lead)
+    db = SessionLocal()
+    try:
+        owner_email = db.execute(text("""
+          SELECT email FROM users
+          WHERE role='owner'
+          ORDER BY CASE WHEN id=2 THEN 0 ELSE 1 END,id
+          LIMIT 1
+        """)).scalar()
+        owner_email = str(owner_email or "").strip()
+        if not owner_email:
+            return None
+        source = "software_site_email" if traffic.get("utm_source") == "email" else "software_site"
+        comment = (
+            f"Заявка с сайта разработки. ID: {lead_id}\n"
+            f"Контакт: {lead.contact}\n"
+            f"Бюджет: {lead.budget}\n"
+            f"Задача: {lead.task or 'Не указана'}\n"
+            f"UTM: {traffic.get('utm_source') or '—'} / {traffic.get('utm_medium') or '—'} / "
+            f"{traffic.get('utm_campaign') or '—'} / {traffic.get('utm_content') or '—'}"
+        )
+        crm_id = db.execute(text("""
+          INSERT INTO manager_leads(
+            manager_email,name,site,niche,comment,status,lead_source,created_at,updated_at
+          )
+          VALUES(:me,:name,:site,:niche,:comment,'новый',:source,NOW(),NOW())
+          RETURNING id
+        """), {
+            "me": owner_email,
+            "name": lead.name or "Гость",
+            "site": (lead.page or "")[:500] or None,
+            "niche": (lead.service or "Разработка ПО")[:240],
+            "comment": comment,
+            "source": source,
+        }).scalar()
+        if crm_id:
+            db.execute(text("""
+              INSERT INTO manager_notes(manager_email,lead_id,kind,text,remind_at)
+              VALUES(:me,:lead,'reminder','Новая заявка с сайта разработки — связаться сегодня',NOW())
+            """), {"me": owner_email, "lead": int(crm_id)})
+        db.commit()
+        return int(crm_id) if crm_id else None
+    finally:
+        db.close()
 
 
 def _send_email(lead: SoftwareLead, recipient: str, lead_id: str) -> None:
@@ -379,6 +500,17 @@ def public_health():
     }
 
 
+@router.post("/event")
+def software_event(payload: SoftwareEvent):
+    if payload.event not in _SOFTWARE_EVENT_ALLOWED:
+        raise HTTPException(status_code=422, detail="Неизвестное событие")
+    try:
+        event_id=_record_software_event(payload)
+        return {"ok":True,"event_id":event_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"event_store_failed:{type(exc).__name__}")
+
+
 @router.post("/lead")
 def create_software_lead(lead: SoftwareLead, request: Request):
     if (lead.honeypot or "").strip():
@@ -397,7 +529,7 @@ def create_software_lead(lead: SoftwareLead, request: Request):
         "created_at": now.isoformat(),
         "ip": ip,
         **lead.model_dump(exclude={"honeypot"}),
-        "utm": _traffic_from_page(lead.page),
+        "utm": _traffic_from_payload(lead),
         "consent_at": now.isoformat(),
         "status": "Новая",
         "note": "",
@@ -406,6 +538,22 @@ def create_software_lead(lead: SoftwareLead, request: Request):
     with _LEAD_LOG.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     _write_admin_snapshot(record)
+
+    crm_lead_id = None
+    try:
+        crm_lead_id = _create_software_crm_lead(lead, lead_id)
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=548)
+    try:
+        _record_software_event(
+            lead,
+            event="development_lead_created",
+            channel="form",
+            lead_id=lead_id,
+            crm_lead_id=crm_lead_id,
+        )
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=559)
 
     # Near-real-time owner notification. External MAX I/O is never done in
     # the form request itself: enqueue only, background worker delivers it.
@@ -466,12 +614,13 @@ def create_software_lead(lead: SoftwareLead, request: Request):
             detail={
                 "message": "Заявка сохранена, но почтовая доставка выполнена не полностью",
                 "lead_id": lead_id,
+                "crm_lead_id": crm_lead_id,
                 "delivered": delivered,
                 "errors": errors,
             },
         )
 
-    return {"ok": True, "lead_id": lead_id, "delivered_to": len(delivered)}
+    return {"ok": True, "lead_id": lead_id, "crm_lead_id": crm_lead_id, "delivered_to": len(delivered)}
 
 
 @admin_router.get("/leads")
@@ -500,6 +649,55 @@ def admin_update_lead(lead_id: str, body: LeadUpdate):
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     _write_admin_snapshot(updated)
+
+    # Keep the owner CRM card in sync with the public-site lead pipeline.
+    # The canonical relationship was persisted when development_lead_created
+    # was recorded, so no fuzzy matching by email/phone is required here.
+    crm_status_map = {
+        "Новая": "новый",
+        "Связались": "в диалоге",
+        "Квалифицирована": "квалифицирован",
+        "Оценка": "квалифицирован",
+        "КП": "целевое действие",
+        "Переговоры": "целевое действие",
+        "Оплачено": "сделка",
+        "Проиграно": "отказ",
+    }
+    db = SessionLocal()
+    try:
+        crm_raw = db.execute(text("""
+          SELECT value::jsonb->>'crm_lead_id'
+          FROM storage
+          WHERE account_id='software_site_event'
+            AND value::jsonb->>'event'='development_lead_created'
+            AND value::jsonb->>'lead_id'=:lead_id
+          ORDER BY id DESC
+          LIMIT 1
+        """), {"lead_id": str(lead_id)}).scalar()
+        crm_id = int(crm_raw) if str(crm_raw or "").isdigit() else None
+        if crm_id:
+            crm_status = crm_status_map[status]
+            db.execute(text("""
+              UPDATE manager_leads
+              SET status=:status, updated_at=NOW()
+              WHERE id=:id AND lead_source IN ('software_site','software_site_email')
+            """), {"id": crm_id, "status": crm_status})
+            note = body.note.strip()
+            if note:
+                db.execute(text("""
+                  INSERT INTO manager_notes(manager_email,lead_id,kind,text)
+                  SELECT manager_email,id,'note',:note
+                  FROM manager_leads ml
+                  WHERE ml.id=:id
+                    AND NOT EXISTS (
+                      SELECT 1 FROM manager_notes n
+                      WHERE n.lead_id=ml.id AND n.kind='note' AND n.text=:note
+                    )
+                """), {"id": crm_id, "note": note[:4000]})
+            db.commit()
+    finally:
+        db.close()
+
     return {"ok": True, "item": updated}
 
 

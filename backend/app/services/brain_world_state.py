@@ -72,10 +72,12 @@ def _scope_marketing_diagnosis(db, account_id: str, actual: dict[str, Any], diag
     if row:
         try: funding=json.loads(row.value or "{}")
         except Exception: funding={}
+    funding_reason=str(funding.get("reason") or "")
     funding_wait=bool(
         target>0 and leads<target
         and funding.get("owner_action_required")
-        and str(funding.get("reason") or "")=="avito_balance_below_one_red_cpl"
+        and funding.get("work_pause_required")
+        and funding_reason in {"avito_advance_required_2214","avito_balance_below_one_red_cpl"}
     )
 
     if money_policy_wait or funding_wait:
@@ -84,15 +86,21 @@ def _scope_marketing_diagnosis(db, account_id: str, actual: dict[str, Any], diag
             text=runtime_mode.removeprefix("WAITING_OWNER:").strip() if runtime_mode.startswith("WAITING_OWNER:") else ""
             owner_actions.append(text or "Подтвердите денежный лимит в настройках аккаунта.")
         if funding_wait:
-            try: real=float(funding.get("real_balance_rub") or 0)
-            except Exception: real=0.0
-            try: need=float(funding.get("max_cpl_rub") or actual.get("max_cost_per_lead_rub") or 0)
-            except Exception: need=0.0
-            owner_actions.append(
-                f"Пополните реальный баланс Avito минимум до {need:.0f} ₽; сейчас {real:.0f} ₽."
-                if need>0 else
-                f"Пополните реальный баланс Avito; сейчас {real:.0f} ₽."
-            )
+            if funding_reason=="avito_advance_required_2214":
+                owner_actions.append(
+                    "Avito подтвердил денежный blocker кодом 2214. "
+                    "Пополните аванс/финансирование Avito; BORIS сам продолжит работу после снятия blocker."
+                )
+            else:
+                try: real=float(funding.get("real_balance_rub") or 0)
+                except Exception: real=0.0
+                try: need=float(funding.get("max_cpl_rub") or actual.get("max_cost_per_lead_rub") or 0)
+                except Exception: need=0.0
+                owner_actions.append(
+                    f"Пополните реальный баланс Avito минимум до {need:.0f} ₽; сейчас {real:.0f} ₽."
+                    if need>0 else
+                    f"Пополните реальный баланс Avito; сейчас {real:.0f} ₽."
+                )
         return {
             "classification":"KPI_WAITING_OWNER_DEPENDENCY",
             "health":"degraded",

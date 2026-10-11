@@ -9,30 +9,30 @@ from app.services import prospect_campaigns as prospect
 
 
 class OwnerOutreachPolicyRootTest(unittest.TestCase):
-    def test_hard_ceiling_is_20(self):
-        self.assertEqual(policy.OWNER_OUTREACH_HARD_MAX_DAILY, 20)
+    def test_hard_ceiling_is_30(self):
+        self.assertEqual(policy.OWNER_OUTREACH_HARD_MAX_DAILY, 30)
 
-    def test_ramp_is_10_then_15_then_20(self):
+    def test_ramp_is_10_then_15_then_30(self):
         self.assertEqual(
             [policy.canonical_daily_cap(x) for x in range(8)],
-            [10, 10, 10, 10, 10, 10, 15, 20],
+            [10, 10, 10, 10, 10, 10, 15, 30],
         )
-        self.assertEqual(policy.canonical_daily_cap(30), 20)
+        self.assertEqual(policy.canonical_daily_cap(30), 30)
         self.assertEqual(policy.canonical_policy_state(5)["next_cap"], 15)
-        self.assertEqual(policy.canonical_policy_state(6)["next_cap"], 20)
+        self.assertEqual(policy.canonical_policy_state(6)["next_cap"], 30)
         self.assertIsNone(policy.canonical_policy_state(7)["next_cap"])
 
     def test_prospect_runtime_uses_external_policy(self):
-        self.assertEqual(prospect.OWNER_OUTREACH_MAX_DAILY, 20)
+        self.assertEqual(prospect.OWNER_OUTREACH_MAX_DAILY, 30)
         state_src = inspect.getsource(prospect._owner_daily_state)
         self.assertIn("canonical_policy_state(age)", state_src)
         self.assertIn("computed_cap=min(configured_cap,canonical_cap)", state_src)
         self.assertIn('policy_state["next_cap"]', state_src)
 
-    def test_db_volume_guard_mirrors_same_10_15_20_policy(self):
+    def test_db_volume_guard_mirrors_same_10_15_30_policy(self):
         self.assertEqual(
             [volume.canonical_cap(x) for x in range(8)],
-            [10, 10, 10, 10, 10, 10, 15, 20],
+            [10, 10, 10, 10, 10, 10, 15, 30],
         )
         snapshot = volume._snapshot_guard_sql()
         queue = volume._queue_guard_sql()
@@ -41,7 +41,7 @@ class OwnerOutreachPolicyRootTest(unittest.TestCase):
             self.assertIn("THEN 10", src)
             self.assertIn("age_days < 7", src)
             self.assertIn("THEN 15", src)
-            self.assertIn("ELSE 20", src)
+            self.assertIn("ELSE 30", src)
         ensure_src = inspect.getsource(volume.ensure)
         self.assertIn("trg_owner_daily_limit_guard_v1", ensure_src)
         self.assertIn("trg_zz_owner_daily_limit_guard_v2", ensure_src)

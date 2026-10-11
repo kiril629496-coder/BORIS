@@ -64,6 +64,58 @@ def daily_report_receipt_message_id(day: str) -> int | None:
     except Exception:
         return None
 
+def telegram_quota_snapshot():
+    tz_name=os.getenv('HOT_LEAD_AUTO_TIMEZONE','Europe/Moscow')
+    daily_cap=max(1,int(os.getenv('HOT_LEAD_AUTO_DAILY_CAP','10') or 10))
+    local_now=datetime.now(ZoneInfo(tz_name))
+    day=local_now.date().isoformat()
+    with engine.connect() as db:
+        initial=int(db.execute(text("""select count(*) from boris_sales_hot_leads
+          where outbound_transport='telegram_personal'
+            and timezone(:tz,contacted_at)::date=CAST(:d AS date)"""),
+          {'tz':tz_name,'d':day}).scalar() or 0)
+        followups=int(db.execute(text("""select count(*) from boris_sales_hot_leads
+          where followup_sent_at is not null
+            and timezone(:tz,followup_sent_at)::date=CAST(:d AS date)"""),
+          {'tz':tz_name,'d':day}).scalar() or 0)
+        ready=int(db.execute(text("""select count(*) from boris_sales_hot_leads l
+          where l.status='new' and l.monitor_intent='buy_service'
+            and coalesce(l.boris_fit,0)>=75
+            and coalesce(l.approval_required,false)=false
+            and coalesce(l.source_posted_at,l.discovered_at)>=now()-interval '72 hours'
+            and (coalesce(l.contact_username,'')<>'' or
+                 (l.contact_peer_id is not null and l.contact_access_hash is not null))""")).scalar() or 0)
+        raw=db.execute(text("""select value_text from monitor_runtime_state
+          where key='tg_personal_peer_flood_cooldown_until'""")).scalar()
+    cooldown_active=False
+    cooldown_until=None
+    try:
+        if raw:
+            cooldown_until=datetime.fromisoformat(str(raw).replace('Z','+00:00'))
+            if cooldown_until.tzinfo is None:
+                cooldown_until=cooldown_until.replace(tzinfo=timezone.utc)
+            cooldown_active=cooldown_until>datetime.now(timezone.utc)
+    except Exception:
+        cooldown_active=False
+    total=initial+followups
+    start_h=max(0,min(23,int(os.getenv('HOT_LEAD_AUTO_SEND_START_HOUR','9') or 9)))
+    end_h=max(start_h+1,min(24,int(os.getenv('HOT_LEAD_AUTO_SEND_END_HOUR','19') or 19)))
+    minute=local_now.hour*60+local_now.minute
+    start_min=start_h*60; end_min=end_h*60
+    if minute<start_min:
+        expected=0
+    elif minute>=end_min:
+        expected=daily_cap
+    else:
+        expected=min(daily_cap,int(daily_cap*(minute-start_min)/max(1,end_min-start_min)))
+    return {
+      'now':local_now,'day':day,'cap':daily_cap,'initial':initial,'followups':followups,
+      'total':total,'remaining':max(0,daily_cap-total),'ready':ready,'expected':expected,
+      'lag':max(0,expected-total),'cooldown_active':cooldown_active,
+      'cooldown_until':cooldown_until,'inside_window':start_min<=minute<end_min,
+    }
+
+
 def heal_runtime():
     actions=[]
     if enabled('boris-tg-sales-cycle.timer')!='enabled':
@@ -88,9 +140,25 @@ def heal_runtime():
         actions.append({'retire_legacy_discovery':[rc1,rc2]})
     age=recent_cycle_age_minutes()
     svc=state('boris-tg-sales-cycle.service')
+    quota=telegram_quota_snapshot()
     if age>45 and svc not in ('active','activating'):
         rc,_=run(['systemctl','start','boris-tg-sales-cycle.service'],20)
         actions.append({'kick_sales_cycle':rc,'age_min':round(age,1)})
+    elif (
+        quota['inside_window']
+        and quota['remaining']>0
+        and quota['ready']>0
+        and quota['lag']>0
+        and not quota['cooldown_active']
+        and svc not in ('active','activating')
+    ):
+        # Deterministic catch-up uses the same canonical cycle. The sender keeps
+        # its own per-message pacing, daily cap and Telegram rate-limit guards.
+        rc,_=run(['systemctl','start','boris-tg-sales-cycle.service'],20)
+        actions.append({
+          'quota_catch_up':rc,'sent':quota['total'],'expected':quota['expected'],
+          'remaining':quota['remaining'],'ready':quota['ready'],
+        })
     # The normal report runs at 19:38 Moscow and verifier at 19:43. If both
     # missed or a transient send failed, the watchdog becomes the third layer:
     # after 19:48 it retries the idempotent verifier until a Telegram message_id

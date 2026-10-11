@@ -5,17 +5,17 @@ Readable application-side mirror of the PostgreSQL volume guard.
 The database remains authoritative for real outbound traffic.
 
 Service-day age:
-  0..5 -> up to 10 successful sends/day
-  6    -> up to 15 successful sends/day
-  7+   -> up to 20 successful sends/day
+  0..6 -> up to 10 successful sends/day
+  7+   -> up to 20 successful sends/day shared by all owner funnels
 """
 
-# OWNER_OUTREACH_RAMP_CONTRACT_V2
+# OWNER_OUTREACH_RAMP_CONTRACT_V3
 OWNER_OUTREACH_HARD_MAX_DAILY = 20
-OWNER_OUTREACH_STAGE1_DAYS = 6
+OWNER_OUTREACH_STAGE1_DAYS = 7
 OWNER_OUTREACH_STAGE1_DAILY = 10
-OWNER_OUTREACH_STAGE2_END_DAY = 7
-OWNER_OUTREACH_STAGE2_DAILY = 15
+# Compatibility fields for existing readers; there is one warmup transition.
+OWNER_OUTREACH_STAGE2_END_DAY = OWNER_OUTREACH_STAGE1_DAYS
+OWNER_OUTREACH_STAGE2_DAILY = OWNER_OUTREACH_HARD_MAX_DAILY
 
 # Backward-compatible names used by older readers. These are aliases only;
 # canonical_daily_cap below is the single policy implementation.
@@ -24,12 +24,10 @@ OWNER_OUTREACH_WARMUP_DAILY = OWNER_OUTREACH_STAGE1_DAILY
 
 
 def canonical_daily_cap(age_days: int) -> int:
-    """Canonical owner ramp: 10/day -> 15/day -> hard ceiling 20/day."""
+    """Canonical owner ramp: first seven service days 10/day, then at most 20/day."""
     age = max(0, int(age_days or 0))
     if age < OWNER_OUTREACH_STAGE1_DAYS:
         return OWNER_OUTREACH_STAGE1_DAILY
-    if age < OWNER_OUTREACH_STAGE2_END_DAY:
-        return OWNER_OUTREACH_STAGE2_DAILY
     return OWNER_OUTREACH_HARD_MAX_DAILY
 
 
@@ -37,9 +35,7 @@ def canonical_policy_state(age_days: int) -> dict:
     age = max(0, int(age_days or 0))
     cap = canonical_daily_cap(age)
     if age < OWNER_OUTREACH_STAGE1_DAYS:
-        next_cap, days = OWNER_OUTREACH_STAGE2_DAILY, OWNER_OUTREACH_STAGE1_DAYS - age
-    elif age < OWNER_OUTREACH_STAGE2_END_DAY:
-        next_cap, days = OWNER_OUTREACH_HARD_MAX_DAILY, OWNER_OUTREACH_STAGE2_END_DAY - age
+        next_cap, days = OWNER_OUTREACH_HARD_MAX_DAILY, OWNER_OUTREACH_STAGE1_DAYS - age
     else:
         next_cap, days = None, 0
     return {

@@ -129,58 +129,61 @@ def report_new_sends(limit:int=30)->int:
         return done
     finally: db.close()
 
-def owner_outreach_summary(db)->str:
-    """Plain-language health/performance block for the owner's BORIS campaign."""
+def owner_funnel_reports(db, tz_name='Europe/Moscow')->list[dict]:
+    """Separate funnels, including paused campaigns; never treat SMTP as delivery proof."""
+    from app.services.owner_outreach_metrics import campaign_period
     from app.services import prospect_campaigns as campaigns
-
-    rows=db.execute(text("""SELECT id,name,subject_template,body_template
-      FROM prospect_campaigns
-      WHERE account_id='__owner_outreach__' AND status='active'
-      ORDER BY id""")).mappings().all()
-    if not rows:
-        return ""
-
-    blocks=[]
-    for row in rows:
-        cid=int(row["id"])
-        copy_version=campaigns._copy_version(
-            str(row.get("subject_template") or ""),
-            str(row.get("body_template") or ""),
-            "base",
-        )
-        stats=db.execute(text("""SELECT
-          count(*) FILTER (WHERE m.sent_at IS NOT NULL)::int AS sent,
-          count(*) FILTER (
-            WHERE m.reply_status='replied'
-              AND EXISTS(
-                SELECT 1 FROM prospect_inbound_replies pr
-                JOIN manager_leads ml ON ml.id=pr.crm_lead_id
-                WHERE pr.member_id=m.id
-                  AND COALESCE(pr.message_kind,'human')='human'
-                  AND ml.status IN ('квалифицирован','целевое действие','пробный','оплатил','сделка')
-              )
-          )::int AS positive_replied,
-          count(*) FILTER (WHERE m.reply_status='opt_out')::int AS opt_out
-          FROM prospect_campaign_members m
-          WHERE m.campaign_id=:c AND m.copy_version=:v"""),
-          {"c":cid,"v":copy_version}).mappings().one()
-        deliverability=campaigns.campaign_deliverability(db,cid)
-        state=str(deliverability.get("state") or "ok")
-        if state=="throttled":
-            safety="BORIS сам снизил темп отправки"
-        elif state=="blocked":
-            safety="отправка остановлена для защиты почты; нужна проверка владельца"
+    rows=db.execute(text("""SELECT c.id,c.owner_id,c.name,c.niche,c.status,c.status_reason,c.mailbox_id,
+      mb.smtp_last_error,mb.imap_last_error,r.last_error search_error
+      FROM prospect_campaigns c
+      LEFT JOIN client_mailboxes mb ON mb.id=c.mailbox_id
+      LEFT JOIN prospect_replenish_runs r ON r.campaign_id=c.id
+      WHERE c.account_id='__owner_outreach__' OR
+        (c.name='Кирилл · разработка SaaS/App' AND mb.account_id='__owner_outreach__')
+      ORDER BY c.id""")).mappings().all()
+    result=[]
+    for raw in rows:
+        c=dict(raw);cid=int(c['id'])
+        ready=int(db.execute(text("SELECT count(*) FROM prospect_campaign_members WHERE campaign_id=:c AND status='ready'"),{'c':cid}).scalar() or 0)
+        daily=campaigns._owner_daily_state(db,int(c['owner_id']))
+        periods={str(days):campaign_period(cid,days,tz_name)['summary'] for days in (1,7,30)}
+        reason=None
+        if c['status']!='active':reason='campaign '+str(c['status'])+': '+str(c.get('status_reason') or 'operator_state')
+        elif c.get('smtp_last_error') or c.get('imap_last_error'):reason='mailbox_unhealthy'
+        elif not daily['remaining']:reason='shared_owner_daily_cap_reached'
+        elif not ready:reason='search_degraded' if c.get('search_error')=='search_degraded' else 'no_ready_prospects'
         else:
-            safety="норма"
-        blocks.append(
-            f"{row['name']}: новый текст — {int(stats.get('sent') or 0)} отправлено, "
-            f"{int(stats.get('positive_replied') or 0)} полезных ответов, "
-            f"{int(stats.get('opt_out') or 0)} отказов. "
-            f"Недоступных адресов за 7 дней: {int(deliverability.get('hard_failures') or 0)}/"
-            f"{int(deliverability.get('sample') or 0)} "
-            f"({float(deliverability.get('hard_failure_rate_pct') or 0):.1f}%) — {safety}."
-        )
-    return "\n".join(blocks)
+            allowed,blocked=campaigns._owner_allowance(db,int(c['owner_id']),1)
+            if not allowed:reason=blocked
+        dev={}
+        if c['name']=='Кирилл · разработка SaaS/App':
+            dev=dict(db.execute(text("""SELECT count(*) FILTER(WHERE kind='company_fit') prospects,
+              count(*) FILTER(WHERE kind='company_fit' AND brief_json->>'analyzed_at' IS NOT NULL) analyzed,
+              count(*) FILTER(WHERE kind='company_fit' AND brief_json->>'outreach_gate'='pass') evidence_pass,
+              count(*) FILTER(WHERE kind='demand') direct_demand,
+              count(*) FILTER(WHERE outreach_status='analysis_required') analysis_required
+              FROM development_lead_shortlist WHERE campaign_id=:c
+                AND service_date=timezone(:tz,NOW())::date"""),{'c':cid,'tz':tz_name}).mappings().one())
+            if not reason and not dev.get('evidence_pass'):reason='no_evidence_pass_buyers'
+        result.append({'campaign_id':cid,'name':c['name'],'status':c['status'],'ready':ready,
+          'zero_send_reason':reason if not periods['1']['sent'] else None,
+          'current_block_reason':reason,'periods':periods,'development':dev,
+          'registrations':None,'registrations_reason':'no_verified_email_to_registration_attribution',
+          'discovery_noise_rejected':None,'discovery_noise_reason':'not_persisted_by_legacy_discovery'})
+    return result
+
+
+def owner_outreach_summary(db)->str:
+    blocks=[]
+    for report in owner_funnel_reports(db):
+        lines=[f"{report['name']}: {report['status']}; ready={report['ready']}."]
+        if report['current_block_reason']:lines.append('Причина: '+report['current_block_reason'])
+        if report['development']:
+            d=report['development'];lines.append(f"DEV сегодня: найдено {d['prospects']}, анализировано {d['analyzed']}, evidence pass {d['evidence_pass']}, direct demand {d['direct_demand']}.")
+        for days,stats in report['periods'].items():
+            lines.append(f"{days}д: sent {stats['sent']}; доставлено≈{stats['delivered_estimated']}; bounce {stats['hard_bounced']}; open {stats['opened_unique']} (human≈{stats['likely_human_opened_unique']}); ответы {stats['replied_unique']}; opt-out {stats['opt_out_unique']}; qualified {stats['qualified_unique']} ({stats['qualified_rate_pct']}%).")
+        blocks.append('\n'.join(lines))
+    return '\n'.join(blocks)
 
 
 def owner_outreach_period_summary(owner_ids:list[int],tz_name:str)->str:

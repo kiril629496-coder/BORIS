@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 import os, sys, json
-from datetime import date, datetime, timedelta
+from app.services.exception_observability import observe_suppressed
+from datetime import date, datetime, timedelta, timezone
+from contextvars import ContextVar
+from app.services.social_editorial_contract import project_local_now, parse_reference_date, planned_content_date
+_SOCIAL_EDITORIAL_DATE = ContextVar("social_editorial_date", default=None)
 
 from app.services.mass_ai_guard import guarded_post as _mass_guarded_post
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +19,11 @@ DEFAULT_TIMES = ["09:00", "19:00"]
 # Предел давности черновика: старше этого срока автопубликация не трогает.
 STALE_AFTER_HOURS = 24
 BANNER_DIR = "/root/BORIS/backend/posting_banners"
+
+
+def _resolve_banner_path(account_id, banner):
+    from app.services.social_media_assets import resolve_banner_path
+    return resolve_banner_path(account_id, banner, banner_dir=BANNER_DIR)
 
 
 def _try_post_delivery_lock(account_id, post_id):
@@ -34,7 +43,7 @@ def _try_post_delivery_lock(account_id, post_id):
         try:
             conn.rollback()
         except Exception:
-            pass
+            observe_suppressed(__name__, sys.exc_info()[1], line=45)
     conn.close()
     return None
 
@@ -53,12 +62,12 @@ def _release_post_delivery_lock(conn, account_id, post_id):
         try:
             conn.rollback()
         except Exception:
-            pass
+            observe_suppressed(__name__, sys.exc_info()[1], line=64)
     finally:
         try:
             conn.close()
         except Exception:
-            pass
+            observe_suppressed(__name__, sys.exc_info()[1], line=69)
 
 
 def _load_post_record(account_id, post_id):
@@ -97,29 +106,113 @@ def _persist_post_record(account_id, record):
         db.close()
 
 
-def _openai_text(account_id, prompt, operation="текст постинга"):
-    """Canonical exactly-once paid text path for Social posting.
+def _social_openai_requests_post(*args, **kwargs):
+    """Social OpenAI Responses transport through the explicit international proxy.
 
-    Reuses the Campaign/Feed Factory paid transport: deterministic intent,
-    cross-process lock, durable cache, account caps, ai_budget, provider
-    Idempotency-Key and exact x-request-id accounting.
+    Global HTTP(S)_PROXY is deliberately disabled for BORIS long-lived services;
+    Social must therefore opt into the same explicit proxy pool used by Images.
+    Never fall back to a direct OpenAI request from a geo-blocked host.
+    """
+    import requests
+    from proxy_pool import get_intl_requests_proxies
+
+    proxies = get_intl_requests_proxies() or {}
+    if not proxies:
+        raise RuntimeError("SOCIAL_OPENAI_PROXY_UNAVAILABLE")
+    session = requests.Session()
+    session.trust_env = False
+    session.proxies.update(proxies)
+    try:
+        return session.post(*args, **kwargs)
+    finally:
+        session.close()
+
+
+def _social_secondary_ai_text(account_id, prompt, operation, intent):
+    """Secondary AI only after a proven non-ambiguous primary provider failure.
+
+    OpenAI is deliberately skipped here: the canonical Social paid contour has
+    already attempted it with the same business intent. The shared router may
+    use the next configured provider (for example Gemini) or local recovery.
+    """
+    from app.services.sales_ai_router import (
+        generate_text,
+        SalesAIProviderUnavailable,
+        SalesAIUnavailable,
+    )
+
+    def _skip_openai(**_kwargs):
+        raise SalesAIProviderUnavailable("social canonical OpenAI attempt already failed")
+
+    try:
+        out = generate_text(
+            account_id=str(account_id),
+            operation=str(operation) + "_secondary",
+            prompt=str(prompt or ""),
+            module="social",
+            idempotency_key="social-secondary:" + str(intent),
+            max_output_tokens=700,
+            timeout=75,
+            openai_call=_skip_openai,
+        )
+    except SalesAIUnavailable as exc:
+        raise RuntimeError("SOCIAL_AI_ROUTER_UNAVAILABLE:" + str(exc)[:220]) from exc
+    text_out = str((out or {}).get("text") or "").strip()
+    if not text_out:
+        raise RuntimeError("SOCIAL_TEXT_EMPTY")
+    return text_out
+
+
+def _openai_text(account_id, prompt, operation="текст постинга"):
+    """Canonical Social paid contour with safe secondary provider recovery.
+
+    The first attempt always stays on Campaign/Feed Factory's exactly-once
+    _ff_guarded_openai_response boundary. A secondary provider is allowed only
+    after a deterministic provider rejection/cooldown where the primary call is
+    known not to have produced a paid 2xx result. Ambiguous transport outcomes
+    remain fail-closed and never trigger another paid remote attempt.
     """
     import hashlib
+    import os as _os_social
+    import requests as _requests_social
     from app.api.campaigns import _ff_guarded_openai_response
 
     prompt = str(prompt or "")
     intent = "social-post-text:" + hashlib.sha256(
         (str(account_id) + "\n" + str(operation) + "\n" + prompt).encode("utf-8", "ignore")
     ).hexdigest()
-    out = _ff_guarded_openai_response(
-        account_id=str(account_id),
-        operation=str(operation),
-        model="gpt-5.4",
-        input_payload=[{"role": "user", "content": prompt}],
-        max_output_tokens=700,
-        idempotency_key=intent,
-        timeout=90,
+    model = str(
+        _os_social.getenv("BORIS_SOCIAL_OPENAI_MODEL")
+        or _os_social.getenv("BORIS_SALES_OPENAI_MODEL")
+        or "gpt-5.4-mini"
     )
+    try:
+        out = _ff_guarded_openai_response(
+            account_id=str(account_id),
+            operation=str(operation),
+            model=model,
+            input_payload=[{"role": "user", "content": prompt}],
+            max_output_tokens=700,
+            idempotency_key=intent,
+            timeout=90,
+            requests_post=_social_openai_requests_post,
+        )
+    except _requests_social.HTTPError as exc:
+        status = int(getattr(getattr(exc, "response", None), "status_code", 0) or 0)
+        if status in {401, 403, 429, 500, 502, 503, 504}:
+            return _social_secondary_ai_text(account_id, prompt, operation, intent)
+        raise
+    except RuntimeError as exc:
+        reason = str(exc)
+        # These states prove the primary provider did not return a usable paid
+        # result. Do not include OUTCOME_UNCERTAIN here.
+        if reason.startswith((
+            "CAMPAIGN_AI_PROVIDER_COOLDOWN:",
+            "CAMPAIGN_AI_RELEASED_RETRY_CAP:",
+        )):
+            return _social_secondary_ai_text(account_id, prompt, operation, intent)
+        raise
+
     text_out = str((out or {}).get("text") or "").strip()
     if not text_out:
         raise RuntimeError("SOCIAL_TEXT_EMPTY")
@@ -173,9 +266,9 @@ def _ru_holidays_movable(year):
         "День матери": _last_weekday(year,11,6),
     }
 
-def _holiday_in_window(days=7):
+def _holiday_in_window(days=7, reference_date=None):
     """Возвращает 'Название (дд.мм)' первого праздника в окне [сегодня; сегодня+days], иначе ''."""
-    today=date.today()
+    today = parse_reference_date(reference_date) if reference_date is not None else _project_clock({"tz_offset": 0}).date()
     hits=[]
     for off in range(days+1):
         d=today+timedelta(days=off)
@@ -189,7 +282,7 @@ def _holiday_in_window(days=7):
     return name+" ("+d.strftime("%d.%m")+")"
 
 
-def _project_occasion(proj):
+def _project_occasion(proj, reference_date=None):
     """Return a calendar hook only where it naturally belongs.
 
     Product/SMM channels must not force unrelated solemn/professional dates
@@ -199,7 +292,7 @@ def _project_occasion(proj):
     name = str((proj or {}).get("name") or "").strip().lower()
     if "океан клиент" in name or "от души" in name:
         return ""
-    return _holiday_in_window(7)
+    return _holiday_in_window(7, reference_date=reference_date or _SOCIAL_EDITORIAL_DATE.get() or _project_clock(proj).date())
 
 
 def _best_examples(account_id, project_id, limit=3):
@@ -227,7 +320,7 @@ def _best_examples(account_id, project_id, limit=3):
     return [t for _, t in ranked[:limit] if t]
 
 
-def _build_text_prompt(theme, client_prompt="", occasion="", examples=None, allow_hashtags=False):
+def _build_text_prompt(theme, client_prompt="", occasion="", examples=None, allow_hashtags=False, reference_date=None):
     parts = [f"Напиши пост для соцсетей (ВКонтакте и Telegram) на тему: {theme}.",
              "Живой, цепляющий, короткий — 3-6 предложений. Без канцелярита. Эмодзи уместно."]
     if occasion: parts.append(f"Привяжи пост к поводу/дате: {occasion}.")
@@ -243,9 +336,12 @@ def _build_text_prompt(theme, client_prompt="", occasion="", examples=None, allo
         parts.append("СЛУЖЕБНЫЕ ПОМЕТКИ ЗАПРЕЩЕНЫ: не пиши ТЕМА:, ТОН:, СТРУКТУРА:, CTA:, ФОРМАТ:, ДЛЯ ИЗОБРАЖЕНИЯ:, ВИЗУАЛЬНЫЙ СТИЛЬ: и пояснения о том, как создавался пост.")
     else:
         parts.append("НИКАКИХ ХЭШТЕГОВ И СЛУЖЕБНЫХ ПОМЕТОК: не пиши #теги, ТЕМА:, ТОН:, СТРУКТУРА:, CTA:, ФОРМАТ:, ДЛЯ ИЗОБРАЖЕНИЯ:, ВИЗУАЛЬНЫЙ СТИЛЬ: и любые пояснения о том, как создавался пост. Читатель должен видеть только готовый человеческий текст.")
-    parts.append("НЕ используй одинаковый рекламный скрипт в каждом посте, не перечисляй весь продуктовый каталог и не повторяй один и тот же CTA. Сначала полезная/живая мысль; продажа — максимум одной естественной фразой и не обязана быть в каждом посте.")
+    parts.append("ЛОГИКА ПОСТА: выбери ОДНУ конкретную мысль и доведи её до понятного вывода. Не смешивай несколько услуг, новостей и офферов в одном тексте. Схема: понятный контекст/проблема → 1 полезная мысль или пример → естественный вывод/CTA.")
+    parts.append("ФАКТЫ: опирайся только на тему, контекст бизнеса и подтверждённые примеры. Если конкретного факта нет — не додумывай. Не пиши общие фразы вроде «индивидуальный подход», «качество и надёжность», «лучшие решения», если они не раскрыты конкретикой.")
+    parts.append("РАЗНООБРАЗИЕ: каждый новый пост должен отличаться углом, первой фразой, структурой и финалом от предыдущих. Не используй один и тот же шаблон, не перечисляй весь продуктовый каталог и не повторяй один и тот же CTA. Сначала полезная/живая мысль; продажа — максимум одной естественной фразой и не обязана быть в каждом посте.")
     parts.append("РАЗМЕТКА: разрешён ТОЛЬКО HTML-тег <b>жирный</b> — оберни в него заголовок первой строки и одну-две ключевые фразы по смыслу. Больше никаких тегов. Markdown запрещён полностью: никаких **, ##, __, backticks — они будут видны читателю как мусор.")
-    _t0 = date.today()
+    _ref = reference_date if reference_date is not None else _SOCIAL_EDITORIAL_DATE.get()
+    _t0 = parse_reference_date(_ref) if _ref is not None else _project_clock({"tz_offset": 0}).date()
     _win = ", ".join((_t0 + timedelta(days=_i)).strftime("%d.%m.%Y") for _i in range(8))
     parts.append("СЕГОДНЯ " + _t0.strftime("%d.%m.%Y") + ". Упоминать события, праздники и любые даты разрешено ТОЛЬКО из этого списка: " + _win + ".")
     parts.append("Все прочие даты и праздники под строгим запретом — не упоминай их вообще. Если в разрешённом окне праздника нет, пиши обычный пост без привязки к дате и без слов «скоро», «на днях», «приближается».")
@@ -253,20 +349,35 @@ def _build_text_prompt(theme, client_prompt="", occasion="", examples=None, allo
     parts.append("Верни только текст поста, без пояснений и кавычек.")
     return "\n".join(parts)
 
-def _build_banner_prompt(theme, client_prompt="", title="", allowed_dates=""):
+def _build_banner_prompt(theme, client_prompt="", title="", allowed_dates="", post_text=""):
+    import re as _re
+    _semantic = str(post_text or "")
+    _semantic = _re.sub(r"<[^>]+>", " ", _semantic)
+    _semantic = _re.sub(r"https?://\S+|@[A-Za-zА-Яа-яЁё0-9_]+|(?<!\w)#[A-Za-zА-Яа-яЁё0-9_]+", " ", _semantic, flags=_re.U)
+    _semantic = " ".join(_semantic.split())[:1400]
     p = (
         "Создай ПРЕМИАЛЬНЫЙ рекламный баннер для социальных сетей, квадрат 1:1.\n\n"
         + ("ГЛАВНЫЙ ЗАГОЛОВОК крупным шрифтом, точно этот текст: «" + title + "»\n" if title else "")
         + "ТЕМА БАННЕРА: " + theme + "\n\n"
-        "СТИЛЬ: премиальная рекламная графика — насыщенные цвета, динамичная композиция, высокое качество "
+        + (
+            "СМЫСЛ ГОТОВОГО ПОСТА (только для выбора визуальной сцены; НЕ переписывай весь текст на баннер):\n"
+            + _semantic + "\n\n"
+            "СМЫСЛОВАЯ СВЯЗЬ: заголовок, главный объект и сцена должны передавать ОДНУ и ту же конкретную мысль готового поста. "
+            "Показывай узнаваемый предмет, действие, интерфейсную метафору или ситуацию именно из текста. "
+            "Не подменяй конкретную тему случайным роботом, абстрактным AI, рукопожатием или универсальным офисом. "
+            "Не делай коллаж из нескольких несвязанных услуг. Один баннер = одна мысль.\n\n"
+            if _semantic else ""
+        )
+        + "СТИЛЬ: премиальная рекламная графика — насыщенные цвета, динамичная композиция, высокое качество "
         "продакшена. НЕ похоже на дешёвое стоковое фото. Один яркий акцентный цвет плюс тёмные или "
         "нейтральные тона фона, объёмный свет, глубина кадра.\n"
         "ГЛАВНЫЙ ОБЪЕКТ по теме рисуй точно и узнаваемо, не подменяй абстракцией.\n"
         "ВЁРСТКА: чистая, с безопасными отступами от краёв. Весь важный контент — в ЦЕНТРАЛЬНОЙ части кадра, "
-        "верх и низ оставляй под фон. Допустимы аккуратные плашки, иконки и короткие подписи, но БЕЗ цен и без дат.\n"
-        "ТЕКСТ: весь текст на РУССКОМ языке, без орфографических ошибок, полностью помещается в кадр и НЕ "
-        "обрезан краями. Если текста много — уменьшай шрифт, но не обрезай. Никаких выдуманных слов и "
-        "бессмысленных букв.\n"
+        "верх и низ оставляй под фон. По умолчанию НЕ добавляй декоративные плашки, иконки, подписи, вопросы и CTA. "
+        "Дополнительный текст разрешён только если клиентский промпт явно требует его.\n"
+        "ТЕКСТ: если задан ГЛАВНЫЙ ЗАГОЛОВОК, это ЕДИНСТВЕННЫЙ текст на баннере, если клиентский промпт прямо не требует иного. "
+        "Не копируй вопрос, CTA или предложения из готового поста. Заголовок на РУССКОМ языке, без орфографических ошибок, "
+        "полностью помещается в кадр и НЕ обрезан краями. Никаких выдуманных слов и бессмысленных букв.\n"
         "ОРИЕНТАЦИЯ: строго ровная, 0 градусов, без наклонов и диагоналей.\n"
         "ЗАПРЕЩЕНО НА БАННЕРЕ: любые цены, суммы, числа с ₽/руб/рублей, ценники и плашки вроде "
         "«специальная цена», «от N ₽», «стоимость», «скидка», прайс-листы, телефоны, адреса, графики. "
@@ -462,10 +573,15 @@ def _extract_public_hashtags(text, limit=10):
 
 
 def _append_public_hashtags(text, tags):
+    import re as _re_tags
     tags = [str(x).strip() for x in (tags or []) if str(x).strip()]
-    if not tags:
-        return str(text or "").strip()
-    return str(text or "").rstrip() + "\n\n" + " ".join(tags)
+    value = str(text or "")
+    if tags:
+        value = _re_tags.sub(r"(?<!\w)#[A-Za-zА-Яа-яЁё0-9_]+", "", value, flags=_re_tags.U)
+        value = _re_tags.sub(r"[ \t]+\n", "\n", value)
+        value = _re_tags.sub(r"\n{3,}", "\n\n", value).strip()
+        return value + "\n\n" + " ".join(tags)
+    return value.strip()
 
 
 def _sanitize_public_post_text(text):
@@ -522,6 +638,37 @@ def _reuse_existing_ocean_social_banner(account_id, project_id, theme, text_valu
     if not path.is_file() or path.stat().st_size < 50_000:
         raise RuntimeError("OCEAN_REUSE_BANNER_INVALID")
     return str(path)
+
+
+def _manicure_banner_title(theme, text_value=""):
+    """Short complete 3-5 word headline for manicure/pedicure banners."""
+    base = str(theme or "").split(". Услуга:", 1)[0].strip(" .:-")
+    low = base.lower().replace("ё", "е")
+    if ("длин" in low and "ног" in low) or "ритм" in low:
+        return "Удобная длина ногтей"
+    if "педикюр" in low:
+        if "осен" in low or "не только лет" in low or "закрыт" in low:
+            return "Педикюр нужен и осенью"
+        if "уход" in low or "стоп" in low:
+            return "Уход за стопами осенью"
+        return "Аккуратный педикюр каждый день"
+    if "кутикул" in low or "сух" in low:
+        return "Уход за сухой кутикулой"
+    if "молоч" in low:
+        return "Молочный маникюр без перегруза"
+    if any(x in low for x in ("бордо", "шоколад", "тёмн", "оттен")):
+        return "Глубокие осенние оттенки"
+    if "френч" in low:
+        return "Современный френч без скуки"
+    if "кошачий глаз" in low:
+        return "Эффект кошачьего глаза"
+    if any(x in low for x in ("форма", "миндаль", "квадрат")):
+        return "Форма и длина ногтей"
+    if "коротк" in low:
+        return "Короткие ногти каждый день"
+    if "дизайн" in low:
+        return "Идея маникюра на сегодня"
+    return "Маникюр для реальной жизни"
 
 
 def _ocean_uncertain_text_fallback(theme):
@@ -598,8 +745,52 @@ def _social_provider_text_recovery(project_id, theme):
             body="<b>"+title[:1].upper()+title[1:]+"</b>\n\nВ непростой момент лучше опираться на простые и искренние слова. Вспомните конкретного человека, важный эпизод или качество, за которое его ценили. Так текст остаётся личным и не превращается в безликий шаблон."
         return _sanitize_public_post_text(body)
     if pid == "270dbf472f7f":
-        title=value.split(". Для ИЗОБРАЖЕНИЯ",1)[0].strip()[:90] or "Идея для следующего маникюра"
-        body="<b>"+title[:1].upper()+title[1:]+"</b>\n\nПри выборе дизайна полезно заранее решить, что важнее именно сейчас: спокойный повседневный вариант или заметный акцент. Форма, длина и оттенок лучше работают вместе, когда подходят вашему привычному образу и ритму жизни.\n\nКакой вариант вам ближе — спокойный или более выразительный?"
+        base=value.split(". Услуга:",1)[0].split(". Для ИЗОБРАЖЕНИЯ",1)[0].strip(" .:-")
+        base_low=base.lower()
+        if any(x in base_low for x in ("педикюр осенью", "не только лет", "закрыт")):
+            body=(
+                "<b>Педикюр не заканчивается вместе с открытой обувью</b>\n\n"
+                "Осенью смысл процедуры меняется: уже не нужно подбирать покрытие под босоножки, "
+                "зато аккуратные стопы и ногти остаются частью обычного ухода за собой.\n\n"
+                "Если яркий цвет сейчас не нужен, можно выбрать спокойное покрытие или аккуратный вариант без него."
+            )
+        elif any(x in base_low for x in ("кутикул", "уход за руками", "сух")):
+            body=(
+                "<b>Сухая кутикула быстро портит впечатление даже от аккуратного покрытия</b>\n\n"
+                "В прохладный сезон рукам чаще нужен обычный домашний уход между визитами. "
+                "Лучше регулярно использовать привычное средство для увлажнения и не пытаться глубоко срезать кожу самостоятельно.\n\n"
+                "Так аккуратный вид маникюра сохраняется дольше без лишних экспериментов дома."
+            )
+        elif any(x in base_low for x in ("бордо", "шоколад", "тёмн", "осенний оттен")):
+            body=(
+                "<b>Тёмный маникюр не обязан выглядеть тяжело</b>\n\n"
+                "Бордо, шоколадный и другие глубокие оттенки сильно зависят от формы и длины ногтей. "
+                "На короткой или средней длине спокойная форма часто делает насыщенный цвет более собранным.\n\n"
+                "Если хочется выразительности без сложного дизайна, можно начать именно с оттенка."
+            )
+        elif any(x in base_low for x in ("коротк", "форма", "миндаль", "квадрат", "длин")):
+            body=(
+                "<b>Форму ногтей лучше выбирать не только по фотографии</b>\n\n"
+                "Важно учитывать длину, привычную нагрузку на руки и то, насколько удобно вам с этой формой каждый день. "
+                "Один и тот же дизайн на коротком мягком квадрате и на миндале будет выглядеть совершенно по-разному.\n\n"
+                "Сначала определитесь с удобной формой — и уже под неё подбирайте цвет и дизайн."
+            )
+        elif any(x in base_low for x in ("френч", "дизайн", "акцент", "геометр", "абстрак", "кошачий глаз")):
+            title=base[:72] or "Один акцент вместо перегруженного дизайна"
+            body=(
+                "<b>"+title[:1].upper()+title[1:]+"</b>\n\n"
+                "Чтобы дизайн выглядел собранно, ему не обязательно занимать каждый ноготь. "
+                "Часто достаточно одного повторяющегося элемента, пары акцентов или одной понятной палитры.\n\n"
+                "Так идея остаётся заметной, но не спорит с формой и длиной ногтей."
+            )
+        else:
+            title=base[:72] or "Маникюр лучше выбирать под реальную жизнь"
+            body=(
+                "<b>"+title[:1].upper()+title[1:]+"</b>\n\n"
+                "Перед выбором стоит решить, что для вас сейчас важнее: практичность, спокойный цвет или заметный акцент. "
+                "Когда форма, длина и оттенок отвечают одной задаче, результат выглядит гораздо цельнее.\n\n"
+                "Сохраните идею и сравните её с тем, что вам удобно носить каждый день."
+            )
         return _sanitize_public_post_text(body)
     return None
 
@@ -769,8 +960,422 @@ def _record_social_ai_uncertain_fallback(account_id, project_id, generation_key,
         db.close()
 
 
-def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion="", channel="", image_source="ai", project_id="", text_prompt_snapshot="", allow_hashtags=False):
-    result = {"account_id": account_id, "theme": theme}
+def _social_payload_digest(value):
+    import hashlib
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _social_copy_deletion_checkpoint(previous, result, *, expected_result_sha256=None):
+    """CAS a single deletion; later checkpoints cannot restore stale copy/cost."""
+    import math
+    old = (previous or {}).get("copy_deletion") or {}
+    new = (result or {}).get("copy_deletion") or {}
+    if expected_result_sha256 is not None:
+        if (not isinstance(previous, dict) or _social_payload_digest(previous) != expected_result_sha256
+                or previous.get("final_payload_stage") != "qa_accounted"
+                or old.get("attempts") != 0 or new.get("attempts") != 1
+                or (new.get("original") or {}).get("text") != previous.get("text")
+                or (new.get("original") or {}).get("delivery_texts") != previous.get("delivery_texts")):
+            raise RuntimeError("SOCIAL_COPY_DELETION_CAS_CONFLICT")
+        mutable = {"text", "delivery_texts", "copy_quality", "delivery_copy_quality", "copy_deletion", "final_payload_stage"}
+        if ({k: v for k, v in previous.items() if k not in mutable}
+                != {k: v for k, v in result.items() if k not in mutable}):
+            raise RuntimeError("SOCIAL_COPY_DELETION_FROZEN_FIELDS_CHANGED")
+    elif old.get("attempts") == 1:
+        if (new.get("attempts") != 1 or previous.get("text") != result.get("text")
+                or previous.get("delivery_texts") != result.get("delivery_texts")
+                or any(old.get(k) != new.get(k) for k in ("version", "manifest", "original", "proposal", "image_sha256"))
+                or any((result.get("delivery_qa_attempts") or {}).get(k) != v
+                       for k, v in (previous.get("delivery_qa_attempts") or {}).items())):
+            raise RuntimeError("SOCIAL_COPY_DELETION_STALE_CHECKPOINT")
+        for key in ("banner_attempt_costs", "banner_vision_qa_costs"):
+            prior_costs, fresh_costs = previous.get(key) or [], result.get(key) or []
+            if (not isinstance(fresh_costs, list) or fresh_costs[:len(prior_costs)] != prior_costs
+                    or any(type(x) not in (int, float) or not math.isfinite(x) or x < 0 for x in fresh_costs)):
+                raise RuntimeError("SOCIAL_COPY_DELETION_COST_HISTORY_CHANGED")
+        known, total = result.get("banner_cost_known"), result.get("banner_cost_rub")
+        if known is True:
+            aggregate = round(sum(result.get("banner_attempt_costs") or [])
+                              + sum(result.get("banner_vision_qa_costs") or []), 6)
+            if (previous.get("banner_cost_known") is not True or type(total) not in (int, float)
+                    or not math.isfinite(total) or total < previous.get("banner_cost_rub", 0)
+                    or total != aggregate):
+                raise RuntimeError("SOCIAL_COPY_DELETION_COST_REGRESSED")
+        elif (known is not False or (result.get("final_payload_stage") != "qa_reconciliation"
+                                    and result.get("final_payload_reconciliation_required") is not True)
+              or (total is not None and (type(total) not in (int, float) or not math.isfinite(total)
+                                        or total < (previous.get("banner_cost_rub") or 0)))):
+            raise RuntimeError("SOCIAL_COPY_DELETION_COST_UNVERIFIED")
+        prior_native = ((previous.get("july_premium") or {}).get("social_native_v2") or {})
+        fresh_native = ((result.get("july_premium") or {}).get("social_native_v2") or {})
+        if prior_native:
+            prior_budget = prior_native.get("native_budget") or {}
+            fresh_budget = fresh_native.get("native_budget") or {}
+            if (any(prior_native.get(k) != fresh_native.get(k) for k in
+                    ("version", "context", "generation_key", "image_intent", "identity"))
+                    or any(fresh_native.get(k, 0) < prior_native.get(k, 0) for k in
+                           ("native_total_rub", "social_total_rub"))
+                    or any((fresh_native.get(journal) or {}).get(k) != v
+                           for journal in ("native_receipts", "social_receipts")
+                           for k, v in (prior_native.get(journal) or {}).items())
+                    or not set(prior_budget.get("request_ids") or []).issubset(set(fresh_budget.get("request_ids") or []))
+                    or (prior_budget.get("known") is True and fresh_budget.get("known") is not True)):
+                raise RuntimeError("SOCIAL_COPY_DELETION_NATIVE_HISTORY_CHANGED")
+
+
+def _social_final_payload_state(account_id, context, action, result=None, *, expected_result_sha256=None):
+    """Durable single producer for NEW opted-in plans; no expired-lease rebuy.
+
+    A process lost during paid work leaves a running claim for reconciliation.
+    A completed result can be recovered unchanged before post materialization.
+    Never backfill this marker onto an existing plan or historical paid intent.
+    """
+    import copy
+    db = SessionLocal()
+    try:
+        row = db.query(Storage).filter(Storage.account_id == str(account_id),
+            Storage.key == context["storage_key"]).with_for_update().first()
+        if row is None:
+            raise RuntimeError("SOCIAL_FINAL_PAYLOAD_PLAN_MISSING")
+        plan = json.loads(row.value)
+        if not isinstance(plan, dict) or plan.get("final_payload_qa") != context:
+            raise RuntimeError("SOCIAL_FINAL_PAYLOAD_IDENTITY_MISMATCH")
+        # The protected owner plan wrapper may rewrite a plan snapshot. Keep
+        # the paid claim in a separate row so a stale wrapper snapshot cannot
+        # erase a running claim, paid checkpoint or completed result.
+        state_key = "social_final_payload_generation:" + context["record_id"]
+        state_row = db.query(Storage).filter(Storage.account_id == str(account_id),
+            Storage.key == state_key).with_for_update().first()
+        state = json.loads(state_row.value) if state_row is not None else None
+        if state is not None and (not isinstance(state, dict) or state.get("context") != context):
+            raise RuntimeError("SOCIAL_FINAL_PAYLOAD_CLAIM_IDENTITY_MISMATCH")
+        if action in {"claim", "recover"}:
+            if isinstance(state, dict) and state.get("state") == "complete" and isinstance(state.get("result"), dict):
+                if state["result"].get("final_payload_qa") != context:
+                    raise RuntimeError("SOCIAL_FINAL_PAYLOAD_RESULT_IDENTITY_MISMATCH")
+                return copy.deepcopy(state["result"])
+            if state is not None:
+                raise RuntimeError("SOCIAL_FINAL_PAYLOAD_RECONCILIATION_REQUIRED")
+            if action == "recover":
+                raise RuntimeError("SOCIAL_FINAL_PAYLOAD_PAST_CLAIM_FORBIDDEN")
+            saved = {"context": context, "state": "running",
+                "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        elif action in {"checkpoint", "complete", "copy_delete"}:
+            if not isinstance(state, dict) or state.get("state") != "running":
+                raise RuntimeError("SOCIAL_FINAL_PAYLOAD_CLAIM_MISSING")
+            if not isinstance(result, dict) or result.get("final_payload_qa") != context:
+                raise RuntimeError("SOCIAL_FINAL_PAYLOAD_RESULT_IDENTITY_MISMATCH")
+            if action == "copy_delete" and not expected_result_sha256:
+                raise RuntimeError("SOCIAL_COPY_DELETION_CAS_REQUIRED")
+            _social_copy_deletion_checkpoint(state.get("result"), result,
+                expected_result_sha256=expected_result_sha256 if action == "copy_delete" else None)
+            saved = {**state,
+                "state": "complete" if action == "complete" else "running",
+                "result": copy.deepcopy(result),
+                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        else:
+            raise ValueError("SOCIAL_FINAL_PAYLOAD_STATE_ACTION_INVALID")
+        payload = json.dumps(saved, ensure_ascii=False)
+        if state_row is None:
+            db.add(Storage(account_id=str(account_id), key=state_key, value=payload))
+        else:
+            state_row.value = payload
+        db.commit()
+        return None
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _social_generate_final_payload(account_id, theme, options):
+    """Own one new generation before any paid call, retaining paid failures."""
+    import copy
+    import re
+    context = copy.deepcopy(options.get("final_payload_context"))
+    project = options.get("project") or {}
+    today = _project_clock(project).date()
+    permitted_days = {today.isoformat(), (today - timedelta(days=1)).isoformat()}
+    if (not isinstance(context, dict)
+            or context.get("version") != "SOCIAL_FINAL_PAYLOAD_QA_V1"
+            or str(account_id) != "u2" or context.get("account_id") != str(account_id)
+            or str(project.get("id")) not in {"a374ced25745", "f938caa3a944", "270dbf472f7f"}
+            or context.get("project_id") != str(project.get("id"))
+            or not re.fullmatch(r"[0-9a-f]{12}", str(context.get("record_id") or ""))
+            or (project.get("mode") or "auto") != "auto"
+            or context.get("local_date") not in permitted_days):
+        raise RuntimeError("SOCIAL_FINAL_PAYLOAD_CONTEXT_INVALID")
+    slot = re.fullmatch(r"social-slot:([^:]+):([^:]+):(\d{8})_([01]\d|2[0-3])",
+                        str(context.get("generation_key") or ""))
+    if (slot is None or slot.group(1) != str(account_id)
+            or slot.group(2) != str(project.get("id"))
+            or slot.group(3) != context["local_date"].replace("-", "")
+            or context.get("storage_key") != "posting_generation_plan:" + slot.group(2) + ":" + slot.group(3) + "_" + slot.group(4)):
+        raise RuntimeError("SOCIAL_FINAL_PAYLOAD_CONTEXT_INVALID")
+    # Cross-midnight compensation may materialize the exact already-completed
+    # result. It never starts a new past-day claim or repeats uncertain work.
+    action = "claim" if context["local_date"] == today.isoformat() else "recover"
+    recovered = _social_final_payload_state(account_id, context, action)
+    if recovered is not None:
+        return recovered
+    result = {"account_id": account_id, "theme": theme, "final_payload_qa": context,
+              "generation_key": context["generation_key"], "final_payload_stage": "copy"}
+    try:
+        result = generate_post(account_id, theme, **options, _final_payload_result=result)
+    except Exception as exc:
+        if str(exc).startswith(("SOCIAL_COPY_DELETION_CAS_", "SOCIAL_COPY_DELETION_STALE_", "SOCIAL_COPY_DELETION_FROZEN_",
+                                "SOCIAL_COPY_DELETION_COST_", "SOCIAL_COPY_DELETION_NATIVE_HISTORY_")):
+            # A stale producer cannot replace a newer durable result with its
+            # local snapshot, even while reporting a blocked generation.
+            raise
+        # The result object is shared with image/QA accounting. A caught error
+        # cannot erase already-received costs, verdicts or request identifiers.
+        result.update(banner=None, quality_status="banner_blocked",
+                      banner_error="FINAL_PAYLOAD_GENERATION_BLOCKED:" + type(exc).__name__ + ":" + str(exc)[:180])
+        if str(result.get("final_payload_stage") or "").endswith("_request"):
+            result["banner_cost_known"] = False
+            result["final_payload_reconciliation_required"] = True
+    _social_final_payload_state(account_id, context, "complete", result)
+    return result
+
+
+def _social_prepare_final_payload(result, project):
+    """Freeze every connected native caption before buying its image."""
+    context = result["final_payload_qa"]
+    tracking = _ocean_tracking_record(result.get("text", ""), project, context["record_id"])
+    result.update(tracking)
+    platforms = _required_delivery_platforms(project)
+    if not platforms:
+        raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:no_connected_delivery_channel")
+    result["delivery_texts"] = {platform: _project_delivery_text_tracked(
+        result.get("text", ""), project, platform,
+        tracking_id=str(tracking.get("utm_content") or ""), final_payload=True,
+    ) for platform in platforms}
+    from app.services import social_quality as sq
+    recent = sq.recent_project_posts(str(result["account_id"]), str(project.get("id") or ""))
+    checks = {p: sq.evaluate_copy(t, result.get("content_brief") or {}, project, recent_posts=recent)
+              for p, t in result["delivery_texts"].items()}
+    result["delivery_copy_quality"] = checks
+    if any(check.get("pass") is not True for check in checks.values()):
+        raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:final_public_copy")
+    from app.services.social_editorial_contract import public_text_for_qa
+    # Carry the approved body's actual objects, colours, shapes and materials
+    # into image generation, not just into the later rejecting inspector.
+    result["visual_brief"]["post_visual_source_text"] = public_text_for_qa(result.get("text", "")).strip()
+    # Enrollment happens once inside a NEW running claim, before any image or
+    # QA charge. An existing paid/historical result never receives this marker.
+    if (not result.get("banner") and not result.get("banner_cost_rub")
+            and not result.get("banner_attempts") and not result.get("premium_attempts")
+            and not result.get("delivery_qa_attempts") and not result.get("copy_deletion")):
+        manifest = sq.copy_deletion_manifest(result.get("text", ""), result["delivery_texts"],
+                                             result.get("content_brief") or {}, result["visual_brief"])
+        if manifest:
+            result["copy_deletion"] = {"version": sq.COPY_DELETION_VERSION, "attempts": 0,
+                                       "state": "eligible", "manifest": manifest}
+    _social_final_payload_state(result["account_id"], context, "checkpoint", result)
+
+
+def _social_generation_final_qa_once(account_id, result, project, *, path, visual_brief):
+    """The delivery gate is also the FIRST inspector, with its one cost ledger."""
+    import copy
+    result["visual_brief"] = copy.deepcopy(visual_brief)
+    result["final_payload_stage"] = "qa_request"
+    _social_final_payload_state(account_id, result["final_payload_qa"], "checkpoint", result)
+    record = {**copy.deepcopy(result), "id": result["final_payload_qa"]["record_id"],
+              "project_id": str(project.get("id") or ""), "ids": {},
+              "delivery_protocol": "SOCIAL_RECEIPT_V1"}
+    gate = _social_delivery_quality_gate(account_id, record, project, path,
+                                       public_texts=result["delivery_texts"])
+    result.update(gate.get("record_updates") or {})
+    verdict = gate.get("qa_result")
+    if not isinstance(verdict, dict) and gate.get("pass") is True:
+        proofs = (gate.get("delivery_quality") or {}).values()
+        verdict = next((p.get("verdict") for p in proofs if isinstance(p, dict) and isinstance(p.get("verdict"), dict)), None)
+    verdict = copy.deepcopy(verdict) if isinstance(verdict, dict) else {"pass": False,
+        "issues": list(gate.get("blockers") or ["FINAL_PAYLOAD_QA_NOT_REACHED"]),
+        "image_repair_allowed": False, "repair_scope": "qa"}
+    if gate.get("pass") is not True:
+        verdict["pass"] = False
+        verdict["issues"] = list(dict.fromkeys(list(verdict.get("issues") or []) + list(gate.get("blockers") or [])))
+    result["vision_qa"] = verdict
+    result["final_payload_stage"] = "qa_accounted" if result.get("banner_cost_known") is True else "qa_reconciliation"
+    _social_final_payload_state(account_id, result["final_payload_qa"], "checkpoint", result)
+    return verdict
+
+
+def _social_remove_copy_units(value, spans):
+    """Delete exact complete paragraphs and their following separator only."""
+    import hashlib
+    cuts = []
+    for span in spans:
+        start, end = span["start"], span["end"]
+        if (type(start) is not int or type(end) is not int or not 0 < start < end <= len(value)
+                or hashlib.sha256(value[start:end].encode("utf-8")).hexdigest() != span["unit_sha256"]):
+            raise RuntimeError("SOCIAL_COPY_DELETION_SPAN_CHANGED")
+        while value[end:end + 2] == "\n\n":
+            end += 2
+        cuts.append((start, end))
+    cuts.sort()
+    if any(left[1] > right[0] for left, right in zip(cuts, cuts[1:])):
+        raise RuntimeError("SOCIAL_COPY_DELETION_SPAN_OVERLAP")
+    for start, end in reversed(cuts):
+        value = value[:start] + value[end:]
+    return value
+
+
+def _social_generation_final_qa(account_id, result, project, *, path, visual_brief):
+    """At most one copy-only deletion plus actual QA of the SAME paid image.
+
+    All paid results are checkpointed before a repair decision. Neither old
+    failures, image defects, native rejections nor unknown cost enter this path.
+    """
+    import copy
+    import hashlib
+    import math
+    from pathlib import Path
+    from app.services import social_quality as sq
+    state = result.get("copy_deletion") or {}
+    if (state.get("version") == sq.COPY_DELETION_VERSION and state.get("attempts") == 0
+            and not state.get("image_sha256") and not result.get("delivery_qa_attempts")):
+        state["image_sha256"] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    first = _social_generation_final_qa_once(account_id, result, project, path=path, visual_brief=visual_brief)
+    if first.get("pass") is True or state.get("version") != sq.COPY_DELETION_VERSION or state.get("attempts") != 0:
+        return first
+
+    def stop(reason):
+        state.update(state="not_repaired", blocked_reason=reason)
+        _social_final_payload_state(account_id, result["final_payload_qa"], "checkpoint", result)
+        return first
+
+    context = result["final_payload_qa"]
+    required = sq.vision_required_flags(project, result.get("content_brief") or {}, visual_brief)
+    copy_flags = {"copy_season_ok", "occasion_ok"}
+    attempts = result.get("delivery_qa_attempts") or {}
+    if (first.get("pass") is not False or len(attempts) != 1
+            or any(type(first.get(k)) is not bool for k in ("pass", *required))
+            or any(first.get(k) is not True for k in required if k not in copy_flags)
+            or not any(first.get(k) is False for k in copy_flags)
+            or first.get("repair_scope") != "copy" or first.get("image_repair_allowed") is not False
+            or first.get("qa_schema_repair_required") is True or first.get("cost_guard_ok") is not True
+            or result.get("banner_cost_known") is not True or result.get("ids")
+            or result.get("delivery_receipts") or result.get("delivery_quality")):
+        return stop("COPY_DELETION_NOT_A_FIRST_COPY_ONLY_FAILURE")
+    if (_project_clock(project).date().isoformat() != context.get("local_date")
+            or first.get("context_date") != context.get("local_date")):
+        return stop("COPY_DELETION_DAY_CHANGED")
+    image_sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    qa_context = sq.copy_deletion_qa_context(result, image_sha)
+    if (qa_context is None or first.get("qa_input_contract") != sq.final_payload_qa_contract(project, qa_context)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(first.get("qa_input_sha256") or ""))):
+        return stop("COPY_DELETION_QA_CONTRACT_UNVERIFIED")
+    proposal, problem = sq.normalize_copy_deletion_proposal(first.get("copy_deletion_proposal"), qa_context)
+    if not proposal:
+        return stop(problem or first.get("copy_deletion_proposal_error") or "COPY_DELETION_NO_PROPOSAL")
+    if any(first.get("occasion_ok" if unit["kind"] == "date" else "copy_season_ok") is not False for unit in proposal["units"]):
+        return stop("COPY_DELETION_FAILURE_KIND_MISMATCH")
+    attempt = next(iter(attempts.values()))
+    evidence = attempt.get("cost_evidence") or {}
+    if (evidence.get("account_id") != str(account_id) or evidence.get("operation") != "social_banner_vision_qa_v1"
+            or not evidence.get("request_id") or attempt.get("accounted_cost_rub") != attempt.get("cost_rub")
+            or attempt.get("cost_rub") != first.get("qa_cost_rub")
+            or (attempt.get("verdict") or {}).get("qa_input_sha256") != first.get("qa_input_sha256")
+            or not first.get("qa_input_sha256")):
+        return stop("COPY_DELETION_RECEIPT_UNVERIFIED")
+    selected = {unit["unit_sha256"] for unit in proposal["units"]}
+    manifest = state["manifest"]
+    units = [unit for unit in manifest["units"] if unit["unit_sha256"] in selected]
+    if len(units) != len(selected):
+        return stop("COPY_DELETION_UNITS_CHANGED")
+    edited = _social_remove_copy_units(result["text"], units)
+    deleted_size = len(result["text"]) - len(edited)
+    if (deleted_size > manifest["body_size"] * .25 or manifest["body_size"] - deleted_size < 120):
+        return stop("COPY_DELETION_TOO_MUCH_COPY")
+    captions = {platform: _social_remove_copy_units(caption, [
+        {**unit["caption_spans"][platform], "unit_sha256": unit["unit_sha256"]} for unit in units
+    ]) for platform, caption in result["delivery_texts"].items()}
+    tracking = _ocean_tracking_record(edited, project, context["record_id"])
+    before_tracking = _ocean_tracking_record(result["text"], project, context["record_id"])
+    if tracking != before_tracking:
+        return stop("COPY_DELETION_TRACKING_OR_DIRECTION_CHANGED")
+    rendered = {platform: _project_delivery_text_tracked(edited, project, platform,
+        tracking_id=str(before_tracking.get("utm_content") or ""), final_payload=True) for platform in captions}
+    if rendered != captions:
+        return stop("COPY_DELETION_PUBLIC_POLICY_CHANGED")
+    recent = sq.recent_project_posts(str(account_id), str(project.get("id") or ""))
+    checked = {p: sq.evaluate_copy(t, result["content_brief"], project, recent_posts=recent) for p, t in captions.items()}
+    body_checked = sq.evaluate_copy(edited, result["content_brief"], project, recent_posts=recent)
+    if body_checked.get("pass") is not True or any(c.get("pass") is not True for c in checked.values()):
+        return stop("COPY_DELETION_COPY_STILL_BLOCKED")
+    reference = sq.vision_reference_context(project, result["content_brief"], visual_brief)
+    if (reference.get("required") and (reference.get("ok") is not True
+            or any(reference.get(k) != (first.get("reference") or {}).get(k) for k in ("niche", "version", "sha256")))):
+        return stop("COPY_DELETION_REFERENCE_CHANGED")
+    from app.services.media_semantic_validator import _vision_estimate_kopeks
+    reservation = float(_vision_estimate_kopeks()) / 100.0
+    total = result.get("banner_cost_rub")
+    if (type(total) not in (int, float) or not math.isfinite(total) or total <= 0
+            or not math.isfinite(reservation) or reservation <= 0
+            or total + reservation > float(sq.BANNER_ACCEPTED_TOTAL_COST_CAP_RUB)):
+        return stop("COPY_DELETION_REMAINING_BUDGET_BLOCKED")
+    if _project_clock(project).date().isoformat() != context.get("local_date"):
+        return stop("COPY_DELETION_DAY_CHANGED")
+    expected = _social_payload_digest(result)
+    corrected = copy.deepcopy(result)
+    corrected.update(text=edited, delivery_texts=captions, copy_quality=body_checked,
+                     delivery_copy_quality=checked, final_payload_stage="copy_deleted")
+    corrected["copy_deletion"].update(attempts=1, state="qa_pending", proposal=proposal,
+        original={"text": result["text"], "delivery_texts": copy.deepcopy(result["delivery_texts"]),
+                  "manifest": copy.deepcopy(manifest), "failed_verdict": copy.deepcopy(first),
+                  "delivery_qa_attempts": copy.deepcopy(attempts), "banner_cost_rub": total,
+                  "claim_result_sha256": expected},
+        manifest={"mode": "verify_only", "body_sha256": hashlib.sha256(edited.encode("utf-8")).hexdigest(),
+                  "public_texts_sha256": sq._copy_deletion_digest(captions), "units": []},
+        reserved_qa_rub=reservation, deleted_characters=deleted_size)
+    _social_final_payload_state(account_id, context, "copy_delete", corrected, expected_result_sha256=expected)
+    # Native orchestration holds references to its own nested ledger/state.
+    # Replace only copy fields; replacing the entire deep-copied result would
+    # detach the native412 state object and lose later accounting metadata.
+    for key in ("text", "delivery_texts", "copy_quality", "delivery_copy_quality", "copy_deletion", "final_payload_stage"):
+        result[key] = corrected[key]
+    second = _social_generation_final_qa_once(account_id, result, project, path=path, visual_brief=visual_brief)
+    if _project_clock(project).date().isoformat() != context.get("local_date"):
+        second = {**second, "pass": False, "issues": list(second.get("issues") or []) + ["COPY_DELETION_DAY_CHANGED"]}
+    if second.get("pass") is not True:
+        second = {**second, "image_repair_allowed": False, "repair_scope": "qa", "copy_deletion_exhausted": True}
+    result["vision_qa"] = second
+    result["copy_deletion"].update(state="passed" if second.get("pass") is True else "failed",
+                                   final_cost_rub=result.get("banner_cost_rub"))
+    _social_final_payload_state(account_id, context, "checkpoint", result)
+    return second
+
+
+def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion="", channel="", image_source="ai", project_id="", text_prompt_snapshot="", allow_hashtags=False, project=None, content_brief=None, reference_date=None, occasion_context=None, final_payload_context=None, _final_payload_result=None):
+    if final_payload_context is not None and _final_payload_result is None:
+        options = {k: v for k, v in locals().items() if k not in {"account_id", "theme", "_final_payload_result"}}
+        return _social_generate_final_payload(account_id, theme, options)
+    result = _final_payload_result if _final_payload_result is not None else {"account_id": account_id, "theme": theme}
+    _project = dict(project or {})
+    _quality_enabled = bool(_project)
+    _recent_quality_posts = []
+    _SQ = None
+    if _quality_enabled:
+        from app.services import social_quality as _SQ
+        _recent_quality_posts = _SQ.recent_project_posts(account_id, project_id, limit=60)
+        _content_brief = dict(content_brief or _SQ.build_content_brief(
+            account_id, _project, theme, recent_posts=_recent_quality_posts,
+            reference_date=reference_date, occasion=occasion_context,
+        ))
+        if not isinstance(_content_brief.get("occasion"), dict) or _content_brief["occasion"].get("kind") == "evergreen":
+            _content_brief["occasion"] = dict(occasion_context or _project_occasion_context(
+                _project, theme, occasion, _content_brief.get("current_date") or _project_clock(_project).date()))
+        result["content_brief"] = _content_brief
+        result["quality_policy"] = _SQ.POLICY_VERSION
+        if final_payload_context is not None:
+            _social_final_payload_state(account_id, result["final_payload_qa"], "checkpoint", result)
+    else:
+        _content_brief = {}
     examples = None
     if not str(text_prompt_snapshot or "").strip() and channel:
         try:
@@ -790,8 +1395,11 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
             print("[autopost] лучшие посты не подобрались:", str(_e)[:80], flush=True)
     _final_text_prompt = (
         str(text_prompt_snapshot or "").strip()
-        or _build_text_prompt(theme, text_prompt, occasion, examples, allow_hashtags=allow_hashtags)
+        or _build_text_prompt(theme, text_prompt, occasion, examples, allow_hashtags=allow_hashtags,
+                              reference_date=_content_brief.get("current_date") or reference_date or _project_clock(_project).date())
     )
+    if _quality_enabled:
+        _final_text_prompt += _SQ.content_brief_prompt(_content_brief)
     try:
         _txt = _openai_text(account_id, _final_text_prompt)
     except RuntimeError as exc:
@@ -822,7 +1430,11 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
         else:
             _reason=str(exc)
             _uncertain=_reason.startswith("CAMPAIGN_AI_OUTCOME_UNCERTAIN:")
-            _recoverable=_reason.startswith(("CAMPAIGN_AI_PROVIDER_COOLDOWN:","CAMPAIGN_AI_RELEASED_RETRY_CAP:"))
+            _recoverable=_reason.startswith((
+                "CAMPAIGN_AI_PROVIDER_COOLDOWN:",
+                "CAMPAIGN_AI_RELEASED_RETRY_CAP:",
+                "SOCIAL_AI_ROUTER_UNAVAILABLE:",
+            ))
             _recovered=_social_provider_text_recovery(project_id,theme) if (_recoverable or _uncertain) else None
             if _recovered:
                 _txt=_recovered
@@ -834,19 +1446,86 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
                 )
             else: raise
     import re as _re
-    _generated_hashtags = _extract_public_hashtags(_txt, limit=10) if allow_hashtags else []
-    _txt = _re.sub(r"\*\*(.+?)\*\*", r"\1", _txt, flags=_re.S)
-    _txt = _re.sub(r"(?m)^#{1,6}\s+", "", _txt)
-    _txt = _txt.replace("__", "")
-    _txt = _airify(_txt)
-    _txt = _sanitize_public_post_text(_txt)
-    if allow_hashtags and _generated_hashtags:
-        _txt = _append_public_hashtags(_txt, _generated_hashtags)
+
+    def _prepare_public_text(_raw):
+        _tags = _extract_public_hashtags(_raw, limit=10) if allow_hashtags else []
+        _value = _re.sub(r"\*\*(.+?)\*\*", r"\1", str(_raw or ""), flags=_re.S)
+        _value = _re.sub(r"(?m)^#{1,6}\s+", "", _value)
+        _value = _re.sub(r"(?<!\w)#[A-Za-zА-Яа-яЁё0-9_]+", "", _value, flags=_re.U)
+        _value = _value.replace("__", "")
+        _value = _airify(_value)
+        _value = _sanitize_public_post_text(_value)
+        if allow_hashtags and _tags:
+            _value = _append_public_hashtags(_value, _tags)
+        return _value, list(_tags)
+
+    _txt, _generated_hashtags = _prepare_public_text(_txt)
+
+    if _quality_enabled:
+        _verdict = _SQ.evaluate_copy(
+            _txt, _content_brief, _project, recent_posts=_recent_quality_posts
+        )
+        _copy_attempts = 1
+        # SOCIAL_QUALITY_BEATS_SCHEDULE: a deterministic emergency copy is never
+        # followed by another paid text request. It either passes the same gate
+        # or the slot is blocked instead of publishing weak/repetitive copy.
+        _can_repair = result.get("text_engine") not in {
+            "deterministic_uncertain_fallback",
+            "deterministic_provider_recovery",
+        }
+        if (not _verdict.get("pass")) and _can_repair:
+            for _repair_no in range(1, int(_SQ.COPY_REGEN_MAX) + 1):
+                _repair_prompt = _SQ.copy_repair_prompt(
+                    _final_text_prompt, _txt, _verdict, _content_brief, _repair_no
+                )
+                _candidate = _openai_text(
+                    account_id,
+                    _repair_prompt,
+                    operation="social_copy_quality_repair_%s" % _repair_no,
+                )
+                _copy_attempts += 1
+                _candidate, _candidate_tags = _prepare_public_text(_candidate)
+                _candidate_verdict = _SQ.evaluate_copy(
+                    _candidate, _content_brief, _project,
+                    recent_posts=_recent_quality_posts,
+                )
+                _txt = _candidate
+                _generated_hashtags = _candidate_tags
+                _verdict = _candidate_verdict
+                if _verdict.get("pass"):
+                    break
+        result["copy_attempts"] = _copy_attempts
+        result["copy_quality"] = _verdict
+        if not _verdict.get("pass"):
+            _problems = list(_verdict.get("blockers") or []) + list(_verdict.get("issues") or [])
+            result["quality_status"] = "copy_blocked"
+            raise RuntimeError(
+                "SOCIAL_COPY_QUALITY_BLOCKED:" + ",".join(str(x) for x in _problems[:8])
+            )
+        result["quality_status"] = "copy_pass"
+
     result["generated_hashtags"] = list(_generated_hashtags)
     result["text"] = _txt
+    from app.services.social_owner_policy_v3 import is_ocean as _is_ocean_copy
+    if _is_ocean_copy(_project) and final_payload_context is None:
+        # All connected variants must fit before any paid banner generation.
+        # Same fixed-width tracking id as the eventual durable record id.
+        for _copy_platform in _required_delivery_platforms(_project):
+            _project_delivery_text_tracked(_txt, _project, _copy_platform)
+    if _quality_enabled:
+        _visual_brief = _SQ.build_visual_brief(_content_brief, _txt, _project)
+        _headline_gate = _SQ.headline_before_image(_visual_brief, _txt)
+        if _headline_gate.get("pass") is not True:
+            raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:" + ",".join(_headline_gate.get("issues") or []))
+        result["visual_brief"] = _visual_brief
+    else:
+        _visual_brief = {}
+    if final_payload_context is not None:
+        _social_prepare_final_payload(result, _project)
     source = str(image_source or "ai").lower()
     if (
-        str(project_id or "") == "688556520514"
+        not _quality_enabled
+        and str(project_id or "") == "688556520514"
         and result.get("text_engine") == "deterministic_uncertain_fallback"
     ):
         try:
@@ -870,29 +1549,34 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
         return result
 
     if result.get("text_engine") == "deterministic_uncertain_fallback" and source == "ai":
-        # The paid text outcome is quarantined as ambiguous. Never buy another
-        # image while recovering that same slot: reuse one already-published,
-        # validated asset from the exact project and keep the entire fallback
-        # provider-free. Ocean normally uses image_source=reuse and U42 has its
-        # own semantic branch above; this path covers Dushi/Manicure and future
-        # projects that explicitly provide a deterministic text recovery.
-        try:
-            recovery=_social_reuse_published_banner(account_id,project_id,theme)
-            result["banner"]=recovery["path"]
-            result["banner_engine"]="reuse_published_project_asset"
-            result["banner_model"]="none"
-            result["banner_recovery_source_record_id"]=recovery["source_record_id"]
-        except Exception as exc:
-            result["banner"]=None
-            result["banner_error"]="SOCIAL_UNCERTAIN_RECOVERY_BANNER_FAILED: "+str(exc)[:180]
-        return result
+        if _quality_enabled:
+            # QUALITY_FIRST: never attach an unrelated historical creative to a
+            # new public idea. Text-provider ambiguity does not authorize another
+            # text call, but a separate content-addressed image intent is safe.
+            result["banner_recovery_mode"] = "fresh_semantic_ai"
+        else:
+            try:
+                recovery=_social_reuse_published_banner(account_id,project_id,theme)
+                result["banner"]=recovery["path"]
+                result["banner_engine"]="reuse_published_project_asset"
+                result["banner_model"]="none"
+                result["banner_recovery_source_record_id"]=recovery["source_record_id"]
+            except Exception as exc:
+                result["banner"]=None
+                result["banner_error"]="SOCIAL_UNCERTAIN_RECOVERY_BANNER_FAILED: "+str(exc)[:180]
+            return result
 
     if result.get("text_engine") == "deterministic_provider_recovery" and source == "ai":
-        try:
-            recovery=_social_reuse_published_banner(account_id,project_id,theme); result["banner"]=recovery["path"]; result["banner_engine"]="reuse_published_project_asset"; result["banner_model"]="none"; result["banner_recovery_source_record_id"]=recovery["source_record_id"]
-        except Exception as exc:
-            result["banner"]=None; result["banner_error"]="SOCIAL_RECOVERY_BANNER_FAILED: "+str(exc)[:180]
-        return result
+        if _quality_enabled:
+            result["banner_recovery_mode"] = "fresh_semantic_ai"
+        elif str(project_id or "") != "270dbf472f7f":
+            try:
+                recovery=_social_reuse_published_banner(account_id,project_id,theme); result["banner"]=recovery["path"]; result["banner_engine"]="reuse_published_project_asset"; result["banner_model"]="none"; result["banner_recovery_source_record_id"]=recovery["source_record_id"]
+            except Exception as exc:
+                result["banner"]=None; result["banner_error"]="SOCIAL_RECOVERY_BANNER_FAILED: "+str(exc)[:180]
+            return result
+        else:
+            result["banner_recovery_mode"]="fresh_semantic_ai"
 
     if source == "reuse":
         try:
@@ -924,14 +1608,28 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
         result["banner"] = None
         result["banner_error"] = "UNKNOWN_IMAGE_SOURCE: " + source[:80]
         return result
+    if _quality_enabled:
+        return _generate_social_quality_banner(
+            account_id=account_id,
+            project_id=project_id,
+            theme=theme,
+            banner_prompt=banner_prompt,
+            result=result,
+            project=_project,
+            content_brief=_content_brief,
+            visual_brief=_visual_brief,
+            quality_module=_SQ,
+        )
     try:
         # Authoritative social banner path: tuned OpenAI gpt-image-2 prompt.
         # GigaChat is not used here. If OpenAI image generation fails, keep
         # fail-closed behavior: no banner -> no social publication.
         os.makedirs(BANNER_DIR, exist_ok=True)
         _title = _make_title(account_id, result.get("text", "") or theme)
+        if str(project_id or "") == "270dbf472f7f":
+            _title = _manicure_banner_title(theme, result.get("text", ""))
         _allowed_dates = ", ".join(
-            (date.today() + timedelta(days=_i)).strftime("%d.%m.%Y")
+            (parse_reference_date(_content_brief.get("current_date") or reference_date or _project_clock(_project).date()) + timedelta(days=_i)).strftime("%d.%m.%Y")
             for _i in range(8)
         )
         _prompt = _build_banner_prompt(
@@ -939,11 +1637,12 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
             banner_prompt,
             _title,
             _allowed_dates,
+            post_text=result.get("text", ""),
         )
         import hashlib as _hashlib
         _image_intent = _hashlib.sha256((
             str(account_id) + "\n" + _prompt + "\n" +
-            "gpt-image-2|1024x1024|medium|banner_social_post"
+            "gpt-image-2|1024x1024|low|banner_social_post_v2"
         ).encode("utf-8", "ignore")).hexdigest()
         fpath = os.path.join(BANNER_DIR, f"{account_id}_social_{_image_intent}.png")
         from app.db.session import SessionLocal as _SessionLocal
@@ -951,7 +1650,7 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
         _db=_SessionLocal()
         try:
             _out=_IMG.generate_banner_financially_guarded(
-                _db, account_id, _prompt, fpath, size="1024x1024", quality="medium",
+                _db, account_id, _prompt, fpath, size="1024x1024", quality="low",
                 model=_IMG.PREMIUM_MODEL, operation="banner_social_post"
             )
         finally:
@@ -963,13 +1662,293 @@ def generate_post(account_id, theme, text_prompt="", banner_prompt="", occasion=
         result["banner_engine"] = "openai_gpt_image_2"
         result["banner_model"] = "gpt-image-2"
         print(
-            f"[banner_openai] ready: {fpath} bytes={_os.path.getsize(fpath)} model=gpt-image-2 quality=medium",
+            f"[banner_openai] ready: {fpath} bytes={_os.path.getsize(fpath)} model=gpt-image-2 quality=low semantic_link=v2",
             flush=True,
         )
     except Exception as e:
         result["banner"] = None
         result["banner_error"] = "OPENAI_BANNER_FAILED: " + str(e)[:180]
         print("[banner_openai] failed: " + str(e)[:180], flush=True)
+    return result
+
+
+
+
+
+
+
+def _generate_social_quality_banner(
+    *,
+    account_id,
+    project_id,
+    theme,
+    banner_prompt,
+    result,
+    project,
+    content_brief,
+    visual_brief,
+    quality_module,
+):
+    """Generate at most two semantically verified social banners.
+
+    All image and actual Vision QA attempts share the owner's 4 RUB ceiling.
+    Provider ambiguity and missing actual cost stop the intent for reconciliation.
+    """
+    import hashlib as _hashlib
+    import math as _math
+    import os as _os
+    from app.db.session import SessionLocal as _SessionLocal
+    from app.services import image_service as _IMG
+    from app.services.media_semantic_validator import _vision_estimate_kopeks
+    from app.services.social_image_costs import image_provenance, reconcile_image_cost
+
+    _SQ = quality_module
+    _final_payload = isinstance(result.get("final_payload_qa"), dict) and result["final_payload_qa"].get("version") == "SOCIAL_FINAL_PAYLOAD_QA_V1"
+    from app.services.social_owner_policy_v3 import is_manicure
+    if is_manicure(project):
+        from app.services.social_premium_banner import generate_premium_social_banner
+        return generate_premium_social_banner(
+            account_id=account_id, project_id=project_id, theme=theme,
+            result=result, project=project, content_brief=content_brief,
+            visual_brief=visual_brief, quality_module=_SQ, banner_dir=BANNER_DIR,
+            **({"final_qa_callback": lambda **kwargs: _social_generation_final_qa(account_id, result, project, **kwargs),
+                "final_payload_checkpoint": lambda: _social_final_payload_state(account_id, result["final_payload_qa"], "checkpoint", result)} if _final_payload else {}),
+        )
+    _title = str((visual_brief or {}).get("headline") or "").strip()
+    if not _title:
+        _title = _make_title(account_id, result.get("text", "") or theme)
+    if not _title or len(_title) > 80:
+        result.update(banner=None, quality_status="banner_blocked", banner_error="BANNER_COMPLETE_HEADLINE_REQUIRED")
+        return result
+    from app.services.social_editorial_contract import project_local_now
+    _reference_date = date.fromisoformat(str(content_brief.get("current_date"))) if content_brief.get("current_date") else project_local_now(project).date()
+    _allowed_dates = ", ".join(
+        (_reference_date + timedelta(days=_i)).strftime("%d.%m.%Y")
+        for _i in range(8)
+    )
+    _client_banner_prompt = (
+        str(banner_prompt or "")
+        + _SQ.visual_brief_prompt(visual_brief or {})
+    )
+    _attempt_costs = []
+    _qa_costs = []
+    _cost_known = True
+    _total_banner_cost = 0.0
+    _last_vision = None
+    _last_error = ""
+    _accepted_path = None
+    _max_attempts = int(_SQ.BANNER_REGEN_MAX)
+    _qa_reservation = float(_vision_estimate_kopeks()) / 100.0
+    if not _math.isfinite(_qa_reservation) or _qa_reservation <= 0:
+        raise ValueError("SOCIAL_QA_RESERVATION_INVALID")
+
+    for _banner_attempt in range(1, _max_attempts + 1):
+        _predicted_image = float(_IMG.estimate_kopeks(1, model=_IMG.PREMIUM_MODEL, quality="low", with_reference=False)) / 100.0
+        if not _math.isfinite(_predicted_image) or _total_banner_cost + max(_predicted_image, 1.5) + _qa_reservation > float(_SQ.BANNER_ACCEPTED_TOTAL_COST_CAP_RUB):
+            _last_error = "BANNER_COST_GUARD_BLOCKED"
+            break
+        _repair_suffix = ""
+        if _banner_attempt > 1 and isinstance(_last_vision, dict):
+            _repair_suffix = (
+                "\n\nVISION_QA_REPAIR: предыдущий вариант отклонён. "
+                "Исправь именно эти проблемы, сохранив тот же смысл: "
+                + ", ".join(
+                    str(x) for x in (_last_vision.get("issues") or [])[:8]
+                )
+                + ". Не повторяй предыдущую композицию."
+            )
+        _prompt = _build_banner_prompt(
+            theme,
+            _client_banner_prompt + _repair_suffix,
+            _title,
+            _allowed_dates,
+            post_text=result.get("text", ""),
+        )
+        _image_intent = _hashlib.sha256((
+            str(account_id)
+            + "\n" + _prompt
+            + "\n"
+            + "gpt-image-2|1024x1024|low|banner_social_post_v3_quality"
+        ).encode("utf-8", "ignore")).hexdigest()
+        _path = _os.path.join(
+            BANNER_DIR, f"{account_id}_social_{_image_intent}.png"
+        )
+        if _final_payload:
+            result.update(banner_cost_rub=_total_banner_cost, banner_cost_known=_cost_known,
+                          banner_attempt_costs=list(_attempt_costs), banner_vision_qa_costs=list(_qa_costs),
+                          banner_attempts=len(_attempt_costs), final_payload_stage="image_request")
+            _social_final_payload_state(account_id, result["final_payload_qa"], "checkpoint", result)
+        _db = _SessionLocal()
+        try:
+            _out = _IMG.generate_banner_financially_guarded(
+                _db,
+                account_id,
+                _prompt,
+                _path,
+                size="1024x1024",
+                quality="low",
+                model=_IMG.PREMIUM_MODEL,
+                operation="banner_social_post",
+                provenance=image_provenance(account_id, project_id, _path, _image_intent),
+            )
+        finally:
+            _db.close()
+
+        if _out.get("ok") is True and _os.path.isfile(_path):
+            try:
+                _cost_receipt = reconcile_image_cost(
+                    account_id=account_id, project_id=project_id, path=_path,
+                    intent=_image_intent, response=_out,
+                )
+                _out["cost_rub"] = _cost_receipt["cost_rub"]
+                _out["request_id"] = _cost_receipt["request_id"]
+            except (ValueError, TypeError, OSError) as _cost_error:
+                _cost_known = False
+                _last_error = "BANNER_COST_RECONCILIATION_REQUIRED:" + type(_cost_error).__name__
+                break
+        try:
+            _attempt_cost = float(_out.get("cost_rub"))
+            _cost_known = not isinstance(_out.get("cost_rub"), bool) and _math.isfinite(_attempt_cost) and _attempt_cost > 0
+        except (TypeError, ValueError):
+            _cost_known = False
+        if not _cost_known:
+            _last_error = str(_out.get("error") or "BANNER_COST_RECONCILIATION_REQUIRED")[:180]
+            break
+        _attempt_costs.append(round(_attempt_cost, 4))
+        _total_banner_cost = round(
+            _total_banner_cost + _attempt_cost, 4
+        )
+        if _final_payload:
+            result.update(banner_cost_rub=_total_banner_cost, banner_cost_known=_cost_known,
+                          banner_attempt_costs=list(_attempt_costs), banner_vision_qa_costs=list(_qa_costs),
+                          banner_attempts=len(_attempt_costs), final_payload_stage="image_accounted")
+            result.setdefault("banner_attempt_artifacts", []).append({
+                "path": _path, "intent": _image_intent, "request_id": _out.get("request_id"),
+                "cost_rub": _attempt_cost, "ok": _out.get("ok") is True,
+            })
+            _social_final_payload_state(account_id, result["final_payload_qa"], "checkpoint", result)
+        if not _out.get("ok") or not (_os.path.exists(_path) and _os.path.getsize(_path) > 0):
+            _last_error = str(_out.get("error") or "OPENAI_GPT_IMAGE_2_BANNER_MISSING")[:180]
+            break
+        if _total_banner_cost + _qa_reservation > float(
+            _SQ.BANNER_ACCEPTED_TOTAL_COST_CAP_RUB
+        ):
+            _last_error = "BANNER_COST_GUARD_BLOCKED"
+            _last_vision = {
+                "policy_version": _SQ.POLICY_VERSION,
+                "pass": False,
+                "issues": ["accepted_banner_total_cost_cap_exceeded"],
+            }
+            break
+
+        if _final_payload:
+            _last_vision = _social_generation_final_qa(account_id, result, project, path=_path, visual_brief=visual_brief)
+            _cost_known = result.get("banner_cost_known") is True
+            _total_banner_cost = float(result.get("banner_cost_rub") or _total_banner_cost)
+            _qa_costs = list(result.get("banner_vision_qa_costs") or [])
+        else:
+            _last_vision = _SQ.validate_banner_vision(
+                account_id, _path, content_brief, visual_brief, result.get("text", ""), project,
+            )
+            try:
+                _qa_cost = float(_last_vision.get("qa_cost_rub"))
+                _cost_known = not isinstance(_last_vision.get("qa_cost_rub"), bool) and _math.isfinite(_qa_cost) and _qa_cost > 0
+            except (TypeError, ValueError):
+                _cost_known = False
+            if _cost_known:
+                _qa_costs.append(round(_qa_cost, 4))
+                _total_banner_cost = round(_total_banner_cost + _qa_cost, 4)
+        if not _cost_known:
+            _last_error = "BANNER_QA_COST_RECONCILIATION_REQUIRED"
+            break
+        if _total_banner_cost > float(_SQ.BANNER_ACCEPTED_TOTAL_COST_CAP_RUB):
+            _last_error = "BANNER_COST_GUARD_BLOCKED"
+            _last_vision = dict(_last_vision, **{"pass": False})
+            _last_vision["issues"] = list(_last_vision.get("issues") or []) + ["accepted_banner_total_cost_cap_exceeded"]
+            break
+        if _last_vision.get("pass") is True:
+            _accepted_path = _path
+            break
+
+        if _last_vision.get("copy_season_ok") is False or _last_vision.get("occasion_ok") is False or _last_vision.get("copy_repair_required") is True:
+            _last_error = "BANNER_COPY_REPAIR_REQUIRED"
+            break
+        if _last_vision.get("image_repair_allowed") is False or _last_vision.get("qa_schema_repair_required") is True or _last_vision.get("repair_scope") == "qa":
+            _last_error = "BANNER_QA_REPAIR_REQUIRED"
+            break
+        _issues = [
+            str(x) for x in (_last_vision.get("issues") or [])
+        ]
+        if any(
+            x.startswith("vision_qa_unavailable:")
+            for x in _issues
+        ):
+            _last_error = "BANNER_VISION_QA_UNAVAILABLE"
+            break
+
+        if _banner_attempt < _max_attempts:
+            # Cost prediction is intentionally conservative. If another image
+            # would likely cross the total 4 RUB ceiling, quality wins over the
+            # schedule and the slot is blocked instead.
+            _predicted_next = max(_attempt_cost * 1.25, 1.50) + _qa_reservation
+            if _total_banner_cost + _predicted_next > float(
+                _SQ.BANNER_ACCEPTED_TOTAL_COST_CAP_RUB
+            ):
+                _last_error = "BANNER_COST_GUARD_BLOCKED"
+                break
+
+    result["banner_attempts"] = len(_attempt_costs)
+    result["banner_attempt_costs"] = list(_attempt_costs)
+    _cost_precision = 6 if (result.get("copy_deletion") or {}).get("attempts") == 1 else 4
+    result["banner_cost_rub"] = round(_total_banner_cost, _cost_precision) if _cost_known else None
+    result["banner_cost_known"] = _cost_known
+    if _final_payload and not _cost_known:
+        result["final_payload_reconciliation_required"] = True
+    result["banner_vision_qa_costs"] = list(_qa_costs)
+    result["vision_qa"] = _last_vision or {
+        "policy_version": _SQ.POLICY_VERSION,
+        "pass": False,
+        "issues": ["vision_qa_not_reached"],
+    }
+
+    if _accepted_path:
+        result["banner"] = _accepted_path
+        result["banner_engine"] = "openai_gpt_image_2"
+        result["banner_model"] = "gpt-image-2"
+        result["quality_status"] = "pass"
+        print(
+            "[banner_openai] quality PASS: %s bytes=%s attempts=%s cost=%.4f"
+            % (
+                _accepted_path,
+                _os.path.getsize(_accepted_path),
+                len(_attempt_costs),
+                _total_banner_cost,
+            ),
+            flush=True,
+        )
+        return result
+
+    result["banner"] = None
+    result["quality_status"] = "banner_blocked"
+    result["banner_error"] = (
+        "BANNER_QUALITY_BLOCKED: "
+        + (
+            _last_error
+            or ",".join(
+                str(x)
+                for x in (
+                    (result.get("vision_qa") or {}).get("issues")
+                    or []
+                )[:6]
+            )
+            or "vision_qa_failed"
+        )
+    )[:220]
+    print(
+        "[banner_openai] quality blocked: "
+        + result["banner_error"],
+        flush=True,
+    )
     return result
 
 
@@ -1083,39 +2062,10 @@ def _tg_safe_html(text):
     return "".join(out)
 
 
-def _send_telegram(chat_id, text, banner_path, *, tenant_scope):
-    text = _tg_safe_html(text)
-    import requests
-    from app import telegram_bot
-    if not telegram_bot.BOT_TOKEN:
-        return {"ok": False, "error": "нет токена бота"}
-    if banner_path and os.path.exists(banner_path):
-        caption = text if len(text) <= 1024 else text[:1000] + "…"
-        send_path = banner_path
-        try:
-            from PIL import Image as _Img
-            _im = _Img.open(banner_path).convert("RGB"); _im.thumbnail((1080, 1080))
-            send_path = banner_path + ".jpg"; _im.save(send_path, "JPEG", quality=85)
-        except Exception:
-            send_path = banner_path
-        r = None
-        for _attempt in range(3):
-            try:
-                with open(send_path, "rb") as ph:
-                    resp = requests.post(telegram_bot.API_BASE + "/sendPhoto",
-                        data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}, files={"photo": ph}, timeout=120)
-                r = resp.json()
-                break
-            except Exception as _e:
-                print("[tg] попытка " + str(_attempt + 1) + "/3 не удалась: " + str(_e)[:120], flush=True)
-                import time as _t; _t.sleep(5)
-        if r is None:
-            return {"ok": False, "error": "telegram недоступен после 3 попыток"}
-        if r.get("ok") and len(text) > 1024:
-            requests.post(telegram_bot.API_BASE + "/sendMessage",
-                data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=60)
-        return r
-    return telegram_bot.send_telegram_message(chat_id, text)
+def _send_telegram(chat_id, text, banner_path, *, tenant_scope, delivery_context=None):
+    from app.services.social_delivery_transport import send_telegram
+    return send_telegram(chat_id, _tg_safe_html(text), banner_path,
+                         tenant_scope=tenant_scope, delivery_context=delivery_context)
 
 def send_post(account_id, chat_id, theme, text_prompt="", banner_prompt="", occasion=""):
     db = SessionLocal()
@@ -1203,7 +2153,7 @@ def _vk_api_failure(payload, stage, prefix=""):
         try:
             retry_seconds = int(_set_social_vk_rate_backoff(retry_seconds) or retry_seconds)
         except Exception:
-            pass
+            observe_suppressed(__name__, sys.exc_info()[1], line=1718)
         result.update({
             "reason": "vk_rate_limited",
             "dependency_state": "waiting_external",
@@ -1213,107 +2163,25 @@ def _vk_api_failure(payload, stage, prefix=""):
     return result
 
 
-def _send_vk(owner_id, text, banner_path, *, tenant_scope):
-    import os, re as _re_vk, requests
-    # VK receives plain text. Keep transport direct: routing image uploads
-    # through an international proxy caused intermittent upload-only failures.
-    text = _re_vk.sub(r"<[^>]+>", "", text or "")
-    token = os.environ.get("VK_TOKEN")
-    if not token:
-        return {"ok": False, "error": "нет VK_TOKEN"}
-    try:
-        remaining = int(_social_vk_rate_backoff_remaining() or 0)
-    except Exception:
-        remaining = 0
-    if remaining > 0:
-        return {
-            "ok": False,
-            "code": 0,
-            "stage": "rate_backoff",
-            "error": "VK cooldown после rate limit: %s сек" % remaining,
-            "reason": "vk_rate_limited",
-            "dependency_state": "waiting_external",
-            "retryable_external": True,
-            "retry_after_seconds": remaining,
-        }
-    V = "5.199"
-    group_id = str(owner_id).lstrip("-")
-    attachments = None
+def _social_vk_wall_post_once(session, params):
+    """Execute one VK publication request under the canonical Social write owner."""
+    return session.get(
+        "https://api.vk.com/method/wall.post",
+        params=params, timeout=(5, 30),
+    ).json()
 
-    if banner_path and os.path.exists(banner_path):
-        last_error = None
-        for attempt in range(3):
-            try:
-                send_path = banner_path
-                try:
-                    from PIL import Image as _Img
-                    im = _Img.open(banner_path).convert("RGB")
-                    im.thumbnail((1080, 1080))
-                    send_path = banner_path + ".vk.jpg"
-                    im.save(send_path, "JPEG", quality=85)
-                except Exception:
-                    send_path = banner_path
 
-                up = requests.get(
-                    "https://api.vk.com/method/photos.getWallUploadServer",
-                    params={"access_token": token, "v": V, "group_id": group_id},
-                    timeout=30,
-                ).json()
-                if up.get("error"):
-                    return _vk_api_failure(
-                        up, "photos.getWallUploadServer", "загрузка фото ВК: "
-                    )
-                if "response" not in up or not (up.get("response") or {}).get("upload_url"):
-                    raise RuntimeError("photos.getWallUploadServer: " + str(up)[:180])
-                upload_url = up["response"]["upload_url"]
-
-                with open(send_path, "rb") as ph:
-                    upr = requests.post(upload_url, files={"photo": ph}, timeout=120).json()
-                for key in ("photo", "server", "hash"):
-                    if key not in upr:
-                        raise RuntimeError("wall upload missing %s: %s" % (key, str(upr)[:180]))
-
-                sv = requests.get(
-                    "https://api.vk.com/method/photos.saveWallPhoto",
-                    params={"access_token": token, "v": V, "group_id": group_id,
-                            "photo": upr["photo"], "server": upr["server"], "hash": upr["hash"]},
-                    timeout=30,
-                ).json()
-                if sv.get("error"):
-                    return _vk_api_failure(
-                        sv, "photos.saveWallPhoto", "загрузка фото ВК: "
-                    )
-                if "response" not in sv or not sv.get("response"):
-                    raise RuntimeError("photos.saveWallPhoto: " + str(sv)[:180])
-                p = sv["response"][0]
-                attachments = "photo" + str(p["owner_id"]) + "_" + str(p["id"])
-                break
-            except Exception as exc:
-                last_error = "загрузка фото ВК: " + type(exc).__name__ + " " + str(exc)[:200]
-                if attempt < 2:
-                    import time as _t2
-                    _t2.sleep(3)
-                    continue
-        if not attachments:
-            return {"ok": False, "error": last_error or "загрузка фото ВК не удалась"}
-
-    params = {"access_token": token, "v": V, "owner_id": str(owner_id),
-              "from_group": 1, "message": text}
-    if attachments:
-        params["attachments"] = attachments
-    try:
-        r = requests.get("https://api.vk.com/method/wall.post", params=params, timeout=30).json()
-    except Exception as exc:
-        return {"ok": False, "error": "wall.post transport: " + str(exc)[:200]}
-    if "response" in r:
-        try:
-            _clear_social_vk_rate_backoff()
-        except Exception:
-            pass
-        return {"ok": True, "post_id": r["response"].get("post_id"), "attachment": attachments}
-    if r.get("error"):
-        return _vk_api_failure(r, "wall.post")
-    return {"ok": False, "error": "wall.post: " + str(r)[:200]}
+def _send_vk(owner_id, text, banner_path, *, tenant_scope, delivery_context=None):
+    import re as _re_vk
+    from app.services.social_delivery_transport import send_vk
+    return send_vk(
+        owner_id, _re_vk.sub(r"<[^>]+>", "", text or ""), banner_path,
+        tenant_scope=tenant_scope, delivery_context=delivery_context,
+        api_failure=_vk_api_failure,
+        publish_wall=_social_vk_wall_post_once,
+        cooldown_remaining=_social_vk_rate_backoff_remaining,
+        clear_cooldown=_clear_social_vk_rate_backoff,
+    )
 
 def _vk_demo(theme, owner_id):
     print("[vk] генерирую и шлю пост в ВК: " + theme + " -> " + str(owner_id), flush=True)
@@ -2079,7 +2947,7 @@ def _runtime_secret_present(name):
                 value = value.strip().strip('"').strip("'")
                 return bool(value)
     except Exception:
-        pass
+        observe_suppressed(__name__, sys.exc_info()[1], line=2503)
     return False
 
 
@@ -2510,7 +3378,7 @@ def _paid_social_onboarding_scaffold(db, account_id, subscription):
             account_name=str(account_row.get("name") or "").strip()
             company_context=str(account_row.get("company_website") or "").strip()
     except Exception:
-        pass
+        observe_suppressed(__name__, sys.exc_info()[1], line=2934)
     if not themes:
         themes=[
             "полезный совет по основной услуге",
@@ -3266,7 +4134,7 @@ def _next_slot(proj):
     if not hours:
         return ""
     hours = sorted(set(hours))
-    _now = datetime.now() + timedelta(hours=int(proj.get("tz_offset", 3)))
+    _now = _project_clock(proj)
     for _h in hours:
         _cand = _now.replace(hour=_h, minute=0, second=0, microsecond=0)
         if _cand >= _now.replace(minute=0, second=0, microsecond=0):
@@ -3403,12 +4271,102 @@ def _pick_nail_traits(account_id):
     return t
 
 
+
+def _align_nail_traits_to_base(account_id, base, traits):
+    """Semantic topic wins over random nail rotation."""
+    t = dict(traits or {})
+    low = str(base or "").lower().replace("ё", "е")
+    pedicure_topic = ("педикюр" in low or "стоп" in low)
+
+    if pedicure_topic:
+        t["service_type"] = "уход за стопами" if "уход" in low and "педикюр" not in low else "педикюр"
+    elif any(x in low for x in ("маникюр", "кутикул", "рук")):
+        t["service_type"] = "уход за руками" if "уход" in low and "маникюр" not in low else "маникюр"
+
+    if "коротк" in low:
+        t["nail_length"] = "короткие"
+    elif "длинн" in low:
+        t["nail_length"] = "длинные"
+    elif "средн" in low:
+        t["nail_length"] = "средние"
+
+    if "мягкий квадрат" in low:
+        t["nail_shape"] = "мягкий квадрат"
+    elif "миндал" in low:
+        t["nail_shape"] = "миндаль"
+    elif "квадрат" in low:
+        t["nail_shape"] = "квадрат"
+    elif "овал" in low:
+        t["nail_shape"] = "овал"
+
+    color_map = (
+        ("бордо","бордовый"),("бордов","бордовый"),("шоколад","шоколадный"),
+        ("молоч","молочный"),("красн","красный"),("нюд","нюд"),
+        ("черн","чёрный"),("бел","белый"),("розов","розовый"),("син","синий"),
+        ("голуб","голубой"),("зелен","зелёный"),("зелён","зелёный"),
+        ("сереб","серебристый"),("золот","золотистый"),("пастел","пастельный"),
+        ("неон","неоновый"),
+    )
+    design_map = (
+        ("кошачий глаз","кошачий глаз"),("френч","френч"),("геометр","геометрия"),
+        ("абстрак","абстракция"),("градиент","градиент"),("метал","металлик"),
+        ("жемчуж","жемчужный"),("минимал","минимализм"),("акцент","акцентные ногти"),
+        ("однотон","однотонный"),
+    )
+    explicit_color = False
+    explicit_design = False
+    for needle, value in color_map:
+        if needle in low:
+            t["primary_color"] = value
+            explicit_color = True
+            break
+    for needle, value in design_map:
+        if needle in low:
+            t["design_type"] = value
+            explicit_design = True
+            break
+
+    if "миф" in low:
+        t["content_type"] = "миф и правда"
+    elif "разбор" in low:
+        t["content_type"] = "разбор дизайна"
+    elif "два вариант" in low or "сравн" in low:
+        t["content_type"] = "сравнение двух вариантов"
+    elif "ошиб" in low:
+        t["content_type"] = "ошибка домашнего ухода"
+    elif "уход" in low or "как " in low or "что " in low or "почему " in low:
+        t["content_type"] = "совет мастера"
+
+    s = str(t.get("service_type") or "")
+    pedicure_topic = pedicure_topic or "педикюр" in s or "стоп" in s
+    if pedicure_topic:
+        t["nail_shape"] = "естественная"
+        t["nail_length"] = "короткие"
+        if not explicit_color:
+            t["primary_color"] = "нюд"
+        if not explicit_design:
+            t["design_type"] = "однотонный"
+        t["visual_style"] = "журнальный beauty"
+        t["tone"] = "экспертный"
+        if not any(x in low for x in ("миф", "разбор", "сравн", "ошиб", "юмор")):
+            t["content_type"] = "совет мастера"
+        t["cta_type"] = "сохранить идею"
+        pool = _FOOT_COMPS
+    else:
+        pool = _HAND_COMPS
+
+    if str(t.get("composition") or "") not in pool:
+        t["composition"] = _least_used(pool, _traits_history(account_id), "composition")
+    return t
+
+
 def _nail_theme(account_id, base_themes):
     """Возвращает (тема_с_признаками, признаки). Тема идёт И в текст, И в баннер,
     поэтому картинка не может разойтись с постом по услуге и дизайну."""
     t = _pick_nail_traits(account_id)
     import random as _rnd
     base = _rnd.choice(base_themes or ["идея дизайна"])
+    t = _align_nail_traits_to_base(account_id, base, t)
     theme = (
         "%s. Услуга: %s. Формат подачи: %s. Форма ногтей: %s, длина: %s. "
         "Дизайн: %s, основной цвет: %s. Тон текста: %s. Призыв в конце: %s. "
@@ -3426,44 +4384,62 @@ def _nail_theme(account_id, base_themes):
     return theme, t
 
 
+def _posting_generation_record(posts, generation_key):
+    """A persisted lifecycle owns its scheduled intent independently of status.
+
+    Even an error without cost metadata may follow a paid or ambiguous provider
+    result. None of the scheduled record writers proves such an error free to
+    retry. Recovery must therefore repair/reconcile the existing record instead
+    of purchasing another post and resetting its visible cost/history.
+    """
+    if not generation_key:
+        return None
+    if not isinstance(posts, list):
+        raise RuntimeError("SOCIAL_GENERATION_STATE_INVALID")
+    return next((
+        rec for rec in posts if isinstance(rec, dict)
+        and str(rec.get("generation_key") or "") == str(generation_key)
+    ), None)
+
+
 def _save_post_record(account_id, project_id, project_name, text, banner_path, status, ids=None, preview=None, publish_at=None, error=None, generation_key=None, record_id=None, tracking=None):
-    import uuid as _uuid
-    banner_name = os.path.basename(banner_path) if banner_path else ""
-    _record_id = str(record_id or _uuid.uuid4().hex[:12])
-    rec = {"id": _record_id, "project_id": project_id, "project_name": project_name,
-           "text": text, "banner": banner_name, "status": status,
-           "publication_status": status,
-           "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "ids": ids or {},
-           "external_post_id": ids or {}, "preview": preview or "",
-           "publish_at": publish_at or None, "error": str(error or "")[:300],
-           "published_at": (datetime.now().astimezone().isoformat(timespec="seconds") if status == "published" else None),
-           "generation_key": str(generation_key or "")[:160]}
-    if isinstance(tracking, dict) and tracking:
-        rec.update({k: v for k, v in tracking.items() if v is not None})
     db = SessionLocal()
     try:
         row, posts = load_posting_posts_for_update(db, account_id)
-        # Final cross-process lifecycle idempotency barrier. Paid text/image paths
-        # are already exactly-once, but worker + rescue may still converge on the
-        # same scheduled intent. Under the posting_posts account lock, keep only
-        # one materialized draft/published/partial record per generation_key.
-        if generation_key:
-            existing = next(
-                (
-                    x for x in posts if isinstance(x, dict)
-                    and str(x.get("generation_key") or "") == str(generation_key)
-                    and str(x.get("status") or "") in ("draft", "published", "partial")
-                ),
-                None,
-            )
-            if existing:
-                db.rollback()
-                db.info.pop("posting_posts_lock:" + str(account_id), None)
-                return str(existing.get("id") or rec["id"])
-        # Один recoverable error на проект. Успешный следующий lifecycle удалит его.
-        posts = [x for x in posts if not (x.get("project_id") == project_id and x.get("status") == "error")]
+        # Final cross-process materialization barrier. This does not claim to
+        # serialize concurrent provider calls before the first record exists.
+        # A status change must never mint a second identity or replace paid
+        # evidence with a new per-record budget. Keep the stored row untouched.
+        existing = _posting_generation_record(posts, generation_key)
+        if existing is not None:
+            existing_id = str(existing.get("id") or "").strip()
+            if not existing_id:
+                raise RuntimeError("SOCIAL_GENERATION_RECORD_ID_MISSING")
+            db.rollback()
+            db.info.pop("posting_posts_lock:" + str(account_id), None)
+            return existing_id
+
+        import uuid as _uuid
+        from app.services.social_media_assets import persist_banner_asset
+        banner_asset = persist_banner_asset(account_id, banner_path, banner_dir=BANNER_DIR) if banner_path else None
+        banner_name = banner_asset["filename"] if banner_asset else ""
+        _record_id = str(record_id or _uuid.uuid4().hex[:12])
+        rec = {"id": _record_id, "project_id": project_id, "project_name": project_name,
+               "text": text, "banner": banner_name, "status": status,
+               "publication_status": status,
+               "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "ids": ids or {},
+               "external_post_id": ids or {}, "preview": preview or "",
+               "publish_at": publish_at or None, "error": str(error or "")[:300],
+               "published_at": (datetime.now().astimezone().isoformat(timespec="seconds") if status == "published" else None),
+               "generation_key": str(generation_key or "")[:160],
+               "delivery_protocol": "SOCIAL_RECEIPT_V1"}
+        if isinstance(tracking, dict) and tracking:
+            rec.update({k: v for k, v in tracking.items() if v is not None})
+        if banner_asset:
+            rec["banner_asset"] = banner_asset
+        # Other project/history rows remain intact. QA reads a bounded newest
+        # 60 per project rather than truncating the entire account to 80.
         posts.insert(0, rec)
-        posts = posts[:50]
         save_posting_posts_locked(db, account_id, row, posts)
     finally:
         db.close()
@@ -3471,21 +4447,17 @@ def _save_post_record(account_id, project_id, project_name, text, banner_path, s
 
 
 def _posting_generation_exists(account_id, generation_key):
-    """True when this scheduled business intent already produced a lifecycle record."""
+    """A saved intent or unreadable state must never authorize fresh paid work."""
     if not generation_key:
         return False
     import json as _json
     db = SessionLocal()
     try:
         row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "posting_posts").first()
-        posts = _json.loads(row.value) if row and row.value else []
-        return any(
-            str(x.get("generation_key") or "") == str(generation_key)
-            and str(x.get("status") or "") in ("draft", "published", "partial")
-            for x in posts if isinstance(x, dict)
-        )
-    except Exception:
-        return False
+        posts = _json.loads(row.value) if row is not None else []
+        return _posting_generation_record(posts, generation_key) is not None
+    except Exception as exc:
+        raise RuntimeError("SOCIAL_GENERATION_STATE_UNAVAILABLE") from exc
     finally:
         db.close()
 
@@ -3499,8 +4471,7 @@ def _scheduled_due_hour(proj, catchup_hours=6):
     recovers automatically without bunching stale posts many hours later.
     """
     import re as _re_due
-    off = int(proj.get("tz_offset", 3) or 3)
-    local_now = datetime.now() + timedelta(hours=off)
+    local_now = _project_clock(proj)
     now_hour = int(local_now.strftime("%H"))
     hours = []
     for raw in (proj.get("times") or []):
@@ -3510,6 +4481,53 @@ def _scheduled_due_hour(proj, catchup_hours=6):
             hours.append(int(match.group()))
     due = [h for h in sorted(set(hours), reverse=True) if 0 <= now_hour - h <= int(catchup_hours)]
     return due[0] if due else None
+
+
+
+def _social_theme_bucket(proj, theme):
+    """Stable editorial bucket used for project-specific diversity rules."""
+    name = str((proj or {}).get("name") or "").lower().replace("ё", "е")
+    t = str(theme or "").lower().replace("ё", "е")
+
+    if "океан клиент" in name or "boris" in name or "борис" in name:
+        groups = (
+            ("avito", ("авито", "объявлен", "каталог", "фид", "категор", "характеристик", "дубл")),
+            ("creative", ("баннер", "фотограф", "изображен", "бренд")),
+            ("ab_tests", ("a/b", "аб-тест", "гипотез", "масштаб")),
+            ("sales_manager", ("менеджер", "переписк", "ответить", "ответ", "продаж")),
+            ("crm_reactivation", ("crm", "срм", "реактива", "воронк", "лид")),
+            ("rop_control", ("роп", "контрол", "слабые места")),
+            ("calls_telephony", ("звон", "телефон", "телефони")),
+            ("analytics", ("аналит", "цифр", "стоимост", "деньг", "бюджет")),
+            ("social_content", ("телеграм", "telegram", "вконтакт", "vk", "соцсет", "контент")),
+            ("market_growth", ("новую ниш", "новый город", "сезон", "конкурент", "цены конкурент")),
+            ("automation_ai", ("автоматизац", "ии", "искусственн", "руками")),
+        )
+        for key, needles in groups:
+            if any(x in t for x in needles):
+                return key
+        return "business_process"
+
+    if "от души" in name:
+        groups = (
+            ("colleague", ("коллег",)),
+            ("boss", ("начальник", "руководител")),
+            ("profession", ("строител", "медик", "учител", "професси")),
+            ("team", ("коллектив", "корпоратив")),
+            ("anniversary", ("юбиле", "день рождения")),
+            ("wedding", ("свадьб",)),
+            ("parents", ("мам", "пап", "родител")),
+            ("farewell", ("прощан",)),
+            ("song", ("песн",)),
+            ("toast_speech", ("тост", "речь", "слово")),
+            ("anti_template", ("шаблон", "интернет", "дежурн")),
+        )
+        for key, needles in groups:
+            if any(x in t for x in needles):
+                return key
+        return "personal_story"
+
+    return ""
 
 
 def _choose_rotating_project_theme(account_id, proj, random_module, recent_limit=6):
@@ -3523,23 +4541,50 @@ def _choose_rotating_project_theme(account_id, proj, random_module, recent_limit
         return "практический совет для клиента без рекламного шаблона"
     pid = str((proj or {}).get("id") or "")
     recent = []
+    recent_buckets = []
+    name = str((proj or {}).get("name") or "").lower().replace("ё", "е")
+    bucket_window = 10 if "от души" in name else (3 if ("океан клиент" in name or "boris" in name or "борис" in name) else 0)
+    query_limit = max(int(recent_limit), bucket_window, 1)
     db = SessionLocal()
     try:
         rows = db.query(Storage).filter(
             Storage.account_id == account_id,
             Storage.key.like("posting_generation_plan:" + pid + ":%"),
-        ).order_by(Storage.id.desc()).limit(max(1, int(recent_limit))).all()
+        ).order_by(Storage.id.desc()).limit(query_limit).all()
         for row in rows:
             try:
                 value = json.loads(row.value or "{}")
             except Exception:
                 continue
             theme = str((value or {}).get("theme") or "").strip()
-            if theme and theme not in recent:
+            if theme and theme not in recent and len(recent) < int(recent_limit):
                 recent.append(theme)
+            if theme and bucket_window and len(recent_buckets) < bucket_window:
+                bucket = _social_theme_bucket(proj, theme)
+                if bucket:
+                    recent_buckets.append(bucket)
     finally:
         db.close()
-    candidates = [x for x in pool if x not in recent] or pool
+
+    candidates = [x for x in pool if x not in recent] or list(pool)
+    if bucket_window and recent_buckets:
+        diversified = [
+            x for x in candidates
+            if _social_theme_bucket(proj, x) not in set(recent_buckets)
+        ]
+        if diversified:
+            candidates = diversified
+        else:
+            # Ocean may reuse a bucket after 3 other modules; Dushi reuses an
+            # emotional construction only after 10 planned posts when possible.
+            relaxed_window = 2 if bucket_window <= 3 else 6
+            recent_relaxed = set(recent_buckets[:relaxed_window])
+            relaxed = [
+                x for x in candidates
+                if _social_theme_bucket(proj, x) not in recent_relaxed
+            ]
+            if relaxed:
+                candidates = relaxed
     return random_module.choice(candidates)
 
 
@@ -3555,8 +4600,7 @@ def _scheduled_generation_plan(account_id, proj, slot_hour=None, service_day=Non
     import json as _json, random as _random
     from sqlalchemy import text as _sql_text
     pid = str(proj.get("id") or "")
-    off = int(proj.get("tz_offset", 3) or 3)
-    local_now = datetime.now() + timedelta(hours=off)
+    local_now = _project_clock(proj)
     chosen_hour = int(local_now.strftime("%H")) if slot_hour is None else int(slot_hour)
     local_day = local_now.strftime("%Y%m%d")
     previous_day = (local_now - timedelta(days=1)).strftime("%Y%m%d")
@@ -3579,10 +4623,15 @@ def _scheduled_generation_plan(account_id, proj, slot_hour=None, service_day=Non
         # scoped and released by commit/rollback automatically.
         db.execute(_sql_text("select pg_advisory_xact_lock(hashtext(:k))"), {"k": generation_key})
         row = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == storage_key).first()
-        if row and row.value:
+        if row:
             try:
                 plan = _json.loads(row.value)
                 if isinstance(plan, dict) and plan.get("theme"):
+                    reference_day = _plan_reference_date(plan, proj, generation_key)
+                    _SOCIAL_EDITORIAL_DATE.set(reference_day)
+                    plan.setdefault("reference_date", reference_day.isoformat())
+                    plan.setdefault("occasion_context", _project_occasion_context(
+                        proj, plan.get("theme"), plan.get("occasion"), reference_day))
                     if not str(plan.get("text_prompt_snapshot") or "").strip():
                         plan["text_prompt_snapshot"] = _build_text_prompt(
                             str(plan.get("theme") or ""),
@@ -3590,12 +4639,16 @@ def _scheduled_generation_plan(account_id, proj, slot_hour=None, service_day=Non
                             str(plan.get("occasion") or ""),
                             examples=None,
                             allow_hashtags=bool((proj or {}).get("allow_hashtags")),
+                            reference_date=reference_day,
                         )
                         row.value = _json.dumps(plan, ensure_ascii=False)
                         db.commit()
                     return generation_key, plan
-            except Exception:
-                pass
+                raise RuntimeError("SOCIAL_GENERATION_PLAN_INVALID")
+            except Exception as exc:
+                # A corrupt/unknown existing paid plan is not permission to
+                # mint a fresh identity or another paid request for its slot.
+                raise RuntimeError("SOCIAL_GENERATION_PLAN_UNAVAILABLE") from exc
         if _is_nail_ctx(account_id, proj):
             theme, _traits = _nail_theme(account_id, proj.get("themes") or [])
         elif _ocean_clients_project(proj):
@@ -3603,22 +4656,43 @@ def _scheduled_generation_plan(account_id, proj, slot_hour=None, service_day=Non
             theme = _choose_rotating_project_theme(account_id, proj, _random, recent_limit=8)
         else:
             theme = _choose_rotating_project_theme(account_id, proj, _random, recent_limit=6)
-        occasion = _project_occasion(proj)
+        reference_day = planned_content_date(proj, generation_key=generation_key, now=datetime.now(timezone.utc))
+        _SOCIAL_EDITORIAL_DATE.set(reference_day)
+        final_payload_enrolled = (
+            str(account_id) == "u2" and pid in {"a374ced25745", "f938caa3a944", "270dbf472f7f"}
+            and (proj.get("mode") or "auto") == "auto"
+            and reference_day == local_now.date() and parsed_day == local_day
+        )
+        # New owner auto plans take a calendar occasion only from the chosen
+        # topic itself. An unrelated next holiday is not part of an evergreen
+        # service post, even when the optional in-memory owner guard is absent.
+        occasion = "" if final_payload_enrolled else _project_occasion(proj)
         plan = {
             "generation_key": generation_key,
             "project_id": pid,
             "slot": slot,
             "theme": theme,
             "occasion": occasion or "",
+            "reference_date": reference_day.isoformat(),
+            "occasion_context": _project_occasion_context(proj, theme, occasion, reference_day),
             "text_prompt_snapshot": _build_text_prompt(
                 theme,
                 str((proj or {}).get("text_prompt") or ""),
                 occasion or "",
                 examples=None,
                 allow_hashtags=bool((proj or {}).get("allow_hashtags")),
+                reference_date=reference_day,
             ),
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
+        if final_payload_enrolled:
+            plan["final_payload_qa"] = {
+                "version": "SOCIAL_FINAL_PAYLOAD_QA_V1",
+                "record_id": __import__("uuid").uuid4().hex[:12],
+                "account_id": str(account_id), "project_id": pid,
+                "generation_key": generation_key, "storage_key": storage_key,
+                "local_date": reference_day.isoformat(),
+            }
         payload = _json.dumps(plan, ensure_ascii=False)
         if row:
             row.value = payload
@@ -3700,6 +4774,7 @@ def _self_heal_expected_auto_generation(account_id, proj):
 
 def _autopost_projects_impl(account_id, owner=False, respect_time=False, only_id=None, scheduled_hour_override=None, pre_generate_only=False, scheduled_service_day_override=None):
     import json as _json, random
+    blocked_results = []
     db = SessionLocal()
     try:
         prow = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == "posting_projects").first()
@@ -3711,8 +4786,7 @@ def _autopost_projects_impl(account_id, owner=False, respect_time=False, only_id
     for proj in projects:
         pid = proj.get("id", "")
         pname = proj.get("name", pid)
-        _project_offset = int(proj.get("tz_offset", 3) or 3)
-        _local_now = datetime.now() + timedelta(hours=_project_offset)
+        _local_now = _project_clock(proj)
         _local_today = _local_now.strftime("%Y%m%d")
         _local_previous_day = (_local_now - timedelta(days=1)).strftime("%Y%m%d")
         today = _local_today
@@ -3775,8 +4849,10 @@ def _autopost_projects_impl(account_id, owner=False, respect_time=False, only_id
             print("[autopost_projects] PAID_AI_AUTO_DISABLED:", pname, flush=True)
             continue
         _generation_key = ""
+        _final_payload_context = None
+        _final_payload_due = ""
         if respect_time:
-            _generation_key, _plan = _scheduled_generation_plan(
+            _generation_key, _plan = _scheduled_plan_with_date_context(
                 account_id, proj, slot_hour=_scheduled_hour,
                 service_day=today if scheduled_service_day_override is not None else None,
             )
@@ -3787,6 +4863,12 @@ def _autopost_projects_impl(account_id, owner=False, respect_time=False, only_id
             _occ = str((_plan or {}).get("occasion") or "").strip()
             if not theme:
                 raise RuntimeError("SOCIAL_GENERATION_PLAN_EMPTY_THEME")
+            if (_plan or {}).get("final_payload_qa") is not None:
+                _final_payload_context = dict(_plan["final_payload_qa"])
+                _due = _scheduled_record_delivery_due_local({"generation_key": _generation_key}, proj)
+                if _due is None:
+                    raise RuntimeError("SOCIAL_FINAL_PAYLOAD_SLOT_UNVERIFIED")
+                _final_payload_due = _due.strftime("%Y-%m-%d %H:%M")
         else:
             if _is_nail_ctx(account_id, proj):
                 theme, _tr = _nail_theme(account_id, proj.get("themes") or [])
@@ -3796,18 +4878,74 @@ def _autopost_projects_impl(account_id, owner=False, respect_time=False, only_id
         print("[autopost_projects]", pname, "тема:", theme, flush=True)
         if _occ:
             print("[autopost_projects]", pname, "повод:", _occ, flush=True)
-        post = generate_post(account_id, theme,
-                             text_prompt=proj.get("text_prompt", ""),
-                             banner_prompt=proj.get("banner_prompt", ""),
-                             occasion=_occ,
-                             channel=proj.get("style_source", ""),
-                             image_source=proj.get("image_source", "ai"),
-                             project_id=pid,
-                             text_prompt_snapshot=(
-                                 str((_plan or {}).get("text_prompt_snapshot") or "")
-                                 if respect_time else ""
-                             ),
-                             allow_hashtags=bool(proj.get("allow_hashtags")))
+        try:
+            post = generate_post(
+                account_id, theme,
+                text_prompt=proj.get("text_prompt", ""),
+                banner_prompt=proj.get("banner_prompt", ""),
+                occasion=_occ,
+                channel=proj.get("style_source", ""),
+                image_source=proj.get("image_source", "ai"),
+                project_id=pid,
+                text_prompt_snapshot=(
+                    str((_plan or {}).get("text_prompt_snapshot") or "")
+                    if respect_time else ""
+                ),
+                allow_hashtags=bool(proj.get("allow_hashtags")),
+                project=proj,
+                reference_date=(_plan or {}).get("reference_date") if respect_time else _project_clock(proj).date(),
+                occasion_context=(_plan or {}).get("occasion_context") if respect_time else _project_occasion_context(
+                    proj, theme, _occ, _project_clock(proj).date()),
+                **({"final_payload_context": _final_payload_context} if _final_payload_context is not None else {}),
+            )
+        except RuntimeError as _quality_exc:
+            _quality_reason = str(_quality_exc or "")
+            if (_final_payload_context is not None and _quality_reason in {
+                    "SOCIAL_FINAL_PAYLOAD_RECONCILIATION_REQUIRED",
+                    "SOCIAL_FINAL_PAYLOAD_PAST_CLAIM_FORBIDDEN",
+            }):
+                # Expected durable no-rebuy state is local to this project.
+                # Targeted owner-ready loops must still reach healthy projects.
+                # Do not create a post, rewrite the claim, or discard its costs.
+                blocked = {"status": "generation_blocked", "generated": False,
+                    "materialized": False, "project_id": pid,
+                    "generation_key": _generation_key,
+                    "record_id": _final_payload_context["record_id"],
+                    "reason": _quality_reason, "reconciliation_required": True,
+                    "paid_work_started_in_this_call": False}
+                print("[autopost_projects] FINAL_PAYLOAD_GENERATION_BLOCKED:",
+                      _json.dumps(blocked, ensure_ascii=False, sort_keys=True), flush=True)
+                if only_id:
+                    return blocked
+                blocked_results.append(blocked)
+                continue
+            if _quality_reason.startswith("SOCIAL_COPY_QUALITY_BLOCKED:"):
+                from app.services import social_quality as _SQ_block
+                _brief = _SQ_block.build_content_brief(
+                    account_id, proj, theme
+                )
+                _save_post_record(
+                    account_id, pid, pname, "", None,
+                    "quality_blocked",
+                    preview="",
+                    publish_at=_final_payload_due or _next_slot(proj),
+                    error=_quality_reason[:300],
+                    generation_key=_generation_key,
+                    record_id=(_final_payload_context or {}).get("record_id"),
+                    tracking={
+                        "quality_policy": _SQ_block.POLICY_VERSION,
+                        "quality_status": "copy_blocked",
+                        "content_brief": _brief,
+                    },
+                )
+                print(
+                    "[autopost_projects] SOCIAL_COPY_QUALITY_BLOCKED:",
+                    pname, "|", _quality_reason[:220],
+                    "| quality_beats_schedule=1",
+                    flush=True,
+                )
+                continue
+            raise
         if (
             _generation_key
             and post.get("text_engine") in {"deterministic_uncertain_fallback","deterministic_provider_recovery"}
@@ -3816,17 +4954,41 @@ def _autopost_projects_impl(account_id, owner=False, respect_time=False, only_id
                 account_id, pid, _generation_key, theme,
                 post.get("text_recovery_reason") or "",
             )
-        _media_ok, _media_err = _banner_delivery_ready(post, proj.get("image_source", "ai"))
+        from app.services import social_quality as _SQ_track
+        _quality_tracking = _SQ_track.quality_tracking(post)
+        _media_ok, _media_err = _banner_delivery_ready(
+            post, proj.get("image_source", "ai")
+        )
         if not _media_ok:
-            _save_post_record(
-                account_id, pid, pname, post.get("text", ""), None, "error",
-                preview=post.get("text", ""), publish_at=_next_slot(proj),
-                error="BANNER_REQUIRED: " + str(_media_err), generation_key=_generation_key,
+            _quality_blocked = (
+                str(post.get("quality_status") or "") == "banner_blocked"
+                or str(_media_err or "").startswith("BANNER_QUALITY_BLOCKED:")
             )
-            print("[autopost_projects] BANNER_REQUIRED:", pname, "|", _media_err, "| status=error", flush=True)
+            _status = "quality_blocked" if _quality_blocked else "error"
+            _save_post_record(
+                account_id, pid, pname, post.get("text", ""), None, _status,
+                preview=post.get("text", ""),
+                publish_at=_final_payload_due or _next_slot(proj),
+                error=(
+                    str(_media_err)
+                    if _quality_blocked
+                    else "BANNER_REQUIRED: " + str(_media_err)
+                ),
+                generation_key=_generation_key,
+                record_id=(_final_payload_context or {}).get("record_id"),
+                tracking=_quality_tracking,
+            )
+            print(
+                "[autopost_projects] BANNER_REQUIRED:",
+                pname, "|", _media_err, "| status=" + _status,
+                flush=True,
+            )
             continue
-        _record_id = __import__("uuid").uuid4().hex[:12]
-        _tracking = _ocean_tracking_record(post.get("text", ""), proj, _record_id)
+        _record_id = str((_final_payload_context or {}).get("record_id") or __import__("uuid").uuid4().hex[:12])
+        _tracking = _ocean_tracking_record(
+            post.get("text", ""), proj, _record_id
+        )
+        _tracking.update(_quality_tracking)
         _tracking_id = str(_tracking.get("utm_content") or "")
         if (proj.get("mode") or "auto") == "moderate":
             _plat = proj.get("platforms") or "both"
@@ -3846,49 +5008,22 @@ def _autopost_projects_impl(account_id, owner=False, respect_time=False, only_id
                     _publish_at = _scheduled_deadline.strftime("%Y-%m-%d %H:%M")
             _save_post_record(account_id, pid, pname, post["text"], post.get("banner"), "draft", preview=_prev, publish_at=_publish_at, generation_key=_generation_key, record_id=_record_id, tracking=_tracking)
             print("[autopost_projects] черновик на утверждение:", pname); continue
-        platforms = proj.get("platforms") or "both"
-        results = {}
-        if proj.get("channel_tg") and platforms in ("tg", "both"):
-            results["tg"] = _send_telegram(proj["channel_tg"], _project_delivery_text_tracked(post["text"], proj, "tg", tracking_id=_tracking_id), post.get("banner"), tenant_scope=account_id)
-        if proj.get("vk_owner_id") and platforms in ("vk", "both"):
-            results["vk"] = _send_vk(int(proj["vk_owner_id"]), _project_delivery_text_tracked(post["text"], proj, "vk", tracking_id=_tracking_id), post.get("banner"), tenant_scope=account_id)
-        _complete = _all_required_delivery_ok(proj, results)
-        _ids = _merge_delivery_ids({}, proj, results)
-        if _complete:
-            db = SessionLocal()
-            try:
-                crow = db.query(Storage).filter(Storage.account_id == account_id, Storage.key == cnt_key).first()
-                if crow:
-                    crow.value = str(int(crow.value) + 1)
-                else:
-                    db.add(Storage(account_id=account_id, key=cnt_key, value="1"))
-                db.commit()
-            finally:
-                db.close()
-            _save_post_record(account_id, pid, pname, post["text"], post.get("banner"), "published", ids=_ids, generation_key=_generation_key, record_id=_record_id, tracking=_tracking)
-            _notify_posted(account_id, pname, theme, proj, results, post.get("banner"))
-            try:
-                from app.services.action_log import log_action, ACTOR_CRON
-                _ch = []
-                if isinstance(results.get("tg"), dict) and results["tg"].get("ok"): _ch.append("Telegram")
-                if isinstance(results.get("vk"), dict) and results["vk"].get("ok"): _ch.append("ВКонтакте")
-                log_action(account_id=account_id, action="Опубликовал пост",
-                           object_kind="пост", object_name=str(theme)[:200],
-                           after_val=", ".join(_ch) or "канал не определён",
-                           reason="проект «%s», публикация сразу" % pname,
-                           actor=ACTOR_CRON, source="posting_runner")
-            except Exception:
-                pass
-        else:
-            _errs = []
-            for _pk in _required_delivery_platforms(proj):
-                _rv = results.get(_pk) if isinstance(results.get(_pk), dict) else {}
-                if not _rv.get("ok"):
-                    _errs.append(_pk + ": " + str(_rv.get("error") or "delivery_failed")[:120])
-            _save_post_record(account_id, pid, pname, post["text"], post.get("banner"), "partial",
-                              ids=_ids, publish_at="", error="; ".join(_errs), generation_key=_generation_key, record_id=_record_id, tracking=_tracking)
-            print("[autopost_projects] PARTIAL_DELIVERY: повторит due_posts только недостающую площадку", flush=True)
-        print("[autopost_projects] итог:", pname, {k: ("OK" if v.get("ok") else "FAIL") for k, v in results.items()})
+        # SOCIAL_DURABLE_DRAFT_BEFORE_SEND_V1: the canonical due/rescue
+        # owns all external delivery. Persist ID, generation key, tracking and
+        # quality before any provider call, so a worker crash cannot mint a new
+        # post/UTM and replay the same business intent.
+        _queue_due = _final_payload_due or _project_clock(proj).strftime("%Y-%m-%d %H:%M")
+        _preview_platform = "tg" if proj.get("channel_tg") and (proj.get("platforms") or "both") in ("tg", "both") else "vk"
+        _queued_record_id = _save_post_record(
+            account_id, pid, pname, post["text"], post.get("banner"), "draft",
+            preview=(post.get("delivery_texts") or {}).get(_preview_platform) or _project_delivery_text_tracked(post["text"], proj, _preview_platform, tracking_id=_tracking_id),
+            publish_at=_queue_due, generation_key=_generation_key,
+            record_id=_record_id, tracking=_tracking,
+        )
+        print("[autopost_projects] готов к штатной доставке:", pname,
+              "| record_id=", _queued_record_id, flush=True)
+    if blocked_results:
+        return {"status": "projects_blocked", "blocked_projects": blocked_results}
 
 
 def autopost_previous_day_slot(account_id, project_id, service_day, slot_hour, owner=False, max_local_hour=6):
@@ -3932,11 +5067,7 @@ def autopost_previous_day_slot(account_id, project_id, service_day, slot_hour, o
     if project.get("expected_auto_generation") is not True or str(project.get("mode") or "auto").lower() == "off":
         return {"status":"autopilot_not_expected","materialized":False,"project_id":pid}
 
-    try:
-        offset = int(project.get("tz_offset", 3) or 3)
-    except Exception:
-        offset = 3
-    local_now = datetime.now() + timedelta(hours=offset)
+    local_now = _project_clock(project)
     local_day = local_now.strftime("%Y%m%d")
     previous_day = (local_now - timedelta(days=1)).strftime("%Y%m%d")
     day = str(service_day or "").strip()
@@ -4100,7 +5231,7 @@ def pregenerate_upcoming_all(lead_hours=2):
                     user=db.query(User).filter(User.id==uid).first()
                     is_owner=bool(user and getattr(user,"role",None)=="owner")
                 except Exception:
-                    pass
+                    observe_suppressed(__name__, sys.exc_info()[1], line=4743)
             buckets.append((str(row.account_id),is_owner,projects))
     finally:
         db.close()
@@ -4116,8 +5247,7 @@ def pregenerate_upcoming_all(lead_hours=2):
                 sub,_=normalize_posting_subscription(proj.get("subscription") if isinstance(proj.get("subscription"),dict) else {})
                 if not _sub_active(sub):
                     continue
-            off=int(proj.get("tz_offset",3) or 3)
-            local_now=datetime.now()+timedelta(hours=off)
+            local_now=_project_clock(proj)
             # Use minute precision, not only the integer hour.  At 18:05 the
             # 18:00 generation slot is already due, but a provider cooldown may
             # have prevented materialization before 18:00.  Keep trying that
@@ -4513,10 +5643,17 @@ _SOCIAL_VK_BACKOFF_KEY = "social_vk_edit_backoff_until"
 _SOCIAL_VK_RATE_BACKOFF_KEY = "social_vk_rate_backoff_until"
 
 
+def _social_vk_rate_backoff_session():
+    """Use the receipt connection while its two-connection delivery lock is held."""
+    from app.services.social_delivery_receipts import current_receipt_connection
+    conn = current_receipt_connection()
+    return SessionLocal(bind=conn) if conn is not None else SessionLocal()
+
+
 def _social_vk_rate_backoff_remaining():
     """Shared cooldown for live VK delivery after API error 9/29."""
     import time as _time
-    db = SessionLocal()
+    db = _social_vk_rate_backoff_session()
     try:
         row = db.query(Storage).filter(
             Storage.account_id == _SOCIAL_VK_BACKOFF_ACCOUNT,
@@ -4537,7 +5674,7 @@ def _set_social_vk_rate_backoff(seconds):
     import time as _time
     seconds = max(0, int(seconds or 0))
     until = _time.time() + seconds
-    db = SessionLocal()
+    db = _social_vk_rate_backoff_session()
     try:
         row = db.query(Storage).filter(
             Storage.account_id == _SOCIAL_VK_BACKOFF_ACCOUNT,
@@ -4562,7 +5699,7 @@ def _set_social_vk_rate_backoff(seconds):
 
 
 def _clear_social_vk_rate_backoff():
-    db = SessionLocal()
+    db = _social_vk_rate_backoff_session()
     try:
         row = db.query(Storage).filter(
             Storage.account_id == _SOCIAL_VK_BACKOFF_ACCOUNT,
@@ -5148,6 +6285,80 @@ def _social_delivery_external_wait_map():
     return out
 
 
+def _vk_text_only_fallback_threshold(project):
+    try:
+        return max(1, min(int((project or {}).get("vk_text_only_fallback_after_cycles") or 3), 10))
+    except Exception:
+        return 3
+
+
+def _vk_text_only_fallback_enabled(project, record):
+    if not bool((project or {}).get("vk_text_only_fallback_enabled")):
+        return False
+    try:
+        cycles = int((record or {}).get("vk_media_failure_cycles") or 0)
+    except Exception:
+        cycles = 0
+    return cycles >= _vk_text_only_fallback_threshold(project)
+
+
+def _vk_media_upload_failure(result):
+    if not isinstance(result, dict) or result.get("ok"):
+        return False
+    stage = str(result.get("stage") or "")
+    error = str(result.get("error") or "")
+    if stage == "rate_backoff":
+        return False
+    return (
+        stage.startswith("photos.")
+        or "загрузка фото ВК" in error
+        or "photos.getWallUploadServer" in error
+        or "photos.saveWallPhoto" in error
+    )
+
+
+def _apply_vk_delivery_outcome(record, project, result, used_text_only=False):
+    """Persist media-failure cycles without converting cooldown polls into failures."""
+    if not isinstance(record, dict) or not isinstance(result, dict):
+        return record
+    if result.get("ok"):
+        record["vk_media_failure_cycles"] = 0
+        record.pop("vk_last_media_failure_at", None)
+        record.pop("vk_text_only_fallback_ready", None)
+        if used_text_only:
+            record["vk_text_only_fallback_used_at"] = datetime.now(timezone.utc).isoformat()
+        return record
+    if not used_text_only and _vk_media_upload_failure(result):
+        try:
+            cycles = int(record.get("vk_media_failure_cycles") or 0) + 1
+        except Exception:
+            cycles = 1
+        record["vk_media_failure_cycles"] = cycles
+        record["vk_last_media_failure_at"] = datetime.now(timezone.utc).isoformat()
+        record["vk_text_only_fallback_ready"] = bool(
+            (project or {}).get("vk_text_only_fallback_enabled")
+            and cycles >= _vk_text_only_fallback_threshold(project)
+        )
+    return record
+
+
+def _social_vk_day_evidence_rejected_without_io(result, record):
+    """Only a proven admission-only refusal may yield this rescue's VK turn."""
+    return (
+        isinstance(record, dict)
+        and record.get("delivery_protocol") == "SOCIAL_RECEIPT_V1"
+        and isinstance(result, dict)
+        and result.get("ok") is False
+        and result.get("stage") == "destination_capacity"
+        and result.get("reason") == "SOCIAL_DAY_EVIDENCE_REQUIRED"
+        and result.get("dependency_state") == "queued"
+        and result.get("receipt_status") == "planned"
+        and result.get("delivery_outcome_uncertain") is False
+        and result.get("provider_io_started") is False
+        and str(result.get("receipt_key") or "").startswith("social_delivery:v1:")
+    )
+
+
 def due_posts_all(dry=False):
     """Publish due Social drafts safely across scheduler/API replicas.
 
@@ -5174,6 +6385,9 @@ def due_posts_all(dry=False):
         projmap = {p.get("id"): p for p in projects}
         sent_projects = set()
 
+        # Destination cap and fresh-slot reservations are checked atomically
+        # in the shared receipt boundary, for both scheduled and API delivery.
+
         # Newest VK-only live work gets the first VK chance after a cooldown.
         # Stable two-pass sorting keeps newest intent inside each priority class
         # and prevents a partially delivered TG+VK backlog from starving the
@@ -5194,8 +6408,8 @@ def due_posts_all(dry=False):
             if not proj or project_id in sent_projects:
                 continue
 
-            now_local = datetime.now() + timedelta(hours=int(proj.get("tz_offset", 3) or 3))
-            now_utc = datetime.now()
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            now_local = _project_clock(proj, now_utc)
             due = candidate.get("status") == "partial"
             reason = "retry_partial_delivery" if due else ""
             pa = str(candidate.get("publish_at") or "").strip()
@@ -5205,7 +6419,7 @@ def due_posts_all(dry=False):
                         due = True
                         reason = "publish_at " + pa
                 except Exception:
-                    pass
+                    observe_suppressed(__name__, sys.exc_info()[1], line=5923)
             if not due and not pa:
                 scheduled_due_local = _scheduled_record_delivery_due_local(candidate, proj)
                 if scheduled_due_local is not None and now_local >= scheduled_due_local:
@@ -5234,7 +6448,7 @@ def due_posts_all(dry=False):
                             due = True
                             reason = "auto_publish_hours %sч от %s" % (aph, candidate.get("created_at", ""))
                     except Exception:
-                        pass
+                        observe_suppressed(__name__, sys.exc_info()[1], line=5952)
             if not due:
                 continue
 
@@ -5249,7 +6463,14 @@ def due_posts_all(dry=False):
                 if not isinstance(existing_ids.get(platform), dict)
                 or not (existing_ids.get(platform) or {}).get("message_id" if platform == "tg" else "post_id")
             }
-            if candidate.get("status") == "partial" and missing_required and missing_required.issubset(waits):
+            _vk_cooldown_expired = False
+            if missing_required == {"vk"}:
+                try:
+                    _vk_cooldown_expired = int(_social_vk_rate_backoff_remaining() or 0) <= 0
+                except Exception:
+                    _vk_cooldown_expired = False
+            if (candidate.get("status") == "partial" and missing_required
+                    and missing_required.issubset(waits) and not _vk_cooldown_expired):
                 print("[due] WAITING_EXTERNAL, пропускаем до следующей transport readiness:",
                       proj.get("name"), ",".join(sorted(missing_required)), flush=True)
                 continue
@@ -5282,7 +6503,7 @@ def due_posts_all(dry=False):
                     try:
                         fresh_due = fresh_due or now_local >= datetime.strptime(fresh_pa[:16], "%Y-%m-%d %H:%M")
                     except Exception:
-                        pass
+                        observe_suppressed(__name__, sys.exc_info()[1], line=6007)
                 elif not fresh_due:
                     scheduled_due_local = _scheduled_record_delivery_due_local(rec, proj)
                     if scheduled_due_local is not None and now_local >= scheduled_due_local:
@@ -5294,13 +6515,19 @@ def due_posts_all(dry=False):
                                 created = datetime.strptime(str(rec.get("created_at") or "")[:16], "%Y-%m-%d %H:%M")
                                 fresh_due = now_utc >= created + timedelta(hours=aph)
                             except Exception:
-                                pass
+                                observe_suppressed(__name__, sys.exc_info()[1], line=6019)
                 if not fresh_due:
                     continue
 
                 platforms = proj.get("platforms") or "both"
                 bname = rec.get("banner") or ""
-                bpath = os.path.join(BANNER_DIR, bname) if bname else None
+                try:
+                    bpath = _resolve_banner_path(acc, bname)
+                except (ValueError, OSError) as asset_exc:
+                    rec["error"] = "SOCIAL_MEDIA_REFERENCE_INVALID:" + type(asset_exc).__name__
+                    _persist_post_record(acc, rec)
+                    print("[due]", rec["error"], rec.get("id"), flush=True)
+                    continue
                 media_ok, media_err = _banner_delivery_ready({"banner": bpath}, proj.get("image_source", "ai"))
                 if not media_ok:
                     rec["error"] = "BANNER_REQUIRED: " + str(media_err)[:220]
@@ -5312,16 +6539,62 @@ def due_posts_all(dry=False):
                 if _tracking:
                     rec.update(_tracking)
                 _tracking_id = str(rec.get("utm_content") or "")
+                _delivery_public_texts = None
+                from app.services.social_owner_policy_v3 import is_guarded as _is_social_guarded
+                if str(rec.get("quality_policy") or "") == "SOCIAL_QUALITY_V1" or _is_social_guarded(proj):
+                    _gate = _social_delivery_quality_gate(acc, rec, proj, bpath)
+                    rec.update(_gate.get("record_updates") or {})
+                    if _gate.get("pass") is not True:
+                        rec["quality_status"] = "delivery_recheck_blocked"
+                        rec["error"] = "SOCIAL_DELIVERY_QUALITY_BLOCKED:" + ",".join(_gate.get("blockers") or [])[:230]
+                        _persist_post_record(acc, rec)
+                        print("[due]", rec["error"], rec.get("id"), flush=True)
+                        continue
+                    _delivery_public_texts = _gate["public_texts"]
+                    _saved_delivery_texts = dict(rec.get("delivery_texts") or {})
+                    _saved_delivery_texts.update(_delivery_public_texts)
+                    rec["delivery_texts"] = _saved_delivery_texts
+                    if not _persist_post_record(acc, rec):
+                        raise RuntimeError("SOCIAL_QA_EVIDENCE_PERSIST_FAILED")
                 results = {}
+                _tg_attempted_here = False
+                _vk_admission_only = False
                 existing_ids = dict(rec.get("ids") or {})
+                if _delivery_public_texts is None:
+                    _delivery_texts = (
+                        dict(rec.get("delivery_texts"))
+                        if isinstance(rec.get("delivery_texts"), dict)
+                        else {}
+                    )
+                    if (
+                        proj.get("channel_tg")
+                        and platforms in ("tg", "both")
+                        and "tg" not in _delivery_texts
+                    ):
+                        _delivery_texts["tg"] = _project_delivery_text_tracked(
+                            rec.get("text", ""), proj, "tg",
+                            tracking_id=_tracking_id,
+                        )
+                    if (
+                        proj.get("vk_owner_id")
+                        and platforms in ("vk", "both")
+                        and "vk" not in _delivery_texts
+                    ):
+                        _delivery_texts["vk"] = _project_delivery_text_tracked(
+                            rec.get("text", ""), proj, "vk",
+                            tracking_id=_tracking_id,
+                        )
+                    if _delivery_texts:
+                        rec["delivery_texts"] = dict(_delivery_texts)
                 if proj.get("channel_tg") and platforms in ("tg", "both"):
                     if isinstance(existing_ids.get("tg"), dict) and existing_ids["tg"].get("message_id"):
                         results["tg"] = {"ok": True, "skipped_existing": True,
                                          "message_id": existing_ids["tg"].get("message_id")}
                     else:
+                        _tg_attempted_here = True
                         results["tg"] = _send_telegram(
-                            proj["channel_tg"], _project_delivery_text_tracked(rec.get("text", ""), proj, "tg", tracking_id=_tracking_id), bpath,
-                            tenant_scope=acc
+                            proj["channel_tg"], (_delivery_public_texts["tg"] if _delivery_public_texts is not None else _project_delivery_text_tracked(rec.get("text", ""), proj, "tg", tracking_id=_tracking_id)), bpath,
+                            tenant_scope=acc, delivery_context=_social_delivery_context(rec, proj, "tg")
                         )
                 if proj.get("vk_owner_id") and platforms in ("vk", "both"):
                     if isinstance(existing_ids.get("vk"), dict) and existing_ids["vk"].get("post_id"):
@@ -5338,22 +6611,37 @@ def due_posts_all(dry=False):
                             }
                         else:
                             vk_attempted = True
+                            _vk_text_only = _vk_text_only_fallback_enabled(proj, rec)
+                            _vk_banner = None if _vk_text_only else bpath
                             results["vk"] = _send_vk(
-                                int(proj["vk_owner_id"]), _project_delivery_text_tracked(rec.get("text", ""), proj, "vk", tracking_id=_tracking_id), bpath,
-                                tenant_scope=acc
+                                int(proj["vk_owner_id"]), (_delivery_public_texts["vk"] if _delivery_public_texts is not None else _project_delivery_text_tracked(rec.get("text", ""), proj, "vk", tracking_id=_tracking_id)), _vk_banner,
+                                tenant_scope=acc, delivery_context=_social_delivery_context(rec, proj, "vk")
                             )
+                            if _social_vk_day_evidence_rejected_without_io(results.get("vk"), rec):
+                                # No provider-capable callback ran. Let the
+                                # older receipt reach its native reconciliation
+                                # instead of being hidden by this newer refusal.
+                                vk_attempted = False
+                                _vk_admission_only = True
+                            if isinstance(results.get("vk"), dict):
+                                if _vk_text_only:
+                                    results["vk"]["fallback_mode"] = "text_only"
+                                _apply_vk_delivery_outcome(rec, proj, results["vk"], used_text_only=_vk_text_only)
 
                 rec["ids"] = _merge_delivery_ids(existing_ids, proj, results)
                 rec["external_post_id"] = dict(rec.get("ids") or {})
                 complete = _all_required_delivery_ok(proj, results)
                 if complete:
-                    _mark_social_delivery_published(
-                        rec,
-                        proj,
-                        preview_text=_project_delivery_text_tracked(
-                            rec.get("text", ""), proj, "tg" if proj.get("channel_tg") else "vk", tracking_id=_tracking_id
-                        ),
+                    _preview_sources = (
+                        _delivery_public_texts if isinstance(_delivery_public_texts, dict) else {},
+                        rec.get("delivery_texts") if isinstance(rec.get("delivery_texts"), dict) else {},
                     )
+                    _preview_text = next((payload
+                        for platform in _required_delivery_platforms(proj)
+                        for source in _preview_sources
+                        for payload in [source.get(platform)]
+                        if isinstance(payload, str) and payload.strip()), None)
+                    _mark_social_delivery_published(rec, proj, preview_text=_preview_text)
                     rec.pop("delivery_failures", None)
                 else:
                     rec["status"] = "partial"
@@ -5367,8 +6655,11 @@ def due_posts_all(dry=False):
                             delivery_failures[platform] = {
                                 key: rv.get(key)
                                 for key in (
-                                    "error", "reason", "dependency_state", "retryable_external",
-                                    "retry_after_seconds", "owner_action_required",
+                                    "error", "stage", "reason", "dependency_state", "retryable_external",
+                                    "retry_after_seconds", "owner_action_required", "fallback_mode",
+                                    "receipt_key", "receipt_status", "delivery_outcome_uncertain",
+                                    "reconciliation_required", "review_after", "review_overdue",
+                                    "owner_action", "photo_message_id", "provider_io_started",
                                 )
                                 if rv.get(key) is not None
                             }
@@ -5377,7 +6668,11 @@ def due_posts_all(dry=False):
 
                 if not _persist_post_record(acc, rec):
                     raise RuntimeError("SOCIAL_POST_RECORD_DISAPPEARED_DURING_DELIVERY")
-                sent_projects.add(project_id)
+                # A TG invocation may have sent or reconciled even when its
+                # final result is cached/uncertain. Only the preexisting-ID
+                # skip (or absent TG branch) leaves this project turn unused.
+                if not (_vk_admission_only and not _tg_attempted_here):
+                    sent_projects.add(project_id)
 
                 if complete:
                     try:
@@ -5407,7 +6702,7 @@ def due_posts_all(dry=False):
                                    reason="время выхода %s" % (reason or "по расписанию"),
                                    actor=ACTOR_CRON, source="posting_runner.due")
                     except Exception:
-                        pass
+                        observe_suppressed(__name__, sys.exc_info()[1], line=6184)
                     _notify_posted(acc, proj.get("name") or rec.get("project_name"),
                                    rec.get("text", "")[:60], proj, results, bname)
                     print(
@@ -5423,6 +6718,443 @@ def due_posts_all(dry=False):
                           proj.get("name"), rec.get("error", ""), flush=True)
             finally:
                 _release_post_delivery_lock(delivery_lock, acc, candidate.get("id"))
+
+    if not dry:
+        try:
+            _verify = social_post_publish_verify_once(limit=12, min_age_seconds=60)
+            if _verify.get("checked"):
+                print(
+                    "[social_verify]",
+                    _verify.get("status"),
+                    "checked=", _verify.get("checked"),
+                    "failed=", _verify.get("failed"),
+                    flush=True,
+                )
+        except Exception as _verify_exc:
+            print(
+                "[social_verify] error:",
+                type(_verify_exc).__name__,
+                str(_verify_exc)[:180],
+                flush=True,
+            )
+        try:
+            _metrics = social_metrics_collect_once(limit=8)
+            if _metrics.get("count"):
+                print(
+                    "[social_metrics] checkpoints updated=",
+                    _metrics.get("count"),
+                    flush=True,
+                )
+        except Exception as _metrics_exc:
+            print(
+                "[social_metrics] error:",
+                type(_metrics_exc).__name__,
+                str(_metrics_exc)[:180],
+                flush=True,
+            )
+
+
+
+def _social_delivery_context(record, project, platform):
+    """Stable, non-secret publication identity from the persisted lifecycle."""
+    failure = ((record.get("delivery_failures") or {}).get(platform) or {})
+    error = str(failure.get("error") or record.get("error") or "")
+    # Retain only known classifier markers, never raw provider URL/token errors.
+    markers = (
+        "photos.getWallUploadServer:", "photos.saveWallPhoto:",
+        "VK live delivery paced: next rescue pass",
+        "VK cooldown после rate limit:", "BANNER_ASSET_MISSING",
+    )
+    marker = next((m for m in markers if m.lower() in error.lower()), "")
+    stage = str(failure.get("stage") or "")
+    if stage not in {"rate_backoff", "photos.getWallUploadServer", "photos.saveWallPhoto"}:
+        stage = ""
+    return {
+        "post_id": str(record.get("id") or ""),
+        "project_id": str(record.get("project_id") or project.get("id") or ""),
+        "generation_key": str(record.get("generation_key") or ""),
+        "created_at": record.get("created_at"),
+        "protocol": record.get("delivery_protocol"),
+        "legacy_error": marker,
+        "legacy_stage": stage,
+    }
+
+def _social_plain_compare(value):
+    import re as _re_verify
+    text = _re_verify.sub(r"<[^>]+>", " ", str(value or ""))
+    text = _re_verify.sub(r"\s+", " ", text).strip().lower().replace("ё", "е")
+    return text
+
+
+def social_post_publish_verify_once(limit=20, min_age_seconds=60, account_id=None):
+    """Verify actual external Social publications and persist durable evidence.
+
+    VK is read back via wall.getById and checked against the exact expected
+    outgoing text plus media presence. Telegram Bot API has no arbitrary
+    getMessage endpoint, so the successful send receipt with a real message_id
+    is the strongest provider-side proof available and is recorded explicitly
+    as such instead of pretending a readback happened.
+    """
+    import json as _json_verify
+    checked = []
+    failures = []
+    remaining = max(1, int(limit or 20))
+
+    _buckets = (
+        [str(account_id)]
+        if str(account_id or "").strip()
+        else _all_user_buckets()
+    )
+    for acc in _buckets:
+        if remaining <= 0:
+            break
+        db = SessionLocal()
+        try:
+            prow = db.query(Storage).filter(
+                Storage.account_id == acc,
+                Storage.key == "posting_projects",
+            ).first()
+            postrow = db.query(Storage).filter(
+                Storage.account_id == acc,
+                Storage.key == "posting_posts",
+            ).first()
+            try:
+                projects = _json_verify.loads(prow.value or "[]") if prow else []
+            except Exception:
+                projects = []
+            try:
+                posts = _json_verify.loads(postrow.value or "[]") if postrow else []
+            except Exception:
+                posts = []
+        finally:
+            db.close()
+        pmap = {
+            str(p.get("id") or ""): p
+            for p in projects if isinstance(p, dict)
+        }
+
+        candidates = []
+        now = datetime.now().astimezone()
+        for post in posts:
+            if not isinstance(post, dict) or post.get("status") != "published":
+                continue
+            # Strict external payload verification belongs to Quality V1 posts.
+            # Legacy records did not durably store the exact rendered payload,
+            # so reconstructing it after publication can create false failures.
+            if str(post.get("quality_policy") or "") != "SOCIAL_QUALITY_V1":
+                continue
+            existing_ver = (
+                post.get("post_publish_verification")
+                if isinstance(post.get("post_publish_verification"), dict)
+                else {}
+            )
+            if existing_ver.get("status") == "pass":
+                continue
+            published_raw = str(post.get("published_at") or "").strip()
+            if published_raw:
+                try:
+                    pdt = datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
+                    if pdt.tzinfo is None:
+                        pdt = pdt.replace(tzinfo=now.tzinfo)
+                    if (now - pdt.astimezone(now.tzinfo)).total_seconds() < int(min_age_seconds):
+                        continue
+                except Exception:
+                    observe_suppressed(__name__, sys.exc_info()[1], line=6335)
+            candidates.append(post)
+        candidates.sort(
+            key=lambda x: str(x.get("published_at") or x.get("created_at") or ""),
+            reverse=True,
+        )
+
+        for candidate in candidates[:remaining]:
+            post_id = str(candidate.get("id") or "")
+            proj = pmap.get(str(candidate.get("project_id") or ""), {})
+            if not post_id or not proj:
+                continue
+            lock = _try_post_delivery_lock(acc, post_id)
+            if lock is None:
+                continue
+            try:
+                fresh = _load_post_record(acc, post_id)
+                if not fresh or fresh.get("status") != "published":
+                    continue
+                ids = fresh.get("ids") if isinstance(fresh.get("ids"), dict) else {}
+                required = _required_delivery_platforms(proj)
+                platform_checks = {}
+                all_ok = bool(required)
+                delivery_texts = (
+                    dict(fresh.get("delivery_texts"))
+                    if isinstance(fresh.get("delivery_texts"), dict)
+                    else {}
+                )
+                quality_v1 = str(fresh.get("quality_policy") or "") == "SOCIAL_QUALITY_V1"
+
+                if "tg" in required:
+                    tg = ids.get("tg") if isinstance(ids.get("tg"), dict) else {}
+                    tg_payload_saved = bool(str(delivery_texts.get("tg") or "").strip())
+                    tg_ok = bool(
+                        tg.get("chat_id")
+                        and tg.get("message_id")
+                        and (tg_payload_saved or not quality_v1)
+                    )
+                    platform_checks["tg"] = {
+                        "ok": tg_ok,
+                        "mode": "provider_send_receipt",
+                        "chat_id": tg.get("chat_id"),
+                        "message_id": tg.get("message_id"),
+                        "payload_saved": tg_payload_saved,
+                        "note": (
+                            "Telegram Bot API send receipt with real message_id; "
+                            "no arbitrary getMessage readback endpoint exists"
+                        ),
+                    }
+                    all_ok = all_ok and tg_ok
+
+                if "vk" in required:
+                    vk = ids.get("vk") if isinstance(ids.get("vk"), dict) else {}
+                    owner_id = vk.get("owner_id")
+                    external_id = vk.get("post_id")
+                    vk_check = {
+                        "ok": False,
+                        "mode": "wall.getById",
+                        "owner_id": owner_id,
+                        "post_id": external_id,
+                    }
+                    if owner_id and external_id:
+                        snap = _vk_wall_post_snapshot(owner_id, external_id)
+                        item = snap.get("item") if isinstance(snap.get("item"), dict) else {}
+                        if snap.get("ok") and item:
+                            expected = str(delivery_texts.get("vk") or "").strip()
+                            expected_source = "saved_delivery_payload"
+                            if not expected and not quality_v1:
+                                try:
+                                    expected = _social_delivery_public_texts(fresh, proj, ["vk"])["vk"]
+                                    expected_source = "legacy_reconstructed"
+                                except RuntimeError as payload_exc:
+                                    expected = ""
+                                    vk_check["error"] = str(payload_exc)[:180]
+                            actual_plain = _social_plain_compare(item.get("text") or "")
+                            expected_plain = _social_plain_compare(expected)
+                            text_ok = bool(expected_plain) and actual_plain == expected_plain
+                            if not text_ok and actual_plain and expected_plain:
+                                # VK may normalize whitespace; allow only a very
+                                # tight containment after normalization.
+                                text_ok = (
+                                    actual_plain in expected_plain
+                                    or expected_plain in actual_plain
+                                ) and min(len(actual_plain), len(expected_plain)) >= int(
+                                    0.96 * max(len(actual_plain), len(expected_plain))
+                                )
+                            banner_expected = bool(fresh.get("banner"))
+                            photos = _vk_photo_attachment_ids(item)
+                            media_ok = (not banner_expected) or bool(photos)
+                            vk_ok = bool(text_ok and media_ok)
+                            vk_check.update({
+                                "ok": vk_ok,
+                                "text_ok": bool(text_ok),
+                                "media_ok": bool(media_ok),
+                                "expected_source": expected_source,
+                                "payload_saved": bool(str(delivery_texts.get("vk") or "").strip()),
+                                "photo_attachments": photos[:5],
+                            })
+                            if quality_v1 and not expected:
+                                vk_check["error"] = "delivery_payload_missing"
+                            views = item.get("views") if isinstance(item.get("views"), dict) else {}
+                            likes = item.get("likes") if isinstance(item.get("likes"), dict) else {}
+                            comments = item.get("comments") if isinstance(item.get("comments"), dict) else {}
+                            reposts = item.get("reposts") if isinstance(item.get("reposts"), dict) else {}
+                            fresh["engagement"] = {
+                                "provider": "vk",
+                                "views": int(views.get("count") or 0),
+                                "likes": int(likes.get("count") or 0),
+                                "reactions": int(likes.get("count") or 0),
+                                "comments": int(comments.get("count") or 0),
+                                "reposts": int(reposts.get("count") or 0),
+                                "collected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            }
+                        else:
+                            vk_check["error"] = str(
+                                snap.get("error") or "SOCIAL_POST_VERIFY_FAIL"
+                            )[:180]
+                    else:
+                        vk_check["error"] = "external_post_id_missing"
+                    platform_checks["vk"] = vk_check
+                    all_ok = all_ok and bool(vk_check.get("ok"))
+
+                verification = {
+                    "policy_version": "SOCIAL_POST_VERIFY_V1",
+                    "status": "pass" if all_ok else "fail",
+                    "code": None if all_ok else "SOCIAL_POST_VERIFY_FAIL",
+                    "verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "platforms": platform_checks,
+                }
+                fresh["post_publish_verification"] = verification
+                if not all_ok:
+                    fresh["verification_error"] = "SOCIAL_POST_VERIFY_FAIL"
+                else:
+                    fresh.pop("verification_error", None)
+                if not _persist_post_record(acc, fresh):
+                    raise RuntimeError("SOCIAL_POST_VERIFY_RECORD_DISAPPEARED")
+                row = {
+                    "account_id": acc,
+                    "project_id": str(fresh.get("project_id") or ""),
+                    "post_id": post_id,
+                    "status": verification["status"],
+                    "platforms": platform_checks,
+                }
+                checked.append(row)
+                if not all_ok:
+                    failures.append(row)
+                remaining -= 1
+                if remaining <= 0:
+                    break
+            finally:
+                _release_post_delivery_lock(lock, acc, post_id)
+
+    return {
+        "status": "pass" if not failures else "fail",
+        "checked": len(checked),
+        "failed": len(failures),
+        "failures": failures[:10],
+        "code": None if not failures else "SOCIAL_POST_VERIFY_FAIL",
+    }
+
+
+
+def social_metrics_collect_once(limit=10, account_id=None):
+    """Capture real VK engagement near 24h/72h/7d checkpoints.
+
+    Historical metrics are never invented: a missed checkpoint stays missing.
+    Telegram metrics are intentionally absent unless a provider collector can
+    prove them.
+    """
+    import json as _json_metrics
+
+    windows = (
+        ("24h", 23.5, 36.0),
+        ("72h", 70.0, 96.0),
+        ("7d", 164.0, 216.0),
+    )
+    remaining = max(1, int(limit or 10))
+    updated = []
+    buckets = (
+        [str(account_id)]
+        if str(account_id or "").strip()
+        else _all_user_buckets()
+    )
+    now = datetime.now().astimezone()
+
+    for acc in buckets:
+        if remaining <= 0:
+            break
+        db = SessionLocal()
+        try:
+            prow = db.query(Storage).filter(
+                Storage.account_id == acc,
+                Storage.key == "posting_projects",
+            ).first()
+            postrow = db.query(Storage).filter(
+                Storage.account_id == acc,
+                Storage.key == "posting_posts",
+            ).first()
+            try:
+                projects = _json_metrics.loads(prow.value or "[]") if prow else []
+            except Exception:
+                projects = []
+            try:
+                posts = _json_metrics.loads(postrow.value or "[]") if postrow else []
+            except Exception:
+                posts = []
+        finally:
+            db.close()
+        pmap = {
+            str(p.get("id") or ""): p
+            for p in projects if isinstance(p, dict)
+        }
+
+        for post in posts:
+            if remaining <= 0:
+                break
+            if not isinstance(post, dict) or post.get("status") != "published":
+                continue
+            proj = pmap.get(str(post.get("project_id") or ""), {})
+            if "vk" not in _required_delivery_platforms(proj):
+                continue
+            ids = post.get("ids") if isinstance(post.get("ids"), dict) else {}
+            vk = ids.get("vk") if isinstance(ids.get("vk"), dict) else {}
+            if not vk.get("owner_id") or not vk.get("post_id"):
+                continue
+            raw = str(post.get("published_at") or "").strip()
+            if not raw:
+                continue
+            try:
+                pdt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if pdt.tzinfo is None:
+                    pdt = pdt.replace(tzinfo=now.tzinfo)
+                age_hours = (
+                    now - pdt.astimezone(now.tzinfo)
+                ).total_seconds() / 3600.0
+            except Exception:
+                continue
+            history = (
+                dict(post.get("engagement_history"))
+                if isinstance(post.get("engagement_history"), dict)
+                else {}
+            )
+            due_labels = [
+                label for label, low, high in windows
+                if low <= age_hours <= high and label not in history
+            ]
+            if not due_labels:
+                continue
+
+            snap = _vk_wall_post_snapshot(vk["owner_id"], vk["post_id"])
+            item = snap.get("item") if isinstance(snap.get("item"), dict) else {}
+            if not snap.get("ok") or not item:
+                continue
+            views = item.get("views") if isinstance(item.get("views"), dict) else {}
+            likes = item.get("likes") if isinstance(item.get("likes"), dict) else {}
+            comments = item.get("comments") if isinstance(item.get("comments"), dict) else {}
+            reposts = item.get("reposts") if isinstance(item.get("reposts"), dict) else {}
+            sample = {
+                "provider": "vk",
+                "views": int(views.get("count") or 0),
+                "likes": int(likes.get("count") or 0),
+                "reactions": int(likes.get("count") or 0),
+                "comments": int(comments.get("count") or 0),
+                "reposts": int(reposts.get("count") or 0),
+                "collected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "age_hours": round(age_hours, 2),
+            }
+
+            lock = _try_post_delivery_lock(acc, post.get("id"))
+            if lock is None:
+                continue
+            try:
+                fresh = _load_post_record(acc, post.get("id"))
+                if not fresh or fresh.get("status") != "published":
+                    continue
+                fresh_history = (
+                    dict(fresh.get("engagement_history"))
+                    if isinstance(fresh.get("engagement_history"), dict)
+                    else {}
+                )
+                for label in due_labels:
+                    if label not in fresh_history:
+                        fresh_history[label] = dict(sample)
+                fresh["engagement_history"] = fresh_history
+                fresh["engagement"] = dict(sample)
+                if _persist_post_record(acc, fresh):
+                    updated.append({
+                        "account_id": acc,
+                        "post_id": fresh.get("id"),
+                        "checkpoints": due_labels,
+                    })
+                    remaining -= 1
+            finally:
+                _release_post_delivery_lock(lock, acc, post.get("id"))
+
+    return {"status": "ok", "updated": updated, "count": len(updated)}
 
 
 def warn_stale_drafts(dry=False):
@@ -5501,11 +7233,10 @@ def _ocean_clients_project(proj):
 
 
 def ensure_ocean_media_reuse(account_id="u2"):
-    """Hard safety floor: Ocean auto-posts may reuse existing media only.
+    """Hard safety floor: Ocean auto-posts must generate fresh AI media.
 
-    This rule is intentionally independent from the mutable owner-policy layer.
-    If a future deploy or manual edit switches Ocean to AI/stock generation,
-    self-heal it back to `reuse` before the scheduler is allowed to generate.
+    The legacy name is kept for compatibility with the scheduler, but the
+    owner requirement is now fresh OpenAI visual generation for every new slot.
     """
     import json as _json
     db = SessionLocal()
@@ -5533,13 +7264,13 @@ def ensure_ocean_media_reuse(account_id="u2"):
             if not _ocean_clients_project(project):
                 continue
             found += 1
-            if str(project.get("image_source") or "").lower() != "reuse":
+            if str(project.get("image_source") or "").lower() != "ai":
                 changed.append({
                     "project_id": str(project.get("id") or ""),
                     "before": project.get("image_source"),
-                    "after": "reuse",
+                    "after": "ai",
                 })
-                project["image_source"] = "reuse"
+                project["image_source"] = "ai"
 
         if found == 0:
             db.rollback()
@@ -5549,7 +7280,7 @@ def ensure_ocean_media_reuse(account_id="u2"):
             db.commit()
         else:
             db.rollback()
-        return {"ok": True, "changed": bool(changed), "changes": changed, "image_source": "reuse"}
+        return {"ok": True, "changed": bool(changed), "changes": changed, "image_source": "ai"}
     except Exception as exc:
         db.rollback()
         return {"ok": False, "changed": False, "reason": type(exc).__name__ + ": " + str(exc)[:160]}
@@ -5731,10 +7462,13 @@ def ocean_vk_link_cleanup_once():
                 continue
             checked += 1
             current = str(item.get("text") or "")
-            # Reconcile against the canonical VK rendering instead of treating
-            # every URL as forbidden. Ocean intentionally carries two trusted
-            # BORIS URLs with short VK UTM tags.
-            clean = _vk_edit_plain_text(_project_delivery_text_tracked(rec.get("text", ""), proj, "vk", tracking_id=str(rec.get("utm_content") or _social_utm_content(rec.get("id"), rec.get("text", "")))))
+            # Existing Ocean publications retain their exact frozen payload.
+            # A renderer upgrade is never permission to rewrite public history.
+            try:
+                clean = _vk_edit_plain_text(_social_delivery_public_texts(rec, proj, ["vk"])["vk"])
+            except RuntimeError as payload_exc:
+                return {"status": "blocked", "stage": "legacy_payload", "post_id": post_id,
+                        "reason": str(payload_exc)[:180], "checked": checked}
             if current.strip() == clean.strip():
                 continue
 
@@ -5850,7 +7584,7 @@ def _ocean_tracking_spec(text, platform="tg", tracking_id=""):
     source = "vk" if str(platform or "").strip().lower() == "vk" else "tg"
     direction = _ocean_direction(text)
     dev = direction == "software_dev"
-    landing = "https://boris-ai.pro/software-dev/" if dev else "https://boris-ai.pro/"
+    landing = "https://boris-ai.pro/software-dev/" if dev else "https://boris-ai.pro/audit"
     campaign = "dev" if dev else "ocean"
     utm_content = str(tracking_id or _social_utm_content(text=text)).strip().lower()
     query = _urlencode({
@@ -5867,7 +7601,7 @@ def _ocean_tracking_spec(text, platform="tg", tracking_id=""):
         "utm_campaign": campaign,
         "utm_content": utm_content,
         "final_url": landing + "?" + query,
-        "cta": "Обсудить разработку:" if dev else "Подробнее:",
+        "cta": "Обсудить разработку:" if dev else "🎁 Получите бесплатно аудит за пару минут + тест BORIS для повышения эффективности рекламы:",
     }
 
 
@@ -5928,17 +7662,25 @@ def _ocean_finalize_delivery(rendered, source_text, platform="tg", tracking_id="
     import re as _re
     value = str(rendered or "")
     value = _re.sub(
-        r"(?im)^\s*(?:🤖\s*BORIS:|💻\s*Разработка\s+ПО:|Подробнее:|Обсудить\s+разработку:)\s*"
-        r"https://boris-ai\.pro(?:/software-dev/|/)?\?[^\s]+\s*$",
+        r"(?im)^\s*(?:🤖\s*BORIS:|💻\s*Разработка\s+ПО:|Подробнее:|Обсудить\s+разработку:|"
+        r"🎁\s*Получите\s+бесплатно\s+аудит.*?рекламы:)\s*"
+        r"https://boris-ai\.pro(?:/audit|/software-dev/|/)?\?[^\s]+\s*$",
+        "",
+        value,
+    )
+    # The project authority may still contain the plain offer in its legacy
+    # signature. The tracked server CTA below is the single canonical copy.
+    value = _re.sub(
+        r"(?im)^\s*🎁?\s*Получите\s+бесплатно\s+аудит\s+за\s+пару\s+минут\s*"
+        r"\+\s*тест\s+BORIS\s+для\s+повышения\s+эффективности\s+рекламы\s*$",
         "",
         value,
     )
     value = _re.sub(r"\n{3,}", "\n\n", value).strip()
     spec = _ocean_tracking_spec(source_text, platform, tracking_id)
     footer = spec["cta"] + " " + spec["final_url"]
-    allowed = max(120, 1000 - len(footer) - 2)
-    if len(value) > allowed:
-        value = value[:allowed].rstrip(" ,;:-") + "…"
+    if len(value) + 2 + len(footer) > 1000:
+        raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:ocean_complete_delivery_does_not_fit")
     final = (value + "\n\n" + footer).strip()
     gate = _ocean_publication_gate(final, source_text, platform, spec["utm_content"])
     if not gate["ok"]:
@@ -5951,13 +7693,112 @@ def _ocean_finalize_delivery(rendered, source_text, platform="tg", tracking_id="
     return final
 
 
-def _project_delivery_text_tracked(text, proj, platform="tg", tracking_id=""):
-    """System-owned last mile for Ocean links; not wrapped by the legacy copy guard."""
-    from app.services.social_owner_policy_v3 import is_ocean, render_public_text
+def _ocean_final_payload_text(text, proj, platform="tg", tracking_id=""):
+    """OVF03 for new records: useful body, topical tags, one approved CTA/URL.
+
+    The old signature belongs to frozen historical payloads, never to the new
+    renderer. Reject an overlong complete post instead of cutting useful copy.
+    """
+    import re
+    from app.services.social_owner_policy_v3 import (
+        _sanitize, _strip_forced_occasion_lines, _model_hashtag_block,
+        _ocean_hashtag_block, _URL,
+    )
+    value = str(text or "").strip()
+    signature = str((proj or {}).get("footer_signature") or "").strip()
+    if signature:
+        value = value.replace(signature, "")
+        for block in signature.split("\n\n"):
+            if block.strip().startswith("🤖 BORIS:"):
+                value = value.replace(block.strip(), "")
+    tags = _model_hashtag_block(value) or _ocean_hashtag_block(value)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = _strip_forced_occasion_lines(_sanitize(value))
+    value = _URL.sub("", value)
+    value = re.sub(r"(?<![\w#])#[A-Za-zА-Яа-яЁё0-9_]+", "", value)
+    value = re.sub(r"(?im)^\s*🎁?\s*Получите\s+бесплатно\s+аудит\s+за\s+пару\s+минут\s*\+\s*тест\s+BORIS\s+для\s+повышения\s+эффективности\s+рекламы\s*:?\s*$", "", value)
+    value = re.sub(r"(?im)^\s*(?:Обсудить\s+разработку|Подробнее|💻\s*Разработка\s+ПО|🤖\s*BORIS)\s*:\s*$", "", value)
+    value = re.sub(r"(?im)^\s*Напишите\s+в\s+MAX\s+или\s+WhatsApp\s*:.*$", "", value)
+    value = re.sub(r"\n{3,}", "\n\n", value).strip()
+    if (not value or re.search(r"(?i)(?:🤖\s*BORIS:\s*AI-Авитолог|напишите.{0,40}(?:whatsapp|max)|оставьте.{0,30}заявк|свяжитесь\s+с\s+нами)", value)):
+        raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:ocean_secondary_commercial_cta")
+    tid = str(tracking_id or _social_utm_content(text=text))
+    spec = _ocean_tracking_spec(text, platform, tid)
+    final = "\n\n".join((value, tags, spec["cta"] + " " + spec["final_url"]))
+    if len(final) > 1000:
+        raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:ocean_complete_delivery_does_not_fit")
+    count = len(re.findall(r"(?<![\w#])#[A-Za-zА-Яа-яЁё0-9_]+", final))
+    if not 5 <= count <= 10 or final.count(spec["cta"]) != 1:
+        raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:ocean_final_payload_contract")
+    gate = _ocean_publication_gate(final, text, platform, tid)
+    if not gate["ok"]:
+        raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:ocean_final_payload_url:" + ",".join(gate["errors"]))
+    return final
+
+
+def _project_delivery_text_tracked(text, proj, platform="tg", tracking_id="", final_payload=False):
+    """Keep owner copy policy; fit a complete source prefix before it can cut."""
+    import re as _re
+    from app.services.social_owner_policy_v3 import (
+        is_ocean, render_public_text, _sanitize, _strip_forced_occasion_lines,
+        _model_hashtag_block, _ocean_hashtag_block as _owner_tags,
+        _ocean_tracking_links, _URL,
+    )
+    if final_payload and is_ocean(proj):
+        return _ocean_final_payload_text(text, proj, platform, tracking_id)
     if is_ocean(proj):
         tid = str(tracking_id or _social_utm_content(text=text))
-        base = render_public_text(text, proj, platform)
-        return _ocean_finalize_delivery(base, text, platform, tid)
+        spec = _ocean_tracking_spec(text, platform, tid)
+        signature = str((proj or {}).get("footer_signature") or "").strip()
+        tags = _model_hashtag_block(text) or _owner_tags(text)
+        owner_footer = "\n\n".join(x for x in (
+            signature, _ocean_tracking_links(platform), tags,
+        ) if x).strip()
+        # Apply the existing legacy-CTA deduplication to the footer itself.
+        # A signature word may also occur in body, CTA or tags; it is a block,
+        # not a global word-count constraint.
+        final_footer = _ocean_finalize_delivery(owner_footer, text, platform, tid)
+        # Honour both limits: the protected owner renderer still runs below.
+        # Reserve whole signature/tags/URL, never shorten any of those fields.
+        allowed = min(1000 - len(owner_footer) - 2, 1000 - len(final_footer) - 2)
+        value = str(text or "").strip()
+        if value.endswith("\n\n" + final_footer):
+            # A canonical complete footer from a prior render is not body copy.
+            value = value[:-len(final_footer)].rstrip()
+        value = _re.sub(r"<[^>]+>", "", value)
+        value = _strip_forced_occasion_lines(_sanitize(value))
+        value = _URL.sub("", value)
+        value = _re.sub(r"(?<![\w#])#[A-Za-zА-Яа-яЁё0-9_]+", "", value)
+        value = _re.sub(r"\n{3,}", "\n\n", value).strip()
+        if allowed <= 0 or not value:
+            raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:ocean_complete_copy_does_not_fit")
+        if len(value) > allowed:
+            # Only an actual sentence end is admissible. A newline or a word
+            # boundary alone cannot prove a complete thought; no ellipsis added.
+            ends = []
+            abbreviations = {"т", "е", "г", "гг", "руб", "тыс", "млн", "млрд", "см", "стр", "рис", "ул", "д", "п", "им"}
+            for match in _re.finditer(r'(?<![.])[.!?][»”"\)\]]*(?=\s|$)', value):
+                if match.end() > allowed:
+                    break
+                tail = value[match.end():].lstrip()
+                token = _re.search(r"([А-Яа-яЁёA-Za-z]+)$", value[:match.start()])
+                if tail and (tail[0].islower() or (value[match.start()] == "." and token and token.group(1).lower() in abbreviations)):
+                    continue
+                ends.append(match.end())
+            if not ends:
+                raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:ocean_complete_sentence_does_not_fit")
+            value = value[:ends[-1]].rstrip()
+        base = render_public_text(value + "\n\n" + tags, proj, platform)
+        if not base.endswith(owner_footer) or not base[:-len(owner_footer)].strip():
+            raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:ocean_owner_footer_or_body_incomplete")
+        final = _ocean_finalize_delivery(base, text, platform, tid)
+        final_tags = _re.findall(r"(?<![\w#])#[A-Za-zА-Яа-яЁё0-9_]+", final)
+        if (not 5 <= len(final_tags) <= 10
+                or not final.endswith("\n\n" + final_footer)
+                or not final[:-len(final_footer)].strip()
+                or final.count(spec["cta"]) != 1):
+            raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:ocean_footer_contract")
+        return final
     return _project_delivery_text(text, proj, platform)
 
 
@@ -6027,17 +7868,352 @@ def _all_required_delivery_ok(proj, results):
     return bool(req) and all(isinstance((results or {}).get(k), dict) and (results or {}).get(k, {}).get("ok") for k in req)
 
 
-def _merge_delivery_ids(existing_ids, proj, results):
-    ids = dict(existing_ids or {})
-    tg = (results or {}).get("tg") if isinstance((results or {}).get("tg"), dict) else {}
-    mid = (tg.get("result") or {}).get("message_id") if isinstance(tg.get("result"), dict) else tg.get("message_id")
-    if mid:
-        ids["tg"] = {"chat_id": (proj or {}).get("channel_tg"), "message_id": mid}
-    vk = (results or {}).get("vk") if isinstance((results or {}).get("vk"), dict) else {}
-    if vk.get("post_id"):
-        ids["vk"] = {"owner_id": (proj or {}).get("vk_owner_id"), "post_id": vk.get("post_id")}
+def _merge_delivery_ids(existing, proj, results):
+    ids = dict(existing or {})
+    for platform, identity, target in (("tg", "message_id", "chat_id"), ("vk", "post_id", "owner_id")):
+        rv = results.get(platform) if isinstance(results.get(platform), dict) else {}
+        previous = ids.get(platform) if isinstance(ids.get(platform), dict) else {}
+        if rv.get("skipped_existing"):
+            continue
+        nested = rv.get("result") if isinstance(rv.get("result"), dict) else rv
+        external_id = nested.get(identity)
+        if not external_id:
+            continue
+        dest = nested.get("chat", {}).get("id") if platform == "tg" else rv.get("owner_id")
+        dest = dest or (proj or {}).get("channel_tg" if platform == "tg" else "vk_owner_id")
+        same = previous.get(identity) == external_id and str(previous.get(target)) == str(dest)
+        part = dict(previous) if same else {}
+        part.update({target: dest, identity: external_id})
+        if nested.get("date") is not None:
+            part["date"] = nested["date"]
+        ids[platform] = part
     return ids
 
+
+def _project_clock(project, now=None):
+    instant = now if now is not None else datetime.now(timezone.utc)
+    return project_local_now(project, instant).replace(tzinfo=None)
+
+
+def _scheduled_plan_with_date_context(account_id, project, **kwargs):
+    # The protected owner wrapper may call _build_text_prompt after the original
+    # plan function returns. Keep its exact plan date until the wrapper finishes,
+    # then restore the calling thread/task's previous context. No guard mutation.
+    token = _SOCIAL_EDITORIAL_DATE.set(None)
+    try:
+        return _scheduled_generation_plan(account_id, project, **kwargs)
+    finally:
+        _SOCIAL_EDITORIAL_DATE.reset(token)
+
+
+def _plan_reference_date(plan, project, generation_key):
+    if (plan or {}).get("reference_date"):
+        return parse_reference_date(plan["reference_date"])
+    # Recover metadata from the frozen paid prompt; never rewrite that prompt
+    # merely because recovery happens on a later local day.
+    match = __import__("re").search(r"СЕГОДНЯ\s+(\d{2})\.(\d{2})\.(\d{4})", str((plan or {}).get("text_prompt_snapshot") or ""))
+    if match:
+        day, month, year = (int(x) for x in match.groups())
+        return date(year, month, day)
+    return planned_content_date(project, generation_key=generation_key, now=datetime.now(timezone.utc))
+
+
+def _project_occasion_context(project, theme, occasion, reference_date):
+    """Only explicit selected topics/calendar hooks get dated metadata.
+
+    No automatic holidays are added to Ocean/Manicure/Dushi. Generic birthday,
+    anniversary and wedding examples remain evergreen; they do not assert that
+    the reader's event happens today. A selected named holiday resolves against
+    the existing calendar, retaining its year/date after generation.
+    """
+    import re
+    def normal(text):
+        value = str(text or "").lower().replace("ё", "е")
+        value = re.sub(r"\bдн(?:я|ю|ем)\b", "день", value)
+        return re.sub(r"\s+", " ", value).strip()
+    reference = parse_reference_date(reference_date)
+    selected = normal(str(theme or "") + " " + str(occasion or ""))
+    hits = []
+    for year in (reference.year - 1, reference.year, reference.year + 1):
+        events = [(date(year, month, day), name) for (month, day), name in _RU_HOLIDAYS_FIXED.items()]
+        events += [(day, name) for name, day in _ru_holidays_movable(year).items() if day]
+        for day, name in events:
+            if normal(name) in selected:
+                hits.append((abs((day - reference).days), day, name))
+    if hits:
+        _, day, name = min(hits)
+        return {"kind": "dated", "name": name, "date": day.isoformat(),
+                "source": "posting_runner_existing_ru_calendar"}
+    if str(occasion or "").strip():
+        return {"kind": "unverified", "name": str(occasion)}
+    return {"kind": "evergreen"}
+
+
+def _social_delivery_public_texts(record, project, platforms, public_texts=None):
+    """Keep already-frozen payloads across renderer upgrades and retries."""
+    from app.services.social_owner_policy_v3 import is_ocean
+    freeze_payload = is_ocean(project)
+    stored = record.get("delivery_texts")
+    stored = stored if isinstance(stored, dict) else {}
+    legacy = bool(freeze_payload and record.get("id") and record.get("delivery_protocol") != "SOCIAL_RECEIPT_V1")
+    texts = {}
+    for platform in platforms:
+        saved = stored.get(platform)
+        if freeze_payload and isinstance(saved, str) and saved.strip():
+            if public_texts is not None and public_texts.get(platform) != saved:
+                raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:delivery_payload_changed:" + platform)
+            texts[platform] = saved
+        elif legacy:
+            # New rendering cannot establish what a legacy provider saw.
+            # Never manufacture 'absent' by comparing against a new payload.
+            raise RuntimeError("SOCIAL_COPY_QUALITY_BLOCKED:legacy_delivery_payload_unverified:" + platform)
+        elif public_texts is not None:
+            texts[platform] = public_texts.get(platform, "")
+        else:
+            tracking = _ocean_tracking_record(record.get("text", ""), project, record.get("id"))
+            tid = str((tracking or {}).get("utm_content") or record.get("utm_content") or "")
+            texts[platform] = _project_delivery_text_tracked(
+                record.get("text", ""), project, platform, tracking_id=tid,
+                **({"final_payload": True} if isinstance(record.get("final_payload_qa"), dict) and record["final_payload_qa"].get("version") == "SOCIAL_FINAL_PAYLOAD_QA_V1" else {}),
+            )
+    return texts
+
+
+def _social_delivery_quality_gate(account_id, record, project, bpath, *, public_texts=None, now=None):
+    """Real temporal re-QA of the same asset, once per exact context/output.
+
+    This helper sends no public messages and mutates no post fields in place.
+    After the per-post advisory lock/read, the caller persists record_updates
+    even on QA failure, then uses returned public_texts for external sends.
+    Pass bpath through the root-owned canonical asset resolver before calling.
+    """
+    import copy
+    import hashlib
+    import math
+    from pathlib import Path
+    from app.services import social_quality as sq
+    from app.services.social_editorial_contract import ensure_delivery_qa, pending_platforms
+
+    instant = now if now is not None else datetime.now(timezone.utc)
+    updates = {}
+    final_context = record.get("final_payload_qa")
+    final_flow = isinstance(final_context, dict) and final_context.get("version") == "SOCIAL_FINAL_PAYLOAD_QA_V1"
+    if final_context is not None and (not final_flow or final_context.get("record_id") != record.get("id")):
+        return {"pass": False, "blockers": ["FINAL_PAYLOAD_IDENTITY_UNVERIFIED"], "record_updates": {}}
+    missing = pending_platforms(record, project)
+    if not missing:
+        return {"pass": True, "public_texts": {}, "pending_platforms": [], "record_updates": {}}
+    try:
+        brief = sq.refresh_temporal_brief(record.get("content_brief") or {}, project, now=instant)
+        visual = copy.deepcopy(record.get("visual_brief") or {})
+        if not visual.get("headline"):
+            return {"pass": False, "blockers": ["SOCIAL_VISUAL_BRIEF_MISSING"], "record_updates": {}}
+        reference = sq.vision_reference_context(project, brief, visual)
+        if reference.get("required") and not reference.get("ok"):
+            return {"pass": False, "blockers": [reference.get("error")], "record_updates": {}}
+        # Fingerprint includes the actual reference bytes; style-file changes
+        # invalidate an old proof without changing the post or the sent channel.
+        if reference.get("required"):
+            visual["owner_reference"] = {
+                k: reference.get(k) for k in ("niche", "version", "sha256")
+            }
+        old_forbidden = list((record.get("content_brief") or {}).get("forbidden_mentions") or [])
+        visual["forbidden_objects"] = list(dict.fromkeys(
+            [x for x in visual.get("forbidden_objects") or [] if x not in old_forbidden]
+            + list(brief.get("forbidden_mentions") or [])
+        ))
+        visual["current_date"] = brief["current_date"]
+        if final_flow:
+            visual.pop("copy_deletion_context", None)
+            visual["final_payload_qa_contract"] = sq.final_payload_qa_contract(project)
+        if not bpath or not Path(bpath).is_file():
+            return {"pass": False, "blockers": ["BANNER_ASSET_MISSING"], "record_updates": {}}
+        digest = hashlib.sha256(Path(bpath).read_bytes()).hexdigest()
+        if final_flow:
+            deletion_context = sq.copy_deletion_qa_context(record, digest)
+            if deletion_context is not None:
+                visual["copy_deletion_context"] = deletion_context
+            visual["final_payload_qa_contract"] = sq.final_payload_qa_contract(project, deletion_context)
+        public_texts = _social_delivery_public_texts(record, project, missing, public_texts)
+        if final_flow:
+            from app.services.social_owner_policy_v3 import is_ocean
+            if is_ocean(project):
+                tid = str(_ocean_tracking_record(record.get("text", ""), project, record["id"]).get("utm_content") or "")
+                for platform, public in public_texts.items():
+                    public_gate = _ocean_publication_gate(public, record.get("text", ""), platform, tid)
+                    if (not public_gate["ok"] or public.count(public_gate["expected"]["cta"]) != 1
+                            or "🤖 BORIS: AI-Авитолог" in public
+                            or __import__("re").search(r"(?i)напишите.{0,40}(?:whatsapp|max)", public)):
+                        return {"pass": False, "blockers": ["OCEAN_FINAL_PAYLOAD_PUBLIC_CONTRACT:" + platform], "record_updates": {}}
+        recent = [p for p in sq.recent_project_posts(account_id, str(project.get("id") or ""))
+                  if str(p.get("id") or "") != str(record.get("id") or "")]
+        copy_checks = {p: sq.evaluate_copy(public_texts[p], brief, project, recent_posts=recent, now=instant)
+                       for p in missing}
+        updates["delivery_copy_quality"] = {**copy.deepcopy(record.get("delivery_copy_quality") or {}), **copy_checks}
+        if any(check.get("pass") is not True for check in copy_checks.values()):
+            return {"pass": False, "blockers": ["SOCIAL_DELIVERY_COPY_BLOCKED"],
+                    "copy_quality": copy_checks, "record_updates": updates}
+        known = record.get("banner_cost_known") is True
+        total_raw = record.get("banner_cost_rub")
+        if type(total_raw) not in (int, float) or not math.isfinite(total_raw) or total_raw <= 0 or not known:
+            return {"pass": False, "blockers": ["BANNER_ACTUAL_COST_UNVERIFIED"], "record_updates": {}}
+        total = float(total_raw)
+        cap = float(sq.BANNER_ACCEPTED_TOTAL_COST_CAP_RUB)
+        if total > cap:
+            return {"pass": False, "blockers": ["BANNER_TOTAL_COST_CAP_EXCEEDED"], "record_updates": {}}
+        attempts = copy.deepcopy(record.get("delivery_qa_attempts") or {})
+        flags = sq.vision_required_flags(project, brief, visual)
+
+        def actual_qa(**request):
+            nonlocal total
+            intent = hashlib.sha256(json.dumps({
+                "context": request["context_sha256"], "outputs": request["public_texts"],
+            }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+            previous = attempts.get(intent) if isinstance(attempts.get(intent), dict) else {}
+            original_cost = previous.get("cost_rub")
+            if (type(original_cost) in (int, float) and math.isfinite(original_cost)
+                    and original_cost > 0 and isinstance(previous.get("verdict"), dict)):
+                # Same actual proof and positive known original charge. No new
+                # provider call and no additional cost, including failed proof.
+                return copy.deepcopy(previous["verdict"])
+            from app.services.media_semantic_validator import _vision_estimate_kopeks
+            if ((record.get("copy_deletion") or {}).get("state") == "qa_pending"
+                    and _project_clock(project).date().isoformat() != (record.get("final_payload_qa") or {}).get("local_date")):
+                return {"pass": False, "cost_guard_ok": False, "image_repair_allowed": False,
+                        "repair_scope": "qa", "issues": ["COPY_DELETION_DAY_CHANGED"]}
+            # Canonical financially guarded reserve is per request, including
+            # all its images. Do not change the global guard or invent a factor.
+            reservation = float(_vision_estimate_kopeks()) / 100.0
+            if not math.isfinite(reservation) or reservation <= 0 or total + reservation > cap:
+                return {"pass": False, "cost_guard_ok": False,
+                        "issues": ["DELIVERY_QA_REMAINING_BUDGET_BLOCKED"]}
+            verdict = sq.validate_banner_vision(
+                account_id, bpath, request["brief"], request["visual_brief"],
+                (request["public_texts"] if final_flow else json.dumps(request["public_texts"], ensure_ascii=False, sort_keys=True)), project,
+            )
+            charge = verdict.get("qa_cost_rub") if isinstance(verdict, dict) else None
+            new_charge = verdict.get("qa_new_charge_rub") if isinstance(verdict, dict) else None
+            if (type(charge) not in (int, float) or not math.isfinite(charge) or charge <= 0
+                    or verdict.get("qa_cost_known") is not True
+                    or type(new_charge) not in (int, float) or not math.isfinite(new_charge)
+                    or new_charge < 0
+                    or (new_charge == 0 and verdict.get("cache_hit") is not True)):
+                # SQ recovers a cache's original cost only from the exact
+                # tenant/operation/provider-request usage receipt. No receipt
+                # means unknown, never a free QA or a fabricated PASS.
+                verdict = {**(verdict if isinstance(verdict, dict) else {}), "pass": False,
+                           "cost_guard_ok": False, "issues": ["DELIVERY_QA_ACTUAL_COST_UNVERIFIED"]}
+                attempts[intent] = {"cost_rub": charge, "new_charge_rub": new_charge,
+                                    "verdict": copy.deepcopy(verdict)}
+                updates["delivery_qa_attempts"] = attempts
+                updates["banner_cost_known"] = False
+                return verdict
+            # Charge the original proof once to this post. A cache hit carries
+            # zero NEW spend, but without a stored attempt it is not evidence
+            # that the original cost was already in the post total.
+            accounted_charge = float(charge)
+            if final_flow:
+                receipt = verdict.get("qa_cost_evidence") or {}
+                receipt_identity = tuple(receipt.get(k) for k in ("account_id", "operation", "request_id"))
+                if (receipt_identity[0] == str(account_id) and receipt_identity[1] == "social_banner_vision_qa_v1"
+                        and isinstance(receipt_identity[2], str) and receipt_identity[2]):
+                    matching = []
+                    for item in attempts.values():
+                        if not isinstance(item, dict):
+                            continue
+                        old_receipt = item.get("cost_evidence") or (item.get("verdict") or {}).get("qa_cost_evidence") or {}
+                        if tuple(old_receipt.get(k) for k in ("account_id", "operation", "request_id")) == receipt_identity:
+                            matching.append((item, old_receipt))
+                    if matching:
+                        amount = float(charge)
+                        consistent = all(
+                            type(item.get("cost_rub")) in (int, float)
+                            and item["cost_rub"] == amount
+                            and type(old_receipt.get("cost_rub")) in (int, float)
+                            and old_receipt["cost_rub"] == amount
+                            and type(item.get("accounted_cost_rub")) in (int, float)
+                            and item["accounted_cost_rub"] in (0.0, amount)
+                            for item, old_receipt in matching
+                        )
+                        proven = consistent and sum(
+                            item.get("accounted_cost_rub") == amount for item, _ in matching
+                        ) == 1
+                        input_sha = str(verdict.get("qa_input_sha256") or "")
+                        same_input = bool(__import__("re").fullmatch(r"[0-9a-f]{64}", input_sha)) and all(
+                            isinstance(item.get("verdict"), dict)
+                            and item["verdict"].get("qa_input_sha256") == input_sha
+                            and item["verdict"].get("qa_input_contract") == verdict.get("qa_input_contract")
+                            for item, _ in matching
+                        )
+                        if verdict.get("cache_hit") is True and new_charge == 0 and receipt.get("cost_rub") == float(charge) and proven and same_input:
+                            # A URL-only normalization change may alias the same
+                            # exact paid request. Retain its positive original
+                            # cost but never book this SAME receipt twice.
+                            accounted_charge = 0.0
+                        else:
+                            verdict = {**verdict, "pass": False, "cost_guard_ok": False,
+                                "image_repair_allowed": False, "repair_scope": "qa",
+                                "issues": list(verdict.get("issues") or []) + ["DELIVERY_QA_RECEIPT_CONFLICT"]}
+                            attempts[intent] = {"cost_rub": float(charge), "new_charge_rub": float(new_charge),
+                                "accounted_cost_rub": None, "cost_evidence": copy.deepcopy(receipt),
+                                "verdict": copy.deepcopy(verdict)}
+                            updates.update(delivery_qa_attempts=attempts, banner_cost_known=False,
+                                           final_payload_reconciliation_required=True)
+                            return verdict
+            total = round(total + accounted_charge, 6)
+            verdict = {**verdict, "cost_guard_ok": total <= cap}
+            if total > cap:
+                verdict["pass"] = False
+                verdict["issues"] = list(verdict.get("issues") or []) + ["BANNER_TOTAL_COST_CAP_EXCEEDED"]
+            attempts[intent] = {"cost_rub": float(charge), "new_charge_rub": float(new_charge),
+                                "cost_evidence": copy.deepcopy(verdict.get("qa_cost_evidence")),
+                                "verdict": copy.deepcopy(verdict)}
+            if final_flow:
+                attempts[intent]["accounted_cost_rub"] = accounted_charge
+            updates["delivery_qa_attempts"] = attempts
+            updates["banner_cost_rub"] = total
+            updates["banner_cost_known"] = True
+            if final_flow:
+                updates["banner_vision_qa_costs"] = list(record.get("banner_vision_qa_costs") or []) + ([accounted_charge] if accounted_charge > 0 else [])
+            # Account for the received paid proof BEFORE any fallible asset or
+            # native postcheck. A read failure cannot erase this actual charge.
+            try:
+                image_same = hashlib.sha256(Path(bpath).read_bytes()).hexdigest() == request["banner_sha256"]
+            except OSError:
+                image_same = False
+            if not image_same:
+                verdict = {**verdict, "pass": False,
+                           "issues": list(verdict.get("issues") or []) + ["BANNER_CHANGED_DURING_QA"],
+                           "image_repair_allowed": False, "repair_scope": "qa"}
+            if (reference.get("required") and
+                    (verdict.get("reference") or {}).get("sha256") != reference.get("sha256")):
+                verdict = {**verdict, "pass": False,
+                           "issues": list(verdict.get("issues") or []) + ["REFERENCE_CHANGED_DURING_QA"],
+                           "image_repair_allowed": False, "repair_scope": "qa"}
+            if final_flow and (verdict.get("final_payload_qa_version") != sq.FINAL_PAYLOAD_QA_VERSION
+                    or verdict.get("qa_input_contract") != visual["final_payload_qa_contract"]
+                    or not __import__("re").fullmatch(r"[0-9a-f]{64}", str(verdict.get("qa_input_sha256") or ""))):
+                verdict = {**verdict, "pass": False,
+                           "issues": list(verdict.get("issues") or []) + ["FINAL_PAYLOAD_QA_INPUT_UNVERIFIED"],
+                           "image_repair_allowed": False, "repair_scope": "qa"}
+            attempts[intent]["verdict"] = copy.deepcopy(verdict)
+            return verdict
+
+        result = ensure_delivery_qa(
+            record=record, project=project, brief=brief, visual_brief=visual,
+            banner_sha256=digest, public_texts=public_texts, required_flags=flags,
+            qa_callback=actual_qa, now=instant,
+        )
+        updates["delivery_quality"] = result["delivery_quality"]
+        if result.get("pass") is True:
+            updates["delivery_texts"] = {**copy.deepcopy(record.get("delivery_texts") or {}), **public_texts}
+        result["public_texts"] = public_texts
+        result["record_updates"] = updates
+        return result
+    except Exception as exc:
+        reason = str(exc)
+        blocker = reason if reason.startswith("SOCIAL_COPY_QUALITY_BLOCKED:") else "SOCIAL_DELIVERY_QA_ERROR:" + type(exc).__name__
+        return {"pass": False, "blockers": [blocker], "record_updates": updates}
 
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "demo":
@@ -6062,3 +8238,5 @@ if __name__ == "__main__":
         _send_demo(sys.argv[2], sys.argv[3])
     else:
         main()
+
+

@@ -270,6 +270,8 @@ class ProjectBody(BaseModel):
     auto_publish_hours: int = 0
     tz_offset: int = 3
     paid_auto_generation: Optional[bool] = None
+    vk_text_only_fallback_enabled: Optional[bool] = None
+    vk_text_only_fallback_after_cycles: int = 3
 
 def _norm_vk(value):
     import re as _re, os as _os, requests as _rq
@@ -343,9 +345,12 @@ def save_project(body: ProjectBody, _cur=_Depends(_get_cur)):
                 "text_prompt": body.text_prompt, "banner_prompt": body.banner_prompt,
                 "image_source": body.image_source, "platforms": body.platforms,
                 "contact_tg": body.contact_tg, "contact_vk": body.contact_vk, "mode": body.mode,
-                "auto_publish_hours": body.auto_publish_hours, "tz_offset": body.tz_offset}
+                "auto_publish_hours": body.auto_publish_hours, "tz_offset": body.tz_offset,
+                "vk_text_only_fallback_after_cycles": max(1, min(int(body.vk_text_only_fallback_after_cycles or 3), 10))}
         if body.paid_auto_generation is not None:
             data["paid_auto_generation"] = bool(body.paid_auto_generation)
+        if body.vk_text_only_fallback_enabled is not None:
+            data["vk_text_only_fallback_enabled"] = bool(body.vk_text_only_fallback_enabled)
         data = _enforce_project_content_contract(data)
         if body.id:
             found = False
@@ -392,6 +397,295 @@ def get_posts(account_id: str = "", project_id: str = "", _cur=_Depends(_get_cur
     if project_id:
         posts = [p for p in posts if p.get("project_id") == project_id]
     return {"posts": posts}
+
+
+
+class SocialPreviewBody(BaseModel):
+    project_id: str
+    action: str = "new"
+    source_post_id: str = ""
+
+
+class SocialFeedbackBody(BaseModel):
+    project_id: str
+    post_id: str
+    rating: str
+    reasons: List[str] = []
+    note: str = ""
+
+
+@router.post("/preview")
+def create_social_preview(body: SocialPreviewBody, _cur=_Depends(_get_cur)):
+    """Create a quality-gated draft without external publication."""
+    import os, random, sys, uuid
+    account_id = _ubucket(_cur)
+    sys.path.insert(
+        0,
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    )
+    import posting_runner as pr
+    from app.services import social_quality as sq
+
+    db = SessionLocal()
+    try:
+        projects = _load(db, account_id, "posting_projects", []) or []
+        existing_posts = _load(db, account_id, "posting_posts", []) or []
+    finally:
+        db.close()
+    proj = next(
+        (
+            p for p in projects
+            if isinstance(p, dict)
+            and str(p.get("id") or "") == str(body.project_id or "")
+        ),
+        None,
+    )
+    if not proj:
+        return {"status": "not_found", "message": "Проект не найден"}
+
+    source = next(
+        (
+            p for p in existing_posts
+            if isinstance(p, dict)
+            and str(p.get("id") or "") == str(body.source_post_id or "")
+        ),
+        None,
+    )
+    action = str(body.action or "new").strip().lower()
+    if action not in {
+        "new", "change_theme", "regenerate_text", "regenerate_banner"
+    }:
+        return {"status": "invalid_action"}
+
+    # Banner-only regeneration keeps the exact accepted copy/brief and produces
+    # a different semantic visual variant. This avoids rewriting good copy.
+    if action == "regenerate_banner" and source:
+        if source.get("ids"):
+            return {
+                "status": "locked_after_delivery",
+                "message": "Опубликованный пост не меняем; создайте новый",
+            }
+        text_value = str(source.get("text") or "").strip()
+        brief = (
+            dict(source.get("content_brief"))
+            if isinstance(source.get("content_brief"), dict)
+            else sq.build_content_brief(
+                account_id, proj,
+                str((source.get("content_brief") or {}).get("selected_theme") or "")
+                or str((proj.get("themes") or ["публикация"])[0]),
+            )
+        )
+        visual = sq.build_visual_brief(brief, text_value, proj)
+        visual["variant_nonce"] = uuid.uuid4().hex[:8]
+        result = {
+            "account_id": account_id,
+            "theme": brief.get("selected_theme") or "",
+            "text": text_value,
+            "content_brief": brief,
+            "copy_quality": source.get("copy_quality") or sq.evaluate_copy(
+                text_value, brief, proj,
+                recent_posts=sq.recent_project_posts(account_id, body.project_id),
+            ),
+            "copy_attempts": int(source.get("copy_attempts") or 1),
+            "visual_brief": visual,
+            "quality_policy": sq.POLICY_VERSION,
+            "quality_status": "copy_pass",
+        }
+        result = pr._generate_social_quality_banner(
+            account_id=account_id,
+            project_id=str(body.project_id),
+            theme=str(brief.get("selected_theme") or ""),
+            banner_prompt=(
+                str(proj.get("banner_prompt") or "")
+                + "\nСоздай новую композицию, отличную от предыдущего preview. "
+                + "Вариант: " + str(visual["variant_nonce"])
+            ),
+            result=result,
+            project=proj,
+            content_brief=brief,
+            visual_brief=visual,
+            quality_module=sq,
+        )
+    else:
+        if source and action == "regenerate_text":
+            source_brief = (
+                source.get("content_brief")
+                if isinstance(source.get("content_brief"), dict) else {}
+            )
+            base_theme = str(
+                source_brief.get("selected_theme")
+                or source.get("theme")
+                or ""
+            ).strip()
+            if not base_theme:
+                base_theme = str((proj.get("themes") or ["публикация"])[0])
+            theme = base_theme
+            text_prompt = (
+                str(proj.get("text_prompt") or "")
+                + "\n\nOWNER_PREVIEW_REGENERATION: перепиши тему с новым углом, "
+                  "новой первой фразой и новым финалом. Не копируй предыдущий draft. "
+                + "Запрос-вариант: " + uuid.uuid4().hex[:8]
+            )
+        else:
+            if pr._is_nail_ctx(account_id, proj):
+                theme, _traits = pr._nail_theme(
+                    account_id, proj.get("themes") or []
+                )
+            else:
+                theme = pr._choose_rotating_project_theme(
+                    account_id, proj, random, recent_limit=8
+                )
+            text_prompt = str(proj.get("text_prompt") or "")
+        brief = sq.build_content_brief(account_id, proj, theme)
+        try:
+            result = pr.generate_post(
+                account_id,
+                theme,
+                text_prompt=text_prompt,
+                banner_prompt=proj.get("banner_prompt", ""),
+                occasion=pr._project_occasion(proj),
+                channel=proj.get("style_source", ""),
+                image_source=proj.get("image_source", "ai"),
+                project_id=str(body.project_id),
+                allow_hashtags=bool(proj.get("allow_hashtags")),
+                project=proj,
+                content_brief=brief,
+            )
+        except RuntimeError as exc:
+            reason = str(exc or "")
+            if reason.startswith("SOCIAL_COPY_QUALITY_BLOCKED:"):
+                return {
+                    "status": "quality_blocked",
+                    "message": reason[:300],
+                    "content_brief": brief,
+                    "copy_quality": {
+                        "pass": False,
+                        "blockers": [
+                            x for x in reason.split(":", 1)[-1].split(",")
+                            if str(x).strip()
+                        ][:8],
+                    },
+                    "vision_qa": None,
+                    "banner_cost_rub": 0,
+                }
+            raise
+
+    media_ok, media_err = pr._banner_delivery_ready(
+        result, proj.get("image_source", "ai")
+    )
+    if not media_ok or not bool((result.get("copy_quality") or {}).get("pass")):
+        return {
+            "status": "quality_blocked",
+            "message": str(media_err or "SOCIAL_COPY_QUALITY_BLOCKED"),
+            "copy_quality": result.get("copy_quality"),
+            "vision_qa": result.get("vision_qa"),
+            "banner_cost_rub": result.get("banner_cost_rub"),
+        }
+
+    record_id = uuid.uuid4().hex[:12]
+    tracking = sq.quality_tracking(result)
+    ocean_tracking = pr._ocean_tracking_record(
+        result.get("text", ""), proj, record_id
+    )
+    if ocean_tracking:
+        tracking.update(ocean_tracking)
+    pr._save_post_record(
+        account_id,
+        str(body.project_id),
+        str(proj.get("name") or body.project_id),
+        result.get("text", ""),
+        result.get("banner"),
+        "draft",
+        preview=pr._project_delivery_text_tracked(
+            result.get("text", ""),
+            proj,
+            "tg" if proj.get("channel_tg") else "vk",
+            tracking_id=str(tracking.get("utm_content") or ""),
+        ),
+        publish_at="",
+        generation_key="manual-preview:" + record_id,
+        record_id=record_id,
+        tracking=tracking,
+    )
+    banner_name = os.path.basename(str(result.get("banner") or ""))
+    return {
+        "status": "ok",
+        "post_id": record_id,
+        "theme": result.get("theme"),
+        "topic_reason": (
+            "Тема выбрана с учётом сезона, последних публикаций, формата "
+            "и обратной связи владельца"
+        ),
+        "text": result.get("text"),
+        "banner": banner_name,
+        "banner_url": (
+            "/api/posting/banner?f=" + banner_name if banner_name else ""
+        ),
+        "content_brief": result.get("content_brief"),
+        "copy_quality": result.get("copy_quality"),
+        "visual_brief": result.get("visual_brief"),
+        "vision_qa": result.get("vision_qa"),
+        "banner_cost_rub": result.get("banner_cost_rub"),
+        "banner_attempts": result.get("banner_attempts"),
+    }
+
+
+@router.post("/quality/feedback")
+def social_quality_feedback(
+    body: SocialFeedbackBody, _cur=_Depends(_get_cur)
+):
+    from app.services.social_quality import append_feedback
+    return append_feedback(
+        _ubucket(_cur),
+        body.project_id,
+        body.post_id,
+        body.rating,
+        body.reasons,
+        body.note,
+    )
+
+
+@router.get("/quality/acceptance")
+def social_quality_acceptance(
+    project_id: str = "", _cur=_Depends(_get_cur)
+):
+    from app.services.social_quality import acceptance_snapshot
+    return acceptance_snapshot(
+        _ubucket(_cur), project_id=project_id, required_slots=10
+    )
+
+
+@router.get("/quality/analytics")
+def social_quality_analytics(
+    project_id: str = "", days: int = 30, _cur=_Depends(_get_cur)
+):
+    from app.services.social_quality import analytics_snapshot
+    days = min(60, max(1, int(days or 30)))
+    return analytics_snapshot(
+        _ubucket(_cur), project_id=project_id, days=days
+    )
+
+
+@router.post("/quality/verify-now")
+def social_quality_verify_now(_cur=_Depends(_get_cur)):
+    import os, sys
+    sys.path.insert(
+        0,
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    )
+    import posting_runner as pr
+    # The verifier remains globally idempotent/readback-only; the account filter
+    # is enforced by returned data before it reaches the UI.
+    bucket = _ubucket(_cur)
+    result = pr.social_post_publish_verify_once(
+        limit=20, min_age_seconds=0, account_id=bucket
+    )
+    result["failures"] = [
+        x for x in (result.get("failures") or [])
+        if str(x.get("account_id") or "") == bucket
+    ]
+    return result
+
 
 class PostActionBody(BaseModel):
     account_id: str
@@ -461,7 +755,11 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
                     "quality_boundary": boundary,
                     "message": "Публикация остановлена: финальная проверка публичного текста не пройдена",
                 }
-        banner = os.path.join(pr.BANNER_DIR, post["banner"]) if post.get("banner") else None
+        try:
+            banner = pr._resolve_banner_path(body.account_id, post.get("banner"))
+        except (ValueError, OSError) as asset_exc:
+            return {"status": "fail", "results": {},
+                    "errors": {"banner": "SOCIAL_MEDIA_REFERENCE_INVALID:" + type(asset_exc).__name__}}
         _media_ok, _media_err = pr._banner_delivery_ready({"banner": banner}, proj.get("image_source", "ai"))
         if not _media_ok:
             return {"status": "fail", "results": {},
@@ -489,9 +787,12 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
             )
         ):
             if _social_is_ocean(proj):
-                rendered["tg"] = pr._project_delivery_text_tracked(
-                    text, proj, "tg", tracking_id=tracking_id
-                )
+                try:
+                    rendered["tg"] = pr._social_delivery_public_texts(post, proj, ["tg"])["tg"]
+                except RuntimeError as copy_exc:
+                    return {"status": "quality_recheck_required", "results": {},
+                            "errors": {"quality": [str(copy_exc)]},
+                            "message": "Сохранённый текст доставки не подтверждён"}
                 output_health = pr._ocean_publication_gate(
                     rendered["tg"], text, "tg", tracking_id
                 )
@@ -526,9 +827,12 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
             )
         ):
             if _social_is_ocean(proj):
-                rendered["vk"] = pr._project_delivery_text_tracked(
-                    text, proj, "vk", tracking_id=tracking_id
-                )
+                try:
+                    rendered["vk"] = pr._social_delivery_public_texts(post, proj, ["vk"])["vk"]
+                except RuntimeError as copy_exc:
+                    return {"status": "quality_recheck_required", "results": {},
+                            "errors": {"quality": [str(copy_exc)]},
+                            "message": "Сохранённый текст доставки не подтверждён"}
                 output_health = pr._ocean_publication_gate(
                     rendered["vk"], text, "vk", tracking_id
                 )
@@ -554,6 +858,22 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
                         "message": "Публикация остановлена: итоговый текст нарушает публичный контракт",
                     }
 
+        if str(post.get("quality_policy") or "") == "SOCIAL_QUALITY_V1" or _social_is_guarded(proj):
+            quality_gate = pr._social_delivery_quality_gate(
+                body.account_id, post, proj, banner, public_texts=rendered)
+            post.update(quality_gate.get("record_updates") or {})
+            if quality_gate.get("pass") is True:
+                _saved_delivery_texts = dict(post.get("delivery_texts") or {})
+                _saved_delivery_texts.update(quality_gate["public_texts"])
+                post["delivery_texts"] = _saved_delivery_texts
+            if not pr._persist_post_record(body.account_id, post):
+                raise RuntimeError("SOCIAL_QA_EVIDENCE_PERSIST_FAILED")
+            if quality_gate.get("pass") is not True:
+                return {"status": "quality_recheck_required", "results": {},
+                        "errors": {"quality": quality_gate.get("blockers") or ["SOCIAL_DELIVERY_QUALITY_BLOCKED"]},
+                        "message": "Актуальность текста и баннера перед доставкой не подтверждена"}
+            rendered = quality_gate["public_texts"]
+
         if proj.get("channel_tg") and platforms in ("tg", "both"):
             if isinstance(existing_ids.get("tg"), dict) and existing_ids["tg"].get("message_id"):
                 results["tg"] = {
@@ -563,7 +883,7 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
                 }
             else:
                 results["tg"] = pr._send_telegram(
-                    proj["channel_tg"], rendered["tg"], banner, tenant_scope=body.account_id
+                    proj["channel_tg"], rendered["tg"], banner, tenant_scope=body.account_id, delivery_context=pr._social_delivery_context(post, proj, "tg")
                 )
 
         if proj.get("vk_owner_id") and platforms in ("vk", "both"):
@@ -575,10 +895,18 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
                 }
             else:
                 results["vk"] = pr._send_vk(
-                    int(proj["vk_owner_id"]), rendered["vk"], banner, tenant_scope=body.account_id
+                    int(proj["vk_owner_id"]), rendered["vk"], banner, tenant_scope=body.account_id, delivery_context=pr._social_delivery_context(post, proj, "vk")
                 )
 
         merged_ids = pr._merge_delivery_ids(existing_ids, proj, results)
+        delivery_texts = (
+            dict(post.get("delivery_texts"))
+            if isinstance(post.get("delivery_texts"), dict)
+            else {}
+        )
+        for _platform, _payload in rendered.items():
+            if str(_payload or "").strip():
+                delivery_texts[_platform] = str(_payload)
         ok = pr._all_required_delivery_ok(proj, results)
         db = SessionLocal()
         try:
@@ -588,18 +916,24 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
                     continue
                 p["ids"] = merged_ids
                 p["external_post_id"] = dict(merged_ids or {})
+                if delivery_texts:
+                    p["delivery_texts"] = dict(delivery_texts)
                 if tracking:
                     p.update(tracking)
                 if ok:
-                    _preview_platform = "tg" if proj.get("channel_tg") else "vk"
-                    if _social_is_ocean(proj):
-                        _preview_text = pr._project_delivery_text_tracked(
-                            text, proj, _preview_platform, tracking_id=tracking_id
-                        )
-                    else:
-                        _preview_text = _social_render_public_text(
-                            text, proj, _preview_platform, fallback=pr._project_delivery_text
-                        )
+                    # External delivery already succeeded: preview cannot
+                    # call a renderer or change the accepted provider payload.
+                    _preview_sources = (
+                        rendered,
+                        p.get("delivery_texts") if isinstance(p.get("delivery_texts"), dict) else {},
+                    )
+                    _preview_text = next((
+                        payload
+                        for platform in pr._required_delivery_platforms(proj)
+                        for source in _preview_sources
+                        for payload in [source.get(platform)]
+                        if isinstance(payload, str) and payload.strip()
+                    ), None)
                     pr._mark_social_delivery_published(
                         p,
                         proj,
@@ -613,6 +947,17 @@ def publish_post(body: PostActionBody, _cur=_Depends(_get_cur)):
                         rv = results.get(k) if isinstance(results.get(k), dict) else {}
                         if not rv.get("ok"):
                             errs.append(k + ": " + str(rv.get("error") or "delivery_failed")[:120])
+                    p["delivery_failures"] = {
+                        k: {field: rv.get(field) for field in (
+                            "error", "stage", "reason", "dependency_state",
+                            "retryable_external", "retry_after_seconds",
+                            "owner_action_required", "receipt_key", "receipt_status",
+                            "delivery_outcome_uncertain", "reconciliation_required", "photo_message_id",
+                            "review_after", "review_overdue", "owner_action",
+                        ) if rv.get(field) is not None}
+                        for k in pr._required_delivery_platforms(proj)
+                        for rv in [results.get(k) or {}] if not rv.get("ok")
+                    }
                     p["error"] = "; ".join(errs)[:300]
                 break
             _save(db, body.account_id, "posting_posts", posts)
@@ -952,6 +1297,21 @@ def update_post(body: PostEditBody, _cur=_Depends(_get_cur)):
             return {"status": "locked_after_delivery",
                     "message": "После первой внешней доставки текст нельзя менять; сначала удалите публикацию"}
         found["text"] = body.text
+        # Editing invalidates the QA evidence bound to the previous text/banner.
+        # The draft stays editable, but Quality V1 will refuse publication until
+        # the owner regenerates/rechecks it through the preview flow.
+        if str(found.get("quality_policy") or "") == "SOCIAL_QUALITY_V1":
+            found["quality_status"] = "needs_recheck_after_edit"
+            found["copy_quality"] = {
+                "policy_version": "SOCIAL_QUALITY_V1",
+                "pass": False,
+                "blockers": ["manual_text_changed_after_quality_check"],
+            }
+            found["vision_qa"] = {
+                "policy_version": "SOCIAL_QUALITY_V1",
+                "pass": False,
+                "issues": ["text_changed_after_banner_quality_check"],
+            }
         proj = next((p for p in projects if p.get("id") == found.get("project_id")), None) or {}
         try:
             import os, sys

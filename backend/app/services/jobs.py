@@ -20,6 +20,7 @@ from app.services.reliability import (CRITICAL_KINDS, HEAVY_KINDS, INTERACTIVE_K
 from app.models.background_job import BackgroundJob
 from app.models.media_asset import MediaAsset
 from app.services.exception_observability import observe_suppressed
+from app.services.job_execution_clock import ExecutionClock, ExecutionOwnershipLost
 
 LOCK_ID = 947120153
 THUMBS_PER_RUN = 300
@@ -487,6 +488,11 @@ def _tenant_slot_limit(kind: str) -> int:
     if kind in CRITICAL_KINDS:
         return 0
     import os
+    if kind == "campaign_media_shard":
+        try:
+            return max(1, min(int(os.environ.get("BORIS_CAMPAIGN_MEDIA_SHARD_TENANT_LIMIT", "4") or 4), 4))
+        except Exception:
+            return 4
     env_name = "BORIS_TENANT_HEAVY_LIMIT" if kind in HEAVY_KINDS else "BORIS_TENANT_NORMAL_LIMIT"
     default = "1" if kind in HEAVY_KINDS else "2"
     try:
@@ -530,10 +536,16 @@ def _acquire_job_execution_lock(conn, job_id: int) -> bool:
         return False
     key = f"boris:background-job:{int(job_id)}"
     try:
-        acquired = bool(conn.execute(_t(
-            "select pg_try_advisory_lock(hashtextextended(:key, 744619))"
-        ), {"key": key}).scalar())
+        owner = conn.execute(_t(
+            "select pg_backend_pid() as backend_pid, "
+            "pg_try_advisory_lock(hashtextextended(:key, 744619)) as acquired"
+        ), {"key": key}).mappings().first()
+        acquired = bool(owner and owner.get("acquired"))
         conn.commit()
+        if acquired:
+            conn.info["boris_execution_owner"] = {
+                "job_id": int(job_id), "backend_pid": int(owner["backend_pid"]),
+            }
         return acquired
     except Exception:
         try:
@@ -679,7 +691,21 @@ def job_public(j):
     # not internal implementation detail, and removes the need to manually poll.
     scheduled = getattr(j, "scheduled_at", None)
     payload = getattr(j, "payload_json", None) or {}
+    from app.services.job_execution_clock import summary as _timing_summary
     return {"id": j.id, "kind": j.kind, "status": j.status,
+            **_timing_summary(j),
+            "job_id":j.id, "account_id":j.account_id,
+            "campaign_id":payload.get("campaign_id"),
+            "item_id":(payload.get("item_ids") or [None])[0],
+            "created_at":j.created_at.isoformat() if j.created_at else None,
+            "queued_at":j.created_at.isoformat() if j.created_at else None,
+            "last_progress_at": (
+                payload.get("_banner_last_progress_at")
+                if payload.get("banner_worker_policy") == "premium_worker_reliability_v1"
+                else (j.updated_at.isoformat() if j.updated_at else None)
+            ),
+            "attempts":int(j.attempts or 0),
+            "progress_done":j.progress_done, "progress_total":j.progress_total,
             "state_text": human.get(j.status, j.status),
             "done": j.progress_done, "total": j.progress_total,
             "started_at": started.isoformat() if started else None,
@@ -826,6 +852,418 @@ def _campaign_mutation_locked(C, campaign):
     return bool(C._ff_publication_locked(ff or {})), activation, ff or {}
 
 
+def _campaign_prepared_photo_count(item):
+    """Count ordinary gallery photos, never the generated banner hero."""
+    item=item or {}
+    banner_urls={
+        str(item.get("banner") or "").strip(),
+        str(item.get("banner_url") or "").strip(),
+    } - {""}
+    count=0
+    for g in (item.get("gallery") or []):
+        g=g or {}
+        url=str(g.get("url") or "").strip()
+        provider=str(g.get("source_provider") or "").strip().lower()
+        role=str(g.get("role") or "").strip().lower()
+        source_ref=str(g.get("source_ref") or "").strip().lower()
+        media_type=str(g.get("media_type") or "").strip().lower()
+        is_banner=bool(
+            (url and url in banner_urls)
+            or media_type=="banner"
+            or source_ref.startswith("premium:")
+            or source_ref in {
+                "campaign_openai_gpt_image_2",
+                "campaign_openai_visual_local_text_v1",
+                "campaign_stock_visual_local_text_v1",
+            }
+            or (
+                provider in {"openai","openai_full_ai_premium","boris_local"}
+                and role=="hero"
+                and (provider!="boris_local" or bool(banner_urls))
+            )
+        )
+        if is_banner:
+            continue
+        count+=1
+    return count
+
+
+def _campaign_media_shard_plan(pending_item_ids, claimed_item_ids=(), *, shard_size=10, slots=4):
+    """Pure deterministic planner: no duplicates, bounded shard count and size."""
+    pending=[]; seen=set()
+    for raw in pending_item_ids or []:
+        try: iid=int(raw)
+        except Exception: continue
+        if iid>0 and iid not in seen:
+            pending.append(iid); seen.add(iid)
+    claimed={int(x) for x in (claimed_item_ids or []) if str(x).isdigit()}
+    shard_size=max(8,min(int(shard_size or 10),10))
+    slots=max(0,min(int(slots or 0),4))
+    free=[iid for iid in pending if iid not in claimed]
+    return [free[i:i+shard_size] for i in range(0,min(len(free),slots*shard_size),shard_size)]
+
+
+def _campaign_media_shard_jobs(db, account_id: str, campaign_id: int, parent_job_id: int):
+    rows=(db.query(BackgroundJob)
+          .filter(BackgroundJob.kind=="campaign_media_shard",
+                  BackgroundJob.account_id==str(account_id))
+          .order_by(BackgroundJob.id.desc()).limit(500).all())
+    out=[]
+    for row in rows:
+        p=dict(row.payload_json or {})
+        if int(p.get("campaign_id") or 0)==int(campaign_id) and int(p.get("_parent_campaign_prepare_job_id") or 0)==int(parent_job_id):
+            out.append(row)
+    return out
+
+
+def _campaign_media_shard_fingerprint(campaign_id: int, parent_job_id: int, wave: int, item_ids) -> str:
+    import hashlib
+    ids=",".join(str(int(x)) for x in (item_ids or []))
+    digest=hashlib.sha256(ids.encode("utf-8")).hexdigest()[:16]
+    return f"campaign_media_shard:{int(campaign_id)}:{int(parent_job_id)}:{int(wave)}:{digest}"
+
+
+def _campaign_media_retry_window(pending_item_ids, children, now=None):
+    """Carry failed-child retry debt across waves instead of respawning hot loops.
+
+    Read-only planner. A no-progress failure holds ONLY its still-pending items
+    for 5 minutes; repeated failed waves extend this to at most 30 minutes.
+    It does not classify an error as success, bypass provider guards or alter
+    another campaign's jobs. The caller supplies exact account/campaign/parent
+    children from _campaign_media_shard_jobs.
+    """
+    from math import ceil
+    now = now or datetime.now(timezone.utc)
+    pending = {int(x) for x in pending_item_ids or [] if str(x).isdigit()}
+    failures = {}
+    for child in children or []:
+        if str(getattr(child, "status", "")) != "failed":
+            continue
+        result = getattr(child, "result_json", None)
+        if not isinstance(result, dict) or result.get("diagnostic_code") != "NO_PROGRESS_LOOP":
+            continue
+        finished = getattr(child, "finished_at", None)
+        if not isinstance(finished, datetime):
+            continue
+        if finished.tzinfo is None:
+            finished = finished.replace(tzinfo=timezone.utc)
+        if finished < now - timedelta(hours=24):
+            continue
+        # A future clock skew must not hold an account forever.
+        finished = min(finished, now)
+        payload = getattr(child, "payload_json", None)
+        payload = payload if isinstance(payload, dict) else {}
+        ids = result.get("pending_item_ids")
+        if not isinstance(ids, list):
+            ids = payload.get("item_ids") or []
+        for value in set(int(x) for x in ids if str(x).isdigit()):
+            if value in pending:
+                failures.setdefault(value, []).append(finished)
+    held = []
+    waits = []
+    for iid, stamps in failures.items():
+        delay = min(1800, 300 * (2 ** min(len(stamps)-1, 3)))
+        until = max(stamps) + timedelta(seconds=delay)
+        remaining = max(0, ceil((until-now).total_seconds()))
+        if remaining:
+            held.append(iid)
+            waits.append(remaining)
+    return {"held_item_ids": sorted(held), "retry_after_seconds": min(waits) if waits else 0,
+            "diagnostic_code": "MEDIA_CHILD_NO_PROGRESS_BACKOFF" if held else None}
+
+
+def _campaign_qa_call_limits(requested_total: int, media_target: int) -> dict:
+    import math
+    total=max(1,int(requested_total or 1))
+    photos=max(1,int(media_target or 1))
+    media_expected=max(1,int(math.ceil((total*photos)/4.0)))
+    # Both local-compositor and Premium FULL_AI banner QA are bounded to four
+    # images per Vision request. The anomaly budget must track provider calls,
+    # not banner count, otherwise a healthy 100-banner run is misclassified.
+    banner_expected=max(1,int(math.ceil(total/4.0)))
+    return {
+        "media_expected_calls":media_expected,
+        "media_call_limit":max(media_expected+10,int(math.ceil(media_expected*1.5))),
+        "banner_expected_calls":banner_expected,
+        "banner_call_limit":max(banner_expected+5,int(math.ceil(banner_expected*1.5))),
+    }
+
+
+def _campaign_qa_usage_snapshot(db, account_id: str, campaign_id: int) -> dict:
+    from sqlalchemy import text as _sql_text
+    row=db.execute(_sql_text("""
+      select
+        count(*) filter (where operation like 'media_semantic_item_vision%%') as media_calls,
+        coalesce(sum(cost_rub) filter (where operation like 'media_semantic_item_vision%%'),0) as media_cost_rub,
+        count(*) filter (
+          where operation like 'campaign_banner%%vision%%qa%%'
+             or operation='campaign_banner_batch_vision_qa_v1'
+             or operation='banner_premium_vision_qa_batch_v1'
+             or operation='banner_premium_vision_qa'
+        ) as banner_calls,
+        count(*) filter (
+          where operation='banner_premium_vision_qa_batch_v1'
+             or operation='campaign_banner_vision_qa_batch_v1'
+             or operation='campaign_banner_batch_vision_qa_v1'
+        ) as banner_batch_calls,
+        count(*) filter (
+          where operation='banner_premium_vision_qa'
+             or operation='campaign_banner_vision_qa'
+        ) as banner_single_calls,
+        coalesce(sum(cost_rub) filter (
+          where operation like 'campaign_banner%%vision%%qa%%'
+             or operation='campaign_banner_batch_vision_qa_v1'
+             or operation='banner_premium_vision_qa_batch_v1'
+             or operation='banner_premium_vision_qa'
+        ),0) as banner_cost_rub
+      from api_usage
+      where account_id=:account_id
+        and coalesce(provenance_json->>'campaign_id','')=:campaign_id
+        and (
+          operation like 'media_semantic_item_vision%%'
+          or operation like 'campaign_banner%%vision%%qa%%'
+          or operation='campaign_banner_batch_vision_qa_v1'
+          or operation='banner_premium_vision_qa_batch_v1'
+          or operation='banner_premium_vision_qa'
+        )
+    """),{"account_id":str(account_id),"campaign_id":str(int(campaign_id))}).mappings().first()
+    row=dict(row or {})
+    return {
+        "media_calls":int(row.get("media_calls") or 0),
+        "media_cost_rub":float(row.get("media_cost_rub") or 0),
+        "banner_calls":int(row.get("banner_calls") or 0),
+        "banner_batch_calls":int(row.get("banner_batch_calls") or 0),
+        "banner_single_calls":int(row.get("banner_single_calls") or 0),
+        "banner_cost_rub":float(row.get("banner_cost_rub") or 0),
+    }
+
+
+def _campaign_banner_required(ff):
+    """Backward-compatible banner contract.
+
+    banner_required means the order uses banners at all. It must NOT be
+    interpreted as put a banner on every card; density is a separate durable
+    order field handled by _campaign_banner_target_ids().
+    """
+    order=dict((ff or {}).get("order_contract") or {}) if isinstance(ff,dict) else {}
+    if "banner_required" in order:
+        return bool(order.get("banner_required"))
+    return True
+
+
+def _campaign_banner_every_n(ff, account_id: str = "") -> int:
+    """Return durable banner cadence; 1 means every card."""
+    order=dict((ff or {}).get("order_contract") or {}) if isinstance(ff,dict) else {}
+    raw=order.get("banner_every_n")
+    try:
+        value=int(raw)
+    except (TypeError,ValueError):
+        value=0
+    if value > 0:
+        return max(1,min(value,20))
+    if str(account_id or order.get("account_id") or "") == "planetazayavki_65985":
+        return 4
+    return 1
+
+
+def _campaign_banner_target_ids(ff, item_ids, account_id: str = "") -> list[int]:
+    """Stable deterministic subset that is allowed to receive banners."""
+    ids=list(dict.fromkeys(int(x) for x in (item_ids or []) if int(x)>0))
+    if not ids or not _campaign_banner_required(ff):
+        return []
+    every=_campaign_banner_every_n(ff,account_id)
+    if every <= 1:
+        return ids
+    return [iid for idx,iid in enumerate(ids) if idx % every == 0]
+
+
+def _campaign_qa_anomaly_snapshot(db, account_id: str, campaign_id: int, requested_total: int, media_target: int) -> dict:
+    usage=_campaign_qa_usage_snapshot(db,account_id,campaign_id)
+    limits=_campaign_qa_call_limits(requested_total,media_target)
+    return {
+        **usage,**limits,
+        "media_anomaly":usage["media_calls"]>limits["media_call_limit"],
+        "banner_anomaly":usage["banner_calls"]>limits["banner_call_limit"],
+        "code":"DUPLICATE_QA_COST_ANOMALY",
+    }
+
+
+def _campaign_premium_prepare_banner_gate(db, job, payload, C, campaign, user, allowed, account_id, item_ids):
+    """One existing canonical banner job owns paid work for automatic prepare.
+
+    Preparation never buys a competing per-chunk intent and never revives a
+    terminal child by erasing its economic/recovery history. Its only mutations
+    here are a new canonical queue row and its own durable wait checkpoint.
+    """
+    from app.services.campaign_banner_job_policy import plan_banner_slice
+    _, _banner_scope_ff = C._ff_state_load(campaign)
+    ids = _campaign_banner_target_ids(_banner_scope_ff, item_ids, account_id)
+    rows = {int(r.id): r for r in C._ff_items(db, campaign.id, allowed)}
+    if not ids or any(i not in rows or str(rows[i].account_id or "") != account_id for i in ids):
+        return {"stage": "banners_blocked", "unit": "banners", "code": "BANNER_ITEM_SCOPE_INVALID",
+                "campaign_id": campaign.id, "account_id": account_id}, "partial"
+    passed = [i for i in ids if C._ff_premium_banner_ready(db, rows[i], payload=C._ff_payload(rows[i]))]
+    pending = [i for i in ids if i not in set(passed)]
+    common = {"stage": "banners", "unit": "banners", "campaign_id": campaign.id,
+              "account_id": account_id, "done": len(passed), "total": len(ids),
+              "pending_item_ids": pending, "external_action": False}
+    if not pending:
+        return {**common, "stage": "banners_done", "retryable": False}, "completed"
+    if payload.get("_premium_prepare_intent_policy") != "canonical_banner_child_v1":
+        return {**common, "stage": "banners_reconciliation_required",
+                "code": "LEGACY_BANNER_INTENT_RECONCILIATION_REQUIRED", "retryable": False}, "partial"
+
+    fingerprint = f"campaign_banners:{int(campaign.id)}:{account_id}"
+    child = db.query(BackgroundJob).filter(BackgroundJob.fingerprint == fingerprint).populate_existing().first()
+    if child is None:
+        legacy_artifacts = [i for i in pending
+                            if str(C._ff_payload(rows[i]).get("banner_provider") or "") == "openai_full_ai_premium"]
+        prior_paid = db.execute(_t(
+            "SELECT id FROM api_usage WHERE account_id=:a AND operation='banner_premium_ai' "
+            "AND provenance_json->>'campaign_id'=:c AND ("
+            "coalesce(provenance_json->>'campaign_item_id',provenance_json->>'item_id','')='' "
+            "OR coalesce(provenance_json->>'campaign_item_id',provenance_json->>'item_id')=ANY(:ids)) LIMIT 1"
+        ), {"a": account_id, "c": str(campaign.id), "ids": [str(i) for i in pending]}).first()
+        if legacy_artifacts or prior_paid is not None:
+            return {**common, "stage": "banners_reconciliation_required",
+                    "code": "PREMIUM_EXISTING_INTENT_RECONCILIATION_REQUIRED", "retryable": False}, "partial"
+        from sqlalchemy.exc import IntegrityError
+        try:
+            # Direct INSERT retains the canonical table/UNIQUE fingerprint but
+            # deliberately omits enqueue()'s terminal-row resurrection behavior.
+            child = BackgroundJob(
+                kind="campaign_banners", status="queued",
+                payload_json={"campaign_id": int(campaign.id), "account_id": account_id,
+                    "item_ids": ids, "stage": "queued", "_parent_campaign_prepare_job_id": int(job.id),
+                    "_trace_id": get_trace_id(), "_priority": job_priority("campaign_banners")},
+                owner_user_id=getattr(user, "id", None), account_id=account_id,
+                fingerprint=fingerprint, progress_total=len(ids),
+            )
+            db.add(child)
+            db.flush()
+            # Freeze the child's exact keys while it is still our new,
+            # uncommitted queue row. Its worker reuses the same shared plan.
+            plan = plan_banner_slice(job_id=child.id, payload=child.payload_json,
+                                     item_ids=ids, passed_ids=passed, legacy_attempted=False)
+            child.payload_json = plan["payload"]
+        except IntegrityError:
+            # A concurrent UI/banner submit won the UNIQUE fingerprint race.
+            # Never create a second job/intent or replace the winner's payload.
+            db.rollback()
+            child = db.query(BackgroundJob).filter(BackgroundJob.fingerprint == fingerprint).populate_existing().first()
+            if child is None:
+                raise
+    child_payload = dict(child.payload_json or {})
+    if (str(child.account_id or "") != account_id
+            or int(child_payload.get("campaign_id") or 0) != int(campaign.id)
+            or str(child.kind or "") != "campaign_banners"
+            or (payload.get("_premium_banner_child_job_id")
+                and int(payload["_premium_banner_child_job_id"]) != int(child.id))):
+        return {**common, "stage": "banners_blocked", "code": "BANNER_CHILD_SCOPE_MISMATCH"}, "partial"
+    child_ids = {int(i) for i in (child_payload.get("item_ids") or [])}
+    if child_ids and not set(pending).issubset(child_ids):
+        return {**common, "stage": "banners_blocked", "code": "BANNER_CHILD_ITEM_SCOPE_MISMATCH"}, "partial"
+    child_status = str(child.status or "")
+    child_result = dict(child.result_json or {})
+    wait_state = {"child_job_id": int(child.id), "child_status": child_status,
+                  "pending_item_ids": pending, "observed_at": datetime.now(timezone.utc).isoformat()}
+    state = dict(payload)
+    state.update(_premium_banner_child_job_id=int(child.id), _premium_banner_wait=wait_state)
+    _campaign_checkpoint(db, job, state, "banners", len(passed), len(ids))
+    common.update(child_job_id=int(child.id), child_status=child_status)
+    if child_status in {"queued", "running", "validating"}:
+        return {**common, "stage": "banner_child_wait", "child_jobs_active": 1, "retryable": True}, "retry"
+    # A completed row with a missing current receipt is not successful. It must
+    # not be auto-enqueued into a new empty budget scope on every parent retry.
+    final = "awaiting_confirmation" if child_status == "awaiting_confirmation" else "partial"
+    return {**common, "stage": "banners_blocked", "retryable": False,
+            "code": str(child_result.get("code") or (
+                "BANNER_CHILD_COMPLETED_UNVERIFIED" if child_status == "completed" else "BANNER_CHILD_BLOCKED")),
+            "child_result": child_result}, final
+
+
+def _campaign_premium_validation_snapshot(db, C, campaign, allowed, account_id, item_ids, *, lock=False):
+    """Bind READY to the same exact card/media revision that was validated."""
+    from app.models.campaign_item import CampaignItem
+    from app.models.campaign import Campaign
+    from app.models.media_link import MediaLink
+    from app.models.media_asset import MediaAsset
+    from app.services.campaign_banner_media_contract import linked_file_current
+    if lock:
+        from app.services.job_execution_clock import assert_current_execution_owner
+        assert_current_execution_owner(db)
+        campaign = (db.query(Campaign).filter(Campaign.id == int(campaign.id))
+                    .populate_existing().with_for_update().first())
+        if campaign is None:
+            return {"ok": False, "code": "CAMPAIGN_NOT_FOUND"}
+        _, ff = C._ff_state_load(campaign)
+        if C._ff_publication_locked(ff) or str(campaign.status or "") == "superseded":
+            return {"ok": False, "code": "PREMIUM_PREPARE_PUBLICATION_LOCKED"}
+    ids = sorted(set(int(i) for i in item_ids))
+    query = (db.query(CampaignItem).filter(CampaignItem.campaign_id == int(campaign.id),
+             CampaignItem.account_id == account_id, CampaignItem.status != "superseded")
+             .order_by(CampaignItem.id).populate_existing())
+    rows = (query.with_for_update() if lock else query).all()
+    if [int(r.id) for r in rows] != ids:
+        return {"ok": False, "code": "PREMIUM_READY_SCOPE_CHANGED"}
+    snapshot = {}
+    for row in rows:
+        payload = C._ff_payload(row)
+        if not C._ff_premium_banner_ready(db, row, payload=payload):
+            return {"ok": False, "code": "PREMIUM_READY_RECEIPT_MISSING", "item_id": int(row.id)}
+        pairs = (db.query(MediaLink, MediaAsset).join(MediaAsset, MediaAsset.id == MediaLink.media_id)
+                 .filter(MediaLink.entity_type == "campaign_item", MediaLink.entity_id == str(row.id),
+                         MediaAsset.deleted_at.is_(None))
+                 .order_by(MediaLink.position.asc(), MediaLink.id.asc()).all())
+        if any(str(asset.account_id or "") != account_id for _, asset in pairs):
+            return {"ok": False, "code": "PREMIUM_READY_MEDIA_ACCOUNT_MISMATCH", "item_id": int(row.id)}
+        if any(not linked_file_current(asset) for _, asset in pairs):
+            return {"ok": False, "code": "PREMIUM_READY_MEDIA_BYTES_CHANGED", "item_id": int(row.id)}
+        snapshot[str(row.id)] = {
+            "version": row.updated_at.isoformat() if row.updated_at else None,
+            "payload": json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            "hero_media_id": row.hero_media_id,
+            "media": [(int(link.id), int(asset.id), str(link.role or ""), int(link.position or 0),
+                       str(asset.storage_key or ""), str(asset.sha256 or "")) for link, asset in pairs],
+        }
+    return {"ok": True, "cards": snapshot, "rows": rows, "campaign": campaign}
+
+
+def _campaign_premium_finalize_ready(db, job, payload, C, campaign, allowed, account_id,
+                                     item_ids, validated_snapshot):
+    current = _campaign_premium_validation_snapshot(
+        db, C, campaign, allowed, account_id, item_ids, lock=True)
+    if not current.get("ok") or current.get("cards") != validated_snapshot.get("cards"):
+        db.rollback()
+        return {"stage": "prepare_reconciliation_required", "code": current.get("code") or "PREMIUM_VALIDATED_REVISION_CHANGED",
+                "item_id": current.get("item_id"), "retryable": False}, "partial"
+    campaign = current["campaign"]
+    _, ff = C._ff_state_load(campaign)
+    order = C._ff_order_progress(db, campaign, ff, account_id, stage="ready_for_review", persist=False)
+    requested = int(order.get("requested_total") or 0)
+    if (requested != len(item_ids) or int(order.get("created_count") or 0) != requested
+            or int(order.get("qa_pass_count") or 0) != requested):
+        db.rollback()
+        return {"stage": "order_qa_blocked", "code": "PREMIUM_READY_QUANTITY_UNPROVEN",
+                "requested": requested, "retryable": False}, "partial"
+    # ORM writes preserve the existing mapper revision/history mechanism.
+    # No broad UPDATE may promote a card edited after external XML validation.
+    for row in current["rows"]:
+        row.status = "ready"
+    campaign.status = "ready_for_review"
+    order.update(status="READY_FOR_OWNER_REVIEW", blocking_reason=None,
+                 completed_at=datetime.now(timezone.utc).isoformat())
+    C._ff_order_event(order, "ORDER_READY", requested_total=requested)
+    ff["order_contract"] = order
+    state = dict(payload)
+    state.update(stage="ready_for_review", checkpoint_at=datetime.now(timezone.utc).isoformat())
+    job.payload_json, job.progress_done, job.progress_total = state, 8, 8
+    # This existing call commits card statuses, Campaign state and the checkpoint
+    # together while the lease/campaign/card locks are still held.
+    C._ff_state_save(db, campaign, ff)
+    return None
+
+
 def _run_campaign_prepare(db, job, payload):
     """Persistent zero-touch campaign preparation. Safe to resume after tab/server restart."""
     if payload.get("content_mode") == "local_verified_v2":
@@ -833,6 +1271,14 @@ def _run_campaign_prepare(db, job, payload):
         return run_local_content(db, job, payload)
     C, campaign, user, allowed, account_id = _campaign_job_context(db, job, payload)
     _, _live_ff = C._ff_state_load(campaign)
+    _premium_prepare = (str((C._ff_account_campaign_ai_policy(db, account_id) or {}).get("banner_engine") or "").strip().lower() == "full_ai_premium"
+                        and _campaign_banner_required(_live_ff))
+    if _premium_prepare and payload.get("_premium_prepare_intent_policy") != "canonical_banner_child_v1":
+        from app.services.campaign_banner_job_policy import legacy_banner_attempted
+        if not legacy_banner_attempted(payload, attempts=job.attempts, has_result=bool(job.result_json)):
+            # Freeze admission before text/media continuations make attempts>1.
+            # Existing attempted jobs without this marker remain reconciliation-only.
+            payload = dict(payload, _premium_prepare_intent_policy="canonical_banner_child_v1")
     if C._ff_publication_locked(_live_ff):
         return {"stage":"publication_locked","campaign_id":campaign.id,"account_id":account_id,
                 "publication_status":str((_live_ff.get("owner_activation") or {}).get("status") or ""),
@@ -991,53 +1437,248 @@ def _run_campaign_prepare(db, job, payload):
     preview = C.campaign_preview(campaign.id, db, user)
     existing = {int(x.get("id")):x for x in (preview.get("items") or [])}
     def _prepared_photo_count(item):
-        item=item or {}; banner=str(item.get("banner") or "").strip(); count=0
-        for g in (item.get("gallery") or []):
-            url=str(g.get("url") or "").strip(); provider=str(g.get("source_provider") or "").lower()
-            if banner and url==banner:
+        return _campaign_prepared_photo_count(item)
+    # The durable owner order is authoritative for gallery size. Legacy tasks
+    # default to three semantic photos; an explicit brief such as "8 изображений
+    # на каждое объявление" raises the exact contract up to the safe cap of eight.
+    _, _ff_media = C._ff_state_load(campaign)
+    _media_order = dict((_ff_media or {}).get("order_contract") or {})
+    media_target=max(1,min(int(_media_order.get("media_per_item") or 3),8))
+
+    # CAMPAIGN_MEDIA_OVERFLOW_NORMALIZE_V2:
+    # Exact order means e.g. 8 ordinary photos + one later banner. An overfull
+    # pre-banner stack must be normalized, not treated as missing forever.
+    media_overfull=[i for i in item_ids if _prepared_photo_count(existing.get(i) or {}) > media_target]
+    if _premium_prepare and media_overfull:
+        return {"stage": "media_reconciliation_required", "code": "PREMIUM_GALLERY_COUNT_DRIFT",
+                "campaign_id": campaign.id, "account_id": account_id,
+                "pending_item_ids": media_overfull, "retryable": False}, "partial"
+    if media_overfull:
+        from app.models.campaign_item import CampaignItem as _OverflowItem
+        from app.models.media_link import MediaLink as _OverflowLink
+        from app.models.media_asset import MediaAsset as _OverflowAsset
+        _overflow_failed=[]
+        for _iid in media_overfull:
+            _row=db.query(_OverflowItem).filter(
+                _OverflowItem.id==int(_iid), _OverflowItem.campaign_id==campaign.id
+            ).first()
+            _p=C._ff_payload(_row) if _row is not None else {}
+            _mids=[]
+            for _raw in (((_p.get("photo_stack") or {}).get("media_ids") or [])):
+                try: _mid=int(_raw)
+                except Exception: _mid=0
+                if _mid and _mid not in _mids:
+                    _mids.append(_mid)
+            if len(_mids) < media_target and _row is not None:
+                _pairs=(db.query(_OverflowLink,_OverflowAsset)
+                        .join(_OverflowAsset,_OverflowAsset.id==_OverflowLink.media_id)
+                        .filter(_OverflowLink.entity_type=="campaign_item",
+                                _OverflowLink.entity_id==str(_iid),
+                                _OverflowAsset.deleted_at.is_(None))
+                        .order_by(_OverflowLink.position.asc(),_OverflowLink.id.asc()).all())
+                _banner_url=str(_p.get("banner_url") or "").strip()
+                for _lnk,_asset in _pairs:
+                    _provider=str(getattr(_asset,"source_provider","") or "").lower()
+                    _ref=str(getattr(_asset,"source_ref","") or "")
+                    _asset_url="/images/"+str(getattr(_asset,"storage_key","") or "").lstrip("/")
+                    _is_banner=(
+                        (_provider in {"openai","boris_local"} and str(getattr(_lnk,"role","") or "")=="hero")
+                        or _ref in {"campaign_openai_gpt_image_2","campaign_openai_visual_local_text_v1","campaign_stock_visual_local_text_v1"}
+                        or bool(_banner_url and _asset_url==_banner_url)
+                    )
+                    if not _is_banner and int(_asset.id) not in _mids:
+                        _mids.append(int(_asset.id))
+            _mids=_mids[:media_target]
+            if len(_mids) != media_target:
+                _overflow_failed.append(int(_iid))
                 continue
-            # Before a banner exists, the stock hero is still a real gallery photo.
-            # After banner creation the generated/local hero is not one of the 3 photos.
-            if provider in {"openai","boris_local"} and str(g.get("role") or "")=="hero":
-                continue
-            count+=1
-        return count
-    # Production contract for zero-touch Campaign Creation is exactly three
-    # semantic photos. "Has any image" is insufficient: after auto-curation a card
-    # may retain one good photo and must return to media automatically.
-    media_pending = [i for i in item_ids if _prepared_photo_count(existing.get(i) or {}) != 3]
+            _trim=C.ff_workflow_photo_stack(
+                campaign.id,
+                C.FFPhotoStackBody(
+                    item_ids=[int(_iid)], media_ids=_mids,
+                    photos_per_item=media_target, randomize=False, after_banner=True,
+                ),
+                db,
+                user,
+            )
+            if str(_trim.get("status") or "")!="ok" or int(_iid) not in set(_trim.get("changed") or []):
+                _overflow_failed.append(int(_iid))
+        if _overflow_failed:
+            return {
+                "stage":"media_retry","campaign_id":campaign.id,"account_id":account_id,
+                "pending_item_ids":_overflow_failed,"retryable":True,
+                "message":"BORIS нормализует фотостек до точного количества заказа."
+            }, "retry"
+        preview=C.campaign_preview(campaign.id,db,user)
+        existing={int(x.get("id")):x for x in (preview.get("items") or [])}
+
+    media_pending = [i for i in item_ids if _prepared_photo_count(existing.get(i) or {}) < media_target]
     payload = _campaign_checkpoint(db, job, payload, "media", 3, total)
     if media_pending:
-        # Stock discovery is probabilistic. Work in small durable chunks; a rejected
-        # candidate is not a client-facing campaign failure.
-        media_pending=list(media_pending[:3])
-        remaining=list(media_pending); last_errors=[]
-        for _attempt in range(3):
-            if not remaining: break
-            media_result = C.ff_workflow_auto_media(campaign.id, C.FFAutoMediaBody(item_ids=remaining, count_per_item=3), db, user)
-            last_errors=list(media_result.get("errors") or [])
-            refreshed=C.campaign_preview(campaign.id, db, user)
-            refreshed_by_id={int(x.get("id")):x for x in (refreshed.get("items") or [])}
-            remaining=[i for i in remaining if _prepared_photo_count(refreshed_by_id.get(i) or {}) != 3]
-        if remaining:
-            # Keep the persistent job alive and retry later. Never expose Python/traceback
-            # details to a client just because a stock provider had no suitable image now.
-            return {"stage":"media_retry","campaign_id":campaign.id,"account_id":account_id,
-                    "pending_item_ids":remaining,"retryable":True,
-                    "message":"BORIS продолжает подбирать подходящие фотографии. Действий от клиента не требуется."}, "retry"
+        # CAMPAIGN_DUPLICATE_QA_COST_ANOMALY_V1:
+        # Stop spawning new paid QA work when this campaign has already consumed
+        # far more Vision calls than its conservative unique-check envelope.
+        _qa_guard=_campaign_qa_anomaly_snapshot(db,account_id,campaign.id,len(item_ids),media_target)
+        if _qa_guard.get("media_anomaly"):
+            record_event(db,job_module(job.kind),"duplicate_qa_cost_anomaly",
+                         "BORIS остановил новые платные проверки: обнаружено аномально много повторных Vision-вызовов",
+                         severity="warning",account_id=account_id,
+                         details={"campaign_id":campaign.id,**_qa_guard},
+                         trace_id=str(payload.get("_trace_id") or "") or None)
+            return {
+                "stage":"cost_anomaly","code":"DUPLICATE_QA_COST_ANOMALY",
+                "campaign_id":campaign.id,"account_id":account_id,
+                "unit":"media_qa","external_action":False,
+                "provider_calls":_qa_guard["media_calls"],
+                "expected_calls":_qa_guard["media_expected_calls"],
+                "call_limit":_qa_guard["media_call_limit"],
+                "cost_rub":_qa_guard["media_cost_rub"],
+                "message":"BORIS остановил новые платные проверки фотографий: расход Vision заметно выше ожидаемого. Нужна автоматическая диагностика повторов перед продолжением."
+            }, "awaiting_confirmation"
+        # CAMPAIGN_MEDIA_DURABLE_SHARDS_V1:
+        # Parent coordinates only; canonical child jobs perform media work in the
+        # same background_jobs queue. Existing worker slots + SKIP LOCKED provide
+        # real parallelism without a second scheduler or duplicate provider engine.
+        import os as _os
+        try:
+            _shard_size=max(8,min(int(_os.environ.get("BORIS_CAMPAIGN_MEDIA_SHARD_SIZE","10") or 10),10))
+        except Exception:
+            _shard_size=10
+        try:
+            _max_shards=max(1,min(int(_os.environ.get("BORIS_CAMPAIGN_MEDIA_MAX_SHARDS","4") or 4),4))
+        except Exception:
+            _max_shards=4
+        _children=_campaign_media_shard_jobs(db,account_id,campaign.id,int(job.id))
+        _active=[x for x in _children if str(x.status or "") in {"queued","running","validating"}]
+        _claimed=[]
+        for _child in _active:
+            for _raw in (dict(_child.payload_json or {}).get("item_ids") or []):
+                try: _ci=int(_raw)
+                except Exception: _ci=0
+                if _ci>0 and _ci not in _claimed:
+                    _claimed.append(_ci)
+        _retry_window=_campaign_media_retry_window(media_pending,_children)
+        _held=_retry_window["held_item_ids"]
+        _slots=max(0,_max_shards-len(_active))
+        _plan=_campaign_media_shard_plan(media_pending,_claimed+_held,shard_size=_shard_size,slots=_slots)
+        if not _active and not _plan and _held:
+            return {
+                "stage":"media_shard_backoff","campaign_id":campaign.id,"account_id":account_id,
+                "done":max(0,len(item_ids)-len(media_pending)),"total":len(item_ids),
+                "pending_item_ids":[int(x) for x in media_pending],
+                "held_item_ids":_held,"child_jobs_active":0,
+                "retry_after_seconds":_retry_window["retry_after_seconds"],
+                "diagnostic_code":"MEDIA_CHILD_NO_PROGRESS_BACKOFF",
+                "retryable":True,"external_action":False,
+                "message":"Повторные попытки подбора фотографий временно ограничены: предыдущие проходы не дали результата. BORIS сохранит прогресс и повторит проверку после паузы."
+            }, "retry"
+        _spawned=[]
+        if _plan:
+            _wave=int(payload.get("_media_shard_wave") or 0)+1
+            payload["_media_shard_wave"]=_wave
+            payload["_media_shard_size"]=_shard_size
+            payload["_media_shard_limit"]=_max_shards
+            job.payload_json=payload
+            for _chunk in _plan:
+                _cp={
+                    "campaign_id":int(campaign.id),"account_id":account_id,
+                    "item_ids":[int(x) for x in _chunk],
+                    "media_target":int(media_target),
+                    "_parent_campaign_prepare_job_id":int(job.id),
+                    "_media_shard_wave":int(_wave),
+                    "_priority":10,
+                }
+                _fp=_campaign_media_shard_fingerprint(campaign.id,int(job.id),_wave,_chunk)
+                _child,_created=enqueue(
+                    db,"campaign_media_shard",_cp,
+                    owner_user_id=campaign.owner_user_id,account_id=account_id,
+                    fingerprint=_fp,progress_total=len(_chunk),
+                )
+                _spawned.append(int(_child.id))
+            db.commit()
+        _active_ids=[int(x.id) for x in _active]+_spawned
+        return {
+            "stage":"media_shards","campaign_id":campaign.id,"account_id":account_id,
+            "done":max(0,len(item_ids)-len(media_pending)),"total":len(item_ids),
+            "pending_item_ids":[int(x) for x in media_pending],
+            "child_jobs_active":len(_active_ids),
+            "child_job_ids":_active_ids,
+            "shard_size":_shard_size,"shard_limit":_max_shards,
+            "retryable":True,
+            "message":"BORIS параллельно подбирает и проверяет фотографии."
+        }, "retry"
 
     preview = C.campaign_preview(campaign.id, db, user)
     existing = {int(x.get("id")):x for x in (preview.get("items") or [])}
+    _, _ff_banner_gate = C._ff_state_load(campaign)
+    _explicit_banner_required = _campaign_banner_required(_ff_banner_gate)
+    if _premium_prepare and _explicit_banner_required:
+        _banner_gate_result, _banner_gate_final = _campaign_premium_prepare_banner_gate(
+            db, job, payload, C, campaign, user, allowed, account_id, item_ids)
+        payload = dict(job.payload_json or payload)
+        if _banner_gate_final != "completed":
+            return _banner_gate_result, _banner_gate_final
     banner_pending = []
-    for i in item_ids:
-        x = existing.get(i) or {}
-        has_openai = any(str(g.get("source_provider") or "").lower() == "openai" for g in (x.get("gallery") or []))
-        if not str(x.get("banner") or "").strip() and not has_openai:
-            banner_pending.append(i)
+    if _explicit_banner_required and not _premium_prepare:
+        _banner_target_ids=set(_campaign_banner_target_ids(_ff_banner_gate,item_ids,account_id))
+        for i in item_ids:
+            if int(i) not in _banner_target_ids:
+                continue
+            x = existing.get(i) or {}
+            has_openai = any(str(g.get("source_provider") or "").lower() == "openai" for g in (x.get("gallery") or []))
+            if not str(x.get("banner") or "").strip() and not has_openai:
+                banner_pending.append(i)
     payload = _campaign_checkpoint(db, job, payload, "banners", 4, total)
     if banner_pending:
-        banner_chunk=banner_pending[:3]
-        banner_result = C.ff_workflow_banners(campaign.id, C.FFBannerBody(item_ids=banner_chunk, goal="offer"), db, user)
+        _qa_guard=_campaign_qa_anomaly_snapshot(db,account_id,campaign.id,len(item_ids),media_target)
+        if _qa_guard.get("banner_anomaly"):
+            record_event(db,job_module(job.kind),"duplicate_qa_cost_anomaly",
+                         "BORIS остановил новые платные проверки баннеров: обнаружено аномально много повторных Vision-вызовов",
+                         severity="warning",account_id=account_id,
+                         details={"campaign_id":campaign.id,**_qa_guard},
+                         trace_id=str(payload.get("_trace_id") or "") or None)
+            return {
+                "stage":"cost_anomaly","code":"DUPLICATE_QA_COST_ANOMALY",
+                "campaign_id":campaign.id,"account_id":account_id,
+                "unit":"banner_qa","external_action":False,
+                "provider_calls":_qa_guard["banner_calls"],
+                "expected_calls":_qa_guard["banner_expected_calls"],
+                "call_limit":_qa_guard["banner_call_limit"],
+                "cost_rub":_qa_guard["banner_cost_rub"],
+                "message":"BORIS остановил новые платные проверки баннеров: расход Vision заметно выше ожидаемого. Нужна диагностика повторов перед продолжением."
+            }, "awaiting_confirmation"
+        # Per-item tariff/idempotency guards remain authoritative; only reduce
+        # scheduler churn by processing a larger bounded durable wave.
+        try:
+            _banner_batch_size=max(3,min(10,int(__import__("os").environ.get("BORIS_CAMPAIGN_BANNER_BATCH_SIZE","10") or 10)))
+        except Exception:
+            _banner_batch_size=10
+        banner_chunk=banner_pending[:_banner_batch_size]
+        _confirmed_paid_items = len(banner_chunk) if _explicit_banner_required else 0
+        _banner_intent_key = "campaign_prepare:%s:banners:%s" % (
+            int(job.id),
+            ",".join(str(int(x)) for x in banner_chunk),
+        )
+        banner_result = C.ff_workflow_banners(
+            campaign.id,
+            C.FFBannerBody(
+                item_ids=banner_chunk,
+                goal="offer",
+                idempotency_key=_banner_intent_key,
+                confirmed_paid_items=_confirmed_paid_items,
+            ),
+            db,
+            user,
+        )
+        if banner_result.get("status")=="paid_confirmation_required":
+            return {"stage":"banner_confirmation_required","campaign_id":campaign.id,"account_id":account_id,
+                    "pending_item_ids":banner_chunk,"paid_images":banner_result.get("paid_images",0),
+                    "message":banner_result.get("message") or "Для этой кампании требуется явное подтверждение платной генерации баннеров."}, "awaiting_confirmation"
+        if banner_result.get("status")=="cost_cap_exceeded":
+            return {"stage":"banner_cost_cap","campaign_id":campaign.id,"account_id":account_id,
+                    "pending_item_ids":banner_chunk,"estimated_cost_rub":banner_result.get("estimated_cost_rub"),
+                    "max_cost_rub":banner_result.get("max_cost_rub",4.0),
+                    "message":banner_result.get("message") or "Генерация баннеров заблокирована лимитом стоимости."}, "awaiting_confirmation"
         if banner_result.get("status")=="billing_limit":
             return {"stage":"billing_limit","campaign_id":campaign.id,"account_id":account_id,
                     "unit":"banners","remaining":banner_result.get("remaining",0),
@@ -1082,12 +1723,51 @@ def _run_campaign_prepare(db, job, payload):
                     "pending_item_ids":[x.get("id") for x in banner_result.get("errors") or []],"retryable":True,
                     "message":"BORIS продолжает готовить и проверять баннеры."}, "retry"
         if len(banner_pending)>len(banner_chunk):
-            return {"stage":"banners","campaign_id":campaign.id,"account_id":account_id,"retryable":True,
-                    "message":"BORIS продолжает готовить баннеры."}, "retry"
+            # CAMPAIGN_BANNER_CHUNK_DURABLE_PROGRESS_V1:
+            # A successful 3-item banner chunk is real progress even though the
+            # workflow remains on the same stage. Recompute the remaining banner
+            # scope and expose done/total/pending coordinates so run_once's
+            # no-progress guard does not mistake successful chunks for a hot loop.
+            _banner_preview_after=C.campaign_preview(campaign.id,db,user)
+            _banner_existing_after={int(x.get("id")):x for x in (_banner_preview_after.get("items") or [])}
+            _banner_remaining_after=[]
+            for _iid in item_ids:
+                _x=_banner_existing_after.get(int(_iid)) or {}
+                _has_openai_after=any(
+                    str(_g.get("source_provider") or "").lower()=="openai"
+                    for _g in (_x.get("gallery") or [])
+                )
+                if not str(_x.get("banner") or "").strip() and not _has_openai_after:
+                    _banner_remaining_after.append(int(_iid))
+            _banner_done_after=max(0,len(item_ids)-len(_banner_remaining_after))
+            return {
+                "stage":"banners",
+                "campaign_id":campaign.id,
+                "account_id":account_id,
+                "done":_banner_done_after,
+                "total":len(item_ids),
+                "pending_item_ids":_banner_remaining_after,
+                "retryable":True,
+                "message":"BORIS продолжает готовить баннеры.",
+            }, "retry"
 
     payload = _campaign_checkpoint(db, job, payload, "internal_validation", 5, total)
+    _premium_validated_snapshot = None
+    if _premium_prepare and _explicit_banner_required:
+        _premium_validated_snapshot = _campaign_premium_validation_snapshot(
+            db, C, campaign, allowed, account_id, item_ids)
+        if not _premium_validated_snapshot.get("ok"):
+            return {"stage": "prepare_reconciliation_required", "code": _premium_validated_snapshot.get("code"),
+                    "item_id": _premium_validated_snapshot.get("item_id"), "retryable": False}, "partial"
     val = C.campaign_validation(campaign.id, db, user)
     if not val.get("ok"):
+        if _premium_prepare:
+            # Legacy cleanup below erases images/evidence and rebinds a stale
+            # payload after provider latency. Premium preserves every current
+            # card/link and reports the exact reconciliation debt instead.
+            return {"stage": "prepare_reconciliation_required", "code": "PREMIUM_INTERNAL_VALIDATION_BLOCKED",
+                    "campaign_id": campaign.id, "account_id": account_id,
+                    "validation": val, "retryable": False}, "partial"
         # Text/category edits intentionally invalidate item-specific media proofs.
         # Refresh ONLY stale/missing semantic proofs against the current payload;
         # never bypass a genuine visual mismatch or low-confidence result.
@@ -1307,6 +1987,21 @@ def _run_campaign_prepare(db, job, payload):
                         "message":"BORIS автоматически добирает недостающие проверенные фотографии после смысловой очистки."}, "retry"
             raise RuntimeError("internal validation blocked %s item(s)" % int(val.get("blocked") or 0))
 
+    _, _ff_order = C._ff_state_load(campaign)
+    _order = C._ff_order_progress(db,campaign,_ff_order,account_id,stage="quantity_gate",persist=True)
+    _requested=int(_order.get("requested_total") or 0)
+    _created=int(_order.get("created_count") or 0)
+    _qa=int(_order.get("qa_pass_count") or 0)
+    if _requested and _created < _requested:
+        return {"stage":"materialize","campaign_id":campaign.id,"account_id":account_id,
+                "requested":_requested,"created":_created,"qa_pass":_qa,"retryable":True}, "retry"
+    if _requested and _created > _requested:
+        return {"stage":"order_scope_blocked","campaign_id":campaign.id,"account_id":account_id,
+                "requested":_requested,"created":_created,"qa_pass":_qa}, "partial"
+    if _requested and _qa != _requested:
+        return {"stage":"order_qa_blocked","campaign_id":campaign.id,"account_id":account_id,
+                "requested":_requested,"created":_created,"qa_pass":_qa}, "partial"
+
     payload = _campaign_checkpoint(db, job, payload, "official_avito_validation", 6, total)
     feed = C.campaign_feed_validate(campaign.id, C.FFOwnerActivationBody(account_id=account_id, confirmed=False), db, user)
     _, ff_after = C._ff_state_load(campaign)
@@ -1320,7 +2015,8 @@ def _run_campaign_prepare(db, job, payload):
     if feed.get("validation_state") != "READY":
         raise RuntimeError(feed.get("validation_message") or feed.get("blocked_reason") or "official Avito validation failed")
 
-    payload = _campaign_checkpoint(db, job, payload, "ready_for_review", 8, total)
+    payload = _campaign_checkpoint(db, job, payload,
+        "review_artifact" if _premium_prepare else "ready_for_review", 7 if _premium_prepare else 8, total)
     # Review artifact is a presentation layer, not a publication action. Generate it
     # automatically from the same canonical CampaignItem/MediaLink state that passed
     # Avito XML validation so the owner never needs a hand-built HTML result page.
@@ -1337,7 +2033,15 @@ def _run_campaign_prepare(db, job, payload):
         # Keep the campaign ready and expose a bounded diagnostic for automatic repair.
         _review_page_error=type(_review_exc).__name__+":"+str(_review_exc)[:180]
     # READY_FOR_REVIEW_IS_TERMINAL_PREP_V1: preparation is finished here; only the separate owner-confirmed deliver action may publish. Persist the same stage on the Campaign row so list/dashboard views do not misleadingly keep showing a completed zero-touch campaign as «draft».
-    if str(campaign.status or "").lower() not in {"superseded"}:
+    if _premium_prepare:
+        if not _premium_validated_snapshot:
+            return {"stage": "prepare_reconciliation_required", "code": "PREMIUM_READY_SNAPSHOT_MISSING",
+                    "retryable": False}, "partial"
+        _final_ready = _campaign_premium_finalize_ready(
+            db, job, payload, C, campaign, allowed, account_id, item_ids, _premium_validated_snapshot)
+        if _final_ready is not None:
+            return _final_ready
+    elif str(campaign.status or "").lower() not in {"superseded"}:
         campaign.status="ready_for_review"
         # Item.status describes preparation readiness, not publication approval.
         # Once canonical validation and official Avito validation both passed, keep
@@ -1350,6 +2054,15 @@ def _run_campaign_prepare(db, job, payload):
                    _ReadyCampaignItem.status!="superseded")
            .update({_ReadyCampaignItem.status:"ready"},synchronize_session=False))
         db.commit()
+    if not _premium_prepare:
+        _, _ff_order_ready = C._ff_state_load(campaign)
+        _order_ready = C._ff_order_progress(db,campaign,_ff_order_ready,account_id,stage="ready_for_review",persist=False)
+        _order_ready["status"]="READY_FOR_OWNER_REVIEW"
+        _order_ready["blocking_reason"]=None
+        _order_ready["completed_at"]=datetime.now(timezone.utc).isoformat()
+        C._ff_order_event(_order_ready,"ORDER_READY",requested_total=int(_order_ready.get("requested_total") or 0))
+        _ff_order_ready["order_contract"]=_order_ready
+        C._ff_state_save(db,campaign,_ff_order_ready)
     return {"stage":"ready_for_review","campaign_id":campaign.id,"account_id":account_id,
             "items":feed.get("items"),"photos":feed.get("photos"),"validation_state":"READY",
             "avito_connected":feed.get("avito_connected"),"autoload_ready":feed.get("autoload_ready"),"can_send":feed.get("can_send"),
@@ -1359,6 +2072,31 @@ def _run_campaign_prepare(db, job, payload):
                        "Кампания подготовлена и XML проверен. Для отправки нужно включить доступ к автозагрузке в этом аккаунте Avito.")}, "completed"
 
 
+def _campaign_owner_prepare_only_contract(ff):
+    """Return True when the durable owner order explicitly forbids publication.
+
+    This guard is intentionally narrow: it protects autonomous delivery workers.
+    A later real owner action may still use the dedicated owner-activation endpoint,
+    but BORIS itself must never translate a prepare-only order into confirmed=True.
+    """
+    if not isinstance(ff, dict):
+        return False
+    order=dict(ff.get("order_contract") or {})
+    raw=str(order.get("original_user_prompt") or "").lower().replace("ё","е")
+    if not raw:
+        return False
+    strong_no_publish=any(x in raw for x in (
+        "не публиков", "не размещ", "не отправля", "без публикац",
+        "не выгруж", "не передавать в avito", "не передавать в авито",
+    ))
+    prepare_only=any(x in raw for x in (
+        "только draft", "только ready", "draft/ready", "draft / ready",
+        "внутри boris", "внутри борис",
+    ))
+    avito_context=("avito" in raw or "авито" in raw or "фид" in raw or "feed" in raw)
+    return bool(strong_no_publish and (avito_context or prepare_only))
+
+
 def _run_campaign_deliver(db, job, payload):
     """Owner-confirmed delivery with authoritative Avito v4 result watch.
 
@@ -1366,6 +2104,40 @@ def _run_campaign_deliver(db, job, payload):
     until Avito returns a terminal v4 upload report, then records full/partial/failure.
     """
     C, campaign, user, allowed, account_id = _campaign_job_context(db, job, payload)
+
+    # CAMPAIGN_AUTO_PUBLISH_OWNER_CONTRACT_V1:
+    # A durable owner instruction such as "Только DRAFT/READY, НЕ публиковать и
+    # НЕ отправлять feed в Avito" is stronger than an autonomous worker intent.
+    # campaign_deliver historically called owner_activation(confirmed=True) with
+    # the system user and could therefore impersonate owner confirmation. Block
+    # that path before approval/feed mutation. A later real owner may explicitly
+    # activate through the dedicated owner endpoint.
+    _, _owner_ff = C._ff_state_load(campaign)
+    if _campaign_owner_prepare_only_contract(_owner_ff):
+        _policy=dict(_owner_ff.get("publication_policy") or {})
+        _policy.update({
+            "mode":"prepare_only",
+            "source":"original_owner_order",
+            "automatic_external_write":False,
+            "requires_real_owner_activation":True,
+        })
+        _owner_ff["publication_policy"]=_policy
+        if str(_owner_ff.get("step") or "") not in {
+            "publication_processing","publication_scheduled","publication_pending_review",
+            "publication_completed","publication_partial","publication_failed"
+        }:
+            _owner_ff["step"]="ready_for_review"
+            if str(campaign.status or "").lower() not in {"superseded","completed","partial","failed","published"}:
+                campaign.status="ready_for_review"
+        C._ff_state_save(db,campaign,_owner_ff)
+        return {
+            "stage":"owner_confirmation_required",
+            "campaign_id":campaign.id,
+            "account_id":account_id,
+            "external_action":False,
+            "publication_policy":"prepare_only",
+            "message":"Владелец запретил автоматическую публикацию. Кампания остаётся внутри BORIS до отдельной ручной команды владельца."
+        }, "awaiting_confirmation"
 
     # CAMPAIGN_DELIVER_SUPERSEDED_FAILCLOSED_V1:
     # a superseded campaign is historical state. Never submit it again even when
@@ -1884,7 +2656,7 @@ def _run_campaign_deliver(db, job, payload):
             "activation":sent.get("activation"),"external_upload":True,"sha256":feed.get("current_sha"),
             "message":"Avito принял запуск. BORIS ждёт итоговый отчёт публикации."}, "queued"
 
-def _run_campaign_banners(db, job, payload):
+def _run_campaign_banners_standard(db, job, payload):
     """Regenerate campaign banners independently from XML/category readiness.
 
     Uses the authoritative Campaign workflow and account scope. This lets creative
@@ -1902,8 +2674,54 @@ def _run_campaign_banners(db, job, payload):
     total=max(1,len(all_ids)); done=total-len(remaining)
     if not remaining:
         return {"stage":"banners_done","campaign_id":campaign.id,"account_id":account_id,"done":total,"total":total}, "completed"
-    chunk=remaining[:1]
-    result=C.ff_workflow_banners(campaign.id,C.FFBannerBody(item_ids=chunk,goal="offer",force=True,idempotency_key=f"campaign_banners:{int(job.id)}:{int(chunk[0])}"),db,user)
+    # Premium FULL_AI finalizes Vision QA in groups of four. Keep the job
+    # checkpoint at the same granularity so this durable worker does not
+    # accidentally degrade the production path back to 1 image / 1 Vision call.
+    chunk=remaining[:4]
+    _chunk_key="-".join(str(int(x)) for x in chunk)
+    _retry_key="chunk:"+_chunk_key
+    _retry_generation=int((payload.get("retry_counts") or {}).get(_retry_key) or 0)
+    _rows_by_id={int(r.id):r for r in rows}
+
+    def _banner_passed(_iid):
+        _row=_rows_by_id.get(int(_iid))
+        if _row is None:
+            return False
+        _p=C._ff_payload(_row)
+        return bool(
+            str(_p.get("banner_url") or "").strip()
+            and str(_p.get("banner_provider") or "").strip().lower()=="openai_full_ai_premium"
+            and bool((_p.get("banner_qa") or {}).get("passed"))
+        )
+
+    # PARTIAL_BATCH_REGENERATION_V1:
+    # Retry only items that still have no approved Premium banner. Successful
+    # siblings stay bound and exactly-once. Every retry generation gets a new
+    # idempotency suffix so a QA_FAILED artifact can actually be regenerated
+    # instead of replaying the same failed paid image forever.
+    _pending_chunk=[int(x) for x in chunk if not _banner_passed(x)]
+    if not _pending_chunk:
+        remaining=remaining[len(chunk):]
+        done=total-len(remaining)
+        _campaign_checkpoint(db,job,payload,"banners",done,total,{"remaining":remaining,"item_ids":all_ids})
+        if not remaining:
+            C._campaign_guardian_enqueue(db,campaign,user,account_id,"campaign_prepare")
+            return {"stage":"banners_done","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"retryable":False,
+                    "message":"Баннеры прошли контроль. BORIS проверяет объявления и Avito-фид."}, "completed"
+        return {"stage":"banners","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"retryable":True}, "retry"
+
+    result=C.ff_workflow_banners(
+        campaign.id,
+        C.FFBannerBody(
+            item_ids=_pending_chunk,
+            goal="offer",
+            force=False,
+            idempotency_key=f"campaign_banners:{int(job.id)}:{_chunk_key}:r{_retry_generation}",
+            confirmed_paid_items=len(_pending_chunk),
+        ),
+        db,
+        user,
+    )
     if result.get("status")=="billing_limit":
         _campaign_checkpoint(db,job,payload,"billing_limit",done,total,{"remaining":remaining,"item_ids":all_ids})
         return {"stage":"billing_limit","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,
@@ -1916,15 +2734,36 @@ def _run_campaign_banners(db, job, payload):
                 "message":result.get("message") or "BORIS повторно сверяет тарифный учёт без новой генерации."}, "retry"
     errors=result.get("errors") or []
     if errors:
-        retries=dict(payload.get("retry_counts") or {}); iid=str(chunk[0]); retries[iid]=int(retries.get(iid) or 0)+1
-        if retries[iid] <= 4:
-            _campaign_checkpoint(db,job,payload,"banners",done,total,{"remaining":remaining,"item_ids":all_ids,"retry_counts":retries})
-            return {"stage":"banners","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"retryable":True}, "retry"
-        # Production creative QA is fail-closed: never silently skip a bad banner.
-        # Keep this item pending and surface a recoverable failure after bounded attempts.
-        _campaign_checkpoint(db,job,payload,"banners",done,total,{"remaining":remaining,"item_ids":all_ids,"retry_counts":retries,"qa_blocked_item":int(chunk[0])})
-        return {"stage":"banners_qa_blocked","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"blocked_item":int(chunk[0]),"message":"Баннер не прошёл контроль качества. BORIS сохранил готовые результаты и требует безопасной перегенерации."}, "partial"
-    remaining=remaining[1:]; done=total-len(remaining)
+        retries=dict(payload.get("retry_counts") or {})
+        retries[_retry_key]=int(retries.get(_retry_key) or 0)+1
+        blocked_item=int((errors[0] or {}).get("id") or _pending_chunk[0])
+        # Re-read the chunk after ff_workflow_banners: siblings that passed QA
+        # are already bound and must count toward truthful progress even while
+        # one failed sibling is being regenerated on the next retry generation.
+        _fresh_rows={int(r.id):r for r in C._ff_items(db,campaign.id,allowed) if int(r.id) in set(chunk)}
+        _passed_now=0
+        for _iid in chunk:
+            _row=_fresh_rows.get(int(_iid))
+            if _row is None:
+                continue
+            _p=C._ff_payload(_row)
+            if (
+                str(_p.get("banner_url") or "").strip()
+                and str(_p.get("banner_provider") or "").strip().lower()=="openai_full_ai_premium"
+                and bool((_p.get("banner_qa") or {}).get("passed"))
+            ):
+                _passed_now+=1
+        _effective_done=min(total,done+_passed_now)
+        if retries[_retry_key] <= 4:
+            _campaign_checkpoint(db,job,payload,"banners",_effective_done,total,{"remaining":remaining,"item_ids":all_ids,"retry_counts":retries})
+            return {"stage":"banners","campaign_id":campaign.id,"account_id":account_id,"done":_effective_done,"total":total,
+                    "retryable":True,"batch_size":len(chunk),"retry_generation":retries[_retry_key],
+                    "pending_in_chunk":max(0,len(chunk)-_passed_now)}, "retry"
+        _campaign_checkpoint(db,job,payload,"banners",_effective_done,total,{"remaining":remaining,"item_ids":all_ids,"retry_counts":retries,"qa_blocked_item":blocked_item})
+        return {"stage":"banners_qa_blocked","campaign_id":campaign.id,"account_id":account_id,"done":_effective_done,"total":total,
+                "blocked_item":blocked_item,"batch_size":len(chunk),"pending_in_chunk":max(0,len(chunk)-_passed_now),
+                "message":"Баннер не прошёл контроль качества после ограниченного числа безопасных перегенераций."}, "partial"
+    remaining=remaining[len(chunk):]; done=total-len(remaining)
     _campaign_checkpoint(db,job,payload,"banners",done,total,{"remaining":remaining,"item_ids":all_ids})
     if not remaining:
         # Creative completion must continue automatically into the canonical
@@ -1932,6 +2771,86 @@ def _run_campaign_banners(db, job, payload):
         C._campaign_guardian_enqueue(db,campaign,user,account_id,"campaign_prepare")
         return {"stage":"banners_done","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"retryable":False,"message":"Баннеры прошли контроль. BORIS проверяет объявления и Avito-фид."}, "completed"
     return {"stage":"banners","campaign_id":campaign.id,"account_id":account_id,"done":done,"total":total,"retryable":True}, "retry"
+
+
+
+def _run_campaign_banners(db, job, payload):
+    # Only the explicit Premium policy enters the new typed retry contract.
+    # The existing standard workflow below is preserved for other accounts.
+    C, campaign, user, allowed, account_id = _campaign_job_context(db, job, payload)
+    policy = C._ff_account_campaign_ai_policy(db, account_id) or {}
+    if str(policy.get("banner_engine") or "").strip().lower() == "full_ai_premium":
+        return _run_campaign_banners_premium(db, job, payload)
+    return _run_campaign_banners_standard(db, job, payload)
+
+
+def _run_campaign_banners_premium(db, job, payload):
+    """Execute the existing Premium adapter with durable per-item paid intents."""
+    from app.services.campaign_banner_job_policy import (
+        legacy_banner_attempted,
+        plan_banner_slice, finish_banner_slice,
+    )
+    C, campaign, user, allowed, account_id = _campaign_job_context(db, job, payload)
+    locked, activation, _ = _campaign_mutation_locked(C, campaign)
+    if locked:
+        return {"stage": "publication_locked", "campaign_id": campaign.id,
+                "account_id": account_id, "upload_id": activation.get("upload_id"),
+                "message": "Кампания уже передана Avito; изменения заморожены до итогового отчёта."}, "awaiting_confirmation"
+    rows = C._ff_items(db, campaign.id, allowed)
+    all_ids = list(dict.fromkeys(int(x) for x in (payload.get("item_ids") or [r.id for r in rows])))
+    by_id = {int(r.id): r for r in rows}
+    if not all_ids or any(i not in by_id or str(by_id[i].account_id or "") != account_id for i in all_ids):
+        return {"stage": "banners_blocked", "unit": "banners", "done": 0,
+                "total": len(all_ids), "code": "BANNER_ITEM_SCOPE_INVALID"}, "partial"
+
+    def passed_ids():
+        return [int(r.id) for r in C._ff_items(db, campaign.id, allowed)
+                if int(r.id) in set(all_ids) and str(r.account_id or "") == account_id
+                and C._ff_premium_banner_ready(db, r, payload=C._ff_payload(r))]
+
+    def persist(out):
+        state = out["payload"]
+        before = dict(job.payload_json or {})
+        if (out["result"]["done"] > int(job.progress_done or 0)
+                or dict(state.get("banner_confirmed_artifacts") or {})
+                != dict(before.get("banner_confirmed_artifacts") or {})):
+            state["_banner_last_progress_at"] = datetime.now(timezone.utc).isoformat()
+        _campaign_checkpoint(db, job, state, out["result"]["stage"],
+                             out["result"]["done"], out["result"]["total"])
+        return {**out["result"], "campaign_id": campaign.id, "account_id": account_id}
+
+    plan = plan_banner_slice(
+        job_id=job.id, payload=payload, item_ids=all_ids, passed_ids=passed_ids(),
+        legacy_attempted=legacy_banner_attempted(
+            payload, attempts=job.attempts, has_result=bool(job.result_json)),
+    )
+    initial = persist(plan)
+    if plan["final"] != "invoke":
+        if plan["final"] == "completed":
+            C._campaign_guardian_enqueue(db, campaign, user, account_id, "campaign_prepare")
+        return initial, plan["final"]
+    chunk = plan["chunk"]
+    # The maps above were committed before entering a possible provider call.
+    # Chunk membership can now change without changing any sibling's image intent.
+    result = C.ff_workflow_banners(
+        campaign.id,
+        C.FFBannerBody(
+            item_ids=chunk, goal="offer", force=False,
+            idempotency_key=f"campaign_banners:{int(job.id)}:batch:" + "-".join(map(str, chunk)),
+            item_idempotency_keys=plan["item_idempotency_keys"],
+            item_budget_intent_keys=plan["item_budget_intent_keys"],
+            confirmed_paid_items=len(chunk),
+        ), db, user,
+    )
+    out = finish_banner_slice(
+        job_id=job.id, payload=job.payload_json, item_ids=all_ids, called_ids=chunk,
+        result=result, passed_ids=passed_ids(), quality_retry_limit=4,
+    )
+    final_result = persist(out)
+    if out["final"] == "completed":
+        C._campaign_guardian_enqueue(db, campaign, user, account_id, "campaign_prepare")
+        final_result["message"] = "Баннеры прошли контроль. BORIS проверяет объявления и Avito-фид."
+    return final_result, out["final"]
 
 
 def _run_campaign_post_publish_watch(db, job, payload):
@@ -1969,18 +2888,27 @@ def _run_campaign_enhance(db, job, payload):
         return {"stage":"enhance_done","campaign_id":campaign.id,"account_id":account_id,"done":total,"total":total,"message":"Тексты усилены. BORIS перепроверяет объявления и Avito-фид."}, "completed"
     # One ad per checkpoint: a slow model/provider can never freeze the whole bulk rewrite.
     chunk=remaining[:1]
-    result=C.ff_workflow_texts(
-        campaign.id,
-        C.FFTextBody(
-            item_ids=chunk,
-            instructions=prompt,
-            goal="message",
-            length="long",
-            idempotency_key=f"campaign_enhance:{int(job.id)}:{int(chunk[0])}",
-        ),
-        db,
-        user,
-    )
+    from app.services.campaign_card_revisions import job_revision_scope
+    from fastapi import HTTPException
+    try:
+        with job_revision_scope(db, campaign.id, chunk, payload.get("expected_updated_at"), allowed, int(job.id), prompt):
+            result=C.ff_workflow_texts(
+                campaign.id,
+                C.FFTextBody(
+                    item_ids=chunk,
+                    instructions=prompt,
+                    goal="message",
+                    length="long",
+                    idempotency_key=f"campaign_enhance:{int(job.id)}:{int(chunk[0])}",
+                ),
+                db,
+                user,
+            )
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        db.rollback()
+        return {"stage":"card_version_conflict","campaign_id":campaign.id,"account_id":account_id,"item_id":chunk[0],"code":"CARD_VERSION_CONFLICT","message":"Карточка изменилась после запуска. Сравните версии и подтвердите новую правку."}, "awaiting_confirmation"
     errors=result.get("errors") or []
     if errors:
         # Model/provider failures are retryable per item. Never fail the whole
@@ -2007,6 +2935,620 @@ def _run_campaign_enhance(db, job, payload):
     return {"stage":"enhance_done","campaign_id":campaign.id,"account_id":account_id,"done":total,"total":total,"message":"Тексты усилены. BORIS перепроверяет объявления и Avito-фид."}, "completed"
 
 
+def _inventory_checkpoint(db, job, payload, stage: str, done: int, total: int = 4, extra: dict | None = None):
+    p=dict(payload or {})
+    p["stage"]=stage
+    p["checkpoint_at"]=datetime.now(timezone.utc).isoformat()
+    if extra:
+        p.update(extra)
+    job.payload_json=p
+    job.progress_done=int(done)
+    job.progress_total=int(total)
+    db.commit()
+    return p
+
+
+def _inventory_create_deficit_campaign(db, job, account_id: str, count: int, policy: dict) -> dict:
+    """Create one account-scoped Campaign for the remaining deficit from proven sources."""
+    from app.api import campaigns as C
+    from app.models.account import Account
+    from app.models.storage import Storage
+    from app.models.user import User
+    from app.services import campaign_service as CS
+
+    count=max(0,min(int(count or 0),1000))
+    if count<=0:
+        return {"status":"nothing_to_create","count":0}
+
+    account=db.query(Account).filter(Account.account_id==account_id).first()
+    if not account or not account.owner_user_id:
+        return {"status":"blocked","reason":"account_owner_missing","count":count}
+
+    strategy={}
+    raw=db.execute(_t("SELECT value FROM storage WHERE account_id=:a AND key='campaign_strategy' ORDER BY id DESC LIMIT 1"),
+                   {"a":account_id}).scalar()
+    try:
+        strategy=json.loads(raw or "{}")
+    except Exception:
+        strategy={}
+
+    parsed_row=(db.query(Storage)
+                .filter(Storage.account_id==account_id,Storage.key=="parsed_products")
+                .order_by(Storage.id.desc()).first())
+    try:
+        parsed=json.loads(parsed_row.value or "{}") if parsed_row else {}
+    except Exception:
+        parsed={}
+    parsed_products=[x for x in (parsed.get("products") or []) if isinstance(x,dict)]
+    source_urls=[str(x) for x in (parsed.get("source_urls") or ([parsed.get("source_url")] if parsed.get("source_url") else [])) if str(x).strip()]
+
+    directions=[str(x).strip() for x in (strategy.get("directions") or []) if str(x).strip()]
+    cities=[str(x).strip() for x in (strategy.get("cities") or []) if str(x).strip()]
+    if not parsed_products and not directions and not str(account.company_niche or "").strip():
+        return {"status":"blocked","reason":"verified_product_source_missing","count":count,
+                "message":"BORIS не создаёт новые объявления без подтверждённого ассортимента, сайта, прайса или направления."}
+
+    existing_id=int((job.payload_json or {}).get("created_campaign_id") or 0)
+    if existing_id:
+        existing=CS.get_campaign(db,existing_id,allowed_accounts=[account_id])
+        if existing:
+            return {"status":"already_created","campaign_id":existing_id,"count":count}
+
+    campaign=CS.new_campaign(
+        db,
+        name=f"Автоподдержание профиля · {datetime.now(timezone.utc).date().isoformat()}",
+        owner_user_id=int(account.owner_user_id),
+        default_account_id=account_id,
+        scenario_type="inventory_maintain",
+        source_type="daily_active_policy",
+    )
+    price_source=str(policy.get("price_source") or "company_price_list")
+    if price_source not in {"company_price_list","website","range"}:
+        price_source="company_price_list"
+    brief=(
+        f"Поддерживать целевое число активных объявлений. Создать {count} новых объявлений "
+        f"только из подтверждённых данных аккаунта, сайта, прайса и Knowledge."
+    )
+    body=C.FFWorkflowBriefBody(
+        brief=brief,
+        directions=directions,
+        cities=cities,
+        quantity=count,
+        variants=1,
+        source_urls=source_urls,
+        source_sections=[],
+        bind_product_data=bool(parsed_products),
+        use_parsed_products=True,
+        price_source=price_source,
+        price_min=max(0,int(policy.get("price_min") or 0)),
+        price_max=max(0,int(policy.get("price_max") or 0)),
+        trust_owner_source_prices=True,
+    )
+    ff=C._ff_extract_plan(db,campaign,body)
+    ff=C._ff_hydrate_profiles(db,campaign,ff)
+    ff["questions"]=C._ff_questions(db,campaign,ff)
+    ff["inventory_maintain_parent_job_id"]=int(job.id)
+    C._ff_state_save(db,campaign,ff)
+
+    user=db.query(User).filter(User.id==int(account.owner_user_id)).first()
+    if user is None:
+        return {"status":"blocked","reason":"campaign_owner_user_missing","campaign_id":int(campaign.id),"count":count}
+    prep=C._campaign_guardian_enqueue(db,campaign,user,account_id,"campaign_prepare")
+    return {
+        "status":"queued",
+        "campaign_id":int(campaign.id),
+        "count":count,
+        "questions":len(ff.get("questions") or []),
+        "prepare_job_id":int(getattr(prep,"id",0) or 0),
+    }
+
+
+
+def _inventory_update_managed_prices(db, account_id: str, plan: dict, policy: dict, *, apply_external: bool) -> dict:
+    """Update prices only for exact legacy Avito ID -> BORIS feed identity mappings."""
+    import hashlib
+    from app.api import campaigns as C
+    from app.models.campaign_item import CampaignItem
+    from app.models.storage import Storage
+    from app.services.marketing_clock import marketing_today_iso
+
+    requested={str(x or "").strip() for x in (plan.get("price_update_ids") or []) if str(x or "").strip()}
+    if not requested or not bool(policy.get("allow_update_price")):
+        return {"status":"nothing_to_do","requested":len(requested),"changed":0,"external":0,"changed_avito":False}
+
+    feed_row=(db.query(Storage)
+              .filter(Storage.account_id==account_id,Storage.key=="feed_items")
+              .with_for_update().first())
+    if not feed_row or not feed_row.value:
+        return {"status":"blocked","reason":"feed_items_missing","requested":len(requested),"changed":0,"external":len(requested),"changed_avito":False}
+    try:
+        feed=json.loads(feed_row.value)
+    except Exception:
+        feed=[]
+    if not isinstance(feed,list):
+        feed=[]
+    by_feed={str(x.get("id") or x.get("Id") or ""):x for x in feed if isinstance(x,dict)}
+
+    mappings=(db.query(CampaignItem)
+              .filter(CampaignItem.account_id==account_id,CampaignItem.avito_item_id.in_(list(requested)))
+              .all())
+    by_avito={}
+    for row in mappings:
+        fid=str(row.feed_identity or row.external_item_id or "").strip()
+        if fid and fid in by_feed:
+            by_avito[str(row.avito_item_id or "")]=(row,fid)
+
+    external=sorted(requested-set(by_avito))
+    price_source=str(policy.get("price_source") or "company_price_list")
+    low=max(0,int(policy.get("price_min") or 0))
+    high=max(0,int(policy.get("price_max") or 0))
+    if low and high and high<low:
+        low,high=high,low
+
+    changed=[]
+    unresolved=[]
+    feed_changed=False
+    for avito_id,(row,fid) in by_avito.items():
+        item=by_feed[fid]
+        title=str(item.get("title") or item.get("Title") or "").strip()
+        try:
+            current=int(float(item.get("price") or item.get("Price") or 0))
+        except Exception:
+            current=0
+        target_price=0
+        source_ref=""
+
+        if price_source=="range":
+            if not low or not high:
+                unresolved.append({"avito_id":avito_id,"feed_identity":fid,"reason":"price_range_missing"})
+                continue
+            if bool(policy.get("randomize_price")):
+                seed=f"{account_id}|{fid}|{marketing_today_iso()}"
+                n=int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16],16)
+                target_price=low+(n % (high-low+1))
+                source_ref="owner_range_deterministic"
+            else:
+                target_price=low if current<low else (high if current>high else current)
+                source_ref="owner_range_clamp"
+        else:
+            resolved=C._campaign_resolve_prices(db,account_id,[title],feed)
+            fact=dict(resolved.get(title) or {})
+            if not bool(fact.get("verified")) or not fact.get("price"):
+                unresolved.append({"avito_id":avito_id,"feed_identity":fid,"title":title,"reason":str(fact.get("status") or "NEEDS_DATA")})
+                continue
+            if price_source=="website" and str(fact.get("source") or "")!="structured_website":
+                unresolved.append({"avito_id":avito_id,"feed_identity":fid,"title":title,"reason":"website_price_not_verified"})
+                continue
+            if price_source=="company_price_list" and str(fact.get("source") or "") not in {"price_list","confirmed_knowledge"}:
+                unresolved.append({"avito_id":avito_id,"feed_identity":fid,"title":title,"reason":"company_price_not_verified"})
+                continue
+            target_price=int(float(fact.get("price") or 0))
+            source_ref=str(fact.get("source_reference") or fact.get("source") or "")
+
+        if target_price<=0 or target_price==current:
+            continue
+        item["price"]=int(target_price)
+        if "Price" in item:
+            item["Price"]=int(target_price)
+        changed.append({
+            "avito_id":avito_id,"feed_identity":fid,"title":title,
+            "old_price":current,"new_price":target_price,"source":source_ref,
+        })
+        feed_changed=True
+
+    if feed_changed:
+        feed_row.value=json.dumps(feed,ensure_ascii=False)
+        db.commit()
+
+    upload=None
+    changed_avito=False
+    if feed_changed and apply_external:
+        try:
+            from app.api.avito import feed_send_to_avito
+            upload=feed_send_to_avito(account_id=account_id)
+            changed_avito=str((upload or {}).get("status") or "")=="ok"
+        except Exception as exc:
+            upload={"status":"error","message":str(exc)[:180]}
+
+    return {
+        "status":"submitted" if changed_avito else ("feed_updated" if feed_changed else ("blocked_partial" if unresolved or external else "nothing_to_do")),
+        "requested":len(requested),
+        "managed":len(by_avito),
+        "changed":len(changed),
+        "external":len(external),
+        "unresolved":unresolved[:100],
+        "external_ids":external[:100],
+        "changes":changed[:100],
+        "changed_feed":feed_changed,
+        "changed_avito":changed_avito,
+        "autoload":upload,
+    }
+
+
+
+def _inventory_queue_legacy_browser(db, job, account_id: str, plan: dict, policy: dict,
+                                    reactivation: dict, *, execute: bool) -> dict:
+    """Build exact desired-state writes for ads outside the BORIS canonical feed."""
+    import hashlib
+    from app.api import campaigns as C
+    from app.api.mass_editor import queue_legacy_inventory_job
+    from app.models.campaign_item import CampaignItem
+    from app.models.storage import Storage
+    from app.services.marketing_clock import marketing_today_iso
+
+    if not execute:
+        return {"status":"planned_only","job_id":None,"total":0,"items":[],"unresolved":[]}
+
+    managed_rows=(db.query(CampaignItem)
+                  .filter(CampaignItem.account_id==account_id,CampaignItem.avito_item_id.isnot(None))
+                  .all())
+    managed_ids={str(r.avito_item_id or "") for r in managed_rows if str(r.feed_identity or "").strip()}
+
+    parsed_row=(db.query(Storage)
+                .filter(Storage.account_id==account_id,Storage.key=="parsed_products")
+                .order_by(Storage.id.desc()).first())
+    try:
+        parsed=json.loads(parsed_row.value or "{}") if parsed_row else {}
+    except Exception:
+        parsed={}
+    products=[x for x in (parsed.get("products") or []) if isinstance(x,dict)]
+    grouped={}
+    for product in products:
+        key=C._campaign_norm(product.get("title"))
+        if key:
+            grouped.setdefault(key,[]).append(product)
+    exact_products={key:rows[0] for key,rows in grouped.items() if len(rows)==1}
+
+    active_candidates=[x for x in (plan.get("active_candidates") or []) if isinstance(x,dict)]
+    price_ids={str(x or "") for x in (plan.get("price_update_ids") or []) if str(x or "")}
+    price_source=str(policy.get("price_source") or "company_price_list")
+    low=max(0,int(policy.get("price_min") or 0)); high=max(0,int(policy.get("price_max") or 0))
+    if low and high and high<low:
+        low,high=high,low
+
+    desired=[]
+    unresolved=[]
+    for item in active_candidates:
+        iid=str(item.get("id") or "").strip()
+        if not iid or iid in managed_ids or not bool(policy.get("allow_edit_existing")):
+            continue
+        title=str(item.get("title") or "").strip()
+        changes={}
+        product=exact_products.get(C._campaign_norm(title))
+
+        if bool(policy.get("allow_update_price")) and iid in price_ids:
+            current=0
+            try: current=int(float(item.get("price") or 0))
+            except Exception: current=0
+            target=0
+            if price_source=="range":
+                if low and high:
+                    if bool(policy.get("randomize_price")):
+                        seed=f"{account_id}|legacy:{iid}|{marketing_today_iso()}"
+                        n=int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16],16)
+                        target=low+(n % (high-low+1))
+                    else:
+                        target=low if current<low else (high if current>high else current)
+            else:
+                resolved=C._campaign_resolve_prices(db,account_id,[title],[])
+                fact=dict(resolved.get(title) or {})
+                source=str(fact.get("source") or "")
+                source_ok=(
+                    bool(fact.get("verified"))
+                    and bool(fact.get("price"))
+                    and (price_source!="website" or source=="structured_website")
+                    and (price_source!="company_price_list" or source in {"price_list","confirmed_knowledge"})
+                )
+                if source_ok:
+                    target=int(float(fact.get("price") or 0))
+            if target>0 and target!=current:
+                changes["price"]=str(target)
+            elif target<=0:
+                unresolved.append({"item_id":iid,"title":title,"field":"price","reason":"verified_price_missing"})
+
+        if product:
+            if bool(policy.get("allow_update_text")) and str(product.get("description") or "").strip():
+                changes["description"]=str(product.get("description") or "").strip()
+            if bool(policy.get("allow_update_category")):
+                # LEGACY_CATEGORY_EXPLICIT_AVITO_ONLY_V1:
+                # a website/category_path is product taxonomy, not proof of an
+                # Avito editor category. Change the category only when the
+                # imported product carries an explicit Avito-specific value.
+                avito_category=str(product.get("avito_category") or product.get("category_avito") or "").strip()
+                if avito_category:
+                    changes["category"]=avito_category
+                for key,value in list(dict(product.get("characteristics") or {}).items())[:24]:
+                    if str(key).strip() and value not in (None,"",[]):
+                        changes["custom:"+str(key).strip()]=str(value)
+            if bool(policy.get("allow_update_media")):
+                images=[str(x) for x in (product.get("images") or ([product.get("image")] if product.get("image") else [])) if str(x).strip()]
+                if images:
+                    changes["images"]=images
+        elif any(bool(policy.get(k)) for k in ("allow_update_text","allow_update_media","allow_update_category")):
+            unresolved.append({"item_id":iid,"title":title,"field":"product_binding","reason":"exact_source_product_missing"})
+
+        if changes:
+            desired.append({
+                "id":int(iid),
+                "title":title,
+                "url":str(item.get("url") or ""),
+                "action":"edit",
+                "changes":changes,
+            })
+
+    for old in (reactivation.get("external_items") or []):
+        iid=str((old or {}).get("item_id") or "").strip()
+        if not iid.isdigit() or not bool(policy.get("allow_reactivate")):
+            continue
+        desired.append({
+            "id":int(iid),
+            "title":str((old or {}).get("title") or ""),
+            "url":str((old or {}).get("url") or ""),
+            "action":"reactivate",
+            "changes":{},
+        })
+
+    queued=queue_legacy_inventory_job(
+        account_id,desired,parent_job_id=int(job.id),confirmed=True
+    ) if desired else {"status":"nothing_to_do","job_id":None,"total":0}
+    queued["unresolved"]=unresolved[:200]
+    queued["desired_items"]=len(desired)
+    return queued
+
+
+def _run_campaign_inventory_maintain(db, job, payload):
+    """Durable daily target-active maintenance orchestration.
+
+    V1 executes only proven account-scoped operations:
+    - exact inventory snapshot;
+    - managed/autoload reactivation ranked by real demand;
+    - creation of a new Campaign from verified account/site/price sources.
+    Legacy external ads are surfaced for the isolated-browser executor and are
+    never falsely marked changed.
+    """
+    from app.api import campaigns as C
+
+    account_id=str(job.account_id or payload.get("account_id") or "").strip()
+    if not account_id:
+        raise RuntimeError("inventory maintenance account_id missing")
+    policy=C._campaign_inventory_policy_read(db,account_id)
+    execute=bool(payload.get("execute"))
+    stage=str(payload.get("stage") or "snapshot")
+
+    if stage in {"queued","snapshot"}:
+        plan=C._campaign_inventory_plan_snapshot(db,account_id,policy)
+        _inventory_checkpoint(db,job,payload,"reactivate",1,4,{
+            "plan_snapshot":plan,
+            "policy_snapshot":policy,
+        })
+        return {
+            "stage":"snapshot_done","account_id":account_id,"done":1,"total":4,
+            "plan":plan,"message":"BORIS сверил фактический профиль Avito и сохранил план."
+        }, "retry"
+
+    plan=dict(payload.get("plan_snapshot") or C._campaign_inventory_plan_snapshot(db,account_id,policy))
+
+    if stage=="reactivate":
+        requested=int((plan.get("plan") or {}).get("reactivate") or 0)
+        if execute and requested>0 and bool(policy.get("allow_reactivate")):
+            from app.services.initial_portfolio import reactivate_for_target_deficit
+            # Mutate canonical feed first; send once after every same-pass feed
+            # change (reactivation + managed price sync) has been applied.
+            reactivation=reactivate_for_target_deficit(account_id,requested,apply_external=False)
+        else:
+            reactivation={
+                "status":"planned_only" if requested else "nothing_to_do",
+                "requested":requested,"queued":0,"external":0,
+                "changed_feed":False,"changed_avito":False,
+            }
+
+        if execute and bool(policy.get("allow_update_price")):
+            price_sync=_inventory_update_managed_prices(db,account_id,plan,policy,apply_external=False)
+        else:
+            price_sync={"status":"planned_only","requested":len(plan.get("price_update_ids") or []),
+                        "changed":0,"external":0,"changed_feed":False,"changed_avito":False}
+
+        upload=None
+        changed_avito=False
+        if execute and (bool(reactivation.get("changed_feed")) or bool(price_sync.get("changed_feed"))):
+            try:
+                from app.api.avito import feed_send_to_avito
+                upload=feed_send_to_avito(account_id=account_id)
+                changed_avito=str((upload or {}).get("status") or "")=="ok"
+            except Exception as exc:
+                upload={"status":"error","message":str(exc)[:180]}
+        reactivation["combined_autoload"]=upload
+        reactivation["changed_avito"]=bool(changed_avito and reactivation.get("changed_feed"))
+        price_sync["combined_autoload"]=upload
+        price_sync["changed_avito"]=bool(changed_avito and price_sync.get("changed_feed"))
+
+        legacy_browser=_inventory_queue_legacy_browser(
+            db,job,account_id,plan,policy,reactivation,execute=execute
+        )
+        _inventory_checkpoint(db,job,payload,"create_new",2,4,{
+            "plan_snapshot":plan,
+            "reactivation_result":reactivation,
+            "price_sync_result":price_sync,
+            "legacy_browser_result":legacy_browser,
+            "legacy_browser_job_id":str(legacy_browser.get("job_id") or ""),
+        })
+        return {
+            "stage":"existing_inventory_done","account_id":account_id,"done":2,"total":4,
+            "reactivation":reactivation,
+            "price_sync":price_sync,
+            "legacy_browser":legacy_browser,
+            "message":"BORIS обработал managed-объявления и поставил точные legacy-правки в изолированный браузер."
+        }, "retry"
+
+    if stage=="create_new":
+        create_count=int((plan.get("plan") or {}).get("create_new") or 0)
+        if execute and create_count>0 and bool(policy.get("allow_create")):
+            creation=_inventory_create_deficit_campaign(db,job,account_id,create_count,policy)
+        else:
+            creation={"status":"planned_only" if create_count else "nothing_to_do","count":create_count}
+        _inventory_checkpoint(db,job,payload,"verify",3,4,{
+            "plan_snapshot":plan,
+            "creation_result":creation,
+            "created_campaign_id":int(creation.get("campaign_id") or 0),
+        })
+        return {
+            "stage":"creation_done","account_id":account_id,"done":3,"total":4,
+            "creation":creation,
+            "message":"BORIS подготовил создание недостающих объявлений из подтверждённых источников."
+        }, "retry"
+
+    legacy_job_id=str(payload.get("legacy_browser_job_id") or "").strip()
+    legacy_job={}
+    if legacy_job_id:
+        try:
+            from app.api.mass_editor import _db_get as _mass_job_get
+            legacy_job=dict(_mass_job_get(account_id,"mass_editor_job:"+legacy_job_id) or {})
+        except Exception:
+            legacy_job={}
+        legacy_status=str(legacy_job.get("status") or "")
+        if legacy_status in {"queued","claimed_isolated","starting","running","resume_isolated"}:
+            _inventory_checkpoint(db,job,payload,"verify",3,4,{
+                "legacy_browser_job_id":legacy_job_id,
+                "legacy_browser_last_status":legacy_status,
+            })
+            return {
+                "stage":"legacy_browser","account_id":account_id,"done":3,"total":4,
+                "legacy_browser":{"job_id":legacy_job_id,"status":legacy_status,
+                                  "processed":int(legacy_job.get("processed") or 0),
+                                  "total":int(legacy_job.get("total") or 0)},
+                "message":"BORIS редактирует старые объявления в изолированной Avito-сессии. Можно закрыть страницу."
+            }, "retry"
+
+    current=C._campaign_inventory_plan_snapshot(db,account_id,policy)
+    reactivation=dict(payload.get("reactivation_result") or {})
+    price_sync=dict(payload.get("price_sync_result") or {})
+    creation=dict(payload.get("creation_result") or {})
+    legacy_plan_result=dict(payload.get("legacy_browser_result") or {})
+    legacy_external=int(reactivation.get("external") or 0)
+    price_external=int(price_sync.get("external") or 0)
+    price_unresolved=list(price_sync.get("unresolved") or [])
+    legacy_unresolved=list(legacy_plan_result.get("unresolved") or [])
+    blockers=[]
+    legacy_status=str(legacy_job.get("status") or "") if legacy_job else ""
+    if legacy_job_id and legacy_status not in {"","completed"}:
+        blockers.append({
+            "code":"legacy_browser_not_fully_verified",
+            "count":int(legacy_job.get("failed") or 0)+int(legacy_job.get("pending_verification") or 0),
+            "status":legacy_status,
+            "job_id":legacy_job_id,
+            "message":"Часть legacy-объявлений ещё не получила подтверждённый итог Avito; BORIS не считает проход полностью зелёным."
+        })
+    if legacy_external and not legacy_job_id:
+        blockers.append({
+            "code":"legacy_isolated_browser_required",
+            "count":legacy_external,
+            "message":"Часть завершённых объявлений создана вне BORIS/autoload и требует изолированного браузерного редактора."
+        })
+    if price_external and not legacy_job_id:
+        blockers.append({
+            "code":"legacy_price_browser_required",
+            "count":price_external,
+            "message":"Часть активных объявлений не управляется canonical feed; BORIS пока не создал безопасную задачу изменения в Avito."
+        })
+    if legacy_unresolved:
+        blockers.append({
+            "code":"legacy_exact_product_match_missing",
+            "count":len(legacy_unresolved),
+            "message":"Часть текущих объявлений Avito нельзя менять автоматически: BORIS не нашёл однозначную связку с конкретным товаром или подтверждёнными данными."
+        })
+    if price_unresolved:
+        blockers.append({
+            "code":"verified_price_missing",
+            "count":len(price_unresolved),
+            "message":"Для части объявлений BORIS не нашёл однозначную подтверждённую цену и ничего не изменил."
+        })
+    result={
+        "stage":"completed",
+        "account_id":account_id,
+        "done":4,"total":4,
+        "execute":execute,
+        "before":plan,
+        "after":current,
+        "reactivation":reactivation,
+        "price_sync":price_sync,
+        "legacy_browser":({
+            "job_id":legacy_job_id,
+            "status":str(legacy_job.get("status") or ""),
+            "processed":int(legacy_job.get("processed") or 0),
+            "total":int(legacy_job.get("total") or 0),
+            "changed":int(legacy_job.get("changed") or 0),
+            "verified":int(legacy_job.get("verified") or 0),
+            "pending_verification":int(legacy_job.get("pending_verification") or 0),
+            "failed":int(legacy_job.get("failed") or 0),
+        } if legacy_job_id else None),
+        "creation":creation,
+        "blockers":blockers,
+        "external_mutations":{
+            "reactivation_autoload":bool(reactivation.get("changed_avito")),
+            "managed_price_autoload":bool(price_sync.get("changed_avito")),
+            "new_campaign_created":bool(creation.get("campaign_id")),
+            "legacy_external_changed":int(legacy_job.get("changed") or 0) if legacy_job_id else 0,
+        },
+        "message":"Ежедневный проход завершён. BORIS сохранил результат и продолжит долгие Campaign-задачи отдельно."
+    }
+    return result, ("partial" if blockers else "completed")
+
+
+def _run_campaign_media_shard(db, job, payload):
+    """Durable media child. One canonical media pass per execution; no publication."""
+    C,campaign,user,allowed,account_id=_campaign_job_context(db,job,payload)
+    _,ff=C._ff_state_load(campaign)
+    if C._ff_publication_locked(ff or {}):
+        return {"stage":"publication_locked","done":0,"total":0,"external_action":False}, "completed"
+    parent_id=int(payload.get("_parent_campaign_prepare_job_id") or 0)
+    if parent_id<=0:
+        return {"stage":"media_shard_invalid","message":"parent job missing","external_action":False}, "failed"
+    item_ids=[]
+    for raw in (payload.get("item_ids") or []):
+        try: iid=int(raw)
+        except Exception: iid=0
+        if iid>0 and iid not in item_ids:
+            item_ids.append(iid)
+    if not item_ids:
+        return {"stage":"media_shard_done","done":0,"total":0,"external_action":False}, "completed"
+    order=dict((ff or {}).get("order_contract") or {})
+    target=max(1,min(int(payload.get("media_target") or order.get("media_per_item") or 3),8))
+    preview=C.campaign_preview(campaign.id,db,user)
+    by_id={int(x.get("id")):x for x in (preview.get("items") or [])}
+    remaining=[iid for iid in item_ids if _campaign_prepared_photo_count(by_id.get(iid) or {}) < target]
+    if not remaining:
+        return {"stage":"media_shard_done","done":len(item_ids),"total":len(item_ids),
+                "pending_item_ids":[],"external_action":False}, "completed"
+    result=C.ff_workflow_auto_media(
+        campaign.id,
+        C.FFAutoMediaBody(item_ids=remaining,count_per_item=target),
+        db,user,
+    )
+    refreshed=C.campaign_preview(campaign.id,db,user)
+    by_id={int(x.get("id")):x for x in (refreshed.get("items") or [])}
+    pending=[iid for iid in item_ids if _campaign_prepared_photo_count(by_id.get(iid) or {}) < target]
+    done=max(0,len(item_ids)-len(pending))
+    if pending:
+        return {
+            "stage":"media_shard_retry","campaign_id":campaign.id,"account_id":account_id,
+            "done":done,"total":len(item_ids),"pending_item_ids":pending,
+            "provider_errors":len(result.get("errors") or []) if isinstance(result,dict) else 0,
+            "provider_error_details":[
+                {"item_id":e.get("id"),"code":str(e.get("code") or "media_prepare_failed")[:80],
+                 "message":str(e.get("message") or "")[:240]}
+                for e in ((result.get("errors") or []) if isinstance(result,dict) else [])[:10]
+                if isinstance(e,dict)
+            ],
+            "retryable":True,"external_action":False,
+            "message":"BORIS продолжает подбирать подходящие фотографии для этой части кампании."
+        }, "retry"
+    return {
+        "stage":"media_shard_done","campaign_id":campaign.id,"account_id":account_id,
+        "done":len(item_ids),"total":len(item_ids),"pending_item_ids":[],
+        "external_action":False
+    }, "completed"
+
+
 def _run_client_owner_contract(db, job, payload):
     # Business/client commands use their own strict artifact contract. They do
     # not wait for a coding provider and do not inherit development locks.
@@ -2014,10 +3556,15 @@ def _run_client_owner_contract(db, job, payload):
     return run_background_job(db, job, payload)
 
 
+from app.services.campaign_editor_jobs import run as _run_campaign_editor
+
 HANDLERS = {
+    "campaign_editor": _run_campaign_editor,
+    "campaign_media_shard": _run_campaign_media_shard,
     "client_owner_contract": _run_client_owner_contract,
     "campaign_prepare": _run_campaign_prepare,
     "campaign_enhance": _run_campaign_enhance,
+    "campaign_inventory_maintain": _run_campaign_inventory_maintain,
     "campaign_banners": _run_campaign_banners,
     "campaign_deliver": _run_campaign_deliver,
     "campaign_post_publish_watch": _run_campaign_post_publish_watch,
@@ -2474,6 +4021,45 @@ def _low_cadence_pending_review_reconcile(db):
     return created
 
 
+def _continuation_progress_basis(result):
+    """Stable continuation coordinates; banner retry intentions are not progress."""
+    result = dict(result or {})
+    if result.get("unit") == "banners":
+        # A retry counter/key is an intention, not completed useful work.
+        return {
+            "stage": str(result.get("stage") or ""),
+            "unit": "banners",
+            "done": int(result.get("done") or 0),
+            "total": int(result.get("total") or 0),
+            "pending_item_ids": sorted(int(x) for x in result.get("pending_item_ids") or []),
+            "progress_evidence": dict(result.get("progress_evidence") or {}),
+        }
+    return {
+        "stage": str(result.get("stage") or ""),
+        "done": int(result.get("done") or 0),
+        "total": int(result.get("total") or 0),
+        "pending_item_ids": sorted(
+            [int(x) for x in (result.get("pending_item_ids") or []) if str(x).isdigit()]
+        ),
+        "unit": str(result.get("unit") or ""),
+        "retry_generation": (
+            int(result.get("retry_generation") or 0)
+            if result.get("retry_generation") is not None
+            else None
+        ),
+        "pending_in_chunk": (
+            int(result.get("pending_in_chunk") or 0)
+            if result.get("pending_in_chunk") is not None
+            else None
+        ),
+        "batch_size": (
+            int(result.get("batch_size") or 0)
+            if result.get("batch_size") is not None
+            else None
+        ),
+    }
+
+
 def run_once(verbose=True):
     """Claim queued jobs atomically with SKIP LOCKED so different accounts can run in parallel.
 
@@ -2483,6 +4069,8 @@ def run_once(verbose=True):
     """
     db = SessionLocal()
     processed = 0
+    tenant_slot_conn = None
+    tenant_slot = None
     try:
         _auto_resume_waiting_campaign_jobs(db)
         _low_cadence_pending_review_reconcile(db)
@@ -2550,10 +4138,12 @@ def run_once(verbose=True):
             db.commit()
 
         while True:
+            execution_guard = None
             claim_now = datetime.now(timezone.utc)
+            _interactive_claim_kinds=tuple(set(INTERACTIVE_KINDS) | {"campaign_media_shard"})
             priority_order = case(
                 (BackgroundJob.kind.in_(tuple(CRITICAL_KINDS)), 0),
-                (BackgroundJob.kind.in_(tuple(INTERACTIVE_KINDS)), 10),
+                (BackgroundJob.kind.in_(_interactive_claim_kinds), 10),
                 (BackgroundJob.kind.in_(tuple(HEAVY_KINDS)), 30),
                 else_=20,
             )
@@ -2585,7 +4175,7 @@ def run_once(verbose=True):
             previous_attempts = int(job.attempts or 0)
             ramp_payload = dict(job.payload_json or {})
             retry_pressure = int(ramp_payload.get("_failure_count") or 0) + int(ramp_payload.get("_recovery_count") or 0)
-            if retry_pressure > 0 and job.kind not in CRITICAL_KINDS and job.kind not in {"campaign_enhance", "campaign_prepare", "campaign_banners"}:
+            if retry_pressure > 0 and job.kind not in CRITICAL_KINDS and job.kind not in {"campaign_enhance", "campaign_prepare", "campaign_banners", "campaign_media_shard"}:
                 ramp_key = int(ramp_payload.get("_recovery_ramp_pressure", -1) or -1)
                 if ramp_key != retry_pressure:
                     retry_wave = min(30, 2 + retry_pressure * 2)
@@ -2605,6 +4195,10 @@ def run_once(verbose=True):
             job.scheduled_at = None
             metrics_payload = dict(job.payload_json or {})
             metrics_payload["_execution_count"] = int(metrics_payload.get("_execution_count") or 0) + 1
+            if job.kind in {"campaign_editor", "campaign_prepare", "campaign_enhance", "campaign_banners", "campaign_media_shard"}:
+                import uuid
+                metrics_payload["_execution_lease_token"] = uuid.uuid4().hex
+                metrics_payload["_execution_lease_created_at"] = job.started_at.isoformat()
             job.payload_json = metrics_payload
             db.commit()
 
@@ -2633,7 +4227,8 @@ def run_once(verbose=True):
 
             payload = job.payload_json or {}
             set_trace_id(str(payload.get("_trace_id") or ""))
-            admission = admission_control(db, job.kind)
+            _admission_kind="campaign_prepare" if job.kind=="campaign_media_shard" else job.kind
+            admission = admission_control(db, _admission_kind)
             if not admission.get("allow", True):
                 job.status = "queued"
                 job.started_at = None
@@ -2712,7 +4307,14 @@ def run_once(verbose=True):
                         print("[jobs] %s #%s deferred by exact execution lock" % (job.kind, job.id), flush=True)
                     break
             try:
-                result, final = HANDLERS[job.kind](db, job, payload)
+                if job.kind in {"campaign_editor","campaign_prepare","campaign_enhance","campaign_banners","campaign_media_shard"}:
+                    execution_guard = ExecutionClock(job, ownership_connection=tenant_slot_conn, db=db)
+                    with execution_guard:
+                        result, final = HANDLERS[job.kind](db, job, payload)
+                else:
+                    result, final = HANDLERS[job.kind](db, job, payload)
+                if execution_guard is not None:
+                    execution_guard.assert_current_owner(db)
                 job.result_json = result
                 job.progress_done = int((result or {}).get("done", job.progress_done) or 0)
                 if final == "retry":
@@ -2728,28 +4330,44 @@ def run_once(verbose=True):
                     # Fingerprint only durable progress coordinates: large campaigns
                     # may legitimately need hundreds of chunks, while the SAME stage
                     # with the SAME pending set must back off and eventually fail closed.
-                    _progress_basis = {
-                        "stage": str((result or {}).get("stage") or ""),
-                        "done": int((result or {}).get("done") or 0),
-                        "total": int((result or {}).get("total") or 0),
-                        "pending_item_ids": sorted([int(x) for x in ((result or {}).get("pending_item_ids") or []) if str(x).isdigit()]),
-                        "unit": str((result or {}).get("unit") or ""),
-                    }
+                    _progress_basis = _continuation_progress_basis(result)
                     _progress_sig = json.dumps(_progress_basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                    if str(p.get("_last_continuation_signature") or "") == _progress_sig:
+                    if int((result or {}).get("child_jobs_active") or 0)>0:
+                        _same=0
+                    elif str(p.get("_last_continuation_signature") or "") == _progress_sig:
                         _same = int(p.get("_same_continuation_count") or 0) + 1
                     else:
                         _same = 0
                     p["_last_continuation_signature"] = _progress_sig
                     p["_same_continuation_count"] = _same
                     p["_last_continuation_at"] = datetime.now(timezone.utc).isoformat()
+                    if _same==3 and job.kind in {"campaign_prepare","campaign_media_shard"}:
+                        p["_no_progress_diagnosis"]={
+                            "code":"NO_PROGRESS_LOOP",
+                            "detected_at":datetime.now(timezone.utc).isoformat(),
+                            "same_continuation_count":_same,
+                            "progress":_progress_basis,
+                        }
+                        job.result_json={**dict(result or {}),"diagnostic_code":"NO_PROGRESS_LOOP",
+                                         "diagnostic":"Повторяется одна и та же стадия без изменения результата"}
+                        record_event(db,job_module(job.kind),"job_no_progress_diagnosis",
+                                     "BORIS обнаружил повтор одной и той же стадии без прогресса",
+                                     severity="warning",account_id=job.account_id,
+                                     details={"job_id":job.id,"kind":job.kind,"same_continuation_count":_same,
+                                              "progress":_progress_basis},
+                                     trace_id=str(payload.get("_trace_id") or "") or None)
                     job.payload_json = p
-                    if job.kind in {"campaign_enhance","campaign_prepare","campaign_banners"}:
+                    if job.kind in {"campaign_enhance","campaign_prepare","campaign_banners","campaign_editor","campaign_media_shard"}:
                         # No-progress retries use bounded exponential backoff. This
                         # preserves autonomous recovery from provider outages without
                         # hot-looping AI/media work or turning the owner into an operator.
                         _chunk_delay = min(900, (2 + (int(job.id or 0) % 3)) * (2 ** min(_same, 8)))
-                        if _same >= 24:
+                        # CAMPAIGN_MEDIA_RETRY_DEBT_V1: do not replace a stopped
+                        # child with a fresh wave on the next two-second tick.
+                        if job.kind=="campaign_prepare" and str((result or {}).get("stage") or "")=="media_shard_backoff":
+                            _chunk_delay=max(_chunk_delay,min(1800,max(1,int((result or {}).get("retry_after_seconds") or 300))))
+                        _no_progress_limit=3 if job.kind=="campaign_media_shard" else 24
+                        if _same >= _no_progress_limit:
                             job.status = "failed"
                             job.finished_at = datetime.now(timezone.utc)
                             job.scheduled_at = None
@@ -2836,6 +4454,27 @@ def run_once(verbose=True):
                     elif final not in ("queued", "awaiting_confirmation"):
                         job.finished_at = datetime.now(timezone.utc)
             except Exception as e:
+                if (isinstance(e, ExecutionOwnershipLost)
+                        or (job.kind in {"campaign_editor", "campaign_prepare", "campaign_enhance", "campaign_banners", "campaign_media_shard"}
+                            and execution_guard is None)):
+                    # Another lease/cancellation owns the row. The former worker
+                    # must not publish a stale failed/completed/result payload.
+                    db.rollback()
+                    _release_distributed_tenant_slot(tenant_slot_conn, job.account_id, tenant_slot)
+                    tenant_slot_conn = None
+                    tenant_slot = None
+                    processed += 1
+                    break
+                if execution_guard is not None:
+                    try:
+                        execution_guard.assert_current_owner(db)
+                    except ExecutionOwnershipLost:
+                        db.rollback()
+                        _release_distributed_tenant_slot(tenant_slot_conn, job.account_id, tenant_slot)
+                        tenant_slot_conn = None
+                        tenant_slot = None
+                        processed += 1
+                        break
                 # Provider quota/circuit isolation is deliberate backpressure. Requeue
                 # without burning attempts or entering DLQ; other tenants continue.
                 if isinstance(e, (ProviderDeferred, CircuitOpen)):
@@ -2854,10 +4493,10 @@ def run_once(verbose=True):
                     p["_provider_retry_after_seconds"] = delay
                     p["_provider_deferral_count"] = int(p.get("_provider_deferral_count") or 0) + 1
                     job.payload_json = p
+                    db.commit()
                     _release_distributed_tenant_slot(tenant_slot_conn, job.account_id, tenant_slot)
                     tenant_slot_conn = None
                     tenant_slot = None
-                    db.commit()
                     processed += 1
                     if verbose:
                         print("[jobs] %s #%s provider-deferred %ss" % (job.kind, job.id, delay), flush=True)
@@ -2894,10 +4533,22 @@ def run_once(verbose=True):
                                           "retry_domain": retry_domain},
                                  trace_id=str(payload.get("_trace_id") or "") or None)
                 print("[jobs] задача %s упала: %s" % (job.id, repr(e)[:200]), flush=True)
+            # Keep the exact execution lock through the final status commit.
+            # Earlier handler commits are guarded by the Session hooks above.
+            if execution_guard is not None:
+                try:
+                    execution_guard.assert_current_owner(db)
+                except ExecutionOwnershipLost:
+                    db.rollback()
+                    _release_distributed_tenant_slot(tenant_slot_conn, job.account_id, tenant_slot)
+                    tenant_slot_conn = None
+                    tenant_slot = None
+                    processed += 1
+                    break
+            db.commit()
             _release_distributed_tenant_slot(tenant_slot_conn, job.account_id, tenant_slot)
             tenant_slot_conn = None
             tenant_slot = None
-            db.commit()
             processed += 1
             if verbose:
                 print("[jobs] %s #%s -> %s" % (job.kind, job.id, job.status), flush=True)
@@ -2905,5 +4556,8 @@ def run_once(verbose=True):
             if job.status == "queued":
                 break
     finally:
+        # A failed final commit must not leak the session-level advisory locks.
+        if tenant_slot_conn is not None:
+            _release_distributed_tenant_slot(tenant_slot_conn, None, None)
         db.close()
     return processed

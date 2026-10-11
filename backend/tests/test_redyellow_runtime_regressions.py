@@ -132,6 +132,7 @@ def test_published_media_banner_expansion_reconcile_is_narrow_and_fail_closed():
     assert "len(linked_for_layout) == image_count" in section
     assert "current_keys == wanted_keys" in section
     assert 'banner_qa.get("passed") is True' in section
+    assert '{"pass","passed"}' in section
     assert "wanted_keys[0][1] == banner_key" in section
     assert 'review["placements"] = image_count' in section
 
@@ -194,3 +195,12 @@ def test_plastering_family_wins_over_generic_paint_token():
         "category": "Предложение услуг",
     }
     assert V._semantic_family(payload) == "plastering_service"
+
+
+
+def test_published_media_paid_reconcile_can_be_tenant_scoped():
+    source = (ROOT / "app/services/media_service.py").read_text(encoding="utf-8")
+    start = source.index("def reconcile_published_campaign_media")
+    section = source[start:start+4200]
+    assert "account_ids=None" in section
+    assert "_published_campaign_media_local_reconcile(db, limit=limit, account_ids=account_ids)" in section

@@ -270,6 +270,58 @@ def _page_links(html: str, base_url: str) -> list[str]:
             break
     return links
 
+
+def _page_form_profile(html: str) -> dict:
+    """Bounded, non-mutating form evidence for direct-submission candidates."""
+    soup = BeautifulSoup(html, "html.parser")
+    forms = soup.find_all("form")
+    field_names: set[str] = set()
+    field_types: set[str] = set()
+    required_names: set[str] = set()
+    for form in forms[:12]:
+        for tag in form.find_all(["input", "textarea", "select"])[:160]:
+            name = str(tag.get("name") or tag.get("id") or "").strip().lower()
+            ftype = str(tag.get("type") or tag.name or "").strip().lower()
+            if ftype == "hidden":
+                continue
+            if name:
+                field_names.add(name)
+                if tag.has_attr("required"):
+                    required_names.add(name)
+            if ftype:
+                field_types.add(ftype)
+    low = html.lower()
+    joined = " ".join(sorted(field_names))
+    return {
+        "forms": len(forms),
+        "field_names": sorted(field_names)[:120],
+        "field_types": sorted(field_types)[:40],
+        "required_names": sorted(required_names)[:80],
+        "has_password": "password" in field_types or "password" in joined,
+        "has_email": "email" in field_types or "email" in joined or "e-mail" in joined,
+        "has_phone": any(x in joined for x in ("phone", "tel", "mobile", "телефон")),
+        "has_person_name": any(
+            x in joined for x in ("your_name", "fullname", "full_name", "first_name", "last_name", "contact_name")
+        ),
+        "has_website": (
+            any(x in joined for x in ("website", "site_url", "url", "homepage", "link"))
+            or any(
+                re.search(r"(?:^|[_\[])site(?:\]|$|_)", name, re.I)
+                for name in field_names
+            )
+        ),
+        "has_description": any(
+            x in joined for x in ("description", "desc", "details", "about", "summary")
+        ) or "textarea" in field_types,
+        "has_checkbox": "checkbox" in field_types,
+        "has_file": "file" in field_types,
+        "has_captcha": any(
+            marker in low
+            for marker in ("recaptcha", "hcaptcha", "turnstile", "captcha", "капча", "защитный код")
+        ),
+    }
+
+
 def _matches(text_value: str, patterns: list[str]) -> list[str]:
     out = []
     low = text_value.lower()
@@ -351,6 +403,7 @@ def inspect_url(url: str) -> dict:
         "text_sha256": hashlib.sha256(text_value.encode("utf-8")).hexdigest(),
         "text_excerpt": text_value[:50000],
         "outbound_links": _page_links(response.text, response.url),
+        "form_profile": _page_form_profile(response.text),
         "transport_profile": profile,
     })
     return result
@@ -1243,6 +1296,10 @@ RULE_URLS["pubdisc_yell_ru"] = [
 RULE_URLS["pubdisc_saashub_com"] = [
     "https://www.saashub.com/services/submit",
 ]
+RULE_URLS["pubdisc_pdfcatalog_ru"] = [
+    "https://pdfcatalog.ru/index/addsite",
+    "https://pdfcatalog.ru/index/rulescat",
+]
 
 
 def _publication_discovery_authoring_evidence(platform_key: str, inspections: list[dict]) -> dict:
@@ -1293,6 +1350,73 @@ def _publication_discovery_authoring_evidence(platform_key: str, inspections: li
             return {"found": True, "candidate": candidate, "authoring_url": value}
     return {"found": False, "candidate": candidate, "authoring_url": None}
 
+
+
+
+def _direct_zero_cost_submission_override(
+    platform_key: str,
+    inspections: list[dict],
+    final: str,
+    requirements: list[str],
+) -> tuple[str, list[str]]:
+    """Recognize explicit free own-listing forms without weakening fail-closed rules.
+
+    A direct publication-discovery candidate may become rule-allowed only when:
+    - the canonical same-domain authoring gate passes;
+    - a real form is present;
+    - the form accepts a website/URL;
+    - current page text explicitly says the submission/listing is free;
+    - no paid/prohibited/link restriction evidence is present.
+
+    CAPTCHA/terms/account requirements do not make the rule "blocked"; they are
+    separate onboarding checkpoints and remain human-assisted.
+    """
+    if not platform_key.startswith("pubdisc_"):
+        return final, requirements
+    authoring = _publication_discovery_authoring_evidence(platform_key, inspections)
+    if not authoring.get("found"):
+        return final, requirements
+
+    texts = " ".join(str(x.get("text_excerpt") or "").lower() for x in inspections)
+    priced_submit = bool(re.search(
+        r"(?:submit for review|submit your tool|submit tool|submit listing|отправить заявку)"
+        r"[^\n]{0,35}(?:[$€£]\s*\d|\d+\s*(?:usd|eur|руб))", texts, re.I))
+    if priced_submit:
+        return "blocked", sorted(set(requirements) | {"paid_submission_required"})
+    zero_cost = bool(
+        re.search(
+            r"(?:free.{0,100}(?:submission|submit|listing|add|no account|no sign[- ]?up)|"
+            r"(?:submission|submit|listing|add).{0,100}free|"
+            r"бесплатн.{0,120}(?:добав|размест|публи|объяв|каталог)|"
+            r"(?:добав|размест|публи).{0,120}бесплатн)",
+            texts,
+            re.I | re.S,
+        )
+    )
+    form_profiles = [x.get("form_profile") or {} for x in inspections]
+    has_form = any(int(p.get("forms") or 0) > 0 for p in form_profiles)
+    has_website = any(bool(p.get("has_website")) for p in form_profiles)
+    negative = any(
+        bool((x.get("evidence") or {}).get("paid"))
+        or bool((x.get("evidence") or {}).get("prohibited"))
+        or bool((x.get("evidence") or {}).get("links"))
+        for x in inspections
+    )
+
+    if not (zero_cost and has_form and has_website and not negative):
+        return final, requirements
+
+    additions = {
+        "exact_same_domain_authoring_surface_verified",
+        "free_submission_form_verified",
+        "website_field_verified",
+        "recheck_rules_before_each_publication",
+    }
+    if any(bool(p.get("has_captcha")) for p in form_profiles):
+        additions.add("captcha_checkpoint_may_require_human")
+    if any(bool(p.get("has_checkbox")) for p in form_profiles):
+        additions.add("terms_or_consent_may_require_human")
+    return "allowed", sorted(set(requirements) | additions)
 
 def inspect_platform(platform_key: str) -> dict:
     """Fresh rule inspection: HTTP first, browser fallback, conservative final decision."""
@@ -1945,6 +2069,65 @@ def inspect_platform(platform_key: str) -> dict:
                 x for x in set(requirements)
                 if x != "exact_same_domain_authoring_surface_required"
             )
+
+    # SEO_FINAL_CLOSURE_DIRECT_ZERO_COST_FORM_V1
+    # Generic evidence-based unlock for current own-listing forms. This never
+    # bypasses CAPTCHA/terms/account onboarding and never overrides paid or
+    # prohibited-link evidence.
+    final, requirements = _direct_zero_cost_submission_override(
+        platform_key, inspections, final, requirements
+    )
+
+    # DUMKI_BELARUS_LEGAL_IDENTITY_GATE_V1
+    # The live form is free and accepts a website, but it explicitly requires a
+    # Belarus registration country, legal entity name and registration number.
+    # Do not count it as usable capacity unless that truthful jurisdictional
+    # identity is available and verified outside the rule engine.
+    if platform_key == "pubdisc_dumki_by":
+        final = "review"
+        requirements = sorted(set(requirements) | {"belarus_legal_identity_required"})
+
+    # PDFCATALOG_GUEST_DIRECT_LINK_CATALOG_V1
+    # Current official pages explicitly expose a free guest submission form,
+    # direct external links and manual moderation. Keep the override narrow and
+    # fail closed unless the same inspection also proves the exact authoring route.
+    if platform_key == "pubdisc_pdfcatalog_ru":
+        authoring = _publication_discovery_authoring_evidence(platform_key, inspections)
+        excerpts = " ".join(
+            str(x.get("text_excerpt") or "").lower() for x in inspections
+        )
+        exact_authoring_route = authoring.get("found") or any(
+            "pdfcatalog.ru/index/addsite" in str(x.get("url") or "").lower()
+            and 200 <= int(x.get("http_status") or 0) < 400
+            for x in inspections
+        )
+        free_guest = (
+            "бесплатно и без регистрации" in excerpts
+            or ("бесплатно" in excerpts and "без регистрации" in excerpts)
+        )
+        direct_links = "прямые ссылки" in excerpts
+        user_submission = (
+            "пользователи имеют право" in excerpts
+            and "добавлять сайты" in excerpts
+        )
+        negative_evidence = any(
+            bool((x.get("evidence") or {}).get("paid"))
+            or bool((x.get("evidence") or {}).get("prohibited"))
+            or bool((x.get("evidence") or {}).get("links"))
+            for x in inspections
+        )
+        if exact_authoring_route and free_guest and direct_links and user_submission and not negative_evidence:
+            final = "allowed"
+            requirements = sorted(set(requirements) | {
+                "use_exact_site_catalog_surface_only",
+                "free_guest_submission_verified",
+                "direct_external_link_verified",
+                "manual_moderation_expected",
+                "no_duplicate_site",
+                "recheck_rules_before_each_publication",
+            })
+        else:
+            final = "review"
 
     # ORGPAGE_CURATED_FREE_COMPANY_CARD_V1
     if platform_key == "pubdisc_orgpage_ru":

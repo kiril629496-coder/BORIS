@@ -13,8 +13,6 @@ from app.services.owner_outreach_policy import (
     OWNER_OUTREACH_HARD_MAX_DAILY,
     OWNER_OUTREACH_STAGE1_DAILY,
     OWNER_OUTREACH_STAGE1_DAYS,
-    OWNER_OUTREACH_STAGE2_DAILY,
-    OWNER_OUTREACH_STAGE2_END_DAY,
     canonical_daily_cap,
 )
 
@@ -46,7 +44,7 @@ def _snapshot_guard_sql() -> str:
         FROM prospect_campaign_members m
         JOIN prospect_campaigns c ON c.id=m.campaign_id
         WHERE c.owner_id=NEW.owner_id
-          AND c.account_id='__owner_outreach__'
+          AND (c.account_id='__owner_outreach__' OR c.mailbox_id IN (SELECT mb.id FROM client_mailboxes mb WHERE mb.owner_user_id=c.owner_id AND mb.account_id='__owner_outreach__'))
           AND m.queued_at IS NOT NULL;
 
         age_days := CASE
@@ -55,7 +53,6 @@ def _snapshot_guard_sql() -> str:
         END;
         allowed_cap := CASE
           WHEN age_days < {OWNER_OUTREACH_STAGE1_DAYS} THEN {OWNER_OUTREACH_STAGE1_DAILY}
-          WHEN age_days < {OWNER_OUTREACH_STAGE2_END_DAY} THEN {OWNER_OUTREACH_STAGE2_DAILY}
           ELSE {OWNER_OUTREACH_HARD_MAX_DAILY}
         END;
 
@@ -82,6 +79,7 @@ def _queue_guard_sql() -> str:
         member_id bigint;
         owner_id_v bigint;
         account_id_v text;
+        mailbox_id_v bigint;
         tz_name text;
         service_day date;
         first_service_day date;
@@ -99,13 +97,17 @@ def _queue_guard_sql() -> str:
         END IF;
 
         member_id := NEW.ref_id::bigint;
-        SELECT c.owner_id,c.account_id
-          INTO owner_id_v,account_id_v
+        SELECT c.owner_id,c.account_id,c.mailbox_id
+          INTO owner_id_v,account_id_v,mailbox_id_v
         FROM prospect_campaign_members m
         JOIN prospect_campaigns c ON c.id=m.campaign_id
         WHERE m.id=member_id;
 
-        IF account_id_v IS DISTINCT FROM '__owner_outreach__' THEN
+        -- OWNER_OUTREACH_SHARED_MAILBOX_CAP_V1
+        IF account_id_v IS DISTINCT FROM '__owner_outreach__' AND NOT EXISTS (
+          SELECT 1 FROM client_mailboxes mb WHERE mb.id=mailbox_id_v
+            AND mb.owner_user_id=owner_id_v AND mb.account_id='__owner_outreach__'
+        ) THEN
           RETURN NEW;
         END IF;
 
@@ -127,7 +129,7 @@ def _queue_guard_sql() -> str:
         FROM prospect_campaign_members m
         JOIN prospect_campaigns c ON c.id=m.campaign_id
         WHERE c.owner_id=owner_id_v
-          AND c.account_id='__owner_outreach__'
+          AND (c.account_id='__owner_outreach__' OR c.mailbox_id IN (SELECT mb.id FROM client_mailboxes mb WHERE mb.owner_user_id=c.owner_id AND mb.account_id='__owner_outreach__'))
           AND m.queued_at IS NOT NULL;
 
         age_days := CASE
@@ -136,7 +138,6 @@ def _queue_guard_sql() -> str:
         END;
         canonical_cap := CASE
           WHEN age_days < {OWNER_OUTREACH_STAGE1_DAYS} THEN {OWNER_OUTREACH_STAGE1_DAILY}
-          WHEN age_days < {OWNER_OUTREACH_STAGE2_END_DAY} THEN {OWNER_OUTREACH_STAGE2_DAILY}
           ELSE {OWNER_OUTREACH_HARD_MAX_DAILY}
         END;
 
@@ -154,7 +155,7 @@ def _queue_guard_sql() -> str:
           THEN q.ref_id::bigint ELSE -1 END
         JOIN prospect_campaigns c ON c.id=m.campaign_id
         WHERE c.owner_id=owner_id_v
-          AND c.account_id='__owner_outreach__'
+          AND (c.account_id='__owner_outreach__' OR c.mailbox_id IN (SELECT mb.id FROM client_mailboxes mb WHERE mb.owner_user_id=c.owner_id AND mb.account_id='__owner_outreach__'))
           AND q.status IN ('queued','sending','sent')
           AND q.id IS DISTINCT FROM NEW.id
           AND CASE
@@ -195,12 +196,11 @@ def _healthy(db) -> bool:
           WHERE t.tgrelid='public.prospect_owner_daily_limits'::regclass
             AND t.tgname=:snapshot
             AND t.tgenabled <> 'D' AND NOT t.tgisinternal
-            AND pg_get_functiondef(p.oid) LIKE '%age_days < 6%'
-            AND pg_get_functiondef(p.oid) LIKE '%THEN 10%'
-            AND pg_get_functiondef(p.oid) LIKE '%age_days < 7%'
-            AND pg_get_functiondef(p.oid) LIKE '%THEN 15%'
-            AND pg_get_functiondef(p.oid) LIKE '%ELSE 20%'
+            AND pg_get_functiondef(p.oid) LIKE :warmup_age
+            AND pg_get_functiondef(p.oid) LIKE :warmup_cap
+            AND pg_get_functiondef(p.oid) LIKE :hard_cap
             AND pg_get_functiondef(p.oid) LIKE '%OLD.daily_cap%'
+            AND pg_get_functiondef(p.oid) LIKE '%mb.owner_user_id=c.owner_id%'
         )
         AND EXISTS(
           SELECT 1
@@ -209,12 +209,11 @@ def _healthy(db) -> bool:
             AND t.tgname=:queue
             AND t.tgenabled <> 'D' AND NOT t.tgisinternal
             AND pg_get_functiondef(p.oid) LIKE '%OWNER_OUTREACH_DAILY_VOLUME_GUARD_V3%'
+            AND pg_get_functiondef(p.oid) LIKE '%OWNER_OUTREACH_SHARED_MAILBOX_CAP_V1%'
             AND pg_get_functiondef(p.oid) LIKE '%pg_advisory_xact_lock%'
-            AND pg_get_functiondef(p.oid) LIKE '%age_days < 6%'
-            AND pg_get_functiondef(p.oid) LIKE '%THEN 10%'
-            AND pg_get_functiondef(p.oid) LIKE '%age_days < 7%'
-            AND pg_get_functiondef(p.oid) LIKE '%THEN 15%'
-            AND pg_get_functiondef(p.oid) LIKE '%ELSE 20%'
+            AND pg_get_functiondef(p.oid) LIKE :warmup_age
+            AND pg_get_functiondef(p.oid) LIKE :warmup_cap
+            AND pg_get_functiondef(p.oid) LIKE :hard_cap
             AND pg_get_functiondef(p.oid) LIKE '%q.status IN (%'
             AND pg_get_functiondef(p.oid) LIKE '%SNAPSHOT_MISSING_FAIL_LOWER%'
             AND pg_get_functiondef(p.oid) LIKE '%snapshot_cap IS NULL AND active_today > 0%'
@@ -235,7 +234,13 @@ def _healthy(db) -> bool:
               'trg_zz_owner_daily_limit_guard_v2'
             )
         )
-    """), {"snapshot": SNAPSHOT_TRIGGER, "queue": QUEUE_TRIGGER}).scalar())
+    """), {
+        "snapshot": SNAPSHOT_TRIGGER, "queue": QUEUE_TRIGGER,
+        # Probe exactly the policy emitted by both SQL generators.
+        "warmup_age": f"%age_days < {OWNER_OUTREACH_STAGE1_DAYS}%",
+        "warmup_cap": f"%THEN {OWNER_OUTREACH_STAGE1_DAILY}%",
+        "hard_cap": f"%ELSE {OWNER_OUTREACH_HARD_MAX_DAILY}%",
+    }).scalar())
 
 
 def _snapshot_drift_rows(db) -> list[dict]:
@@ -246,7 +251,7 @@ def _snapshot_drift_rows(db) -> list[dict]:
                FROM prospect_campaign_members m
                JOIN prospect_campaigns c ON c.id=m.campaign_id
                WHERE c.owner_id=l.owner_id
-                 AND c.account_id='__owner_outreach__'
+                 AND (c.account_id='__owner_outreach__' OR c.mailbox_id IN (SELECT mb.id FROM client_mailboxes mb WHERE mb.owner_user_id=c.owner_id AND mb.account_id='__owner_outreach__'))
                  AND m.queued_at IS NOT NULL
              ) AS first_service_day
       FROM prospect_owner_daily_limits l
@@ -282,7 +287,7 @@ def _ensure_active_daily_snapshots(db) -> list[dict]:
                FROM prospect_campaign_members m
                JOIN prospect_campaigns c2 ON c2.id=m.campaign_id
                WHERE c2.owner_id=c.owner_id
-                 AND c2.account_id='__owner_outreach__'
+                 AND (c2.account_id='__owner_outreach__' OR c2.mailbox_id IN (SELECT mb.id FROM client_mailboxes mb WHERE mb.owner_user_id=c2.owner_id AND mb.account_id='__owner_outreach__'))
                  AND m.queued_at IS NOT NULL
              ) AS first_service_day,
              (
@@ -290,12 +295,12 @@ def _ensure_active_daily_snapshots(db) -> list[dict]:
                FROM prospect_campaign_members m
                JOIN prospect_campaigns c2 ON c2.id=m.campaign_id
                WHERE c2.owner_id=c.owner_id
-                 AND c2.account_id='__owner_outreach__'
+                 AND (c2.account_id='__owner_outreach__' OR c2.mailbox_id IN (SELECT mb.id FROM client_mailboxes mb WHERE mb.owner_user_id=c2.owner_id AND mb.account_id='__owner_outreach__'))
                  AND m.queued_at IS NOT NULL
                  AND timezone('Europe/Moscow',m.queued_at)::date=timezone('Europe/Moscow',NOW())::date
              ) AS activity_today
       FROM prospect_campaigns c
-      WHERE c.status='active' AND c.account_id='__owner_outreach__'
+      WHERE c.status='active' AND (c.account_id='__owner_outreach__' OR c.mailbox_id IN (SELECT mb.id FROM client_mailboxes mb WHERE mb.owner_user_id=c.owner_id AND mb.account_id='__owner_outreach__'))
       ORDER BY c.owner_id
     """)).mappings().all()
     created=[]
@@ -325,7 +330,7 @@ def _missing_active_snapshot_count(db) -> int:
     return int(db.execute(text("""
       SELECT count(DISTINCT c.owner_id)
       FROM prospect_campaigns c
-      WHERE c.status='active' AND c.account_id='__owner_outreach__'
+      WHERE c.status='active' AND (c.account_id='__owner_outreach__' OR c.mailbox_id IN (SELECT mb.id FROM client_mailboxes mb WHERE mb.owner_user_id=c.owner_id AND mb.account_id='__owner_outreach__'))
         AND NOT EXISTS (
           SELECT 1 FROM prospect_owner_daily_limits l
           WHERE l.owner_id=c.owner_id
@@ -377,15 +382,21 @@ def ensure() -> dict:
         db.execute(text(f"DROP TRIGGER IF EXISTS {QUEUE_TRIGGER} ON email_queue"))
         db.execute(text(f"""
           CREATE TRIGGER {QUEUE_TRIGGER}
-          BEFORE INSERT OR UPDATE OF ref_type,ref_id,status,created_at
+          BEFORE INSERT OR UPDATE OF ref_type,ref_id,status,created_at,next_attempt_at,mailbox_id
           ON email_queue
           FOR EACH ROW EXECUTE FUNCTION boris_owner_outreach_queue_volume_v3()
         """))
 
-        # Clamp existing snapshots through the authoritative final trigger, then
-        # create today's row for every active owner-outreach campaign before the
-        # worker can reach the feeder.
-        db.execute(text("UPDATE prospect_owner_daily_limits SET daily_cap=daily_cap"))
+        # Repair only current/future service-day snapshots. Historical plans
+        # and their original limits remain evidence; the new guard protects all
+        # subsequent writes without rewriting those completed days.
+        db.execute(text("""
+          UPDATE prospect_owner_daily_limits AS limits
+          SET daily_cap=daily_cap
+          WHERE limits.service_date >= timezone(
+            COALESCE(NULLIF(limits.timezone,''),'Europe/Moscow'), NOW()
+          )::date
+        """))
         created=_ensure_active_daily_snapshots(db)
         db.commit()
         changed = True

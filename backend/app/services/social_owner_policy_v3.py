@@ -132,8 +132,8 @@ def _manicure_hashtag_block(text):
         return "#педикюр #педикюревпатория #уходзаногами #евпатория #крым #красота"
     if any(w in hay for w in ("френч", "дизайн", "металлик", "цвет", "градиент", "омбре")):
         return "#маникюр #маникюревпатория #дизайнногтей #гельлак #идеиманикюра #евпатория"
-    if any(w in hay for w in ("море", "отпуск", "лет", "пляж")):
-        return "#маникюр #маникюревпатория #маникюрнаморе #евпатория #крым #ногти"
+    if any(w in hay for w in ("осен", "бордо", "шоколад", "молоч", "нюд")):
+        return "#маникюр #маникюревпатория #осеннийманикюр #дизайнногтей #ногти #евпатория"
     return "#маникюр #маникюревпатория #ногти #гельлак #евпатория #крым"
 
 
@@ -559,15 +559,14 @@ def ensure_owner_project_policy(runner, account_id="u2"):
                     touched[key] = {"before": project.get(key), "after": expected}
                     project[key] = expected
 
-            # Owner rule: «Океан» reuses the proven old banner library.
-            # Do not allow a later UI/deploy edit to silently turn image
-            # generation back on.
-            if is_ocean(project) and project.get("image_source") != "reuse":
+            # Owner rule: «Океан» must create a fresh AI visual for each new social post.
+            # Reusing the old banner library caused repetitive feeds and stale creatives.
+            if is_ocean(project) and project.get("image_source") != "ai":
                 touched["image_source"] = {
                     "before": project.get("image_source"),
-                    "after": "reuse",
+                    "after": "ai",
                 }
-                project["image_source"] = "reuse"
+                project["image_source"] = "ai"
 
             if is_ocean(project):
                 for key, expected in (

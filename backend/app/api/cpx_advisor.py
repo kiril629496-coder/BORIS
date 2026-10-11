@@ -356,7 +356,8 @@ def run_advisor(account_id: str = "otdushi"):
         # only when unresolved experiments exist.
         if (_advice_retry <= 0 and _money_entitlement_active and _stats_money_fresh
                 and tok and _waiting_probe_ids and not isinstance(bids_map.get("_error"), str)):
-            for _mid in _waiting_probe_ids[:MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT]:
+            _exact_measure_cap = _raise_measurement_cap(db, account_id)
+            for _mid in _waiting_probe_ids[:_exact_measure_cap]:
                 try:
                     _er = httpx.get(
                         f"https://api.avito.ru/cpxpromo/1/getBids/{int(_mid)}",
@@ -536,15 +537,16 @@ def run_advisor(account_id: str = "otdushi"):
             # inconclusive; this stage never writes a bid to Avito.
             _pre_compaction_summary = _active_raise_measurement_summary(db, account_id)
             _pre_compaction_count = int(_pre_compaction_summary.get("active_count") or 0)
-            _pressure_relief_cap = MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT
-            if _pre_compaction_count >= MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT:
-                _pressure_relief_cap = max(2, MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT // 2)
+            _normal_measurement_cap = _raise_measurement_cap(db, account_id)
+            _pressure_relief_cap = _normal_measurement_cap
+            if _pre_compaction_count >= _normal_measurement_cap:
+                _pressure_relief_cap = max(2, _normal_measurement_cap // 2)
             measurement_compaction = _compact_raise_measurement_backlog(
                 db, account_id, _pressure_relief_cap
             )
-            if _pressure_relief_cap < MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT:
+            if _pressure_relief_cap < _normal_measurement_cap:
                 measurement_compaction["pressure_relief"] = True
-                measurement_compaction["normal_cap"] = MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT
+                measurement_compaction["normal_cap"] = _normal_measurement_cap
             from app.models.storage import Storage as _MeasureStorage
             measure_rows = (
                 db.query(_MeasureStorage)
@@ -676,11 +678,17 @@ def run_advisor(account_id: str = "otdushi"):
         # actionable raise cards that cannot be executed this cycle.
         _raise_measurement_summary = _active_raise_measurement_summary(db, account_id)
         _raise_measurement_waiting = int(_raise_measurement_summary.get("active_count") or 0)
-        _raise_measurement_cap = int(_raise_measurement_summary.get("cap") or MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT)
-        if _raise_measurement_waiting >= max(1, _raise_measurement_cap):
+        # CPX_MEASUREMENT_CAP_NAME_COLLISION_FIX_V1: never shadow the helper
+        # _raise_measurement_cap(). Shadowing made every advisor call fail before
+        # its first exact provider read with UnboundLocalError.
+        _raise_measurement_limit = int(
+            _raise_measurement_summary.get("cap")
+            or MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT
+        )
+        if _raise_measurement_waiting >= max(1, _raise_measurement_limit):
             block_raises = True
             limit_note = (
-                f"Идут {_raise_measurement_waiting}/{_raise_measurement_cap} денежных измерения. "
+                f"Идут {_raise_measurement_waiting}/{_raise_measurement_limit} денежных измерения. "
                 "Новые повышения ставок временно не формируются; BORIS сам возобновит их после завершения замера."
             )
 
@@ -1162,7 +1170,7 @@ def run_advisor(account_id: str = "otdushi"):
                 "checked": len(measurement_results),
                 "measured": len([x for x in measurement_results if x.get("status") == "measured"]),
                 "waiting": _raise_measurement_waiting,
-                "cap": _raise_measurement_cap,
+                "cap": _raise_measurement_limit,
                 "errors": len([x for x in measurement_results if x.get("status") == "error"]),
                 "backlog_compaction": measurement_compaction,
             },
@@ -1230,6 +1238,32 @@ MEASURE_COOLDOWN_DAYS = 1    # DAILY_BID_LEARNING_V1: после суточно�
 # prevents a two-item evidence bottleneck from defeating the daily KPI while
 # retaining a bounded account-level evidence-debt ceiling.
 MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT = 2
+# LARGE_PORTFOLIO_PARALLEL_EVIDENCE_V1:
+# The old fixed cap=2 made a 1000+ listing account learn no faster than a tiny
+# account. Scale evidence concurrency only with verified active inventory and
+# never above the global per-run money-action ceiling.
+def _raise_measurement_cap(db, account_id: str) -> int:
+    try:
+        from app.services.marketing_money_policy import GLOBAL_MAX_AUTO_ACTIONS_RUN
+        from sqlalchemy import text as _measure_cap_text
+        row = db.execute(_measure_cap_text(
+            "SELECT value FROM storage WHERE account_id=:a AND key LIKE 'daily_stats:%' "
+            "ORDER BY id DESC LIMIT 1"
+        ), {"a": str(account_id)}).fetchone()
+        snap = json.loads(row[0] or "{}") if row else {}
+        active = sum(
+            1 for item in (snap.get("items") or [])
+            if isinstance(item, dict) and str(item.get("status") or "") == "active"
+        )
+        if active >= 500:
+            requested = 5
+        elif active >= 100:
+            requested = 3
+        else:
+            requested = 2
+        return max(2, min(int(requested), int(GLOBAL_MAX_AUTO_ACTIONS_RUN)))
+    except Exception:
+        return MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT
 DEFAULT_MIN_BID_RUB = 3      # минимальная ставка при снижении, ₽
 NEW_ITEM_NO_PROMO_MIN_BID_MARKUP_PCT = GLOBAL_MAX_BID_DELTA_PCT  # NEW_FEED_FIRST_BID_GLOBAL_STEP_V1: first activation shares the same <=10% global money step
 ARCHIVE_MIN_VIEWS = 50       # архивировать только при >= стольких показов без контактов
@@ -1372,7 +1406,7 @@ def _native_provider_probe_first_bid_preflight(db, body):
                 "started_at": _ms.get("started_at"),
                 "new_bid_rub": _new_native,
             })
-    _native_first_measurement_cap = 2
+    _native_first_measurement_cap = _raise_measurement_cap(db, body.account_id)
     if len(_active_native_first_measurements) >= _native_first_measurement_cap:
         return {
             "eligible": False,
@@ -1439,14 +1473,17 @@ def _native_provider_probe_first_bid_preflight(db, body):
                 "advice_generated_at": generated_at or None,
                 "advice_age_sec": round(advice_age_sec, 1) if advice_age_sec is not None else None}
 
-    # NATIVE_PROVIDER_PROBE_FIRST_BID_DAILY_CAP2_V1:
-    # A large under-KPI account may initialize at most TWO proven native
-    # converters per Moscow day. This matches the evidence-backlog policy
-    # (1-2 concurrent hypotheses) without leaving hundreds of ads idle.
-    # Any unresolved/ambiguous provider receipt remains a full stop: never fan
-    # out to a second item while the first delivery outcome is unknown.
+    # NATIVE_PROVIDER_PROBE_FIRST_BID_HOURLY_CONTINUATION_V2:
+    # First activation is not a two-actions-per-day quota. The production
+    # marketer evaluates KPI every hour and may open the next proven hypothesis
+    # on a later hourly cycle. Safety remains fail-closed through:
+    #   * unresolved provider-receipt reconciliation below;
+    #   * the concurrent measurement cap above (2/3/5 by active inventory);
+    #   * the database cross-source one-first-bid-per-account/hour guard;
+    #   * owner daily budget, red CPL, hard bid, balance and provider guards in
+    #     apply_one/autonomy. Completed first bids from earlier hours are
+    #     telemetry only and must not stop the rest of the Moscow business day.
     from sqlalchemy import text as _native_fb_text
-    _native_daily_cap = 2
     _receipt_counts = db.execute(_native_fb_text("""
         SELECT
           count(*) FILTER (WHERE status IN ('prepared','attempting','delivery_unknown')) AS unresolved,
@@ -1466,13 +1503,6 @@ def _native_provider_probe_first_bid_preflight(db, body):
                 "reason_code": "native_first_bid_unresolved_receipt",
                 "unresolved_first_activations": _unresolved_native,
                 "completed_first_activations_today": _completed_native,
-                "daily_cap": _native_daily_cap,
-                "advice_generated_at": generated_at}
-    if _completed_native >= _native_daily_cap:
-        return {"eligible": False, "blocked": True,
-                "reason_code": "native_first_bid_daily_cap",
-                "prior_first_activations_today": _completed_native,
-                "daily_cap": _native_daily_cap,
                 "advice_generated_at": generated_at}
 
     return {
@@ -1484,6 +1514,7 @@ def _native_provider_probe_first_bid_preflight(db, body):
         "contacts_7d": int(candidate.get("contacts_7d") or 0),
         "views_7d": int(candidate.get("views_7d") or 0),
         "pacing_first_bid": bool(_pacing_first_bid_lane),
+        "prior_first_activations_today": _completed_native,
     }
 
 
@@ -1634,7 +1665,7 @@ def _active_raise_measurement_summary(db, account_id):
     rows = sorted(active.values(), key=lambda x: str(x.get("started_at") or ""))
     return {
         "active_count": len(rows),
-        "cap": MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT,
+        "cap": _raise_measurement_cap(db, account_id),
         "items": rows,
     }
 
@@ -3093,7 +3124,10 @@ def apply_one(body: ApplyOneBody):
         # are intentionally unaffected.
         if body.action == "raise" and _actor_auto and not _late_day_catchup:
             _raise_backlog = _active_raise_measurement_summary(db, body.account_id)
-            if int(_raise_backlog.get("active_count") or 0) >= MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT:
+            _account_measurement_cap = int(
+                _raise_backlog.get("cap") or _raise_measurement_cap(db, body.account_id)
+            )
+            if int(_raise_backlog.get("active_count") or 0) >= _account_measurement_cap:
                 return {
                     "status": "blocked",
                     "action": body.action,
@@ -3101,7 +3135,7 @@ def apply_one(body: ApplyOneBody):
                     "reason_code": "account_measurement_backlog_wait",
                     "blocked_by": "account_measurement_backlog_wait",
                     "waiting_measurements": int(_raise_backlog.get("active_count") or 0),
-                    "measurement_cap": MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT,
+                    "measurement_cap": _account_measurement_cap,
                     "next_action": "measurement_sweep_then_retry_automatically",
                     "changed_avito": False,
                 }
@@ -5759,7 +5793,7 @@ def profitable_day_push(account_id: str, max_items: int = 2):
         # All autonomous raise lanes share the same account-level evidence cap.
         # Do not let this helper advertise capacity 20 while final apply_one
         # correctly enforces the canonical cap 2.
-        MEASUREMENT_BACKLOG_LIMIT = MAX_ACTIVE_RAISE_MEASUREMENTS_PER_ACCOUNT
+        MEASUREMENT_BACKLOG_LIMIT = _raise_measurement_cap(db, account_id)
         _active_today=len(items)
         _measurement_backlog_limit=MEASUREMENT_BACKLOG_LIMIT
         _waiting_by_item={}

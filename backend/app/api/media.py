@@ -141,6 +141,120 @@ def list_media(account_id: str = "", folder_id: int = 0, media_type: str = "",
                         status=status or None, usage=usage or None, q=q or None,
                         favorite=bool(favorite), trashed=bool(trashed),
                         limit=limit, offset=offset, sort=sort)
+    # MEDIA_HUMAN_LABELS_V1: client-facing names come from exact CampaignItem
+    # links first, then from verified semantic/topic tags. Technical filenames
+    # remain available for details but are not the primary UI label.
+    try:
+        from app.models.media_link import MediaLink
+        from app.models.campaign_item import CampaignItem
+        item_rows=list(res.get("items") or [])
+        media_ids=[int(x.get("id") or 0) for x in item_rows if int(x.get("id") or 0)>0]
+        link_rows=(db.query(MediaLink)
+                   .filter(MediaLink.media_id.in_(media_ids),
+                           MediaLink.entity_type=="campaign_item")
+                   .order_by(MediaLink.media_id,MediaLink.position,MediaLink.id).all()) if media_ids else []
+        campaign_item_ids=[int(x.entity_id) for x in link_rows if str(x.entity_id or "").isdigit()]
+        citems=(db.query(CampaignItem).filter(CampaignItem.id.in_(campaign_item_ids)).all()
+                if campaign_item_ids else [])
+        by_citem={int(x.id):x for x in citems}
+        # Older Campaign media may have lost/never received MediaLink rows while
+        # their immutable filenames still carry the exact CampaignItem id.
+        # Resolve that exact identity for client-facing labels only; never infer
+        # a product from a fuzzy filename.
+        import re as _media_label_re
+        legacy_item_ids=[]
+        for asset in item_rows:
+            m=_media_label_re.search(r"(?:^|_)item_(\d+)(?:_|\.|$)",str(asset.get("filename") or ""))
+            if m:
+                legacy_item_ids.append(int(m.group(1)))
+        legacy_position_by_media={}
+        if legacy_item_ids:
+            legacy_rows=(db.query(CampaignItem)
+                         .filter(CampaignItem.id.in_(list(set(legacy_item_ids))),
+                                 CampaignItem.account_id==account_id).all())
+            for row in legacy_rows:
+                by_citem.setdefault(int(row.id),row)
+            grouped_assets={}
+            for asset in item_rows:
+                m=_media_label_re.search(r"(?:^|_)item_(\d+)(?:_|\.|$)",str(asset.get("filename") or ""))
+                if not m:
+                    continue
+                grouped_assets.setdefault(int(m.group(1)),[]).append(asset)
+            for item_id,assets in grouped_assets.items():
+                photos=sorted([a for a in assets if str(a.get("media_type") or "").lower()!="banner" and "banner" not in str(a.get("filename") or "").lower() and "premium" not in str(a.get("filename") or "").lower() and "cleanlocal" not in str(a.get("filename") or "").lower()],key=lambda x:int(x.get("id") or 0))
+                banners=sorted([a for a in assets if a not in photos],key=lambda x:int(x.get("id") or 0))
+                for pos,a in enumerate(photos,1):
+                    legacy_position_by_media[int(a.get("id") or 0)]=("Фото",pos)
+                for pos,a in enumerate(banners,1):
+                    legacy_position_by_media[int(a.get("id") or 0)]=("Баннер",pos)
+        links_by_media={}
+        for link in link_rows:
+            if str(link.entity_id or "").isdigit():
+                links_by_media.setdefault(int(link.media_id),[]).append(link)
+        for asset in item_rows:
+            mid=int(asset.get("id") or 0)
+            display_name=""
+            display_context=""
+            display_number=None
+            linked=links_by_media.get(mid) or []
+            if linked:
+                link=linked[0]
+                ci=by_citem.get(int(link.entity_id))
+                if ci is not None:
+                    try:
+                        payload=json.loads(ci.payload_json or "{}")
+                    except Exception:
+                        payload={}
+                    base=str(payload.get("source_product",{}).get("title") or payload.get("direction") or payload.get("title") or ci.segment or "").strip()
+                    city=str(payload.get("city") or ci.geo or "").strip()
+                    material_type=("Баннер" if str(asset.get("media_type") or "").lower()=="banner" or str(link.role or "").lower()=="hero" and "banner" in str(asset.get("filename") or "").lower()
+                                   else "Фото")
+                    position=max(0,int(getattr(link,"position",0) or 0))
+                    display_name=(base or "Материал")+" · "+material_type+" "+str(position+1)
+                    display_context=" · ".join(x for x in (city, material_type) if x)
+                    display_number=position+1
+            if not display_name:
+                m=_media_label_re.search(r"(?:^|_)item_(\d+)(?:_|\.|$)",str(asset.get("filename") or ""))
+                ci=by_citem.get(int(m.group(1))) if m else None
+                if ci is not None:
+                    try:
+                        payload=json.loads(ci.payload_json or "{}")
+                    except Exception:
+                        payload={}
+                    category_leaf=str(payload.get("category_path") or payload.get("category") or "").split(">")[-1].strip()
+                    base=str(
+                        (payload.get("source_product") or {}).get("title")
+                        or payload.get("direction")
+                        or category_leaf
+                        or payload.get("title")
+                        or ci.segment
+                        or "Материал"
+                    ).strip()
+                    clean_base=" ".join(base.replace("{","").replace("}","").split())[:70] or "Материал"
+                    filename_l=str(asset.get("filename") or "").lower()
+                    fallback_type="Баннер" if str(asset.get("media_type") or "").lower()=="banner" or "banner" in filename_l or "premium" in filename_l or "cleanlocal" in filename_l else "Фото"
+                    material_type,display_number=legacy_position_by_media.get(int(asset.get("id") or 0),(fallback_type,1))
+                    display_name=f"{clean_base} · {material_type} {display_number}"
+                    city=str(payload.get("city") or ci.geo or "").strip()
+                    display_context=" · ".join(x for x in (category_leaf or clean_base,city,material_type) if x)
+            if not display_name:
+                tags=[str(x) for x in (asset.get("tags") or []) if str(x).strip()]
+                topic=next((x.split(":",1)[1].strip() for x in tags if x.startswith("stock_topic:") and ":" in x),"")
+                subject=next((x.split(":",1)[1].strip() for x in tags if x.startswith("semantic_subject:") and ":" in x),"")
+                base=topic or subject
+                if base:
+                    display_name=base
+                    display_context="Фото из медиатеки"
+            if not display_name:
+                raw=str(asset.get("filename") or "Материал")
+                clean=raw.rsplit(".",1)[0].replace("_"," ").replace("-"," ").strip()
+                display_name=(clean[:70] or "Материал")
+                display_context="Материал BORIS"
+            asset["display_name"]=display_name
+            asset["display_context"]=display_context
+            asset["display_number"]=display_number
+    except Exception as exc:
+        observe_suppressed(__name__, exc, line=156)
     res["status"] = "ok"
     return res
 
@@ -419,6 +533,10 @@ class StockCollectBody(BaseModel):
     account_id: str
     topic: str
     count: int = 12
+    # Campaign/media allocator may reserve assets already used by sibling cards.
+    # Exclusions are same-account IDs only and are resolved to source_ref/sha256
+    # before any external Vision call, so known duplicates are never re-validated.
+    exclude_media_ids: list[int] = []
     # Optional caller context is audit-only. It must never affect the paid
     # semantic intent/cache key; it only makes api_usage attributable.
     provenance: dict = Field(default_factory=dict)
@@ -520,16 +638,34 @@ def collect_stock(body: StockCollectBody, db: Session = Depends(get_db),
     if owner is None:
         raise HTTPException(400, "У аккаунта не задан владелец")
     actor_uid = M._uid(user)
-    # Permission/owner lookups above start an ORM transaction. End it before
-    # Pexels download + OpenAI Vision; those network stages can take minutes
-    # and must never count as PostgreSQL idle-in-transaction time.
+    # STOCK_EXCLUSION_BEFORE_VISION_V1:
+    # Resolve same-account reserved media before network/provider work. This lets
+    # Campaign auto-media request a genuinely new visual pool for sibling cards
+    # without paying Vision QA again for already-used assets.
+    _exclude_ids=sorted({int(x) for x in (body.exclude_media_ids or []) if int(x)>0})
+    _excluded_refs=set()
+    _excluded_sha=set()
+    if _exclude_ids:
+        from app.models.media_asset import MediaAsset as _ExcludedStockAsset
+        _excluded_assets=(db.query(_ExcludedStockAsset)
+            .filter(_ExcludedStockAsset.account_id==account_id,
+                    _ExcludedStockAsset.id.in_(_exclude_ids),
+                    _ExcludedStockAsset.deleted_at.is_(None)).all())
+        for _asset in _excluded_assets:
+            _ref=str(getattr(_asset,"source_ref","") or "").strip()
+            _sha=str(getattr(_asset,"sha256","") or "").strip().lower()
+            if _ref: _excluded_refs.add(_ref)
+            if _sha: _excluded_sha.add(_sha)
+    # Permission/owner/exclusion lookups above start an ORM transaction. End it
+    # before Pexels download + OpenAI Vision; those network stages can take
+    # minutes and must never count as PostgreSQL idle-in-transaction time.
     db.commit()
     pexels_key = os.environ.get("PEXELS_API_KEY")
     if not pexels_key:
         raise HTTPException(503, "Pexels не настроен")
 
     search_query = _stock_topic_query(topic)
-    candidate_limit = min(80, max(wanted * 4, 24))
+    candidate_limit = min(80, max(wanted * (8 if _exclude_ids else 4), 32 if _exclude_ids else 24))
     with httpx.Client(timeout=30, follow_redirects=True) as client:
         resp = client.get("https://api.pexels.com/v1/search",
                           headers={"Authorization": pexels_key},
@@ -541,6 +677,9 @@ def collect_stock(body: StockCollectBody, db: Session = Depends(get_db),
         for p in photos:
             if len(candidates) >= candidate_limit:
                 break
+            page_ref=str(p.get("url") or "").strip()
+            if page_ref and page_ref in _excluded_refs:
+                continue
             url = (p.get("src") or {}).get("large") or (p.get("src") or {}).get("original")
             if not url:
                 continue
@@ -548,8 +687,11 @@ def collect_stock(body: StockCollectBody, db: Session = Depends(get_db),
                 rr = client.get(url, timeout=30)
                 if rr.status_code != 200 or not rr.content or len(rr.content) > 12 * 1024 * 1024:
                     continue
-                candidates.append({"id": p.get("id"), "bytes": rr.content,
-                                   "alt": p.get("alt") or "", "page": p.get("url") or "", "image": url})
+                _candidate_sha=hashlib.sha256(rr.content).hexdigest()
+                if _candidate_sha.lower() in _excluded_sha:
+                    continue
+                candidates.append({"id": p.get("id"), "bytes": rr.content, "sha256":_candidate_sha,
+                                   "alt": p.get("alt") or "", "page": page_ref, "image": url})
             except Exception:
                 continue
 
@@ -578,7 +720,7 @@ def collect_stock(body: StockCollectBody, db: Session = Depends(get_db),
     created = []
     duplicates = 0
     for c in accepted[:wanted]:
-        sha = hashlib.sha256(c["bytes"]).hexdigest()
+        sha = str(c.get("sha256") or hashlib.sha256(c["bytes"]).hexdigest())
         twin = M.find_duplicate(db, owner, sha)
         if twin:
             duplicates += 1
@@ -616,5 +758,6 @@ def collect_stock(body: StockCollectBody, db: Session = Depends(get_db),
                actor=ACTOR_USER, user_id=actor_uid, source="media.stock.collect")
     return {"status": "ok", "topic": topic, "folder_id": folder.id,
             "search_query": search_query, "requested": wanted, "accepted": len(created),
+            "excluded_media": len(_exclude_ids),
             "rejected": rejected, "duplicates": duplicates, "items": created,
             "policy": "strict_vision_fail_closed_0.90"}

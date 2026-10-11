@@ -1,3 +1,4 @@
+from pathlib import Path
 from app.services.development_lead_radar import (
     _brief_outreach_ready,
     _company_brief,
@@ -125,3 +126,9 @@ def test_company_brief_blocks_generic_vertical_guess_without_evidence():
     assert brief['personal_first_message'] == ''
     assert _brief_outreach_ready(brief) is False
     assert _development_brief_ready(brief) is False
+
+def test_campaign_domain_limit_uses_company_domain_not_free_mail_provider():
+    src = Path("/root/BORIS/backend/app/services/prospect_campaigns.py").read_text(encoding="utf-8")
+    assert "JOIN prospect_companies xc ON xc.id=x.company_id" in src
+    assert "COALESCE(NULLIF(lower(xc.domain),''),'') = lower(pc.domain)" in src
+    assert "x.email_domain=m.email_domain" not in src

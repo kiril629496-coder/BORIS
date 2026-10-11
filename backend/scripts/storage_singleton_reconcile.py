@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 KNOWN_EXACT_KEYS={"kpi_action_history","templates"}
 KNOWN_KEEP_OLDEST_KEYS={"revenue_analytics_setup_v1"}
-KNOWN_KEEP_LATEST_KEYS={"mcn_repeat_card_auto_resend_v1"}
+KNOWN_KEEP_LATEST_KEYS={"mcn_repeat_card_auto_resend_v1", "active_module_watch_v1"}
 KNOWN_PREFIXES=("execution_receipt:","global_policy_generation:","revenue_call_count_cache:")
 
 def _lock_key(account_id,key):

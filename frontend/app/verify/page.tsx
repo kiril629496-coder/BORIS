@@ -122,8 +122,25 @@ export default function VerifyEmail() {
     }
     forgetVerification();
     persistSession(r.data, true);
+    try{
+      const emailTouch=JSON.parse(localStorage.getItem("boris_email_utm")||"{}")||{};
+      if(String(emailTouch.utm_source||"").toLowerCase()==="email"){
+        const ym=(window as any).ym;
+        if(typeof ym==="function") ym(111297252,"reachGoal","email_trial_started",{
+          utm_campaign:emailTouch.utm_campaign||undefined,
+          utm_content:emailTouch.utm_content||undefined,
+          utm_term:emailTouch.utm_term||undefined,
+        });
+      }
+    }catch{}
+    const auditReturn = localStorage.getItem("boris_post_verify_return");
+    if (auditReturn && auditReturn.startsWith("/audit")) {
+      localStorage.removeItem("boris_post_verify_return");
+      router.push(auditReturn);
+      return;
+    }
     const phoneReturn = localStorage.getItem("boris_post_login_return");
-    if (phoneReturn === "/phone-app") { localStorage.removeItem("boris_post_login_return"); router.push(phoneReturn); }
+    if (phoneReturn === "/phone-app" || Boolean(phoneReturn?.startsWith("/audit"))) { localStorage.removeItem("boris_post_login_return"); router.push(phoneReturn || "/audit"); }
     else router.push(await resolvePostAuthRoute(r.data.user));
   };
 

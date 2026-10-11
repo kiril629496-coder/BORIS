@@ -29,12 +29,13 @@ class OceanUtmContractTest(unittest.TestCase):
 
     def test_01_tg_boris(self):
         out = self.render(self.boris, "tg")
-        self.assertIn("https://boris-ai.pro/?utm_source=tg&utm_medium=social&utm_campaign=ocean&utm_content=p001", out)
+        self.assertIn("https://boris-ai.pro/audit?utm_source=tg&utm_medium=social&utm_campaign=ocean&utm_content=p001", out)
+        self.assertIn("Получите бесплатно аудит за пару минут + тест BORIS для повышения эффективности рекламы", out)
         self.assertNotIn("software-dev", out)
 
     def test_02_vk_boris(self):
         out = self.render(self.boris, "vk")
-        self.assertIn("https://boris-ai.pro/?utm_source=vk&utm_medium=social&utm_campaign=ocean&utm_content=p001", out)
+        self.assertIn("https://boris-ai.pro/audit?utm_source=vk&utm_medium=social&utm_campaign=ocean&utm_content=p001", out)
         self.assertNotIn("software-dev", out)
 
     def test_03_tg_development(self):
@@ -146,6 +147,75 @@ class OceanUtmContractTest(unittest.TestCase):
         self.assertIn("p.update(tracking)", src)
         self.assertIn('p["external_post_id"]', src)
         self.assertIn('p["publication_status"] = "partial"', src)
+
+    def test_20_audit_cta_is_idempotent_on_retry(self):
+        first = self.render(self.boris, "tg", "pretry")
+        second = pr._ocean_finalize_delivery(first, self.boris, "tg", "pretry")
+        self.assertEqual(second.count("https://boris-ai.pro/audit?"), 1)
+        self.assertEqual(
+            second.count("Получите бесплатно аудит за пару минут + тест BORIS для повышения эффективности рекламы"),
+            1,
+        )
+
+    def test_21_legacy_plain_offer_in_signature_is_deduplicated(self):
+        self.project["footer_signature"] = (
+            "BORIS\n\n"
+            "🎁 Получите бесплатно аудит за пару минут + тест BORIS для повышения эффективности рекламы\n"
+            "Напишите в MAX или WhatsApp."
+        )
+        out = self.render(self.boris, "tg", "pdedup")
+        offer = "Получите бесплатно аудит за пару минут + тест BORIS для повышения эффективности рекламы"
+        self.assertEqual(out.count(offer), 1)
+        self.assertEqual(out.count("https://boris-ai.pro/audit?"), 1)
+        self.assertIn("Напишите в MAX или WhatsApp.", out)
+
+    def test_22_vk_text_only_fallback_disabled_by_default(self):
+        rec = {"vk_media_failure_cycles": 9}
+        self.assertFalse(pr._vk_text_only_fallback_enabled({}, rec))
+
+    def test_23_vk_text_only_fallback_requires_threshold(self):
+        project = {"vk_text_only_fallback_enabled": True, "vk_text_only_fallback_after_cycles": 3}
+        self.assertFalse(pr._vk_text_only_fallback_enabled(project, {"vk_media_failure_cycles": 2}))
+        self.assertTrue(pr._vk_text_only_fallback_enabled(project, {"vk_media_failure_cycles": 3}))
+
+    def test_24_vk_cooldown_poll_does_not_increment_media_failure_cycles(self):
+        project = {"vk_text_only_fallback_enabled": True, "vk_text_only_fallback_after_cycles": 3}
+        rec = {"vk_media_failure_cycles": 2}
+        pr._apply_vk_delivery_outcome(rec, project, {
+            "ok": False,
+            "stage": "rate_backoff",
+            "reason": "vk_rate_limited",
+            "error": "VK cooldown",
+        })
+        self.assertEqual(rec["vk_media_failure_cycles"], 2)
+        self.assertNotIn("vk_text_only_fallback_ready", rec)
+
+    def test_25_vk_real_media_failure_enables_owner_approved_fallback(self):
+        project = {"vk_text_only_fallback_enabled": True, "vk_text_only_fallback_after_cycles": 3}
+        rec = {"vk_media_failure_cycles": 2}
+        pr._apply_vk_delivery_outcome(rec, project, {
+            "ok": False,
+            "stage": "photos.getWallUploadServer",
+            "reason": "vk_rate_limited",
+            "error": "загрузка фото ВК: photos.getWallUploadServer: Flood control",
+        })
+        self.assertEqual(rec["vk_media_failure_cycles"], 3)
+        self.assertTrue(rec["vk_text_only_fallback_ready"])
+        self.assertTrue(pr._vk_text_only_fallback_enabled(project, rec))
+
+    def test_26_vk_text_only_success_resets_failure_state(self):
+        project = {"vk_text_only_fallback_enabled": True, "vk_text_only_fallback_after_cycles": 3}
+        rec = {"vk_media_failure_cycles": 3, "vk_text_only_fallback_ready": True}
+        pr._apply_vk_delivery_outcome(rec, project, {"ok": True, "post_id": 123}, used_text_only=True)
+        self.assertEqual(rec["vk_media_failure_cycles"], 0)
+        self.assertNotIn("vk_text_only_fallback_ready", rec)
+        self.assertIn("vk_text_only_fallback_used_at", rec)
+
+    def test_27_posting_project_api_exposes_owner_fallback_fields(self):
+        from app.api.posting import ProjectBody
+        body = ProjectBody(vk_text_only_fallback_enabled=True, vk_text_only_fallback_after_cycles=4)
+        self.assertTrue(body.vk_text_only_fallback_enabled)
+        self.assertEqual(body.vk_text_only_fallback_after_cycles, 4)
 
 
 if __name__ == "__main__":

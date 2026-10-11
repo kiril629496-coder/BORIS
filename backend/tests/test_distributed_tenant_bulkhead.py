@@ -50,6 +50,21 @@ class DistributedTenantBulkheadTests(unittest.TestCase):
             jobs._release_distributed_tenant_slot(a, "qa-bulkhead-A", slot_a)
             jobs._release_distributed_tenant_slot(b, "qa-bulkhead-B", slot_b)
 
+    def test_ten_tenants_keep_independent_heavy_slots(self):
+        """Ten client jobs may coexist without one tenant consuming another tenant's slot."""
+        held = []
+        try:
+            for index in range(10):
+                account = f"qa-bulkhead-tenant-{index}"
+                conn, slot = jobs._try_distributed_tenant_slot(account, "photo_session")
+                self.assertIsNotNone(conn, account)
+                self.assertEqual(slot, 0)
+                held.append((conn, account, slot))
+            self.assertEqual(len(held), 10)
+        finally:
+            for conn, account, slot in held:
+                jobs._release_distributed_tenant_slot(conn, account, slot)
+
     def test_release_immediately_restores_capacity(self):
         first, slot = jobs._try_distributed_tenant_slot("qa-bulkhead-release", "photo_session")
         self.assertIsNotNone(first)

@@ -142,6 +142,8 @@ class HumanTakeoverStateUnitTests(unittest.TestCase):
             self._Result(first={"sent_at": human, "user_id": 7, "text": "Отвечаю сам"}),
             self._Result(rows=[]),
             self._Result(rows=[]),
+            self._Result(first=None),
+            self._Result(rows=[]),
         ])
         state = mop_core.human_takeover_state(db, "acc", "chat")
         self.assertFalse(state["active"])
@@ -168,9 +170,38 @@ class HumanTakeoverStateUnitTests(unittest.TestCase):
             self._Result(first={"sent_at": human, "user_id": 7, "text": "Отвечаю сам"}),
             self._Result(rows=[]),
             self._Result(rows=[]),
+            self._Result(first=None),
+            self._Result(rows=[]),
         ])
         state = mop_core.human_takeover_state(db, "acc", "chat")
         self.assertFalse(state["active"])
+
+    def test_direct_avito_old_human_reply_is_cleared_by_new_client_inbound(self):
+        db = self._Db([
+            self._Result(first=None),  # returned_to_ai
+            self._Result(first=None),  # attributed Unified Inbox outgoing
+            self._Result(first=None),  # explicit TAKE
+            self._Result(rows=[]),     # MOP sent hashes
+            self._Result(first=(200,)),  # newest real client inbound
+            self._Result(rows=[("старый ручной ответ", 100)]),
+        ])
+        state = mop_core.human_takeover_state(db, "acc", "chat")
+        self.assertFalse(state["active"])
+        self.assertEqual(state["reason"], "no_human_takeover")
+
+    def test_direct_avito_human_reply_after_latest_inbound_blocks_mop(self):
+        db = self._Db([
+            self._Result(first=None),
+            self._Result(first=None),
+            self._Result(first=None),
+            self._Result(rows=[]),
+            self._Result(first=(100,)),
+            self._Result(rows=[("новый ручной ответ", 200)]),
+        ])
+        state = mop_core.human_takeover_state(db, "acc", "chat")
+        self.assertTrue(state["active"])
+        self.assertEqual(state["reason"], "external_human_outgoing")
+        self.assertEqual(state["latest_client_inbound_epoch"], 100)
 
 
 if __name__ == "__main__":

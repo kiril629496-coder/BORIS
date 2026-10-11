@@ -361,3 +361,12 @@ class SocialOwnerIncidentReconcilerTest(unittest.TestCase):
         self.assertIn('"manicure_daily_delivery", "u2:270dbf472f7f", "Маникюр Евпатория"',text)
         self.assertIn('"daily_delivery":daily,"project_name":project_label',text)
         self.assertIn('and not external_delivery_wait',text)
+
+    def test_historical_social_p1_inherits_fresh_external_transport_classification(self):
+        text=Path("app/services/incident_reconciler.py").read_text(encoding="utf-8")
+        self.assertIn("SOCIAL_HISTORICAL_EXTERNAL_RECLASS_V1",text)
+        self.assertIn('ControlIncident.account_id==incident_account_id',text)
+        self.assertIn('"dependency_state":"waiting_external"',text)
+        self.assertIn('"dependency_verified_at":now.isoformat()',text)
+        self.assertIn('historical.details_json=payload',text)
+        self.assertIn('historical.updated_at=now',text)

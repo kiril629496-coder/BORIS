@@ -74,10 +74,18 @@ export default function SocialPage() {
   const [autoHours, setAutoHours] = useState(0);
   const [paidAuto, setPaidAuto] = useState(false);
   const [tzOffset, setTzOffset] = useState(3);
+  const [vkTextOnlyFallback, setVkTextOnlyFallback] = useState(false);
+  const [vkTextOnlyAfter, setVkTextOnlyAfter] = useState(3);
   const [editId, setEditId] = useState("");
   const [editText, setEditText] = useState("");
   const [schedId, setSchedId] = useState("");
   const [schedWhen, setSchedWhen] = useState("");
+  const [qualityBusy, setQualityBusy] = useState(false);
+  const [qualityAnalytics, setQualityAnalytics] = useState<any>(null);
+  const [qualityAcceptance, setQualityAcceptance] = useState<any>(null);
+  const [qualityDays, setQualityDays] = useState(30);
+  const [previewResult, setPreviewResult] = useState<any>(null);
+  const [weakReasons, setWeakReasons] = useState<Record<string, string>>({});
 
   const auth = () => {
     const t = typeof window !== "undefined" ? localStorage.getItem("boris_token") : null;
@@ -117,6 +125,8 @@ export default function SocialPage() {
     setAutoHours(p ? Number(p.auto_publish_hours || 0) : 0);
     setPaidAuto(p ? Boolean(p.paid_auto_generation) : false);
     setTzOffset(p ? Number(p.tz_offset ?? 3) : 3);
+    setVkTextOnlyFallback(p ? Boolean(p.vk_text_only_fallback_enabled) : false);
+    setVkTextOnlyAfter(p ? Math.max(1, Math.min(Number(p.vk_text_only_fallback_after_cycles || 3), 10)) : 3);
   };
 
   const load = async (keepId?: string) => {
@@ -187,6 +197,8 @@ export default function SocialPage() {
         auto_publish_hours: autoHours,
         paid_auto_generation: paidAuto,
         tz_offset: tzOffset,
+        vk_text_only_fallback_enabled: vkTextOnlyFallback,
+        vk_text_only_fallback_after_cycles: Math.max(1, Math.min(vkTextOnlyAfter || 3, 10)),
       };
       if (selId && !creating) body.id = selId;
       const r = await fetch("/api/posting/projects/save", { method:"POST", headers:{ ...h, "Content-Type":"application/json" }, body: JSON.stringify(body) });
@@ -239,7 +251,18 @@ export default function SocialPage() {
     } catch (e) {}
   };
 
-  useEffect(() => { if (selId) { loadPosts(selId); resumeRun(selId); } else setPosts([]); }, [selId]);
+  useEffect(() => {
+    if (selId) {
+      loadPosts(selId);
+      resumeRun(selId);
+      loadQuality(selId);
+    } else {
+      setPosts([]);
+      setQualityAnalytics(null);
+      setQualityAcceptance(null);
+      setPreviewResult(null);
+    }
+  }, [selId]);
 
   const publishPost = async (id: string) => {
     const h = auth(); if (!h) return;
@@ -319,7 +342,66 @@ export default function SocialPage() {
     } catch (e:any) { setLogFor(projId, String(e.message || e)); setBusyFor(projId, false); }
   };
 
-  const refresh = async () => { await load(selId || undefined); if (selId) await loadPosts(selId); };
+  const loadQuality = async (projId: string, days = qualityDays) => {
+    const h = auth(); if (!h || !projId) return;
+    try {
+      const [ar, qr] = await Promise.all([
+        fetch("/api/posting/quality/analytics?project_id=" + encodeURIComponent(projId) + "&days=" + encodeURIComponent(String(days)), { headers:h }),
+        fetch("/api/posting/quality/acceptance?project_id=" + encodeURIComponent(projId), { headers:h }),
+      ]);
+      if (ar.ok) setQualityAnalytics(await ar.json());
+      if (qr.ok) setQualityAcceptance(await qr.json());
+    } catch (e) {}
+  };
+
+  const createQualityPreview = async (action = "new", sourcePostId = "") => {
+    const h = auth(); if (!h || !selId || qualityBusy) return;
+    setQualityBusy(true); setNotice(""); setPreviewResult(null);
+    try {
+      const r = await fetch("/api/posting/preview", {
+        method:"POST",
+        headers:{ ...h, "Content-Type":"application/json" },
+        body:JSON.stringify({ project_id:selId, action, source_post_id:sourcePostId || "" }),
+      });
+      const j = await jsonOrThrow(r);
+      setPreviewResult(j);
+      if (j.status === "ok") {
+        setNotice("✓ Новый вариант прошёл проверку качества и сохранён в черновики");
+        await loadPosts(selId);
+        await loadQuality(selId);
+      } else if (j.status === "quality_blocked") {
+        setNotice("⚠️ BORIS не выпустил слабый вариант: " + humanizeBusinessText(j.message, "качество ниже порога"));
+      } else {
+        setNotice("⚠️ " + humanizeBusinessText(j.message || j.status, "не удалось создать предпросмотр"));
+      }
+    } catch (e:any) {
+      setNotice("⚠️ " + String(e?.message || e));
+    } finally { setQualityBusy(false); }
+  };
+
+  const ratePost = async (postId: string, rating: "good" | "weak", reasons: string[] = []) => {
+    const h = auth(); if (!h || !selId) return;
+    try {
+      const r = await fetch("/api/posting/quality/feedback", {
+        method:"POST",
+        headers:{ ...h, "Content-Type":"application/json" },
+        body:JSON.stringify({ project_id:selId, post_id:postId, rating, reasons }),
+      });
+      const j = await jsonOrThrow(r);
+      if (j.status === "ok") {
+        setNotice(rating === "good" ? "✓ BORIS учтёт этот пост как удачный" : "✓ BORIS учтёт причину и будет избегать её дальше");
+        await loadQuality(selId);
+      }
+    } catch (e:any) { setNotice("⚠️ " + String(e?.message || e)); }
+  };
+
+  const refresh = async () => {
+    await load(selId || undefined);
+    if (selId) {
+      await loadPosts(selId);
+      await loadQuality(selId);
+    }
+  };
 
   const planHours = (p: any): string[] => {
     const list: string[] = ((p && p.times) || []).map((x: any) => String(x).trim()).filter(Boolean);
@@ -421,6 +503,7 @@ export default function SocialPage() {
   const drafts = (Array.isArray(posts) ? posts : []).filter((p: any) => p.status === "draft");
   const partials = (Array.isArray(posts) ? posts : []).filter((p: any) => p.status === "partial");
   const errors = (Array.isArray(posts) ? posts : []).filter((p: any) => p.status === "error");
+  const qualityBlocked = (Array.isArray(posts) ? posts : []).filter((p: any) => p.status === "quality_blocked");
   const published = (Array.isArray(posts) ? posts : []).filter((p: any) => p.status === "published");
   const feedback = notice || msg;
   const card: any = { position:"relative", overflow:"hidden", background:"#fff", border:"1px solid " + T.line, borderRadius:"16px", padding:"24px" };
@@ -538,6 +621,106 @@ export default function SocialPage() {
               </div>
             )}
 
+
+            {sel && (
+              <div className="boris-social-card" style={{ ...card, border:"1px solid #C7D7FE", background:"linear-gradient(180deg,#F8FAFF,#FFFFFF)" }}>
+                <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:"16px", flexWrap:"wrap" }}>
+                  <div style={{ minWidth:"240px", flex:"1 1 420px" }}>
+                    <div style={{ fontSize:"17px", fontWeight:800, color:T.ink }}>Контроль качества Social</div>
+                    <div style={{ fontSize:"13px", color:T.muted, marginTop:"5px", lineHeight:1.5 }}>
+                      Один смысловой brief → текст → связанный баннер → Copy QA → Vision QA → публикация → проверка фактического поста.
+                      Слабый вариант BORIS теперь не выпускает по расписанию.
+                    </div>
+                  </div>
+                  <div style={{ display:"flex", gap:"8px", flexWrap:"wrap", alignItems:"center" }}>
+                    <button className="soc-btn" disabled={qualityBusy || busy} onClick={() => createQualityPreview("new")} style={{ ...btn([T.blue1, T.blue2]), padding:"10px 16px", whiteSpace:"nowrap" }}>
+                      {qualityBusy ? "Проверяю качество…" : "Создать следующий пост без публикации"}
+                    </button>
+                    {[7,30,60].map((d) => (
+                      <button key={d} className="soc-btn" disabled={qualityBusy} onClick={() => { setQualityDays(d); loadQuality(sel.id, d); }} style={{ border:"1px solid " + (qualityDays === d ? T.blue1 : T.line), background:qualityDays === d ? "#EEF4FF" : "#fff", color:qualityDays === d ? T.blue1 : T.ink, borderRadius:"10px", padding:"9px 12px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>{d} дней</button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))", gap:"10px", marginTop:"16px" }}>
+                  <div style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"12px 14px", background:"#fff" }}>
+                    <div style={{ fontSize:"12px", color:T.muted }}>10-slot acceptance</div>
+                    <div style={{ fontSize:"20px", fontWeight:800, marginTop:"4px", color:qualityAcceptance?.pass ? T.green2 : T.ink }}>
+                      {Number(qualityAcceptance?.consecutive_passed || 0)} / {Number(qualityAcceptance?.required_slots || 10)}
+                    </div>
+                    <div style={{ fontSize:"12px", color:T.muted, marginTop:"3px" }}>{qualityAcceptance?.pass ? "PASS — 10 последовательных слотов подтверждены" : "Считаются только новые подтверждённые Quality V1 публикации"}</div>
+                  </div>
+                  <div style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"12px 14px", background:"#fff" }}>
+                    <div style={{ fontSize:"12px", color:T.muted }}>Подтверждено качественных</div>
+                    <div style={{ fontSize:"20px", fontWeight:800, marginTop:"4px" }}>{Number(qualityAnalytics?.quality_verified || 0)}</div>
+                    <div style={{ fontSize:"12px", color:T.muted, marginTop:"3px" }}>Copy + Vision + post-publish verify</div>
+                  </div>
+                  <div style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"12px 14px", background:"#fff" }}>
+                    <div style={{ fontSize:"12px", color:T.muted }}>Автопилот качества</div>
+                    <div style={{ fontSize:"14px", fontWeight:800, marginTop:"6px", color:qualityAnalytics?.autopilot_readiness?.ready ? T.green2 : "#B54708" }}>
+                      {qualityAnalytics?.autopilot_readiness?.ready ? "Можно включать полный автопилот" : "Накопление подтверждений"}
+                    </div>
+                    <div style={{ fontSize:"12px", color:T.muted, marginTop:"3px" }}>{qualityAnalytics?.autopilot_readiness?.message || "Нужно минимум 20 успешных подтверждённых публикаций"}</div>
+                  </div>
+                  <div style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"12px 14px", background:"#fff" }}>
+                    <div style={{ fontSize:"12px", color:T.muted }}>Проверенные метрики</div>
+                    <div style={{ fontSize:"20px", fontWeight:800, marginTop:"4px" }}>{Number(qualityAnalytics?.measured_posts || 0)}</div>
+                    <div style={{ fontSize:"12px", color:T.muted, marginTop:"3px" }}>VK readback 24ч / 72ч / 7д, без выдуманных данных</div>
+                  </div>
+                </div>
+
+                {qualityAnalytics?.winning_topics?.length > 0 && (
+                  <div style={{ marginTop:"14px", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))", gap:"10px" }}>
+                    <div style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"12px 14px" }}>
+                      <div style={{ fontSize:"13px", fontWeight:800, marginBottom:"7px" }}>Что сейчас работает лучше</div>
+                      {(qualityAnalytics.winning_topics || []).slice(0,3).map((x:any, i:number) => (
+                        <div key={i} style={{ fontSize:"13px", color:T.muted, marginTop:"5px" }}>• {x.topic} · {Number(x.engagement_per_post || 0).toFixed(1)}</div>
+                      ))}
+                    </div>
+                    <div style={{ border:"1px solid " + T.line, borderRadius:"12px", padding:"12px 14px" }}>
+                      <div style={{ fontSize:"13px", fontWeight:800, marginBottom:"7px" }}>Обратная связь владельца</div>
+                      <div style={{ fontSize:"13px", color:T.muted }}>👍 {Number(qualityAnalytics?.owner_feedback?.positive || 0)} · 👎 {Number(qualityAnalytics?.owner_feedback?.weak_recent || 0)}</div>
+                      {(qualityAnalytics?.owner_feedback?.top_dislikes || []).slice(0,3).map((x:any, i:number) => (
+                        <div key={i} style={{ fontSize:"13px", color:T.muted, marginTop:"5px" }}>• {x.reason} — {x.count}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {previewResult?.status === "ok" && (
+                  <div style={{ marginTop:"14px", border:"1px solid #A6F4C5", borderRadius:"12px", padding:"12px 14px", background:"#F6FEF9" }}>
+                    <div style={{ fontSize:"13px", fontWeight:800, color:T.green2 }}>Последний предпросмотр прошёл QA</div>
+                    <div style={{ fontSize:"13px", color:T.muted, marginTop:"5px" }}>
+                      Copy {Number(previewResult?.copy_quality?.score || 0)}/100 · Vision {previewResult?.vision_qa?.pass ? "PASS" : "FAIL"} · баннер {Number(previewResult?.banner_cost_rub || 0).toFixed(2)} ₽ · попыток {Number(previewResult?.banner_attempts || 0)}
+                    </div>
+                    <div style={{ fontSize:"13px", color:T.muted, marginTop:"4px" }}>{previewResult?.topic_reason}</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {sel && qualityBlocked.length > 0 && (
+              <div className="boris-social-card" style={{ ...card, border:"1px solid #FEDF89", background:"#FFFAEB" }}>
+                <div style={{ fontSize:"16px", fontWeight:800, color:"#B54708" }}>Остановлено контролем качества ({qualityBlocked.length})</div>
+                <div style={{ fontSize:"13px", color:T.muted, marginTop:"5px", marginBottom:"12px" }}>
+                  Эти варианты не ушли в VK/TG. Качество важнее расписания: создайте новый вариант, не публикуя слабый пост.
+                </div>
+                <div style={{ display:"grid", gap:"10px" }}>
+                  {qualityBlocked.slice(0,6).map((p:any) => (
+                    <div key={p.id} style={{ border:"1px solid #FEDF89", borderRadius:"12px", padding:"12px 14px", background:"#fff" }}>
+                      <div style={{ fontSize:"12px", color:T.muted }}>{p.created_at}{p.content_brief?.selected_theme ? " · " + p.content_brief.selected_theme : ""}</div>
+                      {p.text && <div style={{ fontSize:"13px", color:T.ink, marginTop:"5px", maxHeight:"64px", overflow:"hidden", whiteSpace:"pre-wrap" }}>{cleanPostText(p.text)}</div>}
+                      <div style={{ fontSize:"12px", color:"#B54708", marginTop:"6px" }}>{humanizeBusinessText(p.error, "Не прошёл контроль качества")}</div>
+                      <div style={{ marginTop:"9px", display:"flex", gap:"8px", flexWrap:"wrap" }}>
+                        <button className="soc-btn" disabled={qualityBusy} onClick={() => createQualityPreview("change_theme", p.id)} style={{ ...btn([T.blue1,T.blue2]), padding:"7px 12px", fontSize:"12px" }}>Сменить тему</button>
+                        <button className="soc-btn boris-f3-990af6b92041d2" disabled={busy} onClick={() => removePost(p.id)}>Удалить запись</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="boris-social-card boris-social-settings-card" style={card}>
               <div onClick={() => setOpen(!open)} className="boris-f3-924fd8daa95655">
                 <div className="boris-f3-3df0eea15ca34a"><span className="boris-social-title-icon"><Icon name="settings" size={18} /></span>Настройки проекта{sel ? " — " + (sel.name || "") : ""}</div>
@@ -605,6 +788,21 @@ export default function SocialPage() {
                     <option value="6">Через 6 часов</option>
                     <option value="24">Через сутки</option>
                   </select>
+                </div>
+                <div>
+                  <label style={label}>Fallback VK без баннера</label>
+                  <select className="soc-in" style={{ ...inp, cursor:"pointer" }} value={vkTextOnlyFallback ? "on" : "off"} onChange={(e) => setVkTextOnlyFallback(e.target.value === "on")}>
+                    <option value="off">Выключен — ждать доставку с баннером</option>
+                    <option value="on">Разрешён после повторных внешних отказов</option>
+                  </select>
+                  <div style={{ fontSize:"12px", color:T.muted, marginTop:"5px" }}>По умолчанию выключен. Telegram не публикуется повторно.</div>
+                </div>
+                <div>
+                  <label style={label}>Через сколько отдельных отказов VK</label>
+                  <select disabled={!vkTextOnlyFallback} className="soc-in" style={{ ...inp, cursor:vkTextOnlyFallback?"pointer":"not-allowed", opacity:vkTextOnlyFallback?1:.6 }} value={String(vkTextOnlyAfter)} onChange={(e) => setVkTextOnlyAfter(Number(e.target.value))}>
+                    {[1,2,3,4,5,6].map((n)=><option key={n} value={n}>{n} {n===1?'цикл':'цикла'}</option>)}
+                  </select>
+                  <div style={{ fontSize:"12px", color:T.muted, marginTop:"5px" }}>Рекомендуем 3 cooldown-цикла. Только после этого допустим текстовый VK-пост.</div>
                 </div>
                 <div>
                   <label style={label}>Источник картинки</label>
@@ -724,9 +922,26 @@ export default function SocialPage() {
                       )}
                       <div className="boris-f3-0070778df76ac3">
                         <div style={{ fontSize:"12px", color:T.muted, marginBottom:"4px" }}>{p.created_at}</div>
+                        {p.quality_policy === "SOCIAL_QUALITY_V1" && (
+                          <div style={{ display:"flex", gap:"7px", flexWrap:"wrap", margin:"6px 0 9px" }}>
+                            <span style={{ fontSize:"12px", fontWeight:800, padding:"4px 7px", borderRadius:"999px", background:p.copy_quality?.pass ? "#ECFDF3" : "#FEF3F2", color:p.copy_quality?.pass ? T.green2 : "#B42318" }}>
+                              Copy {p.copy_quality?.pass ? (String(p.copy_quality?.score ?? "") + "/100") : "RECHECK"}
+                            </span>
+                            <span style={{ fontSize:"12px", fontWeight:800, padding:"4px 7px", borderRadius:"999px", background:p.vision_qa?.pass ? "#ECFDF3" : "#FEF3F2", color:p.vision_qa?.pass ? T.green2 : "#B42318" }}>
+                              Vision {p.vision_qa?.pass ? "PASS" : "RECHECK"}
+                            </span>
+                            <span style={{ fontSize:"12px", fontWeight:800, padding:"4px 7px", borderRadius:"999px", background:"#F2F4F7", color:T.ink }}>
+                              Баннер {Number(p.banner_cost_rub || 0).toFixed(2)} ₽
+                            </span>
+                            {p.content_brief?.format && <span style={{ fontSize:"12px", padding:"4px 7px", borderRadius:"999px", background:"#EEF4FF", color:T.blue1 }}>{p.content_brief.format}</span>}
+                          </div>
+                        )}
                         <div style={{ fontSize:"14px", color:T.ink, whiteSpace:"pre-wrap" }}>{cleanPostText(p.preview || p.text)}</div>
                         <div className="boris-f3-fb169f62bbd1ce">
-                          <button className="soc-btn" disabled={busy} onClick={() => publishPost(p.id)} style={{ ...btn([T.green1, T.green2]), padding:"8px 16px", fontSize:"13px" }}>Опубликовать</button>
+                          <button className="soc-btn" disabled={busy || (p.quality_policy === "SOCIAL_QUALITY_V1" && (!p.copy_quality?.pass || !p.vision_qa?.pass))} onClick={() => publishPost(p.id)} style={{ ...btn([T.green1, T.green2]), padding:"8px 16px", fontSize:"13px" }}>Опубликовать</button>
+                          {p.quality_policy === "SOCIAL_QUALITY_V1" && <button className="soc-btn" disabled={qualityBusy} onClick={() => createQualityPreview("regenerate_text", p.id)} style={{ border:"1px solid " + T.blue1, background:"#fff", color:T.blue1, borderRadius:"10px", padding:"8px 13px", fontSize:"12px", fontWeight:700, cursor:"pointer" }}>Новый текст</button>}
+                          {p.quality_policy === "SOCIAL_QUALITY_V1" && <button className="soc-btn" disabled={qualityBusy} onClick={() => createQualityPreview("regenerate_banner", p.id)} style={{ border:"1px solid " + T.blue1, background:"#fff", color:T.blue1, borderRadius:"10px", padding:"8px 13px", fontSize:"12px", fontWeight:700, cursor:"pointer" }}>Новый баннер</button>}
+                          {p.quality_policy === "SOCIAL_QUALITY_V1" && <button className="soc-btn" disabled={qualityBusy} onClick={() => createQualityPreview("change_theme", p.id)} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"8px 13px", fontSize:"12px", fontWeight:700, cursor:"pointer" }}>Сменить тему</button>}
                           <button className="soc-btn" disabled={busy} onClick={() => { setEditId(editId === p.id ? "" : p.id); setEditText(p.text || ""); setSchedId(""); }} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>Редактировать</button>
                           <button className="soc-btn" disabled={busy} onClick={() => { setSchedId(schedId === p.id ? "" : p.id); setSchedWhen((p.publish_at || "").replace(" ", "T")); setEditId(""); }} style={{ border:"1px solid " + T.line, background:"#fff", color:T.ink, borderRadius:"10px", padding:"8px 16px", fontSize:"13px", fontWeight:700, cursor:"pointer" }}>Когда разместить</button>
                           <button className="soc-btn boris-f3-990af6b92041d2" disabled={busy} onClick={() => removePost(p.id)}>Удалить</button>
@@ -798,21 +1013,44 @@ export default function SocialPage() {
                       )}
                       <div className="boris-f3-0070778df76ac3">
                         <div style={{ fontSize:"12px", color:T.muted, marginBottom:"4px" }}>{p.created_at}</div>
+                        {p.quality_policy === "SOCIAL_QUALITY_V1" && (
+                          <div style={{ display:"flex", gap:"7px", flexWrap:"wrap", margin:"6px 0 9px" }}>
+                            <span style={{ fontSize:"12px", fontWeight:800, padding:"4px 7px", borderRadius:"999px", background:p.post_publish_verification?.status === "pass" ? "#ECFDF3" : "#FFFAEB", color:p.post_publish_verification?.status === "pass" ? T.green2 : "#B54708" }}>
+                              {p.post_publish_verification?.status === "pass" ? "Публикация проверена" : "Проверка публикации ожидается"}
+                            </span>
+                            <span style={{ fontSize:"12px", padding:"4px 7px", borderRadius:"999px", background:"#F2F4F7", color:T.ink }}>
+                              {p.ids?.tg?.message_id ? "TG #" + p.ids.tg.message_id : ""}{p.ids?.tg?.message_id && p.ids?.vk?.post_id ? " · " : ""}{p.ids?.vk?.post_id ? "VK #" + p.ids.vk.post_id : ""}
+                            </span>
+                            {p.content_brief?.format && <span style={{ fontSize:"12px", padding:"4px 7px", borderRadius:"999px", background:"#EEF4FF", color:T.blue1 }}>{p.content_brief.format}</span>}
+                          </div>
+                        )}
                         <div style={{ fontSize:"14px", color:T.ink, whiteSpace:"pre-wrap", maxHeight:"90px", overflow:"hidden" }}>{cleanPostText(p.preview || p.text)}</div>
-                        {p.stats && (
+                        {(p.stats || p.engagement) && (() => { const st:any = p.stats || p.engagement || {}; return (
                           <div style={{ display:"flex", gap:"14px", marginTop:"10px", flexWrap:"wrap", fontSize:"13px", color:T.muted, alignItems:"center" }}>
-                            <span title="Просмотры">👁 {p.stats.views ?? 0}</span>
-                            <span title="Лайки">❤️ {p.stats.likes ?? 0}</span>
-                            <span title="Комментарии">💬 {p.stats.comments ?? 0}</span>
-                            <span title="Репосты">🔁 {p.stats.reposts ?? 0}</span>
-                            {p.stats.er != null && (
-                              <span title="Доля читателей, которые отреагировали" style={{ fontWeight:700, color: p.stats.er >= 5 ? T.green2 : T.ink }}>
-                                вовлечение {p.stats.er}%
+                            <span title="Просмотры">👁 {st.views ?? 0}</span>
+                            <span title="Лайки">❤️ {st.likes ?? st.reactions ?? 0}</span>
+                            <span title="Комментарии">💬 {st.comments ?? 0}</span>
+                            <span title="Репосты">🔁 {st.reposts ?? 0}</span>
+                            {st.er != null && (
+                              <span title="Доля читателей, которые отреагировали" style={{ fontWeight:700, color: st.er >= 5 ? T.green2 : T.ink }}>
+                                вовлечение {st.er}%
                               </span>
                             )}
                           </div>
-                        )}
-                        <div className="boris-f3-fb169f62bbd1ce">
+                        ); })()}
+                        <div style={{ display:"flex", gap:"8px", flexWrap:"wrap", alignItems:"center", marginTop:"10px" }}>
+                          <button className="soc-btn" disabled={busy} onClick={() => ratePost(p.id, "good")} style={{ border:"1px solid #A6F4C5", background:"#F6FEF9", color:T.green2, borderRadius:"10px", padding:"7px 11px", fontSize:"12px", fontWeight:800, cursor:"pointer" }}>👍 Хорошо</button>
+                          <select value={weakReasons[p.id] || "слабый смысл"} onChange={(e) => setWeakReasons((prev) => ({ ...prev, [p.id]: e.target.value }))} style={{ ...inp, width:"auto", minWidth:"150px", padding:"7px 10px", fontSize:"12px" }}>
+                            <option value="слабый смысл">Слабый смысл</option>
+                            <option value="слишком рекламно">Слишком рекламно</option>
+                            <option value="повтор">Повтор</option>
+                            <option value="плохой баннер">Плохой баннер</option>
+                            <option value="картинка не по смыслу">Картинка не по смыслу</option>
+                            <option value="неправильный сезон">Неправильный сезон</option>
+                            <option value="ошибка текста">Ошибка текста</option>
+                            <option value="не нравится стиль">Не нравится стиль</option>
+                          </select>
+                          <button className="soc-btn" disabled={busy} onClick={() => ratePost(p.id, "weak", [weakReasons[p.id] || "слабый смысл"])} style={{ border:"1px solid #FEDF89", background:"#FFFAEB", color:"#B54708", borderRadius:"10px", padding:"7px 11px", fontSize:"12px", fontWeight:800, cursor:"pointer" }}>👎 Слабо</button>
                           <button className="soc-btn boris-f3-990af6b92041d2" disabled={busy} onClick={() => unpublishPost(p.id)}>Удалить из канала</button>
                         </div>
                       </div>

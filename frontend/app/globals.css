@@ -9460,3 +9460,44 @@ body{background:radial-gradient(circle at 72% -15%,rgba(47,111,255,.07),transpar
   }
 }
 /* BORIS_CAMPAIGN_BUSINESS_STATUS_V1_END */
+
+
+/* BORIS A/B client result cards — warm Campaign visual language */
+.boris-ab-panel{
+  border-color:#F0D8A8;
+  background:linear-gradient(180deg,#FFFDF9 0%,#FFFFFF 56%,#FFF9EE 100%);
+  box-shadow:0 16px 42px rgba(128,82,16,.08);
+}
+.boris-ab-head-icon{background:#FFF1D6;color:#C96D00;box-shadow:inset 0 0 0 1px #F3D7A1}
+.boris-ab-eyebrow{color:#B96500}
+.boris-ab-kpi{border-color:#EEE2CF;background:#fffdf9}
+.boris-ab-card{border-color:#EEDFC7;box-shadow:0 10px 28px rgba(128,82,16,.055)}
+.boris-ab-card:hover{border-color:#E6BF74;box-shadow:0 14px 34px rgba(128,82,16,.09)}
+.boris-ab-metrics span{background:#FFF9EE}
+.boris-ab-more{color:#B96500}
+.boris-ab-winner{border-color:#ABEFC6;background:linear-gradient(135deg,#ECFDF3,#F8FFFB)}
+
+
+/* BORIS Campaign simplified client menus */
+@media(max-width:520px){
+  .boris-campaign-top-actions{
+    display:grid!important;
+    grid-template-columns:1fr!important;
+    align-items:stretch!important;
+  }
+  .boris-campaign-menu{width:100%!important;}
+  .boris-campaign-menu>summary{
+    width:100%!important;
+    box-sizing:border-box!important;
+    justify-content:space-between!important;
+  }
+  .boris-campaign-menu-panel{
+    position:relative!important;
+    inset:auto!important;
+    width:100%!important;
+    max-width:none!important;
+    box-sizing:border-box!important;
+    margin-top:6px!important;
+    box-shadow:0 12px 30px rgba(17,35,66,.10)!important;
+  }
+}

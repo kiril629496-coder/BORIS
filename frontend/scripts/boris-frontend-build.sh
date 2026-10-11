@@ -59,12 +59,28 @@ PY
 }
 
 SOURCE_HASH_BEFORE_LOCK="$(python3 "$HASHER")"
+
+# MESSENGER_CACHE_REUSE_GATE_V1: cache reuse must never bypass Messenger
+# contracts. These checks are source-only and safe before the build lock.
+python3 "$ROOT/scripts/messenger-control-audit.py"
+python3 "$ROOT/scripts/messenger-route-audit.py"
+python3 "$ROOT/scripts/messenger-pwa-push-audit.py"
+python3 "$ROOT/scripts/messenger-design-audit.py"
+python3 "$ROOT/scripts/qa-messenger-universal-onboarding-static.py"
+/root/BORIS/backend/venv/bin/python /root/BORIS/backend/scripts/messenger-security-audit.py
+
 reuse_ready_artifact "$SOURCE_HASH_BEFORE_LOCK" || true
 
 # FRONTEND_BUILD_SINGLEFLIGHT_V1: serialize autonomous production builds.
 BUILD_LOCK="/run/lock/boris-frontend-build.lock"
-[ -e "$BUILD_LOCK" ] || : >"$BUILD_LOCK"
-exec 7>"$BUILD_LOCK"
+if [ ! -e "$BUILD_LOCK" ]; then
+  : >"$BUILD_LOCK"
+  chmod 0666 "$BUILD_LOCK" 2>/dev/null || true
+fi
+# FRONTEND_BUILD_LOCK_READONLY_FD_V1: flock does not require a writable fd.
+# Open an existing shared lock read-only so root/borisops/sentinelx builders do
+# not fail merely because another trusted runner owns the lock inode.
+exec 7<"$BUILD_LOCK"
 flock -w "${BORIS_FRONTEND_BUILD_LOCK_WAIT_SEC:-900}" 7 || {
   echo "FRONTEND_BUILD=SAFE_DEFERRED another production build is still running"
   exit 75
@@ -102,7 +118,7 @@ tar -C "$ROOT" \
   --exclude='*.old' \
   --exclude='*.orig' \
   --exclude='*.tmp' \
-  -cf - . | tar -C "$WORK" -xf -
+  -cf - . | tar --no-same-permissions --no-overwrite-dir -C "$WORK" -xf -
 ln -s "$ROOT/node_modules" "$WORK/node_modules"
 
 SNAPSHOT_HASH="$(cd "$WORK" && python3 scripts/frontend-source-hash.py)"
@@ -114,6 +130,18 @@ CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 (
   cd "$WORK"
   python3 scripts/mobile-static-contract.py
+)
+
+# Messenger is a client-facing production workspace. Fail closed before
+# Next.js compilation if controls become decorative, frontend routes drift
+# from FastAPI, or PWA/Push installation/deep-link contracts regress.
+(
+  cd "$WORK"
+  python3 scripts/messenger-control-audit.py
+  python3 scripts/messenger-route-audit.py
+  python3 scripts/messenger-pwa-push-audit.py
+  python3 scripts/messenger-design-audit.py
+  python3 scripts/qa-messenger-universal-onboarding-static.py
 )
 
 # Prospecting showcase is a client-facing presentation surface. Keep it

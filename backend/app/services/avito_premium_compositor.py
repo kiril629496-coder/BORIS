@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageStat
 
 
@@ -57,97 +58,177 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int, max_lines:
     return lines
 
 
-def compose_premium_avito_banner(source_path: str, output_path: str, title: str) -> dict:
-    """Create a mobile-first premium Avito banner from a verified real photo.
+def _headline_lines(draw: ImageDraw.ImageDraw, text: str, font, max_width: int):
+    """Prefer one line; otherwise choose the cleanest 2-line split.
 
-    V3 keeps the product/photo dominant and reserves only a bottom caption zone
-    for one bold verified headline. This avoids covering the main object and gives
-    the mobile card an obvious visual hierarchy: photo first, message second.
+    Brand pair "Grand Line" must stay together. The old generic wrapper could
+    emit "Grand" / "Line" on separate lines, which failed mobile QA.
     """
-    src = Image.open(source_path).convert("RGB")
-    canvas = _crop_square(src, 1024)
-
-    # Keep the source photograph full-bleed. Only a very light cinematic grade is
-    # applied globally; no blur, collage, fake object or decorative card is added.
-    rgba = canvas.convert("RGBA")
-    grade = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
-    gd = ImageDraw.Draw(grade)
-    gd.rectangle((0, 0, 1024, 1024), fill=(4, 9, 18, 16))
-
-    # Bottom-only readability field. The upper ~65% stays unobstructed so the
-    # shower/product remains the dominant subject. The fade avoids a hard flyer box.
-    band_top = 635
-    for y in range(band_top, 1024):
-        t = (y - band_top) / max(1, 1024 - band_top - 1)
-        alpha = int(228 * (t ** 0.62))
-        gd.line((0, y, 1024, y), fill=(5, 12, 26, alpha), width=1)
-    rgba = Image.alpha_composite(rgba, grade)
-    draw = ImageDraw.Draw(rgba)
-
-    source_title = " ".join(str(title or "").split())
-    words = source_title.split()
+    words=[w for w in str(text or "").split() if w]
     if not words:
-        return {"ok": False, "error": "EMPTY_TITLE", "font_size": 0, "line_count": 0}
-
-    # Visible copy is a complete semantic prefix of the verified listing title.
-    # Never end a cropped headline on a dangling preposition/conjunction.
-    dangling_tail = {"в", "во", "на", "для", "с", "со", "без", "под", "по", "из", "от", "до", "к", "за", "при", "и", "или"}
-    max_width = 900
-    display_title = ""
-    lines = []
-    font_size = 0
-    font = _font(72)
-    for word_count in range(min(4, len(words)), 0, -1):
-        candidate_words = words[:word_count]
-        if candidate_words and candidate_words[-1].casefold().strip(".,:;—–-") in dangling_tail:
+        return []
+    full=" ".join(words)
+    if draw.textbbox((0,0),full,font=font)[2] <= max_width:
+        return [full]
+    candidates=[]
+    for i in range(1,len(words)):
+        # Never split the Grand Line brand pair.
+        if words[i-1].casefold()=="grand" and words[i].casefold()=="line":
             continue
-        candidate = " ".join(candidate_words).strip()
-        for size in range(72, 57, -2):
-            candidate_font = _font(size)
-            candidate_lines = _wrap(draw, candidate, candidate_font, max_width, 2)
-            exact = " ".join(candidate_lines).replace("…", "") == candidate
-            if exact and len(candidate_lines) <= 2 and not any("…" in ln for ln in candidate_lines):
-                display_title = candidate
-                lines = candidate_lines
-                font_size = size
-                font = candidate_font
-                break
-        if display_title:
+        a=" ".join(words[:i]); b=" ".join(words[i:])
+        wa=draw.textbbox((0,0),a,font=font)[2]
+        wb=draw.textbbox((0,0),b,font=font)[2]
+        if wa<=max_width and wb<=max_width:
+            # Prefer balanced, visually stable lines with the second not tiny.
+            score=max(wa,wb)+abs(wa-wb)*0.22
+            candidates.append((score,[a,b]))
+    return min(candidates,key=lambda x:x[0])[1] if candidates else []
+
+
+def compose_premium_avito_banner(source_path: str, output_path: str, title: str) -> dict:
+    """Mobile-first Avito banner: dominant photo + one quiet glass caption.
+
+    V5 removes the full-width dark bar that Vision QA correctly flagged as a
+    cheap fragmented template. The photograph remains dominant; a single light
+    translucent card carries only the verified title.
+    """
+    src=Image.open(source_path).convert("RGB")
+    canvas=_crop_square(src,1024)
+    rgba=canvas.convert("RGBA")
+
+    # Very light global grade only; keep source truthful.
+    grade=Image.new("RGBA",rgba.size,(0,0,0,0))
+    ImageDraw.Draw(grade).rectangle((0,0,1024,1024),fill=(8,15,28,10))
+    rgba=Image.alpha_composite(rgba,grade)
+
+    source_title=" ".join(str(title or "").split())
+    words=source_title.split()
+    if not words:
+        return {"ok":False,"error":"EMPTY_TITLE","font_size":0,"line_count":0}
+
+    # V6 identity contract: the verified Campaign title is atomic. Never drop
+    # trailing words to make a banner fit; shortening a title changes the offer
+    # and correctly fails dedicated banner QA. Fit the COMPLETE title in one or
+    # two lines, reducing font size only within the mobile-safe range.
+    display_title=source_title
+    lines=[]
+    font_size=0
+    font=_font(64)
+    probe=ImageDraw.Draw(rgba)
+    for size in range(68,47,-2):
+        f=_font(size)
+        ls=_headline_lines(probe,display_title,f,850)
+        if ls and len(ls)<=2:
+            lines=ls
+            font_size=size
+            font=f
             break
-    if not display_title:
-        return {"ok": False, "error": "MOBILE_TEXT_GEOMETRY_FAILED", "font_size": 0, "line_count": 0}
+    if not lines:
+        return {
+            "ok":False,
+            "error":"EXACT_TITLE_GEOMETRY_FAILED",
+            "font_size":0,
+            "line_count":0,
+            "source_title":source_title,
+        }
 
-    boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
-    heights = [max(1, b[3] - b[1]) for b in boxes]
-    gap = 14
-    total_h = sum(heights) + gap * max(0, len(lines) - 1)
-    x = 60
-    # Place the block entirely inside the caption zone with generous margins.
-    y = max(720, 1024 - 82 - total_h)
-    accent_y = max(674, y - 42)
-    draw.rounded_rectangle((x, accent_y, x + 108, accent_y + 14), radius=7, fill=(96, 140, 255, 255))
-    for idx, ln in enumerate(lines):
-        draw.text((x + 3, y + 4), ln, font=font, fill=(0, 0, 0, 150))
-        draw.text((x, y), ln, font=font, fill=(255, 255, 255, 255))
-        y += heights[idx] + gap
+    boxes=[probe.textbbox((0,0),ln,font=font) for ln in lines]
+    heights=[max(1,b[3]-b[1]) for b in boxes]
+    gap=10
+    text_h=sum(heights)+gap*max(0,len(lines)-1)
 
-    # Mobile contract: never silently emit tiny or overlong copy.
-    if font_size < 58 or len(lines) > 2 or not lines:
-        return {"ok": False, "error": "MOBILE_TEXT_GEOMETRY_FAILED", "font_size": font_size, "line_count": len(lines)}
+    # V6 adaptive caption placement. The old fixed bottom panel could cover the
+    # sold object (Campaign 512 proved this on panoramic glazing). Compare the
+    # exact candidate zones and put the single frosted card over the calmer one.
+    top_panel=(38,42,986,324)
+    bottom_panel=(38,700,986,982)
+    top_density=_edge_density(canvas,top_panel)
+    bottom_density=_edge_density(canvas,bottom_panel)
+    if top_density < bottom_density:
+        caption_zone="top"
+        panel=top_panel
+        panel_top=42
+        shadow_box=(44,52,992,332)
+    else:
+        caption_zone="bottom"
+        panel=bottom_panel
+        panel_top=700
+        shadow_box=(44,710,992,990)
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    rgba.convert("RGB").save(output_path, "PNG", optimize=True)
+    # V7 creative-family contract. Layout choice is deterministic from the
+    # canonical output identity + verified title, so retries never randomly
+    # change an already approved creative. Families vary only presentation;
+    # source photo and exact verified title remain authoritative.
+    family_seed=(Path(output_path).name+"|"+source_title).encode("utf-8")
+    family_idx=int.from_bytes(hashlib.blake2b(family_seed,digest_size=2).digest(),"big") % 4
+    family_names=(
+        "glass_light",
+        "glass_dark",
+        "warm_accent",
+        "charcoal_center",
+    )
+    creative_family=family_names[family_idx]
+
+    shadow=Image.new("RGBA",rgba.size,(0,0,0,0))
+    sd=ImageDraw.Draw(shadow)
+    sd.rounded_rectangle(shadow_box,radius=34,fill=(0,0,0,72 if family_idx in (0,2) else 96))
+    shadow=shadow.filter(ImageFilter.GaussianBlur(16))
+    rgba=Image.alpha_composite(rgba,shadow)
+
+    glass=Image.new("RGBA",rgba.size,(0,0,0,0))
+    gd=ImageDraw.Draw(glass)
+    if family_idx == 0:
+        panel_fill=(250,252,255,232); panel_outline=(255,255,255,245)
+        text_fill=(18,30,52,255); align="left"
+    elif family_idx == 1:
+        panel_fill=(18,28,45,222); panel_outline=(255,255,255,95)
+        text_fill=(250,252,255,255); align="left"
+    elif family_idx == 2:
+        panel_fill=(252,248,239,235); panel_outline=(255,255,255,245)
+        text_fill=(34,34,32,255); align="left"
+    else:
+        panel_fill=(22,25,31,218); panel_outline=(255,255,255,125)
+        text_fill=(255,255,255,255); align="center"
+    gd.rounded_rectangle(panel,radius=30,fill=panel_fill,outline=panel_outline,width=2)
+    if family_idx == 2:
+        # A restrained local accent gives a distinct premium family without
+        # adding claims, prices, logos, badges or any unverified copy.
+        gd.rounded_rectangle((58,panel_top+38,70,panel_top+244),radius=6,fill=(164,117,62,230))
+    rgba=Image.alpha_composite(rgba,glass)
+    draw=ImageDraw.Draw(rgba)
+
+    y=panel_top+(282-text_h)//2
+    for idx,ln in enumerate(lines):
+        if align == "center":
+            bb=draw.textbbox((0,0),ln,font=font)
+            line_w=max(1,bb[2]-bb[0])
+            x=(1024-line_w)//2
+        else:
+            x=92 if family_idx == 2 else 82
+        draw.text((x,y),ln,font=font,fill=text_fill)
+        y += heights[idx]+gap
+
+    if font_size<48 or len(lines)>2 or not lines:
+        return {"ok":False,"error":"MOBILE_TEXT_GEOMETRY_FAILED","font_size":font_size,"line_count":len(lines)}
+
+    Path(output_path).parent.mkdir(parents=True,exist_ok=True)
+    rgba.convert("RGB").save(output_path,"PNG",optimize=True)
     return {
-        "ok": True,
-        "layout": "premium_photo_bottom_caption_v3",
-        "source_path": source_path,
-        "output_path": output_path,
-        "font_size": font_size,
-        "line_count": len(lines),
-        "display_title": display_title,
-        "source_title": source_title,
-        "visible_word_count": len(display_title.split()),
-        "text_policy": "complete_title_prefix_max4_two_lines_min58",
-        "text_renderer": "local_pillow",
-        "caption_zone_top": band_top,
+        "ok":True,
+        "layout":f"premium_photo_{creative_family}_adaptive_v7",
+        "creative_family":creative_family,
+        "caption_style":creative_family+"_adaptive",
+        "source_path":source_path,
+        "output_path":output_path,
+        "font_size":font_size,
+        "line_count":len(lines),
+        "display_title":display_title,
+        "source_title":source_title,
+        "visible_word_count":len(display_title.split()),
+        "text_policy":"exact_verified_title_two_lines_min48_adaptive_zone",
+        "text_renderer":"local_pillow",
+        "caption_zone":caption_zone,
+        "caption_zone_top":panel_top,
+        "top_edge_density":round(top_density,4),
+        "bottom_edge_density":round(bottom_density,4),
     }

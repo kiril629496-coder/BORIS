@@ -54,6 +54,19 @@ class CrmOverdueManagerLifecycleTests(unittest.TestCase):
         self.assertIn("False", src)
         self.assertIn("external_action", src)
 
+    def test_manager_reminder_history_is_read_once_after_ordered_batch_locks(self):
+        src = inspect.getsource(brain_recovery._safe_crm_overdue_queue_recovery)
+        self.assertIn("CRM_OVERDUE_HISTORY_BATCH_V1", src)
+        self.assertIn("unnest(CAST(:refs AS text[]))", src)
+        self.assertIn("ORDER BY k", src)
+        self.assertIn("source_ref=ANY(CAST(:refs AS text[]))", src)
+        self.assertIn("task_id','')=ANY(CAST(:task_ids AS text[]))", src)
+        self.assertEqual(1, src.count("FROM boris_crm_activities"))
+        self.assertNotIn("SELECT 1 FROM boris_crm_activities", src)
+        self.assertIn("ORDER BY t.due_at,t.id LIMIT 500", src)
+        self.assertIn("existing_refs.add(item[\"ref\"])", src)
+        self.assertIn("prior_by_task[task_id]=reminder_count", src)
+
     def test_crm_tasks_projection_exposes_internal_reminder_state(self):
         src = inspect.getsource(crm_product.tasks)
         for marker in (

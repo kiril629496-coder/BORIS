@@ -5,6 +5,7 @@
 дублирующего хранилища креденшлов не заводим.
 """
 import re
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, File, Form, UploadFile
@@ -18,6 +19,7 @@ from app.models.storage import Storage
 import json
 from app import inbox_pricing
 from app.services.exception_observability import observe_suppressed
+from app.services.command_policy import has_permission
 
 try:
     from app.api.auth import get_current_user
@@ -165,9 +167,25 @@ def _slugify(value, fallback):
     return s or fallback
 
 
-def _effective_status(slot):
+def _slot_access_allowed(db, slot) -> bool:
+    """Resolve the base subscription from the shared authority.
+
+    Legacy slots without an explicit billing clock still fall back to their own
+    paid_until so an old paid slot is never silently reopened.
+    """
+    if slot.account_id:
+        from app.services.subscription_gate import base_subscription_access
+        state = base_subscription_access(db, slot.account_id, product="ecs")
+        if state.get("paid_until"):
+            return bool(state.get("allowed"))
+    return not _expired(slot.paid_until)
+
+
+def _effective_status(slot, db=None):
     if slot.status in ("released",):
         return slot.status
+    if db is not None:
+        return slot.status if _slot_access_allowed(db, slot) else "readonly"
     if _expired(slot.paid_until):
         return "readonly"
     return slot.status
@@ -200,12 +218,12 @@ def _counts(db, account_ids):
     return res
 
 
-def _slot_dict(slot, counts):
+def _slot_dict(slot, counts, db=None):
     c = counts.get(slot.account_id or "", {})
     return {
         "id": slot.id,
         "slot_no": slot.slot_no,
-        "status": _effective_status(slot),
+        "status": _effective_status(slot, db=db),
         "raw_status": slot.status,
         "account_id": slot.account_id or "",
         "account_name": slot.account_name or "",
@@ -275,7 +293,7 @@ def slots(user=Depends(get_current_user)):
     try:
         rows = _owner_scope(db, user).order_by(AccountSlot.slot_no.asc()).all()
         counts = _counts(db, [r.account_id for r in rows if r.account_id])
-        data = [_slot_dict(r, counts) for r in rows]
+        data = [_slot_dict(r, counts, db=db) for r in rows]
         return {"status": "ok", "slots": data,
                 "connected": sum(1 for d in data if d["status"] == "connected"),
                 "total": len(data)}
@@ -335,7 +353,7 @@ def refresh_avito_slot_capability(account_id: str):
             slot.tariff_ok = res.get("tariff_ok")
             slot.last_check_result = (str(res.get("message") or "") + " | " + str(res.get("raw") or ""))[:1000]
             slot.last_check_at = _now(); slot.updated_at = _now()
-            if _expired(slot.paid_until): slot.status = "readonly"
+            if not _slot_access_allowed(db, slot): slot.status = "readonly"
             elif res.get("ok"): slot.status = "connected"
             else: slot.status = "error"
         # LEGACY_AUTOLOAD_CAPABILITY_SELFHEAL_V1: direct/legacy accounts may have
@@ -399,7 +417,7 @@ def connect(req: ConnectRequest, background: BackgroundTasks, user=Depends(get_c
             slot.updated_at = _now()
             db.commit()
             return {"status": "error", "message": res["message"],
-                    "slot": _slot_dict(slot, {})}
+                    "slot": _slot_dict(slot, {}, db=db)}
 
         name = (req.account_name or res["name"] or
                 "Аккаунт %d" % slot.slot_no).strip()
@@ -460,7 +478,7 @@ def connect(req: ConnectRequest, background: BackgroundTasks, user=Depends(get_c
 
         counts = _counts(db, [_acc_id])
         return {"status": "ok", "message": res["message"],
-                "slot": _slot_dict(slot, counts)}
+                "slot": _slot_dict(slot, counts, db=db)}
     finally:
         db.close()
 
@@ -475,7 +493,7 @@ def set_phone(req: PhoneRequest, user=Depends(get_current_user)):
         slot.display_phone = (req.display_phone or "").strip()
         slot.updated_at = _now()
         db.commit()
-        return {"status": "ok", "slot": _slot_dict(slot, {})}
+        return {"status": "ok", "slot": _slot_dict(slot, {}, db=db)}
     finally:
         db.close()
 
@@ -505,7 +523,7 @@ def check(req: CheckRequest, user=Depends(get_current_user)):
                 slot.tariff_ok = res["tariff_ok"]
                 slot.last_check_result = (res["message"] + " | " + res["raw"])[:1000]
                 slot.status = "connected" if res["ok"] else "error"
-            if _expired(slot.paid_until):
+            if not _slot_access_allowed(db, slot):
                 slot.status = "readonly"
             slot.last_check_at = _now()
             slot.updated_at = _now()
@@ -513,7 +531,7 @@ def check(req: CheckRequest, user=Depends(get_current_user)):
         db.commit()
         counts = _counts(db, [s.account_id for s in checked if s.account_id])
         return {"status": "ok", "checked": len(checked),
-                "slots": [_slot_dict(s, counts) for s in checked]}
+                "slots": [_slot_dict(s, counts, db=db) for s in checked]}
     finally:
         db.close()
 
@@ -531,7 +549,7 @@ def release(req: CheckRequest, user=Depends(get_current_user)):
         slot.last_check_result = "Слот освобождён, переписка сохранена"
         slot.updated_at = _now()
         db.commit()
-        return {"status": "ok", "slot": _slot_dict(slot, {})}
+        return {"status": "ok", "slot": _slot_dict(slot, {}, db=db)}
     finally:
         db.close()
 # ЭТАП 2 — слой чтения/отправки переписки. Дописать в конец inbox_slots.py.
@@ -735,6 +753,29 @@ def inbox_accounts(user=Depends(get_current_user)):
             if not name or name == "\\":
                 name = account_id
 
+            uid = getattr(user, "id", 0)
+            account_owner_id = db.execute(text(
+                "SELECT owner_user_id FROM accounts WHERE account_id=:a LIMIT 1"
+            ), {"a": account_id}).scalar()
+            privileged_owner = bool(
+                getattr(user, "role", "") == "owner"
+                or (account_owner_id is not None and int(account_owner_id) == int(uid or 0))
+            )
+            if privileged_owner:
+                access_role = "OWNER"
+                can_reply = True
+                can_manage_team = True
+                can_view_reports = True
+            else:
+                access_row = db.execute(text(
+                    "SELECT role,can_reply,can_manage_team,can_view_reports "
+                    "FROM user_account_access WHERE user_id=:u AND account_id=:a LIMIT 1"
+                ), {"u": uid, "a": account_id}).mappings().first()
+                access_role = str(access_row["role"] or "VIEWER") if access_row else "VIEWER"
+                can_reply = bool(access_row and access_row["can_reply"])
+                can_manage_team = bool(access_row and access_row["can_manage_team"])
+                can_view_reports = bool(access_row and access_row["can_view_reports"])
+
             accounts.append({
                 "account_id": account_id,
                 "name": name,
@@ -749,6 +790,10 @@ def inbox_accounts(user=Depends(get_current_user)):
                 "unread": u,
                 "attention": attention,
                 "history_only": s is None,
+                "role": access_role,
+                "can_reply": can_reply,
+                "can_manage_team": can_manage_team,
+                "can_view_reports": can_view_reports,
             })
 
         answered_today = 0
@@ -1545,6 +1590,19 @@ def inbox_reply_suggestions(req: InboxTakeRequest, user=Depends(get_current_user
     return {"status": "ok", "suggestions": suggestions, "mop_account_id": mop_account_id}
 
 
+def _inbox_reply_allowed(db, user, account_id: str) -> bool:
+    """Return whether this user may mutate/reply in one inbox account."""
+    uid = getattr(user, "id", 0)
+    if getattr(user, "role", "") == "owner":
+        return True
+    if _owner_scope(db, user).filter(AccountSlot.account_id == account_id).first() is not None:
+        return True
+    if db.query(Account).filter(Account.account_id == account_id, Account.owner_user_id == uid).first() is not None:
+        return True
+    row = db.execute(text("SELECT can_reply FROM user_account_access WHERE user_id = :u AND account_id = :a LIMIT 1"), {"u": uid, "a": account_id}).fetchone()
+    return bool(row and row[0])
+
+
 @router.post("/take")
 def inbox_take(req: InboxTakeRequest, user=Depends(get_current_user)):
     """Взять диалог в работу. Захват атомарный: один условный UPDATE, поэтому
@@ -1553,25 +1611,78 @@ def inbox_take(req: InboxTakeRequest, user=Depends(get_current_user)):
     db = SessionLocal()
     try:
         if req.account_id not in dict(_connected_account_ids(db, user)):
-            return {"status": "error", "message": "Аккаунт не найден или не подключён"}
+            raise HTTPException(status_code=404, detail="Аккаунт не найден или не подключён")
+        if not has_permission(db, user, req.account_id, "can_reply"):
+            raise HTTPException(status_code=403, detail="Действие недоступно для этой роли")
         uid = getattr(user, "id", None)
         res = db.execute(text(
             "UPDATE messenger_leads SET assigned_user_id = :u, assigned_at = now()"
             " WHERE account_id = :a AND avito_chat_id = :c"
             "   AND (assigned_user_id IS NULL OR assigned_user_id = :u)"),
             {"u": uid, "a": req.account_id, "c": req.avito_chat_id})
-        db.commit()
         if res.rowcount == 0:
+            db.rollback()
             who = db.execute(text(
                 "SELECT u.email FROM messenger_leads l"
                 "  LEFT JOIN users u ON u.id = l.assigned_user_id"
                 " WHERE l.account_id = :a AND l.avito_chat_id = :c"),
                 {"a": req.account_id, "c": req.avito_chat_id}).fetchone()
             if who is None:
-                return {"status": "error", "message": "Диалог ещё не заведён в работу"}
-            return {"status": "busy",
-                    "assigned_name": (who[0] or "").split("@")[0] if who[0] else "другой сотрудник",
-                    "message": "Диалог уже ведёт другой сотрудник"}
+                raise HTTPException(status_code=409, detail="Диалог ещё не заведён в работу")
+            assigned_name = (who[0] or "").split("@")[0] if who[0] else "другой сотрудник"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Диалог уже ведёт {assigned_name}",
+            )
+        # Use the existing MOP ownership state machine: TAKE pauses MOP
+        # immediately, while only explicit action=mop can clear it.
+        try:
+            from app import mop_core as _mc_take
+            _takeover = _mc_take.record_human_takeover(
+                db, req.account_id, req.avito_chat_id,
+                str(getattr(user, "id", "") or "manager"),
+                commit=False,
+            )
+            if not _takeover.get("recorded"):
+                db.rollback()
+                raise HTTPException(status_code=500, detail="Не удалось зафиксировать ownership диалога")
+            from app.api.internal_messenger import emit_messenger_event
+            emit_messenger_event(
+                db, req.account_id, "client.assignment.changed", "client_dialog", req.avito_chat_id,
+                {"action": "take", "assigned_user_id": uid, "owner_type": "human"},
+            )
+            emit_messenger_event(
+                db, req.account_id, "client.ai_mode.changed", "client_dialog", req.avito_chat_id,
+                {"action": "human", "ai_active": False, "assigned_user_id": uid},
+            )
+            db.commit()
+            try:
+                from app.services import lead_notifications as _lead_notifications
+                assigned = db.execute(text(
+                    "SELECT contact_name,assigned_at FROM messenger_leads WHERE account_id=:a AND avito_chat_id=:c"
+                ), {"a": req.account_id, "c": req.avito_chat_id}).mappings().first() or {}
+                assigned_at = assigned.get("assigned_at")
+                event_suffix = assigned_at.isoformat() if assigned_at else "current"
+                _lead_notifications.queue_event(
+                    req.account_id,
+                    f"client-assigned:{req.account_id}:{req.avito_chat_id}:{uid}:{event_suffix}",
+                    "client_assigned",
+                    "Вам назначен клиент",
+                    str(assigned.get("contact_name") or "Откройте диалог и ответьте клиенту.")[:500],
+                    url=f"/messenger?account_id={req.account_id}&client_chat_id={req.avito_chat_id}",
+                    payload={
+                        "target_user_ids": [uid] if uid else [],
+                        "client_chat_id": req.avito_chat_id,
+                        "assigned_user_id": uid,
+                    },
+                )
+            except Exception as _push_exc:
+                observe_suppressed(__name__, _push_exc, line=1647)
+        except HTTPException:
+            raise
+        except Exception as _takeover_exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail="Не удалось зафиксировать ownership диалога")
         try:
             from app.services.action_log import log_action, ACTOR_USER
             log_action(account_id=req.account_id, action="Взял диалог в работу",
@@ -1587,20 +1698,30 @@ def inbox_take(req: InboxTakeRequest, user=Depends(get_current_user)):
 
 @router.post("/release")
 def inbox_release(req: InboxTakeRequest, user=Depends(get_current_user)):
-    """Освободить диалог. Может тот, кто взял, и владелец платформы."""
+    """Снять назначение сотрудника, не меняя HUMAN/MOP ownership."""
     db = SessionLocal()
     try:
         if req.account_id not in dict(_connected_account_ids(db, user)):
-            return {"status": "error", "message": "Аккаунт не найден или не подключён"}
+            raise HTTPException(status_code=404, detail="Аккаунт не найден или не подключён")
+        if not has_permission(db, user, req.account_id, "can_reply"):
+            raise HTTPException(status_code=403, detail="Действие недоступно для этой роли")
         uid = getattr(user, "id", None)
         cond = "" if getattr(user, "role", "") == "owner" else " AND assigned_user_id = :u"
         res = db.execute(text(
             "UPDATE messenger_leads SET assigned_user_id = NULL, assigned_at = NULL"
             " WHERE account_id = :a AND avito_chat_id = :c" + cond),
             {"u": uid, "a": req.account_id, "c": req.avito_chat_id})
-        db.commit()
         if res.rowcount == 0:
-            return {"status": "error", "message": "Диалог ведёт другой сотрудник"}
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Диалог ведёт другой сотрудник")
+        # RELEASE only clears assignment. AI ownership changes exclusively through
+        # /mop-handoff?action=mop so the operator action is explicit and auditable.
+        from app.api.internal_messenger import emit_messenger_event
+        emit_messenger_event(
+            db, req.account_id, "client.assignment.changed", "client_dialog", req.avito_chat_id,
+            {"action": "release", "assigned_user_id": None},
+        )
+        db.commit()
         try:
             from app.services.action_log import log_action, ACTOR_USER
             log_action(account_id=req.account_id, action="Освободил диалог",
@@ -1619,44 +1740,72 @@ def inbox_mop_handoff(req: InboxTakeRequest, action: str, user=Depends(get_curre
     """Hand a whole chat to a human or explicitly return it to MOP."""
     action = str(action or "").strip().lower()
     if action not in {"human", "mop"}:
-        return {"status":"error","message":"action must be human or mop"}
+        raise HTTPException(status_code=400, detail="action must be human or mop")
     db = SessionLocal()
     try:
         if req.account_id not in dict(_connected_account_ids(db, user)):
-            return {"status": "error", "message": "Аккаунт не найден или не подключён"}
+            raise HTTPException(status_code=404, detail="Аккаунт не найден или не подключён")
+        if not has_permission(db, user, req.account_id, "can_reply"):
+            raise HTTPException(status_code=403, detail="Действие недоступно для этой роли")
         draft = db.execute(text("""SELECT id,status FROM mop_drafts
             WHERE account_id=:a AND avito_chat_id=:c
             ORDER BY COALESCE(updated_at,created_at) DESC,id DESC LIMIT 1"""),
             {"a":req.account_id,"c":req.avito_chat_id}).mappings().first()
         if not draft:
-            return {"status":"error","message":"Для диалога пока нет MOP draft"}
+            raise HTTPException(status_code=409, detail="Для диалога пока нет MOP draft")
         from app import mop_core as _mc
         actor = str(getattr(user,"id","") or "manager")
-        if action == "human":
-            row, current = _mc.set_status(db, int(draft["id"]), "human_required",
-                ("draft_ready","in_progress","editing","custom_waiting","waiting_confirm","deleted","send_failed","new"),
-                "handed_to_human", channel="web", actor_type="user", actor_id=actor)
-            try:
-                _mc.log_event(db, int(draft["id"]), "human_takeover_confirmed",
-                    channel="web", actor_type="user", actor_id=actor,
-                    payload="operator explicitly took over the chat",
-                    meta={"policy_version":"MOP_HUMAN_TAKEOVER_V1","external_action":False})
-                db.commit()
-            except Exception:
-                db.rollback()
-            return {"status":"ok" if row else "noop","mop_status":"human_required" if row else current,"takeover_active":True}
         try:
-            _mc.log_event(db, int(draft["id"]), "returned_to_ai",
-                channel="web", actor_type="user", actor_id=actor,
-                payload="operator explicitly returned chat to MOP",
-                meta={"policy_version":"MOP_HUMAN_TAKEOVER_V1","external_action":False})
+            if action == "human":
+                row, current = _mc.set_status(
+                    db, int(draft["id"]), "human_required",
+                    ("draft_ready","in_progress","editing","custom_waiting","waiting_confirm","deleted","send_failed","new"),
+                    "handed_to_human", channel="web", actor_type="user", actor_id=actor,
+                    commit=False,
+                )
+                if row is None and current != "human_required":
+                    db.rollback()
+                    raise HTTPException(status_code=409, detail="Текущее состояние BORIS не позволяет передать диалог человеку")
+                recorded = _mc.record_human_takeover(
+                    db, req.account_id, req.avito_chat_id, actor, commit=False,
+                )
+                if not recorded.get("recorded"):
+                    db.rollback()
+                    raise HTTPException(status_code=500, detail="Не удалось передать ownership человеку")
+                from app.api.internal_messenger import emit_messenger_event
+                emit_messenger_event(
+                    db, req.account_id, "client.ai_mode.changed", "client_dialog", req.avito_chat_id,
+                    {"action": "human", "ai_active": False},
+                )
+                db.commit()
+                return {"status":"ok","mop_status":"human_required","takeover_active":True}
+
+            returned = _mc.record_return_to_ai(
+                db, req.account_id, req.avito_chat_id, actor, commit=False,
+            )
+            if not returned.get("recorded"):
+                db.rollback()
+                raise HTTPException(status_code=500, detail="Не удалось вернуть ownership BORIS")
+            row, current = _mc.set_status(
+                db, int(returned["draft_id"]), "draft_ready", ("human_required",),
+                "returned_to_ai", channel="web", actor_type="user", actor_id=actor,
+                commit=False,
+            )
+            if row is None and current == "human_required":
+                db.rollback()
+                raise HTTPException(status_code=500, detail="Не удалось вернуть диалог BORIS")
+            from app.api.internal_messenger import emit_messenger_event
+            emit_messenger_event(
+                db, req.account_id, "client.ai_mode.changed", "client_dialog", req.avito_chat_id,
+                {"action": "mop", "ai_active": True},
+            )
             db.commit()
-        except Exception:
+            return {"status":"ok","mop_status":"draft_ready","takeover_released":True}
+        except HTTPException:
+            raise
+        except Exception as _handoff_exc:
             db.rollback()
-            return {"status":"error","message":"Не удалось вернуть диалог МОПу"}
-        row, current = _mc.set_status(db, int(draft["id"]), "draft_ready", ("human_required",),
-            "returned_to_ai", channel="web", actor_type="user", actor_id=actor)
-        return {"status":"ok","mop_status":"draft_ready" if row else current,"takeover_released":True}
+            raise HTTPException(status_code=500, detail="Не удалось изменить ownership диалога")
     finally:
         db.close()
 
@@ -1665,6 +1814,9 @@ class InboxSendRequest(BaseModel):
     account_id: str
     avito_chat_id: str
     text: str
+    # Durable retry key supplied by the Messenger client. The key is scoped to
+    # account + chat + payload and is never forwarded as a second send path.
+    idempotency_key: str = ""
 
 
 def _set_legacy_delivery_state(account_id: str, avito_chat_id: str,
@@ -1719,15 +1871,86 @@ def _background_targeted_sync(account_id: str, avito_chat_id: str):
         print("[inbox_send] background targeted sync failed: " + repr(e)[:150], flush=True)
 
 
+def _send_idempotency_storage_key(idempotency_key: str) -> str:
+    digest = hashlib.sha256(str(idempotency_key or "").encode("utf-8")).hexdigest()
+    return "inbox_send_idem_v1:" + digest
+
+
+def _send_idempotency_claim(db, account_id: str, chat_id: str, text_value: str, idempotency_key: str):
+    """Claim one send key before external transport; reuse existing Storage.
+
+    The advisory lock closes the duplicate window across workers without adding a
+    second send path or a schema migration. A key is scoped to account + chat and
+    rejects a different payload rather than sending it twice.
+    """
+    key = str(idempotency_key or "").strip()[:240]
+    if not key:
+        return None, None
+    lock_name = "inbox-send:%s:%s:%s" % (account_id, chat_id, key)
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"), {"k": lock_name})
+    storage_key = _send_idempotency_storage_key(key)
+    row = db.execute(text(
+        "SELECT id, value FROM storage WHERE account_id=:a AND key=:k ORDER BY id DESC LIMIT 1"
+    ), {"a": account_id, "k": storage_key}).mappings().first()
+    payload_hash = hashlib.sha256((str(account_id) + "\\0" + str(chat_id) + "\\0" + str(text_value)).encode("utf-8")).hexdigest()
+    if row:
+        try:
+            saved = json.loads(row.get("value") or "{}")
+        except Exception:
+            saved = {}
+        if saved.get("payload_hash") != payload_hash:
+            return {"status": "error", "message": "Idempotency-Key уже использован для другого сообщения"}, None
+        if saved.get("status") == "ok":
+            return {**(saved.get("response") or {}), "deduplicated": True}, None
+        if saved.get("status") == "pending":
+            return {"status": "pending", "deduplicated": True, "message": "Отправка с этим ключом уже выполняется"}, None
+        db.execute(text("UPDATE storage SET value=:v WHERE id=:i"), {"i": row["id"], "v": json.dumps({"status":"pending", "payload_hash":payload_hash}, ensure_ascii=False)})
+        return None, (storage_key, row["id"], payload_hash)
+    rec = Storage(account_id=account_id, key=storage_key, value=json.dumps({"status":"pending", "payload_hash":payload_hash}, ensure_ascii=False))
+    db.add(rec); db.flush()
+    return None, (storage_key, rec.id, payload_hash)
+
+
+def _send_idempotency_finish(account_id: str, storage_key: str, response: dict):
+    if not storage_key:
+        return
+    db = SessionLocal()
+    try:
+        row = db.execute(text(
+            "SELECT value FROM storage WHERE account_id=:a AND key=:k ORDER BY id DESC LIMIT 1"
+        ), {"a": account_id, "k": storage_key}).mappings().first()
+        try:
+            saved = json.loads((row or {}).get("value") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            saved = {}
+        payload_hash = str(saved.get("payload_hash") or "")
+        value = {
+            "status": "ok" if response.get("status") == "ok" else "failed",
+            "response": response,
+        }
+        if payload_hash:
+            value["payload_hash"] = payload_hash
+        db.execute(text("UPDATE storage SET value=:v WHERE account_id=:a AND key=:k"), {
+            "a": account_id, "k": storage_key,
+            "v": json.dumps(value, ensure_ascii=False),
+        })
+        db.commit()
+    except Exception as _suppressed_exc:
+        observe_suppressed(__name__, _suppressed_exc, line=1760)
+        db.rollback()
+    finally:
+        db.close()
+
+
 @router.post("/send")
 def inbox_send(req: InboxSendRequest, background: BackgroundTasks, user=Depends(get_current_user)):
     if not (req.text or "").strip():
-        return {"status": "error", "message": "Пустое сообщение"}
+        raise HTTPException(status_code=400, detail="Пустое сообщение")
     db = SessionLocal()
     try:
         conn = dict(_connected_account_ids(db, user))
         if req.account_id not in conn:
-            return {"status": "error", "message": "Нельзя отправить через чужой или неподключённый аккаунт"}
+            raise HTTPException(status_code=403, detail="Нельзя отправить через чужой или неподключённый аккаунт")
         # BORIS_EMP_SEND_GUARD: у сотрудника своих слотов нет, поэтому _owner_scope
         # возвращал None и проверка readonly не выполнялась вовсе. Слот ищем
         # среди уже разрешённых conn, а право отвечать проверяем явно.
@@ -1739,11 +1962,22 @@ def inbox_send(req: InboxSendRequest, background: BackgroundTasks, user=Depends(
                 " WHERE user_id = :u AND account_id = :a LIMIT 1"),
                 {"u": getattr(user, "id", 0), "a": req.account_id}).fetchone()
             if _row is not None and not _row[0]:
-                return {"status": "error", "message": "Нет права отвечать в этом аккаунте"}
+                raise HTTPException(status_code=403, detail="Нет права отвечать в этом аккаунте")
         slot = _own or db.query(AccountSlot).filter(
             AccountSlot.account_id == req.account_id).first()
         if slot and _effective_status(slot) == "readonly":
-            return {"status": "error", "message": "Подписка на аккаунт неактивна — отправка недоступна"}
+            raise HTTPException(status_code=402, detail="Подписка на аккаунт неактивна — отправка недоступна")
+        _idem_response, _idem_record = _send_idempotency_claim(
+            db, req.account_id, req.avito_chat_id, req.text.strip(), req.idempotency_key)
+        if _idem_response is not None:
+            db.rollback()
+            if _idem_response.get("status") == "error":
+                raise HTTPException(status_code=409, detail=_idem_response.get("message") or "Idempotency-Key conflict")
+            if _idem_response.get("status") == "pending":
+                raise HTTPException(status_code=409, detail=_idem_response.get("message") or "Отправка уже выполняется")
+            return _idem_response
+        _idem_storage_key = _idem_record[0] if _idem_record else ""
+        db.commit()
     finally:
         db.close()
     from app.api.messenger import send_message, _store_messages_locally
@@ -1769,7 +2003,7 @@ def inbox_send(req: InboxSendRequest, background: BackgroundTasks, user=Depends(
         print("[inbox_send] takeover preclaim failed: " + repr(e)[:150], flush=True)
         return {"status":"error","message":"Не удалось безопасно передать диалог сотруднику; отправка отменена"}
 
-    res = send_message(req.account_id, req.avito_chat_id, req.text.strip())
+    res = send_message(req.account_id, req.avito_chat_id, req.text.strip(), product="ecs")
     if res.get("status") != "ok":
         # Human send never reached Avito: release the provisional takeover row
         # so MOP is not left muted by a failed operator action.
@@ -1788,7 +2022,13 @@ def inbox_send(req: InboxSendRequest, background: BackgroundTasks, user=Depends(
         _set_legacy_delivery_state(
             req.account_id, req.avito_chat_id, "send_failed",
             res.get("message") or res.get("status") or "send failed")
-        return res
+        _send_idempotency_finish(req.account_id, _idem_storage_key, res)
+        error_message = str(res.get("message") or res.get("status") or "Не удалось отправить сообщение")
+        if res.get("code") == "subscription_expired" or error_message == "base_subscription_expired":
+            raise HTTPException(status_code=402, detail="Подписка на аккаунт неактивна — отправка недоступна")
+        if res.get("status") == "blocked":
+            raise HTTPException(status_code=422, detail=error_message)
+        raise HTTPException(status_code=502, detail=error_message)
     _set_legacy_delivery_state(req.account_id, req.avito_chat_id, "sent")
     # outgoing_authors was already persisted before the send as the atomic
     # human-takeover boundary. Do not insert a duplicate author row here.
@@ -1803,19 +2043,21 @@ def inbox_send(req: InboxSendRequest, background: BackgroundTasks, user=Depends(
                    source="inbox_send")
     except Exception as _suppressed_exc:
         observe_suppressed(__name__, _suppressed_exc, line=1803)
-    # Черновик закрываем сразу, не дожидаясь синхронизации: иначе до десяти минут
-    # менеджер видит в кабинете уже отправленный ответ и может отправить его
-    # второй раз. Фильтр «продавец ответил» сработал бы только после обхода.
+    # HUMAN_SEND_OWNERSHIP_SEPARATION_V1:
+    # Закрываем веб/Telegram pending draft выше через _set_legacy_delivery_state,
+    # но НЕ помечаем canonical mop_drafts как AI-sent. Ручной ответ сотрудника
+    # должен оставлять AI в human_required до отдельного действия «Вернуть BORIS».
+    # Иначе RELEASE (который снимает только назначение) незаметно теряет AI-pause.
     try:
         _ddb = SessionLocal()
         try:
             _ddb.execute(text(
-                "UPDATE mop_drafts SET status = 'sent', sent_at = now(),"
+                "UPDATE mop_drafts SET status = 'human_required', sent_at = NULL,"
                 " reply_author = :w, updated_at = now()"
                 " WHERE account_id = :a AND avito_chat_id = :c"
                 "   AND status NOT IN ('sent', 'deleted', 'no_reply_required')"),
                 {"a": req.account_id, "c": req.avito_chat_id,
-                 "w": (getattr(user, "email", None) or "")[:120]})
+                 "w": (getattr(user, "email", None) or "")[:24]})
             # MOP_HUMAN_TAKEOVER_V1: a real employee reply owns this chat until
             # an explicit "return to MOP" action. This is independent of 24/7.
             try:
@@ -1823,9 +2065,19 @@ def inbox_send(req: InboxSendRequest, background: BackgroundTasks, user=Depends(
                 _mc_takeover.record_human_takeover(
                     _ddb, req.account_id, req.avito_chat_id,
                     str(getattr(user, "id", "") or "manager"),
+                    commit=False,
                 )
             except Exception as _takeover_exc:
                 print("[inbox_send] takeover lock failed: " + repr(_takeover_exc)[:180], flush=True)
+            from app.api.internal_messenger import emit_messenger_event
+            emit_messenger_event(
+                _ddb, req.account_id, "client.message.changed", "client_dialog", req.avito_chat_id,
+                {"action": "sent", "sender_user_id": getattr(user, "id", None)},
+            )
+            emit_messenger_event(
+                _ddb, req.account_id, "client.ai_mode.changed", "client_dialog", req.avito_chat_id,
+                {"action": "human", "ai_active": False, "sender_user_id": getattr(user, "id", None)},
+            )
             _ddb.commit()
         finally:
             _ddb.close()
@@ -1845,7 +2097,18 @@ def inbox_send(req: InboxSendRequest, background: BackgroundTasks, user=Depends(
     # already appends an optimistic outgoing row; reconcile the authoritative
     # thread after the response has been returned.
     background.add_task(_background_targeted_sync, req.account_id, req.avito_chat_id)
-    return {"status": "ok", "projection": "background"}
+    provider_message_id = None
+    if isinstance(immediate, dict) and immediate.get("id") is not None:
+        provider_message_id = str(immediate.get("id"))
+    _send_result = {
+        "status": "ok",
+        "projection": "background",
+        "delivery_status": "sent",
+        "provider_message_id": provider_message_id,
+        "avito_message": immediate if isinstance(immediate, dict) else None,
+    }
+    _send_idempotency_finish(req.account_id, _idem_storage_key, _send_result)
+    return _send_result
 
 
 class InboxReadRequest(BaseModel):

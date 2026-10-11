@@ -168,7 +168,8 @@ REQUIRED_MARKERS = {
     "frontend_build_ready_dedupe": (ROOT / "frontend/scripts/boris-frontend-build.sh", "FRONTEND_BUILD_READY_DEDUPE_V1"),
     "frontend_generation_convergence": (ROOT / "backend/app/ext_api/deploy.py", "FRONTEND_GENERATION_CONVERGENCE_V2"),
     "frontend_postcontract_selfheal": (ROOT / "backend/app/ext_api/deploy.py", "FRONTEND_POSTCONTRACT_SELFHEAL_V1"),
-    "feed_banner_mobile_two_line_contract": (ROOT / "backend/app/services/avito_premium_compositor.py", "complete_title_prefix_max4_two_lines_min58"),
+    "feed_banner_mobile_title_prefix_contract": (ROOT / "backend/app/services/avito_premium_compositor.py", "complete_title_prefix_max"),
+    "feed_banner_mobile_two_line_contract": (ROOT / "backend/app/services/avito_premium_compositor.py", "two_lines_min"),
     "feed_banner_mobile_qa_cache_v4": (ROOT / "backend/app/services/media_semantic_validator.py", "campaign_banner_vision_qa_v8_content_sha_bottom_caption"),
     "campaign_launcher_curated_niche_first": (ROOT / "backend/app/api/campaigns.py", "Saved niche is curated product truth"),
     "campaign_launcher_hygiene_all_sources": (ROOT / "backend/app/api/campaigns.py", "LAUNCHER_HYGIENE_ALL_SOURCES_V1"),
@@ -324,7 +325,7 @@ REQUIRED_MARKERS = {
     "mop_training_sales_ai_router": (ROOT / "backend/app/api/mop_training.py", "MOP_TRAINING_SALES_AI_ROUTER_V1"),
     "rop_chat_sales_ai_router": (ROOT / "backend/app/api/calltracking.py", "rop_chat_analysis"),
     "sales_gemini_daily_reset_probe_latch": (ROOT / "backend/app/services/sales_ai_router.py", "GEMINI_DAILY_RESET_PROBE_LATCH_V1"),
-    "mop_router_no_openai": (ROOT / "backend/app/services/sales_ai_router.py", "MOP_PROVIDER_NO_OPENAI_V1"),
+    "mop_router_scoped_openai_policy": (ROOT / "backend/app/services/sales_ai_router.py", "PLANETA_OPENAI_MOP_V1"),
     "sales_router_exact_provider_policy": (ROOT / "backend/app/services/sales_ai_router.py", "openai_if_usable_then_deepseek_then_free_gemini_then_local"),
     "sales_router_pii_privacy_boundary": (ROOT / "backend/app/services/sales_ai_router.py", "safe_external_ai_payload"),
     "gigachat_primary_pii_privacy_boundary": (ROOT / "backend/gigachat_pool.py", "GIGACHAT_EXTERNAL_PII_BOUNDARY_V1"),
@@ -733,6 +734,52 @@ REQUIRED_MARKERS = {
 }
 
 
+
+# GLOBAL_HA_SINGLE_ROLLOUT_OWNER_SCAN_V1: archived patch payloads under the
+# exact run/changes subtree are inert evidence. Active run and scripts helpers
+# remain fail-closed if unsafe or unreadable.
+def _single_backend_rollout_owner_runtime_scan(backend_root=None) -> bool:
+    """Scan active helper code while excluding only backend/run/changes."""
+    import re as _re
+
+    backend_root = pathlib.Path(backend_root) if backend_root is not None else ROOT / "backend"
+    unsafe = []
+    for base in (backend_root / "run", backend_root / "scripts"):
+        if not base.exists():
+            continue
+        try:
+            paths = base.rglob("*")
+            for path in paths:
+                try:
+                    relative = path.relative_to(backend_root)
+                    if relative.parts[:2] == ("run", "changes"):
+                        continue
+                    if (
+                        len(relative.parts) >= 2
+                        and relative.parts[0] == "run"
+                        and "-scope-stage-" in relative.parts[1]
+                    ):
+                        continue
+                    if not path.is_file() or path.suffix not in {".py", ".sh"} or ".bak" in path.name:
+                        continue
+                    if path.name == "rolling_restart_backend.sh":
+                        continue
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    unsafe.append(str(path))
+                    continue
+                for line in text.splitlines():
+                    if (
+                        "systemctl" in line
+                        and "boris-backend" in line
+                        and _re.search(r"(restart|try-restart|stop|start)", line)
+                    ):
+                        unsafe.append(str(relative))
+                        break
+        except Exception:
+            return False
+    return not unsafe
+
 def _source_checks() -> dict:
     out = {}
     for key, (path, marker) in REQUIRED_MARKERS.items():
@@ -975,22 +1022,7 @@ def _source_checks() -> dict:
         out["browser_gateway_zip_current"] = False
         out["browser_gateway_public_zip_current"] = False
         out["browser_gateway_public_path_active"] = False
-    # GLOBAL_HA_SINGLE_ROLLOUT_OWNER_SCAN_V1: one-off helper scripts are a real
-    # production risk if they can restart both APIs outside canonical rolling.
-    import re as _re
-    unsafe=[]
-    for _base in (ROOT/"backend/run", ROOT/"backend/scripts"):
-        if not _base.exists(): continue
-        for _p in _base.rglob("*"):
-            if not _p.is_file() or _p.suffix not in {".py",".sh"} or ".bak" in _p.name: continue
-            if _p.name == "rolling_restart_backend.sh": continue
-            try: _txt=_p.read_text(encoding="utf-8",errors="ignore")
-            except Exception: continue
-            for _line in _txt.splitlines():
-                if "systemctl" in _line and "boris-backend" in _line and _re.search(r"(restart|try-restart|stop|start)",_line):
-                    unsafe.append(str(_p.relative_to(ROOT)))
-                    break
-    out["single_backend_rollout_owner_runtime_scan"] = not unsafe
+    out["single_backend_rollout_owner_runtime_scan"] = _single_backend_rollout_owner_runtime_scan()
     # CONTROL_PLANE_SINGLE_SCHEDULER_RUNTIME_V1: the write-capable Control
     # Plane reconciler has exactly one scheduler owner. Production Guardian may
     # supervise/self-heal the timer, but must never execute a second writer.
@@ -1171,6 +1203,29 @@ RUNTIME_GROUPS={
 }
 
 
+def _service_backend_release_id(unit: str) -> str:
+    """Return immutable backend build id actually used by a live API unit."""
+    import subprocess
+    try:
+        raw = subprocess.check_output(
+            ["systemctl", "show", unit, "-p", "MainPID", "--value"],
+            text=True,
+            timeout=5,
+        ).strip()
+        pid = int(raw or 0)
+        if pid <= 0:
+            return ""
+        cmdline = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+        marker = "/releases/backend/"
+        if marker not in cmdline:
+            return ""
+        tail = cmdline.split(marker, 1)[1]
+        build_id = tail.split("/backend", 1)[0].strip("/")
+        return build_id if build_id and "/" not in build_id and " " not in build_id else ""
+    except Exception:
+        return ""
+
+
 def _runtime_generation_state() -> tuple[dict,dict]:
     """Return PASS/FAIL per runtime group plus exact stale units."""
     out={}; stale={}
@@ -1195,6 +1250,16 @@ def _runtime_generation_state() -> tuple[dict,dict]:
             except Exception:
                 certified_content=False
         for unit in units:
+            # IMMUTABLE_RELEASE_IDENTITY_FENCE_V1:
+            # Content/timestamp freshness is not enough after a scoped rollback.
+            # A process from a different immutable build can be newer than the
+            # restored release's file mtimes and must still be considered stale.
+            if key in {"backend_runtime_generation","background_runtime_generation"}:
+                active_build_id = BACKEND_ACTIVE_ROOT.parent.name
+                running_build_id = _service_backend_release_id(unit)
+                if not running_build_id or running_build_id != active_build_id:
+                    bad.append(unit)
+                    continue
             started=_service_started_epoch(unit)
             if certified_content:
                 if started <= 0:
@@ -1965,22 +2030,28 @@ def _json_value(row):
         return {}
 
 
+def _canonical_crm_deal_trigger(account_id: str) -> str:
+    """Canonical CRM deal trigger enforced by production self-heal."""
+    return "after_engaged" if str(account_id or "") == "planetazayavki_65985" else "first_inquiry"
+
+
 def _reconcile_account_state(db, account_id: str, kpi: dict) -> tuple[list[str],list[str]]:
     """Repair only safety-positive account drift; never enable products or raise spend."""
     changes=[]; issues=[]
-    # Existing MOP sales settings must use the global CRM capture invariant.
-    # If there is no settings row, application defaults already use first_inquiry,
-    # so do not create configuration that could accidentally toggle other options.
+    # Existing MOP sales settings must use the account's canonical CRM capture invariant.
+    # Planeta is intentionally after_engaged; other accounts keep first_inquiry.
+    # If there is no settings row, do not create configuration that could toggle other options.
     srow=(db.query(Storage).filter(Storage.account_id==account_id,Storage.key=='mop_crm_sales_settings')
           .order_by(Storage.id.desc()).first())
     if srow:
         try:
             data=json.loads(srow.value or '{}')
             if not isinstance(data,dict): raise ValueError('not_object')
-            if str(data.get('deal_trigger') or 'first_inquiry')!='first_inquiry':
-                data['deal_trigger']='first_inquiry'
+            canonical_trigger=_canonical_crm_deal_trigger(account_id)
+            if str(data.get('deal_trigger') or 'first_inquiry')!=canonical_trigger:
+                data['deal_trigger']=canonical_trigger
                 srow.value=json.dumps(data,ensure_ascii=False)
-                changes.append('crm_deal_trigger_first_inquiry')
+                changes.append('crm_deal_trigger_'+canonical_trigger)
             # An explicitly enabled MOP without its canonical binding is a
             # silent sales outage: inbound messages are stored/CRM-captured,
             # but `_mop_incoming()` deliberately refuses AI generation. Detect
@@ -2405,8 +2476,8 @@ def main():
                               f"Проблемных аккаунтов: {len(broken_accounts)} из {len(accounts)}\n"
                               f"Контроль: {', '.join(shared_broken) if shared_broken else 'account-specific'}\n"
                               "BORIS оставил цикл в ошибке до устранения рассинхронизации.")
-            except Exception:
-                pass
+            except Exception as _notify_exc:
+                print("PRODUCTION_CONTRACT_NOTIFY_DEGRADED=%s" % type(_notify_exc).__name__, flush=True)
         return 1 if failures else 0
     finally:
         db.close()

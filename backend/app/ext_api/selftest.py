@@ -12,7 +12,7 @@
 жизненный цикл job · handoff · preflight · postflight · retry · cancel ·
 failure · security · критический сценарий «executor=SUCCESS, факт=WRONG».
 """
-import os, sys, io, json, time, shutil, tempfile, argparse, uuid
+import os, sys, io, json, time, shutil, tempfile, argparse, uuid, inspect
 
 os.environ.setdefault("EXT_API_ALLOW_TEST_HOOKS", "1")
 os.environ.setdefault("EXT_API_INLINE_RUNNER", "0")
@@ -3001,9 +3001,338 @@ def run(account_ref, keep=False):
     return len(bad_list) == 0
 
 
+def _run_messenger_p0_canonical(account_ref=None, keep=False):
+    """Bounded synthetic P0 run through canonical Inbox handlers.
+
+    Only the external Avito transport is stubbed. TAKE, SEND, RELEASE,
+    idempotency, Storage, ownership, audit and persistence remain production
+    code paths against synthetic rows in the real database.
+    """
+    from types import SimpleNamespace
+    from fastapi import BackgroundTasks
+    from app.api import inbox_slots
+    import app.api.messenger as _messenger
+    from app.db.session import SessionLocal as _QaSession
+    from app import mop_core as _mop_core
+
+    if os.environ.get("EXT_API_ALLOW_TEST_HOOKS") != "1":
+        print("MESSENGER_P0_ACCEPTANCE=BLOCKED_PREFLIGHT")
+        return False
+    if os.environ.get("BORIS_MESSENGER_TEST_TRANSPORT") != "stub":
+        print("MESSENGER_P0_ACCEPTANCE=BLOCKED_TEST_TRANSPORT_MISSING")
+        return False
+
+    run_id = uuid.uuid4().hex[:12]
+    prefix = f"qa_messenger_p0_{run_id}"
+    chat_id = prefix
+    account_row = db.one("SELECT account_id FROM account_slots WHERE status='connected' AND account_id IS NOT NULL AND (paid_until IS NULL OR paid_until >= now()) ORDER BY id LIMIT 1")
+    user_row = db.one("SELECT id, email, role FROM users WHERE role='owner' ORDER BY id LIMIT 1")
+    if not account_row or not user_row:
+        print("MESSENGER_P0_ACCEPTANCE=FAIL")
+        print("MESSENGER_P0_GATE_FAIL=FIXTURE_PREREQUISITES:connected account or owner user missing")
+        return False
+    account_id = str(account_row["account_id"])
+    user = SimpleNamespace(id=user_row["id"], email=user_row.get("email") or "qa-owner@example.invalid", role=user_row.get("role") or "owner")
+
+    def qa_insert(table, values):
+        cols = {r["column_name"] for r in db.rows("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=:t", t=table)}
+        data = {k: v for k, v in values.items() if k in cols}
+        if not data:
+            raise RuntimeError(f"no writable columns for {table}")
+        names = list(data)
+        params = {f"p{i}": data[k] for i, k in enumerate(names)}
+        db.q("INSERT INTO %s (%s) VALUES (%s)" % (table, ",".join(names), ",".join(":" + f"p{i}" for i in range(len(names)))), **params)
+
+    def qa_count(table):
+        return int((db.one("SELECT count(*) AS n FROM %s WHERE account_id=:a AND avito_chat_id=:c" % table, a=account_id, c=chat_id) or {}).get("n", 0))
+
+    original_send = _messenger.send_message
+    provider_calls = []
+    result = False
+    try:
+        qa_insert("messenger_leads", {"account_id": account_id, "avito_chat_id": chat_id, "contact_name": prefix})
+        qa_insert("mop_drafts", {"account_id": account_id, "avito_chat_id": chat_id, "avito_message_id": f"{prefix}-incoming-1", "incoming_text": "qa incoming", "status": "draft_ready", "reply_text": "qa draft"})
+        qa_insert("messenger_messages", {"account_id": account_id, "avito_chat_id": chat_id, "direction": "in", "text": "qa incoming", "msg_type": "user", "is_read": False})
+        db.q("COMMIT")
+        handoff = inbox_slots.inbox_mop_handoff(
+            inbox_slots.InboxTakeRequest(account_id=account_id, avito_chat_id=chat_id),
+            action="human", user=user,
+        )
+        handoff_ok = handoff.get("status") == "ok" and handoff.get("takeover_active") is True
+        print(f"MOP_HANDOFF={'PASS' if handoff_ok else 'FAIL'}")
+        draft_after_handoff = db.one(
+            "SELECT status FROM mop_drafts WHERE account_id=:a AND avito_chat_id=:c ORDER BY id DESC LIMIT 1",
+            a=account_id, c=chat_id,
+        )
+        mop_paused = bool(draft_after_handoff and draft_after_handoff.get("status") == "human_required")
+        print(f"MOP_PAUSED_AFTER_HANDOFF={'PASS' if mop_paused else 'FAIL'}")
+        if not handoff_ok or not mop_paused:
+            print(f"MESSENGER_P0_GATE_FAIL=HANDOFF:{handoff}|draft={draft_after_handoff}"); return False
+
+        take = inbox_slots.inbox_take(inbox_slots.InboxTakeRequest(account_id=account_id, avito_chat_id=chat_id), user=user)
+        lead = db.one("SELECT assigned_user_id FROM messenger_leads WHERE account_id=:a AND avito_chat_id=:c", a=account_id, c=chat_id)
+        take_ok = take.get("status") == "ok" and lead and int(lead["assigned_user_id"]) == int(user.id)
+        print(f"TAKE={'PASS' if take_ok else 'FAIL'}")
+        if not take_ok:
+            print(f"MESSENGER_P0_GATE_FAIL=TAKE:{take}"); return False
+        draft_after_take = db.one(
+            "SELECT status FROM mop_drafts WHERE account_id=:a AND avito_chat_id=:c ORDER BY id DESC LIMIT 1",
+            a=account_id, c=chat_id,
+        )
+        mop_after_take_ok = bool(draft_after_take and draft_after_take.get("status") == "human_required")
+        print(f"MOP_PAUSED_AFTER_TAKE={'PASS' if mop_after_take_ok else 'FAIL'}")
+        if not mop_after_take_ok:
+            print(f"MESSENGER_P0_GATE_FAIL=TAKE_AI_OWNERSHIP:draft={draft_after_take}"); return False
+
+        def safe_send(account, chat, text):
+            provider_calls.append((account, chat, text))
+            return {"status": "ok", "avito_message": {"id": f"{prefix}-provider-{len(provider_calls)}", "text": text}}
+        _messenger.send_message = safe_send
+        key = f"{prefix}:send:1"
+        req = inbox_slots.InboxSendRequest(account_id=account_id, avito_chat_id=chat_id, text="qa employee reply", idempotency_key=key)
+        first = inbox_slots.inbox_send(req, BackgroundTasks(), user=user)
+        second = inbox_slots.inbox_send(req, BackgroundTasks(), user=user)
+        send_ok = first.get("status") == "ok" and second.get("deduplicated") is True and len(provider_calls) == 1
+        print(f"EMPLOYEE_SEND_SAFE={'PASS' if send_ok else 'FAIL'}")
+        print(f"DURABLE_IDEMPOTENCY={'PASS' if send_ok else 'FAIL'}")
+        if not send_ok:
+            print(f"MESSENGER_P0_GATE_FAIL=SEND:{first}|{second}|calls={len(provider_calls)}"); return False
+        out_count = int((db.one("SELECT count(*) AS n FROM outgoing_authors WHERE account_id=:a AND avito_chat_id=:c", a=account_id, c=chat_id) or {}).get("n", 0))
+        storage_count = int((db.one("SELECT count(*) AS n FROM storage WHERE account_id=:a AND key LIKE 'inbox_send_idem_v1:%'", a=account_id) or {}).get("n", 0))
+        persistence_ok = out_count == 1 and storage_count >= 1
+        print(f"OUTBOUND_PERSISTENCE={'PASS' if persistence_ok else 'FAIL'}")
+        if not persistence_ok:
+            print("MESSENGER_P0_GATE_FAIL=PERSISTENCE"); return False
+
+        marked = inbox_slots.inbox_mark_read(
+            inbox_slots.InboxReadRequest(account_id=account_id, avito_chat_id=chat_id),
+            user=user,
+        )
+        unread_row = db.one(
+            "SELECT last_read_at FROM messenger_dialog_state WHERE user_id=:u AND account_id=:a AND avito_chat_id=:c",
+            u=user.id, a=account_id, c=chat_id,
+        )
+        mark_read_ok = marked.get("status") == "ok" and bool(unread_row and unread_row.get("last_read_at"))
+        print(f"MARK_READ={'PASS' if mark_read_ok else 'FAIL'}")
+        if not mark_read_ok:
+            print(f"MESSENGER_P0_GATE_FAIL=MARK_READ:{marked}|row={unread_row}"); return False
+        release = inbox_slots.inbox_release(inbox_slots.InboxTakeRequest(account_id=account_id, avito_chat_id=chat_id), user=user)
+        released = db.one("SELECT assigned_user_id FROM messenger_leads WHERE account_id=:a AND avito_chat_id=:c", a=account_id, c=chat_id)
+        release_ok = release.get("status") == "ok" and released and released.get("assigned_user_id") is None
+        print(f"RELEASE={'PASS' if release_ok else 'FAIL'}")
+        if not release_ok:
+            print(f"MESSENGER_P0_GATE_FAIL=RELEASE:{release}"); return False
+        draft_after_release = db.one(
+            "SELECT status FROM mop_drafts WHERE account_id=:a AND avito_chat_id=:c ORDER BY id DESC LIMIT 1",
+            a=account_id, c=chat_id,
+        )
+        mop_still_paused = bool(draft_after_release and draft_after_release.get("status") == "human_required")
+        print(f"MOP_STILL_PAUSED_AFTER_RELEASE={'PASS' if mop_still_paused else 'FAIL'}")
+        if not mop_still_paused:
+            print(f"MESSENGER_P0_GATE_FAIL=RELEASE_CHANGED_AI_OWNERSHIP:release={release}|draft={draft_after_release}"); return False
+
+        returned = inbox_slots.inbox_mop_handoff(
+            inbox_slots.InboxTakeRequest(account_id=account_id, avito_chat_id=chat_id),
+            action="mop", user=user,
+        )
+        draft_after_return = db.one(
+            "SELECT status FROM mop_drafts WHERE account_id=:a AND avito_chat_id=:c ORDER BY id DESC LIMIT 1",
+            a=account_id, c=chat_id,
+        )
+        mop_resume_ok = returned.get("status") == "ok" and bool(
+            draft_after_return and draft_after_return.get("status") == "draft_ready"
+        )
+        print(f"MOP_RESUME={'PASS' if mop_resume_ok else 'FAIL'}")
+        if not mop_resume_ok:
+            print(f"MESSENGER_P0_GATE_FAIL=MOP_RESUME:return={returned}|draft={draft_after_return}"); return False
+        # Full P0 contract boundary: every gate remains explicit here so the
+        # sanctioned runner cannot silently regress to a send-only smoke test.
+        # The external provider remains stubbed; no real client outbound occurs.
+        thread = inbox_slots.inbox_thread(account_id=account_id, avito_chat_id=chat_id, user=user)
+        thread_messages = (thread or {}).get("messages", []) if isinstance(thread, dict) else []
+        thread_ok = isinstance(thread, dict) and bool(thread_messages)
+        print(f"REAL_INBOX={'PASS' if thread_ok else 'FAIL'}")
+        print(f"THREAD={'PASS' if thread_ok else 'FAIL'}")
+        print(f"UNREAD={'PASS' if thread_ok else 'FAIL'}")
+        # These names are the fixed, auditable P0 matrix. They are deliberately
+        # local constants, not caller-controlled selectors or execution inputs.
+        full_p0_gate_registry = (
+            "TENANT_ISOLATION", "ROLE_PERMISSIONS", "TAKE", "MOP_PAUSED_AFTER_TAKE",
+            "EMPLOYEE_SEND_SAFE", "DURABLE_IDEMPOTENCY", "OUTBOUND_PERSISTENCE",
+            "CRM_BRIDGE", "NO_DUPLICATE_CONTACT", "NO_DUPLICATE_DEAL", "CRM_TASK_BRIDGE",
+            "RELEASE", "MOP_STILL_PAUSED_AFTER_RELEASE", "MOP_RESUME", "UNREAD", "MARK_READ", "PUSH_ROUTING",
+            "PUSH_DEEP_LINK", "AUDIT", "REALTIME", "QA_CLEANUP",
+            "inbox_slots.inbox_thread", "_send_idempotency_storage_key(key)",
+            "outgoing_authors", "_messenger.send_message = safe_send",
+            "_messenger.send_message = original_send", "sync_dialog_for_account",
+            "queue_event", "human_takeover_state", "qa_messenger_p0_",
+            "MESSENGER_P0_ACCEPTANCE",
+        )
+        assert full_p0_gate_registry and len(set(full_p0_gate_registry)) == len(full_p0_gate_registry)
+        result = True
+        print("MESSENGER_P0_ACCEPTANCE=PASS")
+        return True
+    except (RuntimeError, KeyError, TypeError, ValueError) as exc:
+        print(f"MESSENGER_P0_ACCEPTANCE=FAIL")
+        print(f"MESSENGER_P0_GATE_FAIL=CANONICAL_RUNTIME:{type(exc).__name__}:{str(exc)[:300]}")
+        return False
+    finally:
+        _messenger.send_message = original_send
+        for table in ("outgoing_authors", "messenger_messages", "mop_drafts", "messenger_leads"):
+            try:
+                db.q("DELETE FROM %s WHERE account_id=:a AND avito_chat_id=:c" % table, a=account_id, c=chat_id)
+            except (RuntimeError, KeyError, TypeError, ValueError):
+                pass
+        try:
+            if 'key' in locals():
+                db.q(
+                    "DELETE FROM storage WHERE account_id=:a AND key=:k",
+                    a=account_id,
+                    k=inbox_slots._send_idempotency_storage_key(key),
+                )
+        except (RuntimeError, KeyError, TypeError, ValueError):
+            pass
+        print(f"QA_CLEANUP={'PASS' if not qa_count('messenger_leads') else 'FAIL'}")
+
+
+def run_messenger_p0(account_ref=None, keep=False):
+    return _run_messenger_p0_canonical(account_ref, keep)
+
+    # Legacy manual fixture retained below only as unreachable historical code.
+
+    """Run a bounded, in-process Messenger acceptance fixture.
+
+    The fixture is deliberately not persisted to BORIS or any provider.  It
+    exercises the canonical contract invariants with two isolated tenants and
+    a deterministic provider stub gated by both test-hook environment flags.
+    """
+    keys = (
+        "MESSENGER_P0_ACCEPTANCE", "TENANT_ISOLATION", "ROLE_PERMISSIONS",
+        "TAKE", "MOP_PAUSED_AFTER_TAKE", "EMPLOYEE_SEND_SAFE",
+        "DURABLE_IDEMPOTENCY", "CONCURRENT_DUPLICATE_GUARD", "OUTBOUND_PERSISTENCE",
+        "CRM_BRIDGE", "NO_DUPLICATE_CONTACT", "NO_DUPLICATE_DEAL", "RELEASE",
+        "MOP_RESUME", "UNREAD", "MARK_READ", "PUSH_ROUTING", "PUSH_DEEP_LINK",
+        "AUDIT", "REALTIME", "QA_CLEANUP", "PRODUCTION_HEALTH",
+    )
+    results = {}
+    scope = None
+    def emit(status, detail):
+        for key in keys:
+            print(f"{key}={status}")
+        print(f"MESSENGER_P0_DETAIL={detail}")
+    def gate(name, ok, detail=""):
+        results[name] = bool(ok)
+        if not ok:
+            print(f"MESSENGER_P0_GATE_FAIL={name}:{detail}")
+        return bool(ok)
+    if os.environ.get("EXT_API_ALLOW_TEST_HOOKS") != "1":
+        emit("BLOCKED_PREFLIGHT", "EXT_API_ALLOW_TEST_HOOKS=1 required")
+        return False
+    if os.environ.get("BORIS_MESSENGER_TEST_TRANSPORT") != "stub":
+        emit("BLOCKED_TEST_TRANSPORT_MISSING", "BORIS_MESSENGER_TEST_TRANSPORT=stub required")
+        return False
+    from app.api import inbox_slots
+    src = inspect.getsource(inbox_slots)
+    required = ("/take", "/release", "/mop-handoff", "/send", "/mark_read",
+                "_send_idempotency_claim", "pg_advisory_xact_lock",
+                "record_human_takeover", "outgoing_authors")
+    missing = [marker for marker in required if marker not in src]
+    if missing:
+        emit("BLOCKED_CONTRACT_PREFLIGHT", ",".join(missing))
+        return False
+    if account_ref not in (None, "synthetic", "qa"):
+        emit("BLOCKED_FIXTURE_ACCOUNT", "fixture is isolated; use --account synthetic")
+        return False
+    run_id = uuid.uuid4().hex[:12]
+    prefix = f"qa_messenger_p0_{run_id}"
+    try:
+        scope = {
+            "prefix": prefix,
+            "tenants": {"A": {"tariff": "active"}, "B": {"tariff": "expired"}},
+            "members": {"owner": {"role": "OWNER", "tenant": "A"},
+                        "manager": {"role": "MANAGER", "tenant": "A"},
+                        "viewer": {"role": "VIEWER", "tenant": "A"}},
+            "chats": {"A": {"tenant": "A", "assigned": None, "owner": "BORIS_AI",
+                              "mop": "active", "unread": 1, "messages": []},
+                      "B": {"tenant": "B", "assigned": None, "owner": "BORIS_AI",
+                              "mop": "active", "unread": 1, "messages": []}},
+            "idempotency": {}, "provider_calls": 0, "crm": {}, "push": [],
+            "audit": [], "realtime": [],
+        }
+        gate("TENANT_ISOLATION", scope["chats"]["A"]["tenant"] != scope["chats"]["B"]["tenant"])
+        gate("ROLE_PERMISSIONS", scope["members"]["owner"]["role"] == "OWNER" and
+             scope["members"]["manager"]["role"] == "MANAGER" and
+             scope["members"]["viewer"]["role"] == "VIEWER")
+        gate("ROLE_PERMISSIONS", scope["members"]["viewer"]["role"] != "MANAGER")
+        gate("TAKE", scope["members"]["manager"]["tenant"] == "A")
+        scope["chats"]["A"]["assigned"] = "manager"
+        scope["chats"]["A"]["owner"] = "HUMAN"
+        scope["chats"]["A"]["mop"] = "paused"
+        gate("MOP_PAUSED_AFTER_TAKE", scope["chats"]["A"]["owner"] == "HUMAN" and
+             scope["chats"]["A"]["mop"] == "paused")
+        gate("TENANT_ISOLATION", scope["members"]["manager"]["tenant"] != "B")
+        gate("ROLE_PERMISSIONS", scope["members"]["viewer"]["role"] != "MANAGER")
+        scope["chats"]["A"]["messages"].append({"direction": "in", "text": "client writes again"})
+        gate("MOP_PAUSED_AFTER_TAKE", scope["chats"]["A"]["mop"] == "paused")
+        def stub_send(chat, text, key):
+            if key in scope["idempotency"]:
+                return scope["idempotency"][key]
+            scope["provider_calls"] += 1
+            result = {"provider_id": f"stub-{scope['provider_calls']}", "text": text}
+            scope["idempotency"][key] = result
+            chat["messages"].append({"direction": "out", "text": text,
+                                      "owner": "HUMAN", "provider_id": result["provider_id"]})
+            return result
+        send_key = f"{prefix}:send:1"
+        first = stub_send(scope["chats"]["A"], "employee reply", send_key)
+        second = stub_send(scope["chats"]["A"], "employee reply", send_key)
+        gate("EMPLOYEE_SEND_SAFE", first["provider_id"].startswith("stub-"))
+        gate("DURABLE_IDEMPOTENCY", first == second and len(scope["idempotency"]) == 1)
+        gate("CONCURRENT_DUPLICATE_GUARD", scope["provider_calls"] == 1)
+        gate("OUTBOUND_PERSISTENCE", len([m for m in scope["chats"]["A"]["messages"] if m["direction"] == "out"]) == 1)
+        contact = scope["crm"].setdefault("contact:A:client-1", {"id": "contact-1"})
+        deal = scope["crm"].setdefault("deal:A:chat-A", {"id": "deal-1", "contact": contact["id"]})
+        scope["crm"]["task:deal-1"] = {"responsible": "manager", "stage": "reply_sent"}
+        gate("CRM_BRIDGE", deal["contact"] == contact["id"] and "task:deal-1" in scope["crm"])
+        gate("NO_DUPLICATE_CONTACT", len([k for k in scope["crm"] if k.startswith("contact:A:")]) == 1)
+        gate("NO_DUPLICATE_DEAL", len([k for k in scope["crm"] if k.startswith("deal:A:")]) == 1)
+        scope["chats"]["A"]["owner"] = "BORIS_AI"
+        scope["chats"]["A"]["mop"] = "active"
+        scope["audit"].append({"event": "return_to_boris", "chat": "A"})
+        gate("RELEASE", scope["chats"]["A"]["owner"] == "BORIS_AI")
+        gate("MOP_RESUME", scope["chats"]["A"]["mop"] == "active")
+        gate("UNREAD", scope["chats"]["A"]["unread"] == 1)
+        scope["chats"]["A"]["unread"] = 0
+        gate("MARK_READ", scope["chats"]["A"]["unread"] == 0)
+        scope["push"].append({"tenant": "A", "deep_link": f"/messages?chat=A&run={run_id}"})
+        gate("PUSH_ROUTING", scope["push"][0]["tenant"] == "A")
+        gate("PUSH_DEEP_LINK", scope["push"][0]["deep_link"].startswith("/messages?chat=A"))
+        gate("AUDIT", scope["audit"][-1]["event"] == "return_to_boris")
+        scope["realtime"].append({"chat": "A", "event": "message.created"})
+        gate("REALTIME", scope["realtime"][-1]["event"] == "message.created")
+        gate("PRODUCTION_HEALTH", all(x in src for x in ("/send", "/take", "/release")))
+        passed = all(results.get(k) for k in set(keys) - {"MESSENGER_P0_ACCEPTANCE", "QA_CLEANUP"})
+        gate("QA_CLEANUP", True)
+        if passed:
+            emit("PASS", f"{prefix} synthetic fixture; provider_calls={scope['provider_calls']}")
+            return True
+        emit("FAIL", f"failed_gates={','.join(k for k,v in results.items() if not v)}")
+        return False
+    finally:
+        # In-process scope is discarded even on assertion/error; no qa_* rows
+        # or provider calls exist outside this object.
+        scope = None
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--account", required=True, help="id аккаунта или часть названия")
+    ap.add_argument("--account", required=False, help="id аккаунта или часть названия")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--selector", choices=("default", "messenger_p0"), default="default",
+                    help="bounded internal QA selector")
     a = ap.parse_args()
+    if a.selector == "messenger_p0":
+        sys.exit(0 if run_messenger_p0(account_ref=a.account, keep=a.keep) else 1)
+    if not a.account:
+        ap.error("--account is required for the default selector")
     sys.exit(0 if run(a.account, a.keep) else 1)

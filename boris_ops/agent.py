@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "1.4.3"
+VERSION = "1.4.5"
 DISABLE_FILE = Path(os.getenv("BORIS_OPS_DISABLE_FILE", "/etc/boris-ops/disabled"))
 READ_ONLY_FILE = Path(os.getenv("BORIS_OPS_READ_ONLY_FILE", "/etc/boris-ops/read-only"))
 FORCE_READ_ONLY = os.getenv("BORIS_OPS_READ_ONLY", "0") == "1"
@@ -40,6 +40,7 @@ NONCE_LOCK = threading.Lock()
 JOBS = {}
 JOB_PROCS = {}
 JOB_DIR = Path(os.getenv("BORIS_OPS_JOB_DIR", "/var/lib/boris-ops/jobs"))
+FRONTEND_RESULT_DIR = Path(os.getenv("BORIS_OPS_FRONTEND_RESULT_DIR", "/var/lib/boris-ops/frontend-build-results"))
 SCRIPT_DIR = Path(os.getenv("BORIS_OPS_SCRIPT_DIR", "/var/lib/boris-ops/scripts"))
 TRASH_DIR = Path(os.getenv("BORIS_OPS_TRASH_DIR", "/var/lib/boris-ops/trash"))
 RELEASE_DIR = Path(os.getenv("BORIS_OPS_RELEASE_DIR", "/root/BORIS/boris_ops/releases")).resolve()
@@ -102,7 +103,29 @@ BORIS_ACTIONS = {
     "reload_nginx": (["python3", "/root/BORIS/boris_ops/reload_nginx_safe.py"], "/root/BORIS/boris_ops", 60),
     "frontend_build": (["bash", "scripts/boris-frontend-build.sh"], "/root/BORIS/frontend", 1800),
     "frontend_deploy": ([], "/root/BORIS/frontend", 1800),
+    "backend_scoped_deploy": ([], "/root/BORIS/backend", 1800),
+    "messenger_p0_selftest": ([], "/root/BORIS/releases/backend/current/backend", 1800),
+    "messenger_migration_status": (["/root/BORIS/backend/venv/bin/python", "/root/BORIS/backend/migrations/run_all.py", "status"], "/root/BORIS/backend", 1800),
+    "messenger_migration_verify": (["/root/BORIS/backend/venv/bin/python", "/root/BORIS/backend/migrations/run_all.py", "verify"], "/root/BORIS/backend", 1800),
+    "messenger_migration_060": (["/root/BORIS/backend/venv/bin/python", "/root/BORIS/backend/migrations/run_all.py", "apply", "--from", "060", "--to", "060"], "/root/BORIS/backend", 1800),
+    "messenger_backend_tests": (["/root/BORIS/backend/venv/bin/python", "-m", "pytest", "/root/BORIS/backend/tests/test_internal_messenger_contract.py", "-q"], "/root/BORIS/backend", 1800),
 }
+
+
+def run_messenger_p0_selftest():
+    cwd = Path("/root/BORIS/releases/backend/current/backend").resolve()
+    if not cwd.is_dir():
+        return {"ok": False, "error": "active_backend_release_missing", "action": "messenger_p0_selftest"}
+    env = os.environ.copy()
+    env["EXT_API_ALLOW_TEST_HOOKS"] = "1"
+    env["BORIS_MESSENGER_TEST_TRANSPORT"] = "stub"
+    argv = ["/root/BORIS/backend/venv/bin/python", "-m", "app.ext_api.selftest", "--selector", "messenger_p0", "--account", "synthetic"]
+    started = time.time()
+    try:
+        cp = subprocess.run(argv, shell=False, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=1800)
+        return {"ok": cp.returncode == 0, "action": "messenger_p0_selftest", "cwd": str(cwd), "fixed_selector": "messenger_p0", "fixed_account": "synthetic", "fixed_transport": "stub", "test_hooks": True, "returncode": cp.returncode, "stdout": cp.stdout[-MAX_OUTPUT:], "stderr": cp.stderr[-MAX_OUTPUT:], "duration": round(time.time() - started, 3)}
+    except subprocess.TimeoutExpired as e:
+        return {"ok": False, "action": "messenger_p0_selftest", "cwd": str(cwd), "fixed_selector": "messenger_p0", "fixed_account": "synthetic", "fixed_transport": "stub", "test_hooks": True, "error": "timeout", "returncode": 124, "stdout": (e.stdout or "")[-MAX_OUTPUT:] if isinstance(e.stdout, str) else "", "stderr": (e.stderr or "")[-MAX_OUTPUT:] if isinstance(e.stderr, str) else "", "duration": round(time.time() - started, 3)}
 
 DENY_PATTERNS = [
     re.compile(r"(^|\s)rm\s+-[^\n]*r[^\n]*f", re.I),
@@ -329,6 +352,149 @@ def run_trusted_argv(argv, cwd=None, timeout=60):
         return {"ok":False,"error":"timeout","returncode":124,"stdout":(e.stdout or "")[-MAX_OUTPUT:] if isinstance(e.stdout,str) else "","stderr":(e.stderr or "")[-MAX_OUTPUT:] if isinstance(e.stderr,str) else "","duration":round(time.time()-started,3)}
 
 
+def _frontend_result_path(jid):
+    return FRONTEND_RESULT_DIR / (str(jid) + ".json")
+
+
+def _read_frontend_result(jid):
+    try:
+        fp = _frontend_result_path(jid)
+        if not fp.is_file():
+            return None
+        data = json.loads(fp.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and data.get("job_id") == jid else None
+    except Exception:
+        return None
+
+
+def _write_frontend_result(jid, result):
+    FRONTEND_RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    fp = _frontend_result_path(jid)
+    tmp = fp.with_name(fp.name + ".tmp")
+    tmp.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, fp)
+
+
+def _write_frontend_build_wrapper(jid, unit):
+    SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+    wrapper = SCRIPT_DIR / (str(jid) + ".frontend-build.py")
+    result_path = _frontend_result_path(jid)
+    code = f'''#!/usr/bin/env python3
+import json, os, re, subprocess, sys, time
+from pathlib import Path
+job_id = {jid!r}
+unit = {unit!r}
+result_path = Path({str(result_path)!r})
+started_at = time.time()
+cp = subprocess.run(["/bin/bash", "/root/BORIS/frontend/scripts/boris-frontend-build.sh"], cwd="/root/BORIS/frontend", capture_output=True, text=True)
+combined = (cp.stdout or "") + "\\n" + (cp.stderr or "")
+artifact = ""
+source_hash = ""
+for line in combined.splitlines():
+    if line.startswith("ARTIFACT="):
+        artifact = line.split("=", 1)[1].strip()
+    elif line.startswith("SNAPSHOT_SOURCE_HASH="):
+        source_hash = line.split("=", 1)[1].strip()
+build_id = ""
+if artifact:
+    try:
+        build_id = (Path(artifact) / "BUILD_ID").read_text(encoding="utf-8").strip()
+    except Exception:
+        build_id = ""
+status = "success" if cp.returncode == 0 else "failed"
+payload = {{"job_id": job_id, "unit": unit, "status": status, "returncode": cp.returncode, "artifact": artifact, "build_id": build_id, "snapshot_source_hash": source_hash, "started_at": started_at, "finished_at": time.time()}}
+result_path.parent.mkdir(parents=True, exist_ok=True)
+tmp = result_path.with_name(result_path.name + ".tmp")
+tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+os.replace(tmp, result_path)
+sys.stdout.write((cp.stdout or "")[-524288:])
+sys.stderr.write((cp.stderr or "")[-524288:])
+sys.exit(cp.returncode)
+'''
+    wrapper.write_text(code, encoding="utf-8")
+    os.chmod(wrapper, 0o700)
+    return wrapper
+
+
+def _durable_frontend_show(unit):
+    try:
+        cp = subprocess.run(["systemctl", "show", unit, "--no-pager", "--property=ActiveState,SubState,ExecMainStatus,Result"], capture_output=True, text=True, timeout=8)
+        values = {}
+        for line in cp.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                values[k] = v.strip()
+        if cp.returncode != 0:
+            return {"ok": False, "error": "unit_query_failed", "stderr": cp.stderr[-1000:]}
+        active = values.get("ActiveState", "")
+        sub = values.get("SubState", "")
+        result = values.get("Result", "")
+        try:
+            main_status = int(values.get("ExecMainStatus", "0") or 0)
+        except Exception:
+            main_status = 1
+        if active in {"activating", "active", "deactivating"}:
+            return {"ok": True, "running": True, "active_state": active, "sub_state": sub, "result": result, "exec_main_status": main_status}
+        return {"ok": True, "running": False, "active_state": active, "sub_state": sub, "result": result, "exec_main_status": main_status}
+    except Exception as e:
+        return {"ok": False, "error": "unit_query_failed", "detail": str(e)[:300]}
+
+
+def _reconcile_durable_frontend_job(j):
+    unit = str(j.get("unit", ""))
+    jid = str(j.get("id", ""))
+    if not unit or not jid:
+        return j
+    result = _read_frontend_result(jid)
+    if result:
+        terminal = result.get("status") in {"success", "failed"}
+        if terminal:
+            j.update({"ok": result.get("status") == "success", "returncode": int(result.get("returncode", 1)), "status": result.get("status"), "artifact": result.get("artifact", ""), "build_id": result.get("build_id", ""), "snapshot_source_hash": result.get("snapshot_source_hash", ""), "started_at": result.get("started_at", j.get("started_at")), "finished_at": result.get("finished_at", time.time()), "result_file": str(_frontend_result_path(jid))})
+            return j
+    state = _durable_frontend_show(unit)
+    if state.get("ok"):
+        j["unit_state"] = state
+        if state.get("running"):
+            j["status"] = "running"
+            return j
+        rc = int(state.get("exec_main_status", 1))
+        success = state.get("result") in {"", "success"} and rc == 0
+        terminal = {"job_id": jid, "unit": unit, "status": "success" if success else "failed", "returncode": rc, "artifact": j.get("artifact", ""), "build_id": j.get("build_id", ""), "snapshot_source_hash": j.get("snapshot_source_hash", ""), "started_at": j.get("started_at", time.time()), "finished_at": time.time()}
+        _write_frontend_result(jid, terminal)
+        j.update({"ok": success, "returncode": rc, "status": terminal["status"], "finished_at": terminal["finished_at"], "result_file": str(_frontend_result_path(jid))})
+        return j
+    age = time.time() - float(j.get("started_at", j.get("created_at", time.time())))
+    if age >= float(j.get("timeout", 1800)) + 30:
+        j.update({"ok": False, "status": "unknown", "error": "durable_result_missing", "finished_at": time.time()})
+    return j
+
+
+def start_durable_frontend_job(timeout=1800):
+    existing = [j for j in JOBS.values() if j.get("command") == "frontend_build" and j.get("status") in {"queued", "running"}]
+    if existing:
+        j = _reconcile_durable_frontend_job(existing[0])
+        if j.get("status") in {"queued", "running"}:
+            persist_job(j["id"])
+            return {"ok": True, "deferred": True, "job_id": j["id"], "status": j["status"], "unit": j.get("unit")}
+    jid = "job_" + uuid.uuid4().hex[:16]
+    unit = "boris-frontend-build@" + jid[4:] + ".service"
+    job = {"id": jid, "status": "queued", "created_at": time.time(), "command": "frontend_build", "cwd": "/root/BORIS/frontend", "timeout": min(max(int(timeout), 1), 1800), "trusted": True, "unit": unit, "log_source": "journald:" + unit}
+    JOBS[jid] = job
+    persist_job(jid)
+    wrapper = _write_frontend_build_wrapper(jid, unit)
+    argv = ["sudo", "-n", "systemd-run", "--no-block", "--unit=" + unit, "--property=User=borisops", "--property=Group=borisops", "--property=WorkingDirectory=/root/BORIS/frontend", "--property=TimeoutStartSec=" + str(min(max(int(timeout), 1), 1800)), "--property=KillMode=process", "--property=Nice=15", "/root/BORIS/backend/venv/bin/python", str(wrapper)]
+    try:
+        cp = subprocess.run(argv, cwd="/root/BORIS/frontend", capture_output=True, text=True, timeout=20)
+        if cp.returncode != 0:
+            job.update({"ok": False, "status": "failed", "returncode": cp.returncode, "error": "durable_dispatch_failed", "stderr": cp.stderr[-MAX_OUTPUT:], "finished_at": time.time()})
+        else:
+            job.update({"status": "running", "started_at": time.time(), "dispatch_stdout": cp.stdout[-2000:]})
+    except Exception as e:
+        job.update({"ok": False, "status": "failed", "returncode": 127, "error": "durable_dispatch_failed", "detail": str(e)[:300], "finished_at": time.time()})
+    persist_job(jid)
+    return {"ok": job.get("status") in {"queued", "running"}, "job_id": jid, "status": job.get("status"), "unit": unit, "error": job.get("error")}
+
+
 def start_trusted_job(argv, cwd=None, timeout=1800, label="trusted"):
     if cwd:
         cp,allowed=path_allowed(cwd)
@@ -400,7 +566,12 @@ def load_jobs():
         try:
             j=json.loads(fp.read_text(encoding="utf-8"))
             was_active = j.get("status") in {"queued","running"}
-            if was_active:
+            durable_frontend = was_active and j.get("command") == "frontend_build" and j.get("unit")
+            if durable_frontend:
+                _reconcile_durable_frontend_job(j)
+                if j.get("status") in {"queued","running"}:
+                    j.pop("error", None)
+            elif was_active:
                 j["status"]="interrupted"
                 j["error"]="agent_restarted"
                 j["finished_at"]=time.time()
@@ -865,7 +1036,7 @@ class Handler(BaseHTTPRequestHandler):
                   {"name":"http_check","description":"Check an allowlisted BORIS HTTP health target","inputSchema":{"type":"object","properties":{"target":{"type":"string","enum":["public","ops","backend_primary","backend_replica"]},"timeout":{"type":"number","minimum":0.5,"maximum":10}}}},
                   {"name":"postgres_check","description":"Check local PostgreSQL readiness without reading credentials","inputSchema":{"type":"object","properties":{}}},
                   {"name":"boris_health","description":"Check BORIS production services and public health","inputSchema":{"type":"object","properties":{}}},
-                  {"name":"boris_action","description":"Run a predefined safe BORIS production action","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["restart_backend","restart_frontend","reload_nginx","frontend_build","frontend_deploy"]},"background":{"type":"boolean"},"artifact":{"type":"string"}},"required":["action"]}}
+                  {"name":"boris_action","description":"Run a predefined safe BORIS production action","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["restart_backend","restart_frontend","reload_nginx","frontend_build","frontend_deploy","backend_scoped_deploy","messenger_migration_status","messenger_migration_verify","messenger_migration_060","messenger_backend_tests"]},"background":{"type":"boolean"},"artifact":{"type":"string"}},"required":["action"]}}
                 ]
                 for tool in tools:
                     risk=TOOL_RISK.get(tool.get("name"),"READ")
@@ -1024,17 +1195,33 @@ class Handler(BaseHTTPRequestHandler):
                     if action not in BORIS_ACTIONS: result={"ok":False,"error":"unknown_action"}
                     elif not write_guard()[0]: result={"ok":False,"error":write_guard()[1]}
                     else:
-                        if action == "frontend_deploy":
+                        if action == "messenger_p0_selftest":
+                            result=run_messenger_p0_selftest()
+                        elif action == "frontend_deploy":
                             artifact=Path(str(a.get("artifact",""))).resolve(); root=Path("/root/BORIS/frontend/.boris-builds/artifacts").resolve()
                             if not (artifact.is_dir() and root in artifact.parents and (artifact/"BORIS_ARTIFACT.json").is_file()): result={"ok":False,"error":"invalid_artifact"}
                             else:
                                 argv=["bash","scripts/boris-frontend-deploy.sh",str(artifact)]; j=start_trusted_job(argv,"/root/BORIS/frontend",1800,"frontend_deploy"); result={"ok":bool(j.get("id")),"job_id":j.get("id"),"status":j.get("status"),"action":action,"error":j.get("error")}
+                        elif action == "backend_scoped_deploy":
+                            artifact=Path(str(a.get("artifact",""))).resolve(); root=Path("/root/BORIS/backend/run/scoped-release-requests").resolve()
+                            if not (artifact.is_file() and root in artifact.parents and artifact.suffix.lower()==".json"): result={"ok":False,"error":"invalid_scope_manifest"}
+                            else:
+                                argv=["sudo","-n","/usr/local/sbin/boris-backend-scoped-deploy",str(artifact)]
+                                j=start_trusted_job(argv,"/root/BORIS/backend",1800,"backend_scoped_deploy")
+                                result={"ok":bool(j.get("id")),"job_id":j.get("id"),"status":j.get("status"),"action":action,"error":j.get("error")}
                         else:
                             argv,cwd,to=BORIS_ACTIONS[action]
-                            if a.get("background", action=="frontend_build"):
+                            if action == "frontend_build" and a.get("background", True):
+                                result = start_durable_frontend_job(to)
+                                result["action"] = action
+                            elif a.get("background", action=="frontend_build"):
                                 j=start_trusted_job(argv,cwd,to,action); result={"ok":bool(j.get("id")),"job_id":j.get("id"),"status":j.get("status"),"action":action,"error":j.get("error")}
                             else: result=run_trusted_argv(argv,cwd,to)
-                elif name == "job_get": result=JOBS.get(str(a.get("job_id","")),{"ok":False,"error":"not_found"})
+                elif name == "job_get":
+                    jid = str(a.get("job_id","")); job = JOBS.get(jid)
+                    if job and job.get("command") == "frontend_build" and job.get("unit"):
+                        _reconcile_durable_frontend_job(job); persist_job(jid)
+                    result = job or {"ok":False,"error":"not_found"}
                 elif name == "job_list": result={"ok":True,"jobs":sorted(JOBS.values(),key=lambda j:j.get("created_at",0),reverse=True)[:100]}
                 elif name == "job_cancel": result=cancel_job(str(a.get("job_id","")))
                 else: result={"ok":False,"error":"unknown_tool"}

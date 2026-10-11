@@ -20,158 +20,41 @@ from sqlalchemy import text
 from app.db.session import SessionLocal
 from app.services import prospect_campaigns as campaigns
 from app.services import prospecting
+from app.services.outreach_discovery_policy import company_noise_reason
 from app.services.exception_observability import observe_suppressed
 
 OWNER_ID = 2
-TARGET_DAILY = 50
+TARGET_DAILY = 150
 MIN_DAILY = 30
 HOT_TARGET_SERVICES = {5, 7, 8, 9, 14, 17, 18, 25, 26, 33}
 CAMPAIGN_NAME = "Кирилл · разработка SaaS/App"
-CAMPAIGN_NICHE = "Заказная разработка SaaS, мобильных приложений и автоматизации"
+CAMPAIGN_NICHE = "Коммерческие Avito-ниши"
 MIN_PAIN_EVIDENCE = 2
 MIN_PAIN_SCORE = 55
-SUBJECTS = "По цифровой системе для бизнеса||По автоматизации процессов||По мобильному приложению||По CRM и личному кабинету||По SaaS-платформе||По разработке ПО под процессы"
-DEVELOPMENT_EMAIL_BODY = """Добрый день!
+SUBJECTS = "Где ПО может ускорить ваш бизнес?||Найдём одну зону роста?||Что в бизнесе можно ускорить?||Посчитаем без обязательств||Есть смысл автоматизировать один процесс?||Где бизнес теряет время?"
+DEVELOPMENT_EMAIL_BODY = """Добрый день! Это Кирилл.
 
-Посмотрел {company}.
+Давайте просто поймём, где разработка ПО может повысить скорость и эффективность вашего бизнеса.
 
-Мы занимаемся заказной разработкой программных продуктов для бизнеса: SaaS-платформ, мобильных приложений iOS/Android, CRM, личных кабинетов, внутренних систем, интеграций и автоматизации процессов.
+Бесплатно определим одну зону роста и посчитаем смету. Это ни к чему вас не обязывает — дальше сами решите, есть ли смысл что-то внедрять.
 
-Если готовые сервисы не закрывают вашу бизнес-логику, можем собрать собственное решение под конкретный процесс: сначала определить ключевые сценарии, затем сделать MVP, протестировать на реальной работе и дальше развивать продукт по этапам.
+На сайте — реальные проекты:
+https://systems-ai-oko.ru/
 
-Чтобы не тратить бюджет на повторную разработку типовых вещей, используем готовый технический фундамент для авторизации, ролей, кабинетов, уведомлений, платежей, аналитики и инфраструктуры, а основное время уходит на уникальные функции вашего проекта.
-
-Могу бесплатно посмотреть задачу и прислать:
-— структуру MVP;
-— какие функции нужны в первой версии;
-— ориентир по срокам;
-— вилку стоимости;
-— какие готовые сервисы можно использовать вместо собственной разработки, если писать всё с нуля невыгодно.
-
-Примеры направлений: SaaS, мобильные приложения, web-приложения, CRM, кабинеты клиентов/сотрудников/дилеров, AI-автоматизация, интеграции с 1С/API/телефонией.
-
-Подробнее:
-https://boris-ai.pro/software-dev/
-
-Если актуально, ответьте на это письмо несколькими предложениями о задаче — подготовлю первый вариант архитектуры и оценки.
-
-Если предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.
+Неактуально — ответьте «не интересно», больше писать не будем.
 
 Кирилл
 """
 
 
-# Six approved development-outreach copies. They intentionally stay separate
-# from the BORIS marketing-product funnel and all point to the software landing.
+# Короткие A/B-варианты: меняется только тема, смысл и оффер одинаковые.
 DEVELOPMENT_EMAIL_VARIANTS = [
-    {
-        "label": "A",
-        "subject": "По цифровой системе для бизнеса",
-        "body": """Добрый день!
-
-Занимаемся разработкой программных продуктов под процессы бизнеса: корпоративные сайты, веб-сервисы, SaaS-платформы и личные кабинеты.
-
-Если готовые сервисы не закрывают вашу логику, можем сначала собрать структуру первой рабочей версии, определить интеграции и дать ориентир по срокам и стоимости до начала разработки.
-
-Подробнее о направлениях и примерах решений:
-https://boris-ai.pro/software-dev/
-
-Если актуально, ответьте несколькими словами о задаче — подготовлю первый вариант решения.
-
-Если предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.
-
-Кирилл""",
-    },
-    {
-        "label": "B",
-        "subject": "По автоматизации процессов",
-        "body": """Добрый день!
-
-Разрабатываем системы автоматизации для бизнеса: заявки, задачи, документы, уведомления, аналитика и обмен данными между сервисами в одном рабочем контуре.
-
-Можно начать с одного узкого процесса, сделать MVP, проверить его на реальной работе и затем развивать без большой разработки вслепую.
-
-Что делаем и как строится работа:
-https://boris-ai.pro/software-dev/
-
-Если у вас есть процесс, который сейчас держится на таблицах, чатах или ручных действиях, ответьте на письмо — предложу вариант автоматизации.
-
-Если предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.
-
-Кирилл""",
-    },
-    {
-        "label": "C",
-        "subject": "По мобильному приложению",
-        "body": """Добрый день!
-
-Занимаемся разработкой мобильных приложений для бизнеса: iOS, Android, кроссплатформенные решения, кабинеты клиентов и сотрудников, уведомления, оплаты и интеграции с CRM или внутренней системой.
-
-До разработки можем разложить идею на сценарии, определить состав MVP и дать понятный план запуска по этапам.
-
-Подробнее:
-https://boris-ai.pro/software-dev/
-
-Если мобильное приложение для вашего бизнеса сейчас актуально, ответьте на письмо — подготовлю предварительную структуру первой версии.
-
-Если предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.
-
-Кирилл""",
-    },
-    {
-        "label": "D",
-        "subject": "По CRM и личному кабинету",
-        "body": """Добрый день!
-
-Разрабатываем CRM, личные кабинеты и внутренние системы под конкретные процессы компании: заявки, сделки, роли сотрудников, документы, статусы, отчёты и интеграции.
-
-Если коробочная CRM требует слишком много обходных решений, можно собрать только нужную бизнес-логику и подключить существующие сервисы через API.
-
-Направления разработки:
-https://boris-ai.pro/software-dev/
-
-Если такая задача есть, ответьте на письмо — предложу состав MVP и порядок реализации.
-
-Если предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.
-
-Кирилл""",
-    },
-    {
-        "label": "E",
-        "subject": "По интеграциям и AI-автоматизации",
-        "body": """Добрый день!
-
-Занимаемся разработкой интеграций и AI-автоматизации для бизнеса: API, обмен данными между системами, боты, обработка обращений, аналитика и внутренние помощники.
-
-Задача не обязательно должна быть оформлена как техническое задание. Достаточно описать, что сотрудники сейчас делают вручную и какой результат нужен — мы разложим это на этапы.
-
-Подробнее:
-https://boris-ai.pro/software-dev/
-
-Если хотите, ответьте кратким описанием процесса — подготовлю вариант архитектуры и первую оценку.
-
-Если предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.
-
-Кирилл""",
-    },
-    {
-        "label": "F",
-        "subject": "По разработке ПО под процессы",
-        "body": """Добрый день!
-
-Разрабатываем ПО под задачи бизнеса — от первой рабочей версии до запуска и дальнейшего развития: SaaS, веб-приложения, мобильные приложения, CRM, кабинеты, API и автоматизация.
-
-Если идея ещё не оформлена в ТЗ, это нормально: сначала определяем ключевые сценарии, отделяем обязательное для MVP от второстепенного и только после этого оцениваем разработку.
-
-Посмотреть направления и подход:
-https://boris-ai.pro/software-dev/
-
-Если есть задача, которую хотите обсудить, ответьте на это письмо несколькими предложениями — подготовлю первый разбор.
-
-Если предложение не актуально, ответьте «не интересно» — адрес будет исключён из следующих обращений.
-
-Кирилл""",
-    },
+    {"label":"A","subject":"Где ПО может ускорить ваш бизнес?","body":DEVELOPMENT_EMAIL_BODY},
+    {"label":"B","subject":"Найдём одну зону роста?","body":DEVELOPMENT_EMAIL_BODY},
+    {"label":"C","subject":"Что в бизнесе можно ускорить?","body":DEVELOPMENT_EMAIL_BODY},
+    {"label":"D","subject":"Посчитаем без обязательств","body":DEVELOPMENT_EMAIL_BODY},
+    {"label":"E","subject":"Есть смысл автоматизировать один процесс?","body":DEVELOPMENT_EMAIL_BODY},
+    {"label":"F","subject":"Где бизнес теряет время?","body":DEVELOPMENT_EMAIL_BODY},
 ]
 
 VERTICALS = [
@@ -186,6 +69,61 @@ VERTICALS = [
     ("франшиза услуг", "franchise", "кабинет франчайзи, стандарты, обучение, заявки, KPI и контроль сети"),
     ("строительная компания", "construction", "лиды, сметы, объекты, исполнители, документы, фото и контроль этапов"),
 ]
+
+DEVELOPMENT_BUYER_NICHES = (
+    'Сети салонов красоты',
+    'Сети косметологических клиник',
+    'Сети стоматологий',
+    'Медицинские сети',
+    'Лаборатории / диагностические сети',
+    'Сети автосервисов',
+    'Шиномонтажные сети',
+    'Сервисные компании с выездными мастерами',
+    'Ремонт бытовой техники',
+    'Клининговые компании',
+    'Управляющие компании ЖКХ',
+    'Управляющие компании коммерческой недвижимостью',
+    'Девелоперы',
+    'Строительные компании',
+    'Ремонтные компании',
+    'Компании по обслуживанию объектов',
+    'Логистические компании',
+    'Грузоперевозчики',
+    'Курьерские компании',
+    'Компании со своим автопарком',
+    'Аренда спецтехники',
+    'Таксопарки / корпоративный транспорт',
+    'Оптовые компании',
+    'Дистрибьюторы',
+    'Производители с дилерской сетью',
+    'Франшизы',
+    'Федеральные сети',
+    'Сети пунктов выдачи / обслуживания',
+    'B2B-поставщики',
+    'Компании с дилерами',
+    'Компании с партнёрским кабинетом',
+    'Онлайн-школы — ТОЛЬКО реальные образовательные компании',
+    'Учебные центры',
+    'Сети детских центров',
+    'Частные образовательные сети',
+    'HR / рекрутинговые агентства с большим потоком заявок',
+    'Сервисные франшизы',
+    'Facility management',
+    'HoReCa сети',
+    'Ресторанные сети',
+    'Доставка еды с собственной инфраструктурой',
+    'Производства с заказами / дилерами / личным кабинетом',
+    'Компании с мобильным приложением, которое явно устарело',
+    'Компании с несколькими филиалами и онлайн-записью',
+    'Компании с несколькими филиалами + личным кабинетом',
+    'Компании с большим числом исполнителей / мастеров',
+    'Компании с диспетчеризацией',
+    'Компании с маршрутами',
+    'Компании с большим документооборотом',
+    'Компании с ручной работой через Excel, если это подтверждено их собственным сайтом/материалами',
+)
+
+BUYER_SCENARIO_HINTS = ('сеть', 'сетей', 'филиал', 'франшиз', 'дилер', 'партнер', 'партнёр', 'кабинет', 'онлайн-запис', 'онлайн запис', 'заявк', 'приложен', 'курьер', 'водител', 'мастер', 'исполнител', 'диспетчер', 'статус заказ', 'маршрут', 'документ', 'платеж', 'erp', 'crm', 'excel', 'автопарк', 'оптов', 'b2b')
 
 VERTICAL_HINTS = [
     (("салон", "beauty", "маникюр", "парикмах"), "салонный бизнес"),
@@ -232,12 +170,12 @@ CONTENT_NOISE = (
 
 def _company_fit_relevant(company: dict, vertical_key: str) -> bool:
     hay = " ".join(str(company.get(k) or "") for k in ("name", "title", "snippet", "domain", "website", "url")).lower().replace("ё", "е")
-    if _is_dev_vendor(company):
+    if company_noise_reason(company) or _is_dev_vendor(company):
         return False
     if any(x in hay for x in CONTENT_NOISE):
         return False
     positive = VERTICAL_POSITIVE.get(str(vertical_key), ())
-    return bool(positive and any(x in hay for x in positive))
+    return bool(positive and any(x in hay for x in positive) and any(x in hay for x in BUYER_SCENARIO_HINTS))
 
 
 def ensure_schema(db):
@@ -303,7 +241,7 @@ PAIN_EVIDENCE_RULES = (
 EVIDENCE_LINK_HINTS = (
     "service", "services", "uslugi", "услуг", "client", "клиент", "partner", "партнер", "партнёр",
     "franchise", "франш", "dealer", "дилер", "delivery", "достав", "booking", "запис", "cabinet", "кабинет",
-    "app", "прилож", "branches", "филиал", "network", "сеть",
+    "app", "прилож", "branches", "филиал", "network", "сеть", "contact", "контакт", "about", "о компании", "sitemap",
 )
 
 
@@ -329,13 +267,33 @@ def _extract_site_evidence(page_url: str, body: str) -> list[dict]:
     low = text_value.lower().replace("ё", "е")
     evidence = []
     for kind, strength, needles, fact in PAIN_EVIDENCE_RULES:
-        hit = next((x for x in needles if x.replace("ё", "е") in low), None)
-        if not hit:
+        quote = ''
+        for needle in needles:
+            normalized = needle.replace('ё', 'е')
+            if normalized == 'акт':
+                pattern = r'\bакт(?:ы|ов|ами|ах|ом|а)?\b'
+            elif normalized == 'счет':
+                pattern = r'\bсчет(?:а|ов|ами|ах|ом|у)?\b'
+            else:
+                pattern = r'\b' + re.escape(normalized)
+            for match in re.finditer(pattern, low):
+                context = low[max(0, match.start()-65):match.end()+95]
+                if kind in {'online_request', 'staff_operations'} and any(x in context for x in ('собеседован', 'ваканси', 'соискател')):
+                    continue
+                if kind == 'staff_operations' and not any(x in context for x in ('клиент', 'заявк', 'заказ', 'выезд', 'объект', 'запис', 'услуг', 'визит', 'процедур')):
+                    continue
+                if kind == 'multi_location' and normalized == 'открыли более' and not re.search(r'\d+.{0,25}(?:студи|филиал|клиник|точ|салон|цент|магазин)', context):
+                    continue
+                quote = _compact(text_value[max(0, match.start()-65):match.end()+95], 180)
+                break
+            if quote:
+                break
+        if not quote:
             continue
         evidence.append({
             "kind": kind,
             "fact": fact,
-            "quote": _evidence_excerpt(text_value, hit),
+            "quote": quote,
             "source_url": page_url,
             "strength": strength,
             "source_type": "company_site",
@@ -415,8 +373,10 @@ def _score_pain_evidence(evidence: list[dict]) -> int:
     return min(100, score)
 
 
-def _scan_company_evidence(company: dict, vertical_label: str, max_pages: int = 2) -> dict:
+def _scan_company_evidence(company: dict, vertical_label: str, max_pages: int = 4) -> dict:
     website = str(company.get("website") or "").strip()
+    if company_noise_reason(company) or _is_dev_vendor(company):
+        return {"analysis_status":"rejected_noise", "reason":"non_buyer", "evidence":[], "pain_score":0}
     if not website:
         return {"analysis_status": "scan_failed", "reason": "website_missing", "evidence": [], "pain_score": 0}
     session = requests.Session()
@@ -425,7 +385,7 @@ def _scan_company_evidence(company: dict, vertical_label: str, max_pages: int = 
     visited = set()
     evidence = []
     errors = []
-    while queue and len(visited) < max(1, min(int(max_pages), 3)):
+    while queue and len(visited) < max(1, min(int(max_pages), 5)):
         url = queue.pop(0)
         if url in visited:
             continue
@@ -433,9 +393,12 @@ def _scan_company_evidence(company: dict, vertical_label: str, max_pages: int = 
         try:
             prospecting.assert_public_host(url)
             final_url, body, _size = prospecting.fetch(session, url)
+            if not prospecting.same_domain(website, final_url) or company_noise_reason({'website': final_url}):
+                errors.append('non_corporate_redirect')
+                continue
             evidence.extend(_extract_site_evidence(final_url, body))
             if len(visited) == 1:
-                queue.extend(x for x in _evidence_links(final_url, body, limit=3) if x not in visited)
+                queue.extend(x for x in _evidence_links(final_url, body, limit=8) if x not in visited)
         except Exception as exc:
             errors.append(type(exc).__name__)
     uniq = {}
@@ -645,11 +608,12 @@ def _ensure_campaign():
               UPDATE prospect_campaigns
                  SET account_id=NULL,
                      niche=:niche,
+                     regions='[]'::jsonb,
                      subject_template=:subject,
                      body_template=:body,
                      ab_variants=CAST(:ab AS JSONB),
                      attachment_path=NULL,
-                     daily_limit=20,
+                     daily_limit=15,
                      per_domain_daily_limit=1,
                      min_quality_score=60,
                      updated_at=NOW()
@@ -676,11 +640,11 @@ def _ensure_campaign():
         OWNER_ID,
         name=CAMPAIGN_NAME,
         niche=CAMPAIGN_NICHE,
-        regions=["Россия"],
+        regions=[],
         subject_template=SUBJECTS,
         body_template=DEVELOPMENT_EMAIL_BODY,
         ab_variants=DEVELOPMENT_EMAIL_VARIANTS,
-        daily_limit=20,
+        daily_limit=15,
         per_domain_daily_limit=1,
         min_quality_score=60,
         account_id=None,
@@ -713,6 +677,8 @@ def _verified_email(db, company_id):
 def _already_owner_contacted(db, email):
     """Dedupe inside the development funnel only.
 
+    Unsent ready members must be reanalyzed after hardening; canonical member
+    uniqueness and the send-time family guard prevent duplicate initial mail.
     BORIS-product outreach is a separate offer/funnel. It must never rewrite or
     suppress development solely because another BORIS campaign used that address.
     """
@@ -723,7 +689,7 @@ def _already_owner_contacted(db, email):
       WHERE c.owner_id=:o
         AND (c.name=:name OR lower(coalesce(c.niche,'')) LIKE '%заказн%разработ%')
         AND lower(m.email)=lower(:e)
-        AND (m.sent_at IS NOT NULL OR m.status IN ('ready','queued','sent'))
+        AND (m.sent_at IS NOT NULL OR m.status IN ('queued','sent'))
       LIMIT 1
     """), {"o": OWNER_ID, "e": email, "name": CAMPAIGN_NAME}).first())
 
@@ -758,8 +724,6 @@ DEV_VENDOR_HINTS = (
 
 def _is_dev_vendor(company: dict) -> bool:
     source = str(company.get("source") or "").strip().lower()
-    if source == "development_curated":
-        return False
     hay = " ".join(str(company.get(k) or "") for k in (
         "name", "title", "snippet", "domain", "website", "url", "search_query"
     )).lower().replace("ё", "е")
@@ -774,7 +738,7 @@ def _existing_company_fit_score(company: dict) -> tuple[int, str, str]:
     """High-confidence reusable pool when public search engines are degraded."""
     source = str(company.get("source") or "").lower()
     hay = " ".join(str(company.get(k) or "") for k in ("name", "domain", "search_query", "website")).lower().replace("ё", "е")
-    if _is_dev_vendor(company):
+    if company_noise_reason(company) or _is_dev_vendor(company):
         return 0, "", ""
     if any(x in hay for x in DEV_POOL_NEGATIVE):
         return 0, "", ""
@@ -1054,12 +1018,18 @@ def _company_brief(company, vertical_label, process_pain, fit_score, email, anal
 def _discover_company_fit(max_companies=16):
     today = _service_date()
     # Rotate niches so the same four web searches are not repeated every day.
-    offset = today.toordinal() % len(VERTICALS)
-    chosen = [VERTICALS[(offset + i) % len(VERTICALS)] for i in range(4)]
+    offset = (today.toordinal() * 4 + datetime.now(timezone.utc).hour) % len(DEVELOPMENT_BUYER_NICHES)
+    chosen = []
+    for i in range(4):
+        niche = DEVELOPMENT_BUYER_NICHES[(offset + i) % len(DEVELOPMENT_BUYER_NICHES)]
+        low = niche.lower()
+        label = next((k for k, hints in VERTICAL_POSITIVE.items() if any(h in low for h in hints)), 'franchise')
+        pain = next((p for _, k, p in VERTICALS if k == label), 'заявки, исполнители, документы и статусы')
+        chosen.append((niche, label, pain))
     found = []
     for niche, label, pain in chosen:
         try:
-            res = campaigns.discover_niche(OWNER_ID, niche, ["Россия"], target=6, max_queries=3, query_offset=today.toordinal())
+            res = campaigns.discover_niche(OWNER_ID, niche, ["Россия"], target=6, max_queries=3, query_offset=today.toordinal(), discovery_family="development", buyer_vertical=label)
             ids = list(dict.fromkeys((res.get("inserted") or []) + (res.get("existing") or [])))[:8]
             if ids:
                 campaigns.parse_batch(OWNER_ID, ids, max_pages=4, max_companies=8)
@@ -1081,7 +1051,8 @@ def _discover_company_fit(max_companies=16):
                     found.append({"company": dict(c), "vertical": label, "pain": pain, "fit_score": min(100, fit), "email": email})
             finally:
                 db.close()
-        except Exception:
+        except Exception as exc:
+            observe_suppressed(__name__, exc, line=1054)
             continue
     # unique by email/domain
     uniq = {}
@@ -1169,9 +1140,33 @@ def _feed_campaign(db, day, campaign_id):
             added += 1
             member_id=int(member); member_status='ready'
         else:
-            existing=db.execute(text("""SELECT id,status,skip_reason FROM prospect_campaign_members
+            existing=db.execute(text("""SELECT id,status,skip_reason,email,sent_at FROM prospect_campaign_members
               WHERE campaign_id=:ca AND contact_id=:ct ORDER BY id LIMIT 1"""),
               {"ca":campaign_id,"ct":contact["contact_id"]}).mappings().first()
+            # A company can legitimately get a new verified mailbox after the
+            # previous address bounced. The campaign has a unique(company_id)
+            # guard, so ON CONFLICT above cannot insert a replacement row.
+            # Rebind only terminal/unsendable rows to a DIFFERENT verified email;
+            # never rewrite a live queued/sent member.
+            if not existing:
+                existing=db.execute(text("""SELECT id,status,skip_reason,email,sent_at FROM prospect_campaign_members
+                  WHERE campaign_id=:ca AND company_id=:co ORDER BY id LIMIT 1"""),
+                  {"ca":campaign_id,"co":int(r["company_id"])}).mappings().first()
+                if existing:
+                    old_status=str(existing.get("status") or "")
+                    old_email=str(existing.get("email") or "").strip().lower()
+                    if old_status in {"suppressed","failed","skipped"} and old_email != email:
+                        rebound=db.execute(text("""UPDATE prospect_campaign_members
+                          SET contact_id=:ct,email=:e,email_domain=:dom,quality_score=:q,
+                              status='ready',skip_reason=NULL,email_queue_id=NULL,queued_at=NULL,
+                              sent_at=NULL,reply_status=NULL,replied_at=NULL,updated_at=NOW()
+                          WHERE id=:m AND status IN ('suppressed','failed','skipped')"""),
+                          {"ct":contact["contact_id"],"e":email,"dom":email.split("@",1)[1],
+                           "q":min(100,int(r["fit_score"])),"m":int(existing["id"])}).rowcount
+                        if rebound:
+                            existing=db.execute(text("""SELECT id,status,skip_reason,email,sent_at
+                              FROM prospect_campaign_members WHERE id=:m"""),
+                              {"m":int(existing["id"])}).mappings().first()
             member_id=int(existing["id"]) if existing else None
             member_status=str(existing["status"] or "") if existing else ""
             if existing and member_status == 'skipped' and str(existing.get('skip_reason') or '') == 'pain_evidence_required':
@@ -1226,12 +1221,12 @@ def run(*, discover=True, target=TARGET_DAILY):
     # the verified reserve. Full morning runs do more; emergency refills stay light.
     enrichment=_enrich_curated_missing_contacts(max_companies=(8 if discover else 3))
     if discover:
-        company_candidates.extend(_discover_company_fit(max_companies=18))
+        company_candidates.extend(_discover_company_fit(max_companies=60))
     # Always keep a verified reserve so search-engine anti-bot pages do not stop
     # tomorrow's email work. This path performs no paid API calls.
-    company_candidates.extend(_existing_verified_company_fit(max_companies=40))
+    company_candidates.extend(_existing_verified_company_fit(max_companies=120))
     company_seen=set()
-    analysis_budget = 12 if discover else 6
+    analysis_budget = 50 if discover else 12
     analyzed = 0
     for x in sorted(company_candidates,key=lambda z:-int(z.get("fit_score") or 0)):
         domain=str(x["company"].get("domain") or "").strip().lower()
@@ -1242,7 +1237,7 @@ def run(*, discover=True, target=TARGET_DAILY):
         if analyzed >= analysis_budget:
             break
         analyzed += 1
-        analysis = _scan_company_evidence(x["company"], x["vertical"], max_pages=2)
+        analysis = _scan_company_evidence(x["company"], x["vertical"], max_pages=4)
         brief = _company_brief(x["company"], x["vertical"], x["pain"], x["fit_score"], x["email"]["email"], analysis=analysis)
         company_items.append({
             "kind": "company_fit", "lead_id": None, "company_id": int(x["company"]["id"]),
@@ -1251,7 +1246,7 @@ def run(*, discover=True, target=TARGET_DAILY):
     company_items.sort(key=lambda x: (0 if _brief_outreach_ready(x.get("brief")) else 1, -int(x.get("brief",{}).get("pain_score") or 0), -int(x.get("fit_score") or 0)))
 
     wanted = max(MIN_DAILY, min(int(target), TARGET_DAILY))
-    company_take = min(30, len(company_items), wanted)
+    company_take = min(100, len(company_items), wanted)
     selected = list(company_items[:company_take])
     selected.extend(hot[:max(0, wanted - len(selected))])
     if len(selected) < wanted:

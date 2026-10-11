@@ -5,7 +5,18 @@ LOGDIR=/var/log/boris
 mkdir -p "$LOGDIR"
 STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 OUT=$(mktemp)
-trap 'rm -f "$OUT"' EXIT
+LOG="$LOGDIR/avito_visual_guard_watchdog.log"
+finish() {
+  local rc=$?
+  trap - EXIT
+  cat "$OUT" >>"$LOG"
+  rm -f "$OUT"
+  if (( rc != 0 )); then
+    logger -t BORIS_AVITO_VISUAL_GUARD "FAIL rc=$rc; see $LOG" || true
+  fi
+  exit "$rc"
+}
+trap finish EXIT
 {
   echo "[$STAMP] AVITO_VISUAL_GUARD_WATCHDOG START"
   # systemd gives this oneshot 180s total. Never wait longer than the service
@@ -57,10 +68,4 @@ trap 'rm -f "$OUT"' EXIT
   fi
   echo "[$STAMP] STEP legacy_guard PASS"
   echo "[$STAMP] AVITO_VISUAL_GUARD_WATCHDOG PASS"
-} >"$OUT" 2>&1 || {
-  rc=$?
-  cat "$OUT" >>"$LOGDIR/avito_visual_guard_watchdog.log"
-  logger -t BORIS_AVITO_VISUAL_GUARD "FAIL rc=$rc; see $LOGDIR/avito_visual_guard_watchdog.log"
-  exit "$rc"
-}
-cat "$OUT" >>"$LOGDIR/avito_visual_guard_watchdog.log"
+} >"$OUT" 2>&1

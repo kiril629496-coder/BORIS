@@ -347,6 +347,46 @@ def learn_previous_days(now_msk):
     finally: db.close()
     return out
 
+def _pacing_day_state(previous, now_msk):
+    """Never erase unresolved temporary bids when the service day changes.
+
+    Pure decision only: no database/provider writes, no mandate changes. The
+    canonical reset path remains the only owner of reset terminal evidence.
+    """
+    from copy import deepcopy
+    today = now_msk.date().isoformat()
+    if not isinstance(previous, dict):
+        return {"allow": False, "reason": "invalid_previous_day_state", "state": previous,
+                "previous_day_msk": None, "pending_item_ids": []}
+    state = deepcopy(previous)
+    old_day = str(state.get("day_msk") or "")
+    items = state.get("items", {})
+    if not isinstance(items, dict):
+        return {"allow": False, "reason": "invalid_previous_day_items", "state": state,
+                "previous_day_msk": old_day, "pending_item_ids": []}
+    if old_day == today:
+        return {"allow": True, "state": state, "previous_day_msk": old_day,
+                "pending_item_ids": [], "reason": None}
+    pending = sorted(str(iid) for iid, meta in items.items()
+                     if not isinstance(meta, dict)
+                     or str(meta.get("status") or "") not in {"reset", "skipped_below_baseline"})
+    if pending:
+        return {"allow": False, "reason": "previous_day_reset_pending", "state": state,
+                "previous_day_msk": old_day, "pending_item_ids": pending}
+    if old_day:
+        try:
+            parsed = datetime.fromisoformat(old_day).date()
+            valid_day = parsed.isoformat() == old_day
+        except (TypeError, ValueError):
+            valid_day = False
+        if not valid_day or old_day > today:
+            return {"allow": False, "reason": "invalid_previous_service_date", "state": state,
+                    "previous_day_msk": old_day, "pending_item_ids": []}
+    return {"allow": True,
+            "state": {"day_msk": today, "status": "active", "items": {}},
+            "previous_day_msk": old_day, "pending_item_ids": [], "reason": None}
+
+
 def boost_evening(now_msk, account_filter=None):
     if now_msk.hour<BOOST_START_HOUR:return []
     accounts=[x for x in get_goal_auto_accounts() if float(x.get("target_leads_per_day") or 0)>0]; out=[]
@@ -422,7 +462,18 @@ def boost_evening(now_msk, account_filter=None):
                     try:_negative_boost_ids.add(int(_iid))
                     except Exception:pass
             state=_load(db,a,STATE_KEY) or {}
-            if str(state.get("day_msk") or "")!=now_msk.date().isoformat():state={"day_msk":now_msk.date().isoformat(),"status":"active","items":{}}
+            # PRESERVE_UNFINISHED_RESET_ACROSS_DAY_V1: a new calendar day is
+            # not proof that yesterday's reset succeeded. Keep pending evidence
+            # untouched and block only additional pacing; never disable live ads.
+            _day_state=_pacing_day_state(state,now_msk)
+            if not _day_state["allow"]:
+                out.append({"account_id":a,"status":"blocked_previous_day_reset",
+                            "reason":_day_state["reason"],
+                            "previous_day_msk":_day_state["previous_day_msk"],
+                            "pending_item_ids":_day_state["pending_item_ids"],
+                            "applied":0,"changed_avito":False})
+                continue
+            state=_day_state["state"]
             # LATE_DAY_ONE_STEP_THEN_MEASURE_V2: no blind continuation cohort.
             # If both account measurement slots are occupied, one strong
             # converter may rotate its own >12h unresolved slot once/day under a

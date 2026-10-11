@@ -35,6 +35,34 @@ def _save_banner_record(account_id, filename, folder, theme_label, prompt, sourc
 
 
 
+def _extract_verified_price(source: str) -> str:
+    """Return only a literal price fragment already present in the owner input."""
+    import re
+
+    clean = " ".join(str(source or "").strip().split())
+    if not clean:
+        return ""
+    price_re = re.compile(
+        r"(?<!\w)(?:от\s+)?\d[\d\s.,]{0,14}"
+        r"(?:\s*(?:тыс(?:\.|яч[аи]?)?))?\s*"
+        r"(?:₽|руб(?:\.|лей|ля)?|р\.)(?!\w)",
+        re.IGNORECASE,
+    )
+    match = price_re.search(clean)
+    return " ".join(match.group(0).split())[:60] if match else ""
+
+
+def _numeric_claim_supported(value: str, source: str) -> bool:
+    """Generated copy may not introduce numbers absent from the source brief."""
+    import re
+
+    value_nums = re.findall(r"\d+(?:[.,]\d+)?", str(value or ""))
+    if not value_nums:
+        return True
+    source_compact = re.sub(r"\s+", "", str(source or ""))
+    return all(re.sub(r"\s+", "", token) in source_compact for token in value_nums)
+
+
 def _generate_marketing_copy(
     raw_description: str,
     account_id: str = None,
@@ -117,9 +145,9 @@ def _generate_marketing_copy(
             data.get("subtitle") or ""
         ).strip()
 
-        price_text = str(
-            data.get("price_text") or ""
-        ).strip()
+        # Never trust model-generated commercial numbers as facts. Price is
+        # extracted literally from the owner-provided source, not from AI JSON.
+        price_text = _extract_verified_price(source)
 
         advantages = [
             str(x).strip()
@@ -127,11 +155,13 @@ def _generate_marketing_copy(
                 data.get("advantages")
                 or []
             )
-            if str(x).strip()
+            if str(x).strip() and _numeric_claim_supported(str(x), source)
         ][:3]
 
-        if not title:
+        if not title or not _numeric_claim_supported(title, source):
             title = fallback["title"]
+        if not _numeric_claim_supported(subtitle, source):
+            subtitle = ""
 
         result = {
             "title": title[:90],
@@ -2293,4 +2323,220 @@ def banner_v4_create_one(
     )
     if result.get("status") == "ok":
         result["direction"] = str(req.direction or "architecture")
+    return result
+
+
+# ===== BORIS PREMIUM FULL_AI (JULY 2026 RESTORED) =====
+
+from fastapi import HTTPException
+
+class BannerPremiumCreateRequest(BaseModel):
+    account_id: str
+    description: str
+    exact_title: str = ""
+    exact_subtitle: str = ""
+    exact_cta: str = ""
+    exact_price: str = ""
+    advantages: list[str] = []
+    accent_color: str = "#F97316"
+    format: str = "1:1"
+    hypothesis: str = "product_hero"
+    reference_image_base64: str = ""
+    reference_image_urls: list[str] = []
+    idempotency_key: str = ""
+    parent_banner_id: str = ""
+    edit_instruction: str = ""
+
+
+class BannerPremiumApproveRequest(BaseModel):
+    account_id: str
+    banner_id: str
+    version: Optional[int] = None
+
+
+class BannerPremiumRejectRequest(BaseModel):
+    account_id: str
+    banner_id: str
+    version: Optional[int] = None
+    reason: str = ""
+
+
+def _premium_subscription_access(account_id: str) -> dict:
+    from app.db.session import SessionLocal as _PremiumSession
+    from app.services.subscription_gate import base_subscription_access
+    db = _PremiumSession()
+    try:
+        return base_subscription_access(db, account_id, product="campaign")
+    finally:
+        db.close()
+
+
+@router.get("/premium-ai/status")
+def banner_premium_status(
+    account_id: str,
+    current_user=_DepSec(_CurUser),
+):
+    from app.services.banner_full_ai_premium import status_payload
+    account_id = _banner_v2_account_access(account_id, current_user)
+    subscription = _premium_subscription_access(account_id)
+    payload = status_payload()
+    payload["account_id"] = account_id
+    payload["subscription"] = subscription
+    payload["available"] = bool(payload.get("enabled") and subscription.get("allowed"))
+    return {"status": "ok", **payload}
+
+
+@router.post("/premium-ai/create-one")
+def banner_premium_create_one(
+    req: BannerPremiumCreateRequest,
+    current_user=_DepSec(_CurUser),
+):
+    from app.services.banner_full_ai_premium import create_preview
+
+    account_id = _banner_v2_account_access(req.account_id, current_user)
+    subscription = _premium_subscription_access(account_id)
+    if not subscription.get("allowed"):
+        raise HTTPException(403, "Аккаунт BORIS неактивен")
+
+    description = str(req.description or "").strip()
+    if not description:
+        raise HTTPException(400, "Расскажите о предложении")
+
+    title = str(req.exact_title or "").strip()
+    subtitle = str(req.exact_subtitle or "").strip()
+    price_text = str(req.exact_price or "").strip()
+    advantages = [str(x or "").strip() for x in (req.advantages or []) if str(x or "").strip()][:3]
+
+    if not title:
+        copy = _generate_marketing_copy(
+            description,
+            account_id=account_id,
+            operation="banner_premium_copy",
+        )
+        title = str(copy.get("title") or "").strip()
+        if not subtitle:
+            subtitle = str(copy.get("subtitle") or "").strip()
+        if not advantages:
+            advantages = [
+                str(x or "").strip()
+                for x in (copy.get("advantages") or [])
+                if str(x or "").strip()
+            ][:3]
+        if not price_text:
+            price_text = str(copy.get("price_text") or "").strip()
+
+    reference_style = ""
+    if str(req.reference_image_base64 or "").strip():
+        reference_style = _describe_reference_style(
+            req.reference_image_base64,
+            account_id=account_id,
+            operation="banner_premium_reference_style",
+        )
+    elif req.reference_image_urls:
+        reference_style = _describe_reference_style_multi(
+            req.reference_image_urls,
+            account_id=account_id,
+            operation="banner_premium_reference_style_multi",
+        )
+
+    result = create_preview(
+        account_id=account_id,
+        description=description,
+        exact_title=title,
+        exact_subtitle=subtitle,
+        exact_cta=str(req.exact_cta or "").strip(),
+        exact_price=price_text,
+        advantages=advantages,
+        accent_color=str(req.accent_color or "#F97316").strip(),
+        fmt=str(req.format or "1:1").strip(),
+        hypothesis=str(req.hypothesis or "product_hero").strip(),
+        reference_style=reference_style,
+        idempotency_key=str(req.idempotency_key or "").strip(),
+        parent_banner_id=str(req.parent_banner_id or "").strip(),
+        edit_instruction=str(req.edit_instruction or "").strip(),
+    )
+
+    if result.get("status") == "cost_cap_exceeded":
+        raise HTTPException(
+            409,
+            "Расчётная стоимость превышает лимит 4 ₽ — генерация не запущена",
+        )
+    if result.get("status") != "ok":
+        raise HTTPException(
+            500,
+            str(
+                result.get("detail")
+                or result.get("code")
+                or "Не удалось создать Премиум AI баннер"
+            ),
+        )
+    return result
+
+
+@router.get("/premium-ai/versions")
+def banner_premium_versions(
+    account_id: str,
+    banner_id: str,
+    current_user=_DepSec(_CurUser),
+):
+    from app.services.banner_full_ai_premium import get_versions
+
+    account_id = _banner_v2_account_access(account_id, current_user)
+    versions = get_versions(account_id, banner_id)
+    return {
+        "status": "ok",
+        "account_id": account_id,
+        "banner_id": banner_id,
+        "versions": versions,
+    }
+
+
+@router.post("/premium-ai/approve")
+def banner_premium_approve(
+    req: BannerPremiumApproveRequest,
+    current_user=_DepSec(_CurUser),
+):
+    from app.services.banner_full_ai_premium import approve_preview
+
+    account_id = _banner_v2_account_access(req.account_id, current_user)
+    subscription = _premium_subscription_access(account_id)
+    if not subscription.get("allowed"):
+        raise HTTPException(403, "Аккаунт BORIS неактивен")
+
+    result = approve_preview(
+        account_id,
+        str(req.banner_id or "").strip(),
+        req.version,
+    )
+    if result.get("status") != "ok":
+        raise HTTPException(
+            409,
+            str(result.get("code") or "Не удалось одобрить баннер"),
+        )
+    return result
+
+
+@router.post("/premium-ai/reject")
+def banner_premium_reject(
+    req: BannerPremiumRejectRequest,
+    current_user=_DepSec(_CurUser),
+):
+    from app.services.banner_full_ai_premium import reject_preview
+
+    account_id = _banner_v2_account_access(req.account_id, current_user)
+    subscription = _premium_subscription_access(account_id)
+    if not subscription.get("allowed"):
+        raise HTTPException(403, "Аккаунт BORIS неактивен")
+
+    result = reject_preview(
+        account_id,
+        str(req.banner_id or "").strip(),
+        req.version,
+        str(req.reason or "").strip(),
+    )
+    if result.get("status") != "ok":
+        raise HTTPException(
+            409,
+            str(result.get("code") or "Не удалось отклонить баннер"),
+        )
     return result

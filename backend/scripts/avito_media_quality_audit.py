@@ -28,6 +28,14 @@ from app.api.avito import _check_feed_images
 LEGACY = {"boris_deterministic", "boris_unique"}
 
 
+def is_transient_derivative_url(raw) -> bool:
+    """Canonical storage must reference durable sources, never XML derivatives."""
+    import re
+    value = str(raw or "").split("?", 1)[0]
+    name = value.rsplit("/", 1)[-1].lower()
+    return bool(re.fullmatch(r"(?:uq|uqv)_[0-9a-f]{16}\.(?:jpg|jpeg|png|webp)", name))
+
+
 def main() -> int:
     db = SessionLocal()
     try:
@@ -82,6 +90,7 @@ def main() -> int:
 
         canonical_hits = []
         canonical_fullai = []
+        canonical_transient_derivatives = []
         rows = db.query(Storage).filter(Storage.key.in_(("feed_items", "drafts"))).all()
         for row in rows:
             try:
@@ -99,6 +108,14 @@ def main() -> int:
                     url = str(raw or "")
                     clean = url.split("?", 1)[0]
                     name = clean.rsplit("/", 1)[-1].lower()
+                    if row.key == "feed_items" and is_transient_derivative_url(clean) and "/images/" in clean:
+                        from urllib.parse import unquote as _unquote_transient
+                        _transient_rel = _unquote_transient(clean.split("/images/", 1)[1])
+                        if not (Path("/root/BORIS/backend/images") / _transient_rel).is_file():
+                            canonical_transient_derivatives.append({
+                                "account_id": row.account_id, "key": row.key,
+                                "item_id": item.get("id"), "url": clean,
+                            })
                     if any(marker in name for marker in ("fullai_", "gptimg_")):
                         canonical_fullai.append({
                             "account_id": row.account_id, "key": row.key,
@@ -213,7 +230,6 @@ def main() -> int:
 
         # Active XML/feed artifacts must obey the same invariant as canonical DB state.
         # Historical quarantines under .boris_backups are intentionally outside these roots.
-        from pathlib import Path
         public_fullai_files = []
         public_images_root = Path("/root/BORIS/backend/images")
         if public_images_root.exists():
@@ -259,6 +275,8 @@ def main() -> int:
             "canonical_hit_examples": canonical_hits[:20],
             "canonical_fullai_hits": len(canonical_fullai),
             "canonical_fullai_examples": canonical_fullai[:20],
+            "canonical_missing_transient_derivative_hits": len(canonical_transient_derivatives),
+            "canonical_missing_transient_derivative_examples": canonical_transient_derivatives[:20],
             "feed_accounts": len(feeds),
             "feed_failures": len(failed_feeds),
             "failed_feeds": failed_feeds,
@@ -266,7 +284,7 @@ def main() -> int:
             "campaign_feed_drift_examples": campaign_feed_drift[:20],
             "xml_legacy_hits": len(xml_legacy_hits),
             "xml_legacy_examples": xml_legacy_hits[:20],
-            "status": "PASS" if not (active_legacy or active_links or active_legacy_campaign_ai or active_legacy_campaign_links or active_source_laundered or invalid_provenance_active_assets or invalid_provenance_active_links or active_legacy_timestamp_banners or legacy_banner_table_rows or operational_storage_fullai_refs or public_fullai_files or canonical_hits or canonical_fullai or failed_feeds or campaign_feed_drift or xml_legacy_hits) else "FAIL",
+            "status": "PASS" if not (active_legacy or active_links or active_legacy_campaign_ai or active_legacy_campaign_links or active_source_laundered or invalid_provenance_active_assets or invalid_provenance_active_links or active_legacy_timestamp_banners or legacy_banner_table_rows or operational_storage_fullai_refs or public_fullai_files or canonical_hits or canonical_fullai or canonical_transient_derivatives or failed_feeds or campaign_feed_drift or xml_legacy_hits) else "FAIL",
         }
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "PASS" else 2

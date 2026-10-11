@@ -58,6 +58,7 @@ def permanent_tg_error(value):
     return any(x in s for x in (
         'UsernameInvalidError','UsernameNotOccupiedError','UserPrivacyRestrictedError',
         'ChatWriteForbiddenError','UserIsBlockedError',
+        'InputUserDeactivatedError','UserDeactivatedBanError','UserDeactivatedError',
     )) or ('no user has' in low and 'as username' in low)
 
 def _main_locked(dry=False):
@@ -89,6 +90,17 @@ def _main_locked(dry=False):
         if not db.execute(text("""SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='boris_sales_hot_leads' AND column_name='reactivation_priority_reason')""")).scalar():
             db.execute(text('ALTER TABLE boris_sales_hot_leads ADD COLUMN reactivation_priority_reason TEXT'))
         db.execute(text("""UPDATE boris_sales_hot_leads l SET status='skipped',skipped_at=COALESCE(skipped_at,NOW()),approval_note='suppressed_identity',updated_at=NOW() WHERE l.status='new' AND EXISTS (SELECT 1 FROM telegram_sales_identity_suppressions s WHERE (l.contact_peer_id IS NOT NULL AND s.peer_id=l.contact_peer_id) OR (COALESCE(l.contact_username,'')<>'' AND COALESCE(s.username,'')<>'' AND lower(s.username)=lower(l.contact_username)))"""))
+        # TG_STALE_APPROVED_SELF_HEAL_V1: a process can die after the atomic
+        # new->approved claim and before Telegram returns. If no message/timestamp
+        # was ever recorded, requeue it after 20 minutes instead of poisoning
+        # queue_safety forever. A delivered/contacted row is never touched.
+        db.execute(text("""UPDATE boris_sales_hot_leads
+          SET status='new',approved_at=NULL,approved_by=NULL,
+              approval_note='stale_approved_requeued',updated_at=NOW()
+          WHERE status='approved'
+            AND coalesce(approval_required,false)=false
+            AND contacted_at IS NULL AND outbound_message_id IS NULL
+            AND approved_at < NOW()-INTERVAL '20 minutes'"""))
         budget=remaining_outbound(db,DAILY_CAP,SEND_TZ.key)
         react_sent_today=db.execute(text("SELECT count(*) FROM boris_sales_hot_leads WHERE outbound_transport='telegram_personal' AND monitor_intent='existing_contact_reactivation' AND timezone(:tz,contacted_at)::date=timezone(:tz,now())::date"),{'tz':SEND_TZ.key}).scalar() or 0
         if budget['remaining']<=0:

@@ -274,7 +274,7 @@ def _normalise_site(value: str) -> str:
 
 
 INACTIVE_CONTENT_STATUSES = {"rejected", "superseded"}
-INACTIVE_PROJECT_STATUSES = {"content_rejected", "duplicate_superseded"}
+INACTIVE_PROJECT_STATUSES = {"content_rejected", "duplicate_superseded", "paused"}
 
 
 def project_is_active(project: dict | None) -> bool:
@@ -838,105 +838,322 @@ def _guarantee_expired(project: dict, placement: dict, *, now: datetime | None =
     return (now or datetime.now(timezone.utc)) > deadline
 
 def _confirmed_guest_evidence(project: dict) -> list[dict]:
-    """Return verified guest publications that belong to this project's site.
+    """Return current verified external publications for one project host.
 
-    Guest/no-registration publishers predate the Crowd SEO placement ledger.
-    Keep their immutable evidence as a separate source and reconcile it at read
-    time so a proven public post is counted without inventing a forum slot or
-    risking a duplicate publication.
+    Canonical publications.json is authoritative for new external deliveries.
+    Historical sidecar files remain supported, but current verification state
+    always wins. Only evidence with a live target link and matching target host
+    may contribute to verified referring-domain coverage.
     """
-    site_host=urlparse(str(project.get("site") or "")).netloc.lower().removeprefix("www.")
-    if not site_host or not GUEST_CONFIRMED_DIR.exists():
+    site_host = urlparse(str(project.get("site") or "")).netloc.lower().removeprefix("www.")
+    if not site_host:
         return []
-    canonical_publications = {
+
+    canonical_rows = list(marketplace.list_publications())
+    canonical_by_url = {
         str(row.get("url") or "").rstrip("/"): row
-        for row in marketplace.list_publications()
+        for row in canonical_rows
         if str(row.get("url") or "").strip()
     }
-    out=[]; seen=set()
-    for path in sorted(GUEST_CONFIRMED_DIR.glob("confirmed_posts_*.json")):
-        try:
-            rows=json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+    out = []
+    seen_urls = set()
+
+    # New canonical external publications.
+    for row in canonical_rows:
+        publication = str(row.get("url") or "").strip()
+        target = str(row.get("site_url") or row.get("target_url") or "").strip()
+        if not publication or not target:
             continue
-        if not isinstance(rows,list):
+        target_host = urlparse(target).netloc.lower().removeprefix("www.")
+        if target_host != site_host:
             continue
-        for row in rows:
-            if not isinstance(row,dict) or str(row.get("status") or "")!="posted_verified":
+        verification = row.get("verification") if isinstance(row.get("verification"), dict) else {}
+        link_present = row.get("link_present")
+        if link_present is None:
+            link_present = verification.get("link_present")
+        indexable = verification.get("indexable")
+        target_path = urlparse(target).path or "/"
+        # Historical redirected development backlinks are retained as evidence
+        # but never inflate the new direct 60-domain contract.
+        if verification.get("counts_toward_new_direct_60") is False:
+            continue
+        if target_host == "boris-ai.pro" and target_path.startswith("/software-dev"):
+            continue
+        if (
+            row.get("verified") is not True
+            or link_present is not True
+            or indexable is False
+            or bool(row.get("verification_error"))
+        ):
+            continue
+        key = publication.rstrip("/")
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        out.append({
+            "status": "posted_verified",
+            "publication_url": publication,
+            "target_url": target,
+            "platform": row.get("platform"),
+            "verified_at": row.get("verified_at") or row.get("verification_checked_at"),
+            "verification": verification,
+            "source": row.get("source") or "canonical_publications",
+        })
+
+    # Historical sidecar evidence, reconciled against canonical state.
+    if GUEST_CONFIRMED_DIR.exists():
+        for path in sorted(GUEST_CONFIRMED_DIR.glob("confirmed_posts_*.json")):
+            try:
+                rows = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
                 continue
-            target=str(row.get("target_url") or "").strip()
-            publication=str(row.get("publication_url") or "").strip()
-            if urlparse(target).netloc.lower().removeprefix("www.") != site_host or not publication:
+            if not isinstance(rows, list):
                 continue
-            key=publication.rstrip("/")
-            if key in seen:
-                continue
-            current = canonical_publications.get(key)
-            # Historical sidecar evidence proves that a post once existed, but
-            # current Crowd SEO credit must follow the latest live verifier.
-            if current is not None and (
-                current.get("verified") is False
-                or bool(current.get("verification_error"))
-                or current.get("link_present") is False
-            ):
-                continue
-            seen.add(key); out.append(row)
+            for row in rows:
+                if not isinstance(row, dict) or str(row.get("status") or "") != "posted_verified":
+                    continue
+                target = str(row.get("target_url") or "").strip()
+                publication = str(row.get("publication_url") or "").strip()
+                if urlparse(target).netloc.lower().removeprefix("www.") != site_host or not publication:
+                    continue
+                key = publication.rstrip("/")
+                if key in seen_urls:
+                    continue
+                current = canonical_by_url.get(key)
+                if current is not None:
+                    verification = current.get("verification") if isinstance(current.get("verification"), dict) else {}
+                    link_present = current.get("link_present")
+                    if link_present is None:
+                        link_present = verification.get("link_present")
+                    if (
+                        current.get("verified") is False
+                        or bool(current.get("verification_error"))
+                        or link_present is False
+                        or verification.get("indexable") is False
+                    ):
+                        continue
+                seen_urls.add(key)
+                out.append(row)
     return out
 
+
+def _publication_donor_domain(value: str | None) -> str:
+    return (urlparse(str(value or "")).hostname or "").lower().removeprefix("www.")
+
+
 def _placement_summary(project: dict) -> dict:
-    placements=list(project.get("placements") or [])
-    active=[x for x in placements if _placement_is_active(x)]
-    history=[x for x in placements if not _placement_is_active(x)]
-    guarantee_expired=[
+    placements = list(project.get("placements") or [])
+    active = [x for x in placements if _placement_is_active(x)]
+    history = [x for x in placements if not _placement_is_active(x)]
+    guarantee_expired = [
         x for x in placements
-        if x.get("status")=="guarantee_expired" and x.get("publication_url")
+        if x.get("status") == "guarantee_expired" and x.get("publication_url")
     ]
-    planned=_project_plan_count(project)
-    published=[x for x in active if x.get("publication_url")]
-    verified=[x for x in active if x.get("status")=="verified"]
-    guest_verified=_confirmed_guest_evidence(project)
-    placement_urls={str(x.get("publication_url") or "").rstrip("/") for x in published}
-    guest_verified=[x for x in guest_verified if str(x.get("publication_url") or "").rstrip("/") not in placement_urls]
-    contract_covered=len(active)+len(guarantee_expired)
+    planned = _project_plan_count(project)
+    published = [x for x in active if x.get("publication_url")]
+    verified = [
+        x for x in active
+        if x.get("status") == "verified"
+        and x.get("publication_url")
+        and x.get("link_present") is not False
+        and x.get("indexable") is not False
+    ]
+    guest_verified = _confirmed_guest_evidence(project)
+
+    published_domains = {
+        _publication_donor_domain(x.get("publication_url"))
+        for x in published
+        if _publication_donor_domain(x.get("publication_url"))
+    }
+    verified_domains = {
+        _publication_donor_domain(x.get("publication_url"))
+        for x in verified
+        if _publication_donor_domain(x.get("publication_url"))
+    }
+    guest_domains = {
+        _publication_donor_domain(x.get("publication_url"))
+        for x in guest_verified
+        if _publication_donor_domain(x.get("publication_url"))
+    }
+    all_verified_domains = verified_domains | guest_domains
+    all_published_domains = published_domains | guest_domains
+
+    placement_urls = {str(x.get("publication_url") or "").rstrip("/") for x in published}
+    guest_verified = [
+        x for x in guest_verified
+        if str(x.get("publication_url") or "").rstrip("/") not in placement_urls
+    ]
+    contract_covered = len(active) + len(guarantee_expired)
     return {
-        "planned":planned,
-        "active":len(active),
-        "history":len(history),
-        "published":len(published)+len(guest_verified),
-        "verified":len(verified)+len(guest_verified),
-        "placement_published":len(published),
-        "placement_verified":len(verified),
-        "guest_verified":len(guest_verified),
-        "guarantee_expired":len(guarantee_expired),
-        "contract_covered":contract_covered,
-        "active_deficit":max(0,planned-contract_covered),
+        "planned": planned,
+        "active": len(active),
+        "history": len(history),
+        # Contract delivery is based on unique referring domains, never rows.
+        "published": len(all_published_domains),
+        "verified": len(all_verified_domains),
+        "published_referring_domains": sorted(all_published_domains),
+        "verified_referring_domains": sorted(all_verified_domains),
+        "placement_published": len(published),
+        "placement_verified": len(verified),
+        "guest_verified": len(guest_domains - verified_domains),
+        "guarantee_expired": len(guarantee_expired),
+        "contract_covered": contract_covered,
+        "active_deficit": max(0, planned - contract_covered),
     }
 
 def _effective_target_pages(project: dict) -> list[dict]:
-    """Return the landing pages that may be used by new placements.
+    """Return only canonical same-site landing pages for new placements.
 
-    Software-development campaigns must route every post to a concrete
-    /software-dev/services/... landing. The campaign's primary_url is only the
-    campaign root and must never override the per-service post targets.
+    Historical campaign profiles may survive a domain migration. They must
+    never be allowed to pull new backlinks back to an old host. A project can
+    provide a weighted seo_target_pages plan; otherwise same-host post targets,
+    then same-host primary_url, then project.target_pages are used.
     """
     site = str(project.get("site") or "")
+    site_host = urlparse(site).netloc.lower().removeprefix("www.")
     profile = project.get("campaign_profile") or {}
-    posts = list(profile.get("posts_ru") or [])
-    if "/software-dev" in site and posts:
-        out=[]; seen=set()
-        for post in posts:
-            url=str(post.get("target_url") or "").strip()
-            if "/software-dev/services/" not in url or url in seen:
+
+    configured = list(profile.get("seo_target_pages") or [])
+    if configured:
+        out = []
+        for row in configured:
+            url = str((row or {}).get("url") or "").strip()
+            host = urlparse(url).netloc.lower().removeprefix("www.")
+            if not url or host != site_host:
                 continue
-            seen.add(url)
-            out.append({"url":url,"label":str(post.get("title") or project.get("niche_label") or "Разработка ПО")})
+            try:
+                weight = max(1, min(20, int((row or {}).get("weight") or 1)))
+            except Exception:
+                weight = 1
+            label = str((row or {}).get("label") or project.get("niche_label") or "сайт")
+            out.extend({"url": url, "label": label} for _ in range(weight))
         if out:
             return out
-    primary=str(profile.get("primary_url") or "").strip()
-    if primary:
-        return [{"url":primary,"label":str(profile.get("brand") or project.get("niche_label") or "сайт")}]
-    return list(project.get("target_pages") or [{"url":project.get("site"),"label":project.get("niche_label","сайт")}])
 
+    posts = list(profile.get("posts_ru") or [])
+    if posts:
+        out = []
+        seen = set()
+        for post in posts:
+            url = str(post.get("target_url") or "").strip()
+            host = urlparse(url).netloc.lower().removeprefix("www.")
+            if not url or host != site_host or url in seen:
+                continue
+            seen.add(url)
+            out.append({
+                "url": url,
+                "label": str(post.get("title") or project.get("niche_label") or "Разработка ПО"),
+            })
+        if out:
+            return out
+
+    primary = str(profile.get("primary_url") or "").strip()
+    primary_host = urlparse(primary).netloc.lower().removeprefix("www.") if primary else ""
+    if primary and primary_host == site_host:
+        return [{"url": primary, "label": str(profile.get("brand") or project.get("niche_label") or "сайт")}]
+
+    safe_targets = []
+    for row in list(project.get("target_pages") or []):
+        url = str((row or {}).get("url") or "").strip()
+        host = urlparse(url).netloc.lower().removeprefix("www.")
+        if url and host == site_host:
+            safe_targets.append(row)
+    return safe_targets or [{"url": site, "label": project.get("niche_label", "сайт")}]
+
+
+def _anchor_for_slot(index: int, target_url: str, keyword: str, brand: str) -> tuple[str, str]:
+    """Stable 20-slot anchor rotation: 60% URL, 20% brand, 15% partial, 5% exact."""
+    mod = index % 20
+    if mod < 12:
+        return "безанкорная", target_url
+    if mod < 16:
+        return "брендовая", brand
+    if mod < 19:
+        return "частичный анкор", keyword
+    return "точный анкор", keyword
+
+
+
+
+def _draft_keyword_phrases(project: dict, placement: dict, *, limit: int = 20) -> list[str]:
+    """Return 10-20 structured SEO phrases for the publication guard.
+
+    This metadata is not rendered as a visible keyword dump. It exists so the
+    content gate can verify intent while forum/directory copy stays readable.
+    """
+    values = [str(placement.get("keyword") or "").strip()]
+    values.extend(_project_keywords(project))
+    host = urlparse(str(project.get("site") or "")).netloc.lower().removeprefix("www.")
+    if host == "avito-specialist.ru":
+        values.extend([
+            "услуги авитолога",
+            "настройка Авито",
+            "продвижение объявлений Авито",
+            "продвижение бизнеса на Авито",
+            "увеличение продаж на Авито",
+            "увеличение заявок с Авито",
+        ])
+    elif host == "boris-ai.pro":
+        values.extend([
+            "AI маркетолог",
+            "AI менеджер продаж",
+            "автоматизация Авито",
+            "CRM для Авито",
+            "аналитика Авито",
+            "AI для продаж",
+            "автоматизация рекламы",
+            "CRM с AI",
+            "AI МОП",
+            "AI РОП",
+        ])
+    elif host == "systems-ai-oko.ru":
+        values.extend([
+            "разработка ПО",
+            "разработка SaaS",
+            "разработка CRM",
+            "разработка Telegram бота",
+            "AI автоматизация бизнеса",
+            "API интеграция",
+            "интеграция 1С",
+            "разработка мобильных приложений",
+            "разработка веб-приложений",
+            "IP телефония интеграция",
+        ])
+
+    out = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        key = text.casefold()
+        if text and key not in seen:
+            seen.add(key)
+            out.append(text)
+
+    # Generic client fallback: keep intent structured without inserting a
+    # visible SEO footer into the publication body.
+    base = str(placement.get("keyword") or project.get("niche_label") or "услуги").strip()
+    fallbacks = [
+        base,
+        f"услуги {base}",
+        f"{base} для бизнеса",
+        f"{base} под ключ",
+        f"заказать {base}",
+        f"настройка {base}",
+        f"внедрение {base}",
+        f"решение {base}",
+        f"сервис {base}",
+        f"специалист {base}",
+        f"помощь по теме {base}",
+        f"консультация {base}",
+    ]
+    for value in fallbacks:
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            out.append(value)
+        if len(out) >= 10:
+            break
+    return out[: max(10, min(limit, 20))]
 
 def _retarget_unpublished_placements(project: dict) -> int:
     """Self-heal target pages after a fresh site analysis.
@@ -960,13 +1177,7 @@ def _retarget_unpublished_placements(project: dict) -> int:
     for i,pl in enumerate(candidates):
         target=targets[i % len(targets)]
         keyword=keywords[i % len(keywords)]
-        mod=i % 10
-        if mod <= 5:
-            mode,anchor="безанкорная",target["url"]
-        elif mod <= 8:
-            mode,anchor="частичный анкор",keyword
-        else:
-            mode,anchor="брендовая",brand
+        mode,anchor=_anchor_for_slot(i,target["url"],keyword,brand)
         before=(pl.get("target_url"),pl.get("keyword"),pl.get("link_mode"),pl.get("anchor"),pl.get("text_variant"))
         after=(target["url"],keyword,mode,anchor,(i % 3)+1)
         if before != after:
@@ -989,17 +1200,107 @@ def _slot_key(row: dict) -> str:
     return f"{row.get('platform')}::{row.get('surface_id') or 'default'}"
 
 
+
+
+def _project_existing_listing_platforms(project: dict) -> set[str]:
+    """Platforms where this project already has a submitted/public listing.
+
+    This includes historical redirected evidence. It is intentionally broader
+    than the new direct-60 counter because a platform may forbid duplicate site
+    submissions even when an old backlink is excluded from the current SEO
+    contract.
+    """
+    project_id = str(project.get("id") or "")
+    site_host = urlparse(str(project.get("site") or "")).netloc.lower().removeprefix("www.")
+    platforms: set[str] = set()
+
+    for placement in project.get("placements") or []:
+        platform = str(placement.get("platform") or "").strip()
+        if not platform:
+            continue
+        if (
+            placement.get("publication_url")
+            or bool((placement.get("last_publish_result") or {}).get("publish_clicked"))
+            or str(placement.get("status") or "") in {
+                "publication_pending_verification",
+                "published_unverified",
+                "verified",
+            }
+        ):
+            platforms.add(platform)
+
+    for row in marketplace.list_publications():
+        platform = str(row.get("platform") or "").strip()
+        if not platform:
+            continue
+        target = str(row.get("site_url") or row.get("target_url") or "").strip()
+        target_host = urlparse(target).netloc.lower().removeprefix("www.")
+        verification = row.get("verification") if isinstance(row.get("verification"), dict) else {}
+        if target_host == site_host or str(verification.get("project_id") or "") == project_id:
+            platforms.add(platform)
+
+    for row in marketplace.list_attempts(limit=1000):
+        platform = str(row.get("platform") or "").strip()
+        if not platform:
+            continue
+        action = str(row.get("action") or "")
+        status = str(row.get("status") or "")
+        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+        meta_project_id = str(meta.get("project_id") or "")
+        meta_target = str(
+            meta.get("target_url")
+            or meta.get("project_site")
+            or meta.get("redirect_target")
+            or ""
+        ).strip()
+        meta_host = urlparse(meta_target).netloc.lower().removeprefix("www.")
+
+        project_match = bool(
+            (project_id and meta_project_id == project_id)
+            or (site_host and meta_host == site_host)
+        )
+        if not project_match:
+            continue
+
+        if (
+            action in {
+                "guest_catalog_submit",
+                "guest_catalog_email_submit",
+                "guest_tool_submit",
+                "verify_publication",
+            }
+            and (
+                status == "verified"
+                or status == "submitted"
+                or status.startswith("submitted_pending")
+            )
+        ):
+            platforms.add(platform)
+
+    return platforms
+
 def _usable_matches_for_project(project: dict, matches: list[dict]) -> list[dict]:
-    """Exclude surfaces already consumed by a published post that failed verification."""
+    """Exclude already-consumed surfaces and no-duplicate-site platforms."""
     consumed = {
         _slot_key(pl)
         for pl in (project.get("placements") or [])
         if pl.get("publication_url")
         and str(pl.get("status") or "") in {"replacement_required", "platform_replacement_required"}
     }
-    if not consumed:
-        return list(matches)
-    return [row for row in matches if _slot_key(row) not in consumed]
+    existing_listing_platforms = _project_existing_listing_platforms(project)
+
+    out = []
+    for row in matches:
+        if _slot_key(row) in consumed:
+            continue
+        platform = str(row.get("platform") or "")
+        if platform in existing_listing_platforms:
+            policy = marketplace.platform_policy(platform)
+            requirements = set(policy.get("rule_requirements") or [])
+            if "no_duplicate_site" in requirements:
+                continue
+        out.append(row)
+    return out
 
 
 def _project_niche_aliases(project_niche: str, keywords: list[str]) -> set[str]:
@@ -1750,15 +2051,9 @@ def prepare_placement_plan(project_id: str) -> dict:
     for i,forum in enumerate(forums[:wanted]):
         target = targets[i % len(targets)]
         keyword = keywords[i % len(keywords)]
-        # Safe diversified profile: mostly naked URLs, some partial anchors,
-        # occasional brand anchors. Client does not configure this manually.
-        mod = i % 10
-        if mod <= 5:
-            mode, anchor = "безанкорная", target["url"]
-        elif mod <= 8:
-            mode, anchor = "частичный анкор", keyword
-        else:
-            mode, anchor = "брендовая", brand
+        # SEO_FINAL_CLOSURE_ANCHORS_V1: 60% naked URL, 20% brand,
+        # 15% partial-match and 5% exact commercial anchor.
+        mode, anchor = _anchor_for_slot(i, target["url"], keyword, brand)
         a={"url":target["url"],"keyword":keyword,"mode":mode,"anchor":anchor}
         t=texts[i % len(texts)] if texts else {"variant":1,"text":project["site"]}
         variant = i + 1 if (project.get("campaign_profile") or {}).get("posts_ru") else int(t.get("variant") or 1)
@@ -2151,21 +2446,11 @@ def _render_placement_text(project: dict, pl: dict, variant: int) -> tuple[str,s
         if url and url.lower() not in text.lower():
             link_label="More details" if language=="en" else ("Подробнее о продукте" if str(post.get("offer_family") or "") == "product" else "Подробнее об услуге")
             text=f"{text}\n\n{link_label}: {url}"
-        # CONTENT_GATE_FOOTER_PRESERVATION_V1:
-        # `_clean_text` is intentionally for scraped/page text and collapses
-        # all whitespace. Applying it after building the publication copy also
-        # collapsed the required final keyword paragraph, so every otherwise
-        # valid development draft failed `keyword_block_not_last`. Clean the
-        # human-readable body first, then append one preserved final paragraph
-        # in exactly the same format enforced by validate_publication_content().
+        # SEO_FINAL_CLOSURE_STRUCTURED_KEYWORDS_V2:
+        # Keep publication copy human-readable. Search phrases are stored in
+        # draft.keyword_phrases and validated structurally by the global gate,
+        # never exposed as a synthetic SEO footer to directory/forum readers.
         text=_clean_text(text)
-        keywords=[str(x).strip() for x in (post.get("keywords") or []) if str(x).strip()]
-        exact_keyword=str(pl.get("keyword") or "").strip()
-        if exact_keyword and exact_keyword.lower() not in {x.lower() for x in keywords}:
-            keywords.insert(0, exact_keyword)
-        if keywords:
-            label="Keyword phrases" if language=="en" else "Ключевые фразы"
-            text=f"{text}\n\n{label}: " + "; ".join(keywords[:20]) + "."
         return _clean_text(title)[:180], text[:1800]
 
     # INTERNATIONAL_SURFACE_COPY_V1
@@ -2280,6 +2565,7 @@ def sync_project_drafts(project_id: str) -> dict:
             "link_mode":pl["link_mode"],
             "anchor":pl["anchor"],
             "keyword":pl["keyword"],
+            "keyword_phrases":_draft_keyword_phrases(project, pl),
         }
         new_drafts.append(draft)
         pl["marketplace_draft_id"]=draft_id
@@ -2292,6 +2578,13 @@ def sync_project_drafts(project_id: str) -> dict:
     # as their placement leaves the active plan. Posted drafts are immutable
     # evidence and are deliberately preserved.
     active_draft_ids={str(x.get("id") or "") for x in new_drafts}
+    # Moderation is still an active placement. Preserve its original draft;
+    # rejecting it prevents the reconciler from recording the eventual URL.
+    active_draft_ids.update(
+        str(pl.get("marketplace_draft_id") or "")
+        for pl in project.get("placements", [])
+        if pl.get("status") == "publication_pending_verification"
+    )
     stale_rejected=0
     for old in marketplace.list_drafts():
         if (
@@ -2314,11 +2607,26 @@ def sync_project_drafts(project_id: str) -> dict:
 
 @_locked_project_mutation
 def decide_project(project_id: str, decision: str) -> dict:
-    if decision not in {"approved","rejected"}:
+    if decision not in {"approved","rejected","paused","resume"}:
         raise ValueError("invalid decision")
     rows=_load(); project=next((x for x in rows if x.get("id")==project_id),None)
     if not project:
         raise KeyError(project_id)
+    if decision == "paused":
+        project["status"] = "paused"
+        project["paused_at"] = _now()
+        project["updated_at"] = _now()
+        _save(rows)
+        return project
+    if decision == "resume":
+        if project.get("status") != "paused":
+            raise ValueError("project is not paused")
+        project["status"] = "placement_plan_ready"
+        project["resumed_at"] = _now()
+        project["updated_at"] = _now()
+        project["status"] = _operational_status(project)
+        _save(rows)
+        return get_project(project_id)
     project["content_status"]=decision
     project["updated_at"]=_now()
     if decision=="rejected":
@@ -2625,6 +2933,7 @@ def record_publish_attempt(project_id: str, placement_id: str, result: dict) -> 
     pl["last_publish_attempt_at"]=_now()
     pl["last_publish_result"]={
         "publish_clicked":bool(result.get("publish_clicked")),
+        "submission_accepted":bool(result.get("submission_accepted")),
         "publication_verified":bool(result.get("publication_verified")),
         "checkpoint":result.get("checkpoint"),
         "url":result.get("url"),
@@ -2635,7 +2944,7 @@ def record_publish_attempt(project_id: str, placement_id: str, result: dict) -> 
         pl["status"]="published_unverified"
     elif result.get("publish_clicked"):
         pl["status"]="publication_pending_verification"
-        pl["error"]="publication_url_verification_required"
+        pl["error"]=str(result.get("checkpoint") or "publication_url_verification_required")
     elif result.get("checkpoint") == "foreign_thread_reply_forbidden":
         pl["status"]="platform_replacement_required"
         pl["error"]="foreign_thread_reply_forbidden"

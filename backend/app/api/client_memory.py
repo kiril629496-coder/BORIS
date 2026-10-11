@@ -612,10 +612,23 @@ def find_answer(db, account_id, question, shared=True, min_overlap=2):
 
     # маркеры намерения вопроса: цена / покупка / изготовление / залог
     _price_q = bool(qw & stems(CAT_WORDS.get("cena", "")))
+    _q_low = str(question or "").lower().replace("ё", "е")
+    # MOP_HOURS_INTENT_PRECEDES_AVAILABILITY_V1:
+    # "Сегодня выходной?", "до скольки работаете?" and similar questions are
+    # about the company's work schedule, not stock/product availability.
+    _hours_q = bool(__import__("re").search(
+        r"(?:\bвыходн\w*\b|\bдо\s+скольк\w*\b|"
+        r"\b(?:сегодня|завтра)\s+(?:вы\s+)?(?:работа\w*|открыт\w*)\b|"
+        r"\b(?:работа\w*|открыт\w*)\s+(?:ли\s+)?(?:сегодня|завтра)\b|"
+        r"\bво\s+скольк\w*\s+(?:открыва\w*|закрыва\w*)\b|"
+        r"\bграфик\b|\bрежим\s+работ\w*)",
+        _q_low,
+    ))
     _direct_memory_categories = [cat for cat in ("kontakty", "grafik", "geografiya", "akciya")
                                  if qw & stems(CAT_WORDS.get(cat, ""))]
+    if _hours_q and "grafik" not in _direct_memory_categories:
+        _direct_memory_categories.insert(0, "grafik")
     _direct_memory_category = _direct_memory_categories[0] if len(_direct_memory_categories) == 1 else None
-    _q_low = str(question or "").lower().replace("ё", "е")
     _sale_q = bool(qw & {"прода", "купит", "покуп"})
     _sale_product_price_q = bool(_price_q and any(x in _q_low for x in (
         "под ключ", "каркас", "стандартн", "усиленн", "оргалит", "двпо", "osb",
@@ -666,7 +679,7 @@ def find_answer(db, account_id, question, shared=True, min_overlap=2):
     _dep_q = bool(qw & {"залог", "депоз", "обесп"})
     _delivery_q = bool(qw & stems("доставка доставить привезти перевозка вывоз манипулятор разгрузка"))
     _avail_q = bool(qw & {"налич", "досту", "свобо", "остал", "имеет"}) or (
-        bool(qw & {"сейча", "сегод"}) and not _price_q and not _direct_memory_category)
+        bool(qw & {"сейча", "сегод"}) and not _price_q and not _direct_memory_category and not _hours_q)
     _price_context_required = bool(_price_context_required and not _delivery_q and not _avail_q)
     if _price_context_required:
         return {

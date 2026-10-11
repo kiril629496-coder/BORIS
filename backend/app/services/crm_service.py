@@ -80,6 +80,7 @@ def create_task(db, uid, account_id, title, due_date, chat_id="", due_time="",
     t = (task_type or "").strip() or "другое"
     if t not in TASK_TYPES:
         t = "другое"
+    _rule_context = _prepare_task_rule(db, account_id, "created")
     r = db.execute(text(
         "insert into crm_tasks (account_id, avito_chat_id, due_date, due_time,"
         " task_type, title, comment, created_by)"
@@ -87,15 +88,18 @@ def create_task(db, uid, account_id, title, due_date, chat_id="", due_time="",
         {"a": account_id, "c": chat_id or None, "d": d, "tm": (due_time or "")[:5],
          "tp": t, "ti": title.strip()[:300], "cm": (comment or "").strip(),
          "u": str(uid)}).fetchone()
+    _observe_task_rule(db, account_id, int(r[0]), "created", _rule_context)
     db.commit()
     return r[0]
 
 
 def done_task(db, account_id, task_id, comment=""):
+    _rule_context = _prepare_task_rule(db, account_id, "completed")
     db.execute(text(
         "update crm_tasks set status='done', done_at=now(), done_comment=:c,"
         " updated_at=now() where id=:i and account_id=:a"),
         {"c": (comment or "").strip(), "i": task_id, "a": account_id})
+    _observe_task_rule(db, account_id, int(task_id), "completed", _rule_context)
     db.commit()
     return True
 
@@ -168,3 +172,24 @@ def today_tasks(db, uid, limit=50):
             "аккаунт": r.name or r.account_id, "просрочено": late})
     return {"всего": len(items), "сегодня": n_today, "просрочено": n_late,
             "задачи": items}
+
+
+def _observe_task_rule(db, account_id, task_id, event, context):
+    from app.services.control_rule_runtime import _observe_rule_failure
+    try:
+        from app.services.control_rule_runtime import observe_legacy_crm_task
+        with db.begin_nested():
+            observe_legacy_crm_task(db, account_id, task_id, event, context=context)
+    except Exception as exc:
+        _observe_rule_failure(exc)
+
+
+def _prepare_task_rule(db, account_id, event):
+    from app.services.control_rule_runtime import _observe_rule_failure
+    try:
+        from app.services.control_rule_runtime import prepare_legacy_crm_task_context
+        with db.begin_nested():
+            return prepare_legacy_crm_task_context(db, account_id, event)
+    except Exception as exc:
+        _observe_rule_failure(exc)
+        return None

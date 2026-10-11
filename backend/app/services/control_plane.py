@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import IntegrityError
 
 from app.models.control_plane import (
     ControlEvidence, ControlExecution, ControlIncident, ControlModuleContract,
@@ -254,12 +255,22 @@ def start_execution(db, requirement: ControlRequirement, *, account_id: str | No
     existing = db.query(ControlExecution).filter(ControlExecution.idempotency_key == idempotency_key).first()
     if existing: return existing
     row = ControlExecution(id=str(uuid.uuid4()), requirement_id=requirement.id, correlation_id=correlation, account_id=account_id, module=requirement.module, status="received", plan_json=plan or {}, idempotency_key=idempotency_key)
-    db.add(row); db.flush()
+    try:
+        # The unique idempotency key owns the race. A duplicate insert must not
+        # abort the caller's domain transaction or repeat its external action.
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError:
+        existing = db.query(ControlExecution).filter(ControlExecution.idempotency_key == idempotency_key).first()
+        if existing is None:
+            raise
+        return existing
     record_event(db, "control_plane", "execution.started", requirement.title, account_id=account_id, details={"execution_id": row.id, "requirement_id": requirement.id}, trace_id=correlation)
     return row
 
 
-def transition_execution(db, execution: ControlExecution, new_status: str, *, actual_state: dict | None = None, reason: str | None = None, error_code: str | None = None) -> ControlExecution:
+def transition_execution(db, execution: ControlExecution, new_status: str, *, actual_state: dict | None = None, reason: str | None = None, error_code: str | None = None, touch_requirement: bool = True) -> ControlExecution:
     old = str(execution.status or "received")
     if new_status not in EXECUTION_FLOW.get(old, set()):
         raise ValueError(f"invalid execution transition {old}->{new_status}")
@@ -296,7 +307,7 @@ def transition_execution(db, execution: ControlExecution, new_status: str, *, ac
                 out.setdefault("verified_by","execution_terminal_evidence")
                 step.output_json=out
     db.flush()
-    if new_status == "pass":
+    if new_status == "pass" and touch_requirement:
         req = db.query(ControlRequirement).filter(ControlRequirement.id == execution.requirement_id).first()
         if req:
             req.last_applied_at = utcnow(); req.last_verified_at = utcnow()

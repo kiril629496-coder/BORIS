@@ -15,6 +15,7 @@ from app.models.campaign_item import CampaignItem
 from app.models.media_asset import MediaAsset
 from app.models.media_link import MediaLink
 from app.services.exception_observability import observe_suppressed
+from app.services.campaign_ready_decision_snapshot import persist_ready_decision_snapshot
 
 
 PUBLIC_IMAGE_BASE = "https://boris-ai.pro/images/"
@@ -115,6 +116,114 @@ def _submitted_xml_cards(submitted: dict, expected_sha: str, validated_artifact:
     if not cards:
         raise RuntimeError("campaign review: submitted XML contains no Ad nodes")
     return cards
+
+
+def _runtime_build_id() -> str | None:
+    explicit=str(os.environ.get("BORIS_RELEASE_BUILD_ID") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        candidate=Path(__file__).resolve().parents[3].name.lower()
+    except (IndexError, OSError):
+        candidate=""
+    if len(candidate)==64 and all(ch in "0123456789abcdef" for ch in candidate):
+        return candidate
+    return None
+
+
+def _engine_snapshot(campaign, ff: dict, rows: list[CampaignItem],
+                     official_xml_sha: str | None = None) -> dict:
+    """Freeze runtime/contracts used to produce one validated ready snapshot."""
+    engines=set(); models=set(); providers=set(); copy_contracts=set()
+    intake_versions=set(); semantic_policies=set(); semantic_checkers=set()
+    banner_qa_sources=set()
+
+    for row in rows:
+        p=_payload(row)
+        for value,target in (
+            (p.get("banner_engine"),engines),
+            (p.get("banner_model"),models),
+            (p.get("banner_provider"),providers),
+            (p.get("copy_quality_contract"),copy_contracts),
+            (p.get("intake_contract_version"),intake_versions),
+        ):
+            raw=str(value or "").strip()
+            if raw:
+                target.add(raw)
+
+        qa=p.get("banner_qa") if isinstance(p.get("banner_qa"),dict) else {}
+        for value in (qa.get("checker"),qa.get("source"),qa.get("mode")):
+            raw=str(value or "").strip()
+            if raw:
+                banner_qa_sources.add(raw)
+
+        for ev in (p.get("media_semantic_evidence") or []):
+            if not isinstance(ev,dict):
+                continue
+            policy=str(ev.get("policy_version") or "").strip()
+            checker=str(ev.get("checker") or "").strip()
+            if policy:
+                semantic_policies.add(policy)
+            if checker:
+                semantic_checkers.add(checker)
+
+    direction_intake=ff.get("direction_intake") if isinstance(ff.get("direction_intake"),dict) else {}
+    direction_contracts=sorted({
+        str(value.get("contract_version") or "").strip()
+        for value in direction_intake.values()
+        if isinstance(value,dict) and str(value.get("contract_version") or "").strip()
+    })
+    source_contract=ff.get("source_contract") if isinstance(ff.get("source_contract"),dict) else {}
+    order_contract=ff.get("order_contract") if isinstance(ff.get("order_contract"),dict) else {}
+
+    return {
+        "snapshot_contract":1,
+        "captured_at":datetime.now(timezone.utc).isoformat(),
+        "backend_build_id":_runtime_build_id(),
+        "campaign_id":int(campaign.id),
+        "official_xml_sha256":str(official_xml_sha or "").strip() or None,
+        "feed_factory_version":ff.get("version"),
+        "source_contract_version":source_contract.get("version"),
+        "order_contract_version":order_contract.get("version"),
+        "direction_contract_versions":direction_contracts,
+        "item_intake_contract_versions":sorted(intake_versions),
+        "copy_quality_contracts":sorted(copy_contracts),
+        "banner_engines":sorted(engines),
+        "banner_models":sorted(models),
+        "banner_providers":sorted(providers),
+        "banner_qa_sources":sorted(banner_qa_sources),
+        "media_semantic_policy_versions":sorted(semantic_policies),
+        "media_semantic_checkers":sorted(semantic_checkers),
+        "generator":"campaign_review_page_v3_engine_snapshot",
+    }
+
+
+def _select_engine_snapshot(publication_snapshot: bool, existing_review: dict,
+                            current_snapshot: dict, current_xml_sha: str = "") -> dict:
+    existing = (
+        existing_review.get("engine_snapshot")
+        if isinstance(existing_review, dict)
+        and isinstance(existing_review.get("engine_snapshot"), dict)
+        else None
+    )
+    existing_sha=str(
+        existing_review.get("official_xml_sha256")
+        if isinstance(existing_review,dict) else ""
+    ).strip()
+    current_sha=str(current_xml_sha or "").strip()
+    if existing and (
+        publication_snapshot
+        or (current_sha and existing_sha and current_sha == existing_sha)
+    ):
+        return dict(existing)
+    return dict(current_snapshot or {})
+
+
+def _apply_decision_snapshot_engine(current_snapshot: dict, decision_meta: dict) -> dict:
+    frozen=(decision_meta or {}).pop("decision_snapshot_engine",None)
+    if isinstance(frozen,dict) and frozen:
+        return dict(frozen)
+    return dict(current_snapshot or {})
 
 
 def generate_campaign_review_page(db, campaign_id: int, account_id: str, expected_xml_sha: str | None = None) -> dict:
@@ -226,6 +335,35 @@ def generate_campaign_review_page(db, campaign_id: int, account_id: str, expecte
     submitted = dict(activation.get("submitted_snapshot") or {})
     submitted_sha = str(submitted.get("sha256") or "").strip()
     publication_snapshot = bool(activation_status in {"processing","submitted","scheduled","scheduled_waiting","scheduled_pending_review","pending_review","partial","completed"} and submitted_sha and submitted_sha == xml_sha)
+    existing_review=ff.get("review_page") if isinstance(ff.get("review_page"),dict) else {}
+    engine_snapshot=_select_engine_snapshot(
+        publication_snapshot,
+        existing_review,
+        _engine_snapshot(campaign,ff,rows,xml_sha),
+        current_xml_sha=xml_sha,
+    )
+    decision_meta={}
+    if publication_snapshot:
+        for key in (
+            "decision_snapshot_contract",
+            "decision_snapshot_key",
+            "decision_snapshot_sha256",
+            "decision_snapshot_items",
+        ):
+            if existing_review.get(key) is not None:
+                decision_meta[key]=existing_review.get(key)
+        if not decision_meta:
+            decision_meta["decision_snapshot_status"]="legacy_submitted_without_ready_snapshot"
+    else:
+        decision_meta=persist_ready_decision_snapshot(
+            db,
+            campaign=campaign,
+            account_id=str(account_id),
+            rows=rows,
+            engine_snapshot=engine_snapshot,
+            official_xml_sha=xml_sha,
+        )
+        engine_snapshot=_apply_decision_snapshot_engine(engine_snapshot,decision_meta)
     status_chip = (f"✓ Отправленный снимок: {len(cards)} объявлений" if publication_snapshot else f"✓ {len(cards)}/{len(cards)} подготовлено")
     publication_chip = (f"Avito: {_esc(activation_status)}" if publication_snapshot else "⏸ Публикация только отдельной командой владельца")
     basis_note = ("Страница соответствует неизменяемому submitted snapshot, который был передан Avito." if publication_snapshot else "Страница создана из текущего ready-for-review состояния.")
@@ -274,6 +412,8 @@ def generate_campaign_review_page(db, campaign_id: int, account_id: str, expecte
         "no_auth": True,
         "external_upload": False,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "generator": "campaign_review_page_v2_snapshot_exact",
+        "generator": "campaign_review_page_v3_engine_snapshot",
         "source_basis": "submitted_xml" if publication_snapshot else "current_ready_state",
+        "engine_snapshot": engine_snapshot,
+        **decision_meta,
     }

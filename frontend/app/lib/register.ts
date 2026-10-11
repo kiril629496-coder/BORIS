@@ -7,6 +7,15 @@ export type RegisterInput = {
   accountName?: string;
   plannedAccounts?: string;
   turnstileToken?: string;
+  attributionSessionId?: string;
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
+  utmContent?: string;
+  utmTerm?: string;
+  landingPath?: string;
+  firstSeenAt?: string;
+  qa?: boolean;
 };
 
 export type RegisterResult =
@@ -98,6 +107,15 @@ export async function registerUser(input: RegisterInput): Promise<RegisterResult
     planned_accounts: input.plannedAccounts || "",
     ref: readRefCookie(),
     turnstile_token: input.turnstileToken || "",
+    attribution_session_id: input.attributionSessionId || "",
+    utm_source: input.utmSource || "",
+    utm_medium: input.utmMedium || "",
+    utm_campaign: input.utmCampaign || "",
+    utm_content: input.utmContent || "",
+    utm_term: input.utmTerm || "",
+    landing_path: input.landingPath || "",
+    first_seen_at: input.firstSeenAt || "",
+    qa: Boolean(input.qa),
   }, false);
 }
 

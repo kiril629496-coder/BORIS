@@ -21,6 +21,7 @@ class User(Base):
     created_at = Column(DateTime, server_default=func.now())
     last_login_at = Column(DateTime, nullable=True)
     subscription_expires_at = Column(DateTime, nullable=True)  # триал/подписка - 4 дня с регистрации
+    security_epoch = Column(Integer, default=0, nullable=False)  # инвалидация всех старых auth-сессий пользователя
 
     # --- подтверждение email (миграция 001_email_verification.sql) ---
     # status — единственный гейт доступа в кабинет. is_active оставлен как был:

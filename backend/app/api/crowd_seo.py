@@ -1,7 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
+from app.api.auth import require_owner
 from app.services import crowd_seo as svc
+from app.services import seo_checkpoint_center
 
 router = APIRouter(prefix="/api/prospecting/crowd-seo", tags=["crowd-seo"])
 
@@ -18,6 +20,55 @@ class PublicationBody(BaseModel):
 
 class DecisionBody(BaseModel):
     decision: str
+
+
+class CheckpointCompleteBody(BaseModel):
+    entry_id: str = Field(..., min_length=2, max_length=300)
+    platform: str = Field(..., min_length=2, max_length=160)
+    target_site: str | None = Field(None, max_length=200)
+    page_url: str | None = Field(None, max_length=2000)
+
+    class Config:
+        extra = "forbid"
+
+
+@router.get("/checkpoint-center")
+def checkpoint_center(response: Response, user=Depends(require_owner)):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return seo_checkpoint_center.build_center_payload(include_secrets=False)
+
+
+@router.get("/checkpoint-center/extension-config")
+def checkpoint_center_extension_config(response: Response, user=Depends(require_owner)):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return seo_checkpoint_center.build_center_payload(include_secrets=True)
+
+
+@router.post("/checkpoint-center/complete")
+def checkpoint_complete(
+    body: CheckpointCompleteBody,
+    response: Response,
+    user=Depends(require_owner),
+):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    try:
+        return seo_checkpoint_center.human_completed(
+            entry_id=body.entry_id,
+            platform=body.platform,
+            target_site=body.target_site,
+            page_url=body.page_url,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="checkpoint entry not found")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"checkpoint completion failed: {type(exc).__name__}: {exc}",
+        )
+
 
 @router.get("/projects")
 def projects():

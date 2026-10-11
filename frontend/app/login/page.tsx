@@ -50,11 +50,14 @@ export default function Login() {
       router.push("/verify");
       return;
     }
-    const phoneReturn = localStorage.getItem("boris_post_login_return");
-    if (phoneReturn === "/phone-app") {
+    const postLoginReturn = localStorage.getItem("boris_post_login_return")
+      || (window.location.pathname === "/messenger/login" ? "/messenger" : null);
+    const safeReturn = postLoginReturn === "/phone-app" || Boolean(postLoginReturn?.startsWith("/messenger")) || Boolean(postLoginReturn?.startsWith("/audit"));
+    if (postLoginReturn && safeReturn) {
       localStorage.removeItem("boris_post_login_return");
-      router.push(phoneReturn);
+      router.push(postLoginReturn);
     } else {
+      if (postLoginReturn) localStorage.removeItem("boris_post_login_return");
       router.push(await resolvePostAuthRoute(data.user));
     }
   };

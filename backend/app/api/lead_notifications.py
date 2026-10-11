@@ -3,9 +3,10 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy import text
 from app.db.session import SessionLocal
 from app.api.auth import get_current_user
+from app.api.legal import require_messenger_legal_user
 from app.services import lead_notifications as svc
 
-router = APIRouter(prefix="/api/lead-notifications", tags=["lead-notifications"])
+router = APIRouter(prefix="/api/lead-notifications", tags=["lead-notifications"], dependencies=[Depends(require_messenger_legal_user)])
 public_router = APIRouter(prefix="/api/public/lead-notifications", tags=["lead-notifications-public"])
 
 def _uid(user):
