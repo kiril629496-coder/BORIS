@@ -126,3 +126,25 @@ def test_jobs_continue_only_pass_subset_after_banner_partial():
     assert '_passed_scope=passed_ids()' in src
     assert '_enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,_passed_scope)' in src
     assert 'final_result["next_stage"]="prepare_ready_subset"' in src
+
+
+def test_resume_with_only_terminal_blocked_items_stays_partial_not_completed():
+    payload = _base([1])
+    payload["banner_terminal_blocked"] = {
+        "1": {
+            "id": 1,
+            "code": "premium_batch_qa_not_passed",
+            "reason": "Awkward crop",
+            "artifact_identity": "banner1:v1:" + "a" * 64,
+        }
+    }
+    plan = plan_banner_slice(
+        job_id=77,
+        payload=payload,
+        item_ids=[1],
+        passed_ids=[],
+        legacy_attempted=True,
+    )
+    assert plan["final"] == "partial"
+    assert plan["result"]["stage"] == "banners_partial"
+    assert plan["result"]["blocked_count"] == 1
