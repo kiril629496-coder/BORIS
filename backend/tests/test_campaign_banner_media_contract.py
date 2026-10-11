@@ -209,3 +209,19 @@ class RequestIdentityTest(unittest.TestCase):
 
 if __name__=="__main__":
     unittest.main()
+
+
+def test_legacy_alias_url_passes_when_exact_premium_identity_and_sha_match():
+    case=BannerMediaProofTest(methodName="test_exact_current_receipt_and_bytes_pass_without_paid_call")
+    case.setUp()
+    try:
+        alias=case.root/"tenant-a"/"banners"/"up_premium_banner_abc_v1.png"
+        alias.parent.mkdir(parents=True,exist_ok=True)
+        alias.write_bytes(case.file.read_bytes())
+        case.asset.storage_key="tenant-a/banners/up_premium_banner_abc_v1.png"
+        case.payload["banner_url"]="/images/tenant-a/banners/up_premium_banner_abc_v1.png"
+        case.payload["images"][0]=case.payload["banner_url"]
+        case.current["url"]="/images/tenant-a/banners/premium_ai/premium_banner_abc_v1.png"
+        assert case.proof()["ready"] is True
+    finally:
+        case.doCleanups()

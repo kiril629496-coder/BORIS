@@ -175,6 +175,15 @@ def premium_link_proof(payload, pairs, *, account_id, hero_media_id,
         return {"ready": False, "code": "PREMIUM_BANNER_CONTENT_CHANGED"}
     expected_hash = str(qa.get("artifact_sha256") or "")
     technical_hash = str((qa.get("technical_qa") or {}).get("artifact_sha256") or "")
+    current_url=str(current.get("url") or "")
+    _alias_prefix="/images/"+str(account_id).strip("/")+"/banners/"
+    _identity_suffix=str(banner_id)+"_v"+str(version)+".png"
+    _legacy_alias_equivalent=bool(
+        current_url.startswith(_alias_prefix)
+        and expected_url.startswith(_alias_prefix)
+        and current_url.endswith(_identity_suffix)
+        and expected_url.endswith(_identity_suffix)
+    )
     ready = bool(
         current.get("status") == "ok"
         and current.get("receipt_current") is True
@@ -187,7 +196,12 @@ def premium_link_proof(payload, pairs, *, account_id, hero_media_id,
         and str(current.get("artifact_sha256") or "") == str(asset.sha256 or "")
         and expected_hash == str(asset.sha256 or "")
         and technical_hash == expected_hash
-        and str(current.get("url") or "") in {expected_url, str(public_url or expected_url)}
+        and (current_url in {expected_url, str(public_url or expected_url)} or _legacy_alias_equivalent)
+        # LEGACY_PREMIUM_ALIAS_SAME_BYTES_V1:
+        # URL/path may differ when a historical Campaign alias points to the exact
+        # same Premium artifact bytes. Exact tenant + premium source_ref identity +
+        # linked hero + SHA + current receipt + scope/content guards above are the
+        # authority; a second filesystem alias must not invalidate the receipt.
     )
     return {"ready": ready, "code": "PASS" if ready else str(current.get("code") or "QA_RECEIPT_UPGRADE_REQUIRED"),
             "banner_id": banner_id, "version": version, "preview": current}
