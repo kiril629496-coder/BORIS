@@ -277,7 +277,7 @@ class PremiumGuardTests(unittest.TestCase):
     def setUp(self):
         self.row = types.SimpleNamespace(id=12, account_id="acct", campaign_id=600)
         self.asset = types.SimpleNamespace(id=101, account_id="acct", source_provider="openai_full_ai_premium",
-            source_ref="premium:banner-A:v1", storage_key="acct/banners/A.png")
+            source_ref="premium:banner-A:v1", storage_key="acct/banners/A.png", sha256="a" * 64)
         self.link = types.SimpleNamespace(position=0, role="hero", id=201)
         self.payload = {"feed_factory": True, "title": "Точный заголовок", "description": "Точное описание",
             "category": "Услуги", "banner_url": "/images/acct/banners/A.png", "images": ["/images/acct/banners/A.png"]}
@@ -329,3 +329,106 @@ class PremiumGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+def test_premium_legacy_alias_same_identity_and_sha_is_valid():
+    row = types.SimpleNamespace(id=12, account_id="acct", campaign_id=600)
+    asset = types.SimpleNamespace(
+        id=101,
+        account_id="acct",
+        source_provider="openai_full_ai_premium",
+        source_ref="premium:banner-A:v1",
+        storage_key="acct/banners/up_premium_banner-A_v1.png",
+        sha256="a" * 64,
+    )
+    link = types.SimpleNamespace(position=0, role="hero", id=201)
+    payload = {
+        "feed_factory": True,
+        "media_semantic_guard": {"mode": "universal"},
+        "title": "Точный заголовок",
+        "description": "Точное описание",
+        "category": "Услуги",
+        "banner_url": "/images/acct/banners/up_premium_banner-A_v1.png",
+        "images": ["/images/acct/banners/up_premium_banner-A_v1.png"],
+    }
+    fp = validator.semantic_content_fingerprint(payload)
+    payload["banner_qa"] = {
+        "passed": True,
+        "banner_id": "banner-A",
+        "version": 1,
+        "artifact_sha256": "a" * 64,
+        "qa_version": "qa-v2",
+        "content_fingerprint": fp,
+    }
+    current = {
+        "status": "ok",
+        "receipt_current": True,
+        "artifact_current": True,
+        "qa_terminal": True,
+        "qa_passed": True,
+        "cost_reconciled": True,
+        "cost_sla_pass": True,
+        "artifact_sha256": "a" * 64,
+        "qa_version": "qa-v2",
+        "url": "/images/acct/banners/premium_ai/premium_banner-A_v1.png",
+        "provenance": {
+            "campaign_id": 600,
+            "campaign_item_id": 12,
+            "content_fingerprint": fp,
+        },
+    }
+    with patch.object(modules["app.services.banner_full_ai_premium"], "read_current_preview", lambda *args: copy.deepcopy(current), create=True):
+        with patch.object(validator, "_linked_media", lambda *args: [(link, asset)]):
+            assert validator.validate_linked_media_semantics(None, row, payload) == []
+
+
+def test_premium_legacy_alias_requires_exact_sha_and_identity():
+    row = types.SimpleNamespace(id=12, account_id="acct", campaign_id=600)
+    asset = types.SimpleNamespace(
+        id=101,
+        account_id="acct",
+        source_provider="openai_full_ai_premium",
+        source_ref="premium:banner-A:v1",
+        storage_key="acct/banners/up_premium_banner-A_v1.png",
+        sha256="b" * 64,
+    )
+    link = types.SimpleNamespace(position=0, role="hero", id=201)
+    payload = {
+        "feed_factory": True,
+        "media_semantic_guard": {"mode": "universal"},
+        "title": "Точный заголовок",
+        "description": "Точное описание",
+        "category": "Услуги",
+        "banner_url": "/images/acct/banners/up_premium_banner-A_v1.png",
+        "images": ["/images/acct/banners/up_premium_banner-A_v1.png"],
+    }
+    fp = validator.semantic_content_fingerprint(payload)
+    payload["banner_qa"] = {
+        "passed": True,
+        "banner_id": "banner-A",
+        "version": 1,
+        "artifact_sha256": "a" * 64,
+        "qa_version": "qa-v2",
+        "content_fingerprint": fp,
+    }
+    current = {
+        "status": "ok",
+        "receipt_current": True,
+        "artifact_current": True,
+        "qa_terminal": True,
+        "qa_passed": True,
+        "cost_reconciled": True,
+        "cost_sla_pass": True,
+        "artifact_sha256": "a" * 64,
+        "qa_version": "qa-v2",
+        "url": "/images/acct/banners/premium_ai/premium_banner-A_v1.png",
+        "provenance": {
+            "campaign_id": 600,
+            "campaign_item_id": 12,
+            "content_fingerprint": fp,
+        },
+    }
+    with patch.object(modules["app.services.banner_full_ai_premium"], "read_current_preview", lambda *args: copy.deepcopy(current), create=True):
+        with patch.object(validator, "_linked_media", lambda *args: [(link, asset)]):
+            errors = validator.validate_linked_media_semantics(None, row, payload)
+            assert errors and errors[0]["code"] == "premium_banner_receipt_invalid"

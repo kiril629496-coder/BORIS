@@ -191,9 +191,25 @@ def _premium_banner_receipt_matches(row, payload, link, asset):
             and current.get("qa_passed") is True and current.get("cost_reconciled") is True
             and current.get("cost_sla_pass") is True):
         return False
-    if _payload_local_image_keys({"images": [current.get("url")]}).get(0) != key:
+    current_key = _payload_local_image_keys({"images": [current.get("url")]}).get(0)
+    artifact_sha = str(getattr(asset, "sha256", "") or "").lower()
+    proof_sha = str(proof.get("artifact_sha256") or "").lower()
+    current_sha = str(current.get("artifact_sha256") or "").lower()
+    _identity_suffix = f"{banner_id}_v{version}.png"
+    _tenant_banner_prefix = f"{account}/banners/"
+    _legacy_alias_equivalent = bool(
+        key.startswith(_tenant_banner_prefix)
+        and str(current_key or "").startswith(_tenant_banner_prefix)
+        and key.endswith(_identity_suffix)
+        and str(current_key or "").endswith(_identity_suffix)
+        and artifact_sha
+        and artifact_sha == proof_sha == current_sha
+    )
+    if current_key != key and not _legacy_alias_equivalent:
         return False
-    if proof.get("artifact_sha256") != current.get("artifact_sha256") or proof.get("qa_version") != current.get("qa_version"):
+    if not artifact_sha or artifact_sha != proof_sha or proof_sha != current_sha:
+        return False
+    if proof.get("qa_version") != current.get("qa_version"):
         return False
     provenance = current.get("provenance") or {}
     if str(provenance.get("campaign_id") or "") != str(getattr(row, "campaign_id", "") or ""):
