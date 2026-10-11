@@ -376,3 +376,62 @@ def test_providerfree_ready_subset_routes_to_banner_stage_when_required():
     assert 'db,"campaign_banners",banner_payload' in src
     assert 'fingerprint=f"campaign_banners:{campaign_id}:{account_id}:ready_subset:{scope_hash}"' in src
     assert 'terminal["next_stage"]="banners"' in src
+
+
+def test_machine_metadata_receipt_migration_classifies_without_auto_passing_reject():
+    from app.services.banner_machine_metadata_migration import _machine_only_issues, _clean_pass, VISIBLE_CHECKS
+    rejected = {
+        "qa_terminal": True, "qa_status": "REJECT", "passed": False,
+        "issues": ["Malformed ID in banner_id"],
+    }
+    assert _machine_only_issues(rejected) is True
+    assert _clean_pass(rejected) is False
+    visual = {**rejected, "issues": ["visible headline text mismatch"]}
+    assert _machine_only_issues(visual) is False
+
+    passed = {
+        "qa_terminal": True, "qa_status": "PASS", "passed": True, "issues": [],
+        **{key: True for key in VISIBLE_CHECKS},
+    }
+    assert _clean_pass(passed) is True
+    passed["composition_ok"] = False
+    assert _clean_pass(passed) is False
+
+
+def test_premium_banner_job_migrates_old_receipts_before_paid_planning():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "PREMIUM_MACHINE_METADATA_RECEIPT_MIGRATION_V1" in src
+    assert "banner_machine_metadata_migration" in src
+    assert "_confirmed_artifacts" in src
+    assert "_migrate_banner_receipt(account_id,_bid,_ver)" in src
+    premium = src[src.index("def _run_campaign_banners_premium"):src.index("def _run_campaign_post_publish_watch")]
+    assert premium.index("PREMIUM_MACHINE_METADATA_RECEIPT_MIGRATION_V1") < premium.index("plan = plan_banner_slice(")
+
+
+def test_avito_error_fee_is_external_wait_not_publication_failure():
+    from app.services.jobs import _avito_fee_wait_snapshot
+    snap = {
+        "item_errors": [
+            {"ad_id": "a", "status": "error_fee", "message_code": 2214},
+            {"ad_id": "b", "section": "error_fee", "message_code": 2214},
+        ]
+    }
+    out = _avito_fee_wait_snapshot(snap)
+    assert out["fee_only"] is True
+    assert out["fee_count"] == 2
+    assert out["ad_ids"] == ["a", "b"]
+
+    mixed = {"item_errors": [snap["item_errors"][0], {"ad_id": "c", "status": "error_category"}]}
+    assert _avito_fee_wait_snapshot(mixed)["fee_only"] is False
+
+
+def test_avito_fee_wait_preserves_upload_and_never_replays_submit():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "AVITO_FEE_WAIT_IS_EXTERNAL_V1" in src
+    assert '"stage":"awaiting_external_funding"' in src
+    assert '"code":"AVITO_ADVANCE_FUNDING_REQUIRED"' in src
+    assert '"retry_policy":"observe_same_upload_after_funding"' in src
+    assert 'payload["stage"]="awaiting_avito_result"' in src
+    assert 'payload["upload_id"]=activation["upload_id"]' in src

@@ -2313,6 +2313,28 @@ def _campaign_delivery_scope_rows(C, db, campaign, allowed, account_id, payload=
     return [by_id[iid] for iid in scope]
 
 
+
+def _avito_fee_wait_snapshot(snap):
+    """Recognize terminal Avito fee/advance blockers that auto-activate after funding."""
+    snap=dict(snap or {})
+    errors=[dict(x or {}) for x in (snap.get("item_errors") or []) if isinstance(x,dict)]
+    if not errors:
+        errors=[dict(x or {}) for x in ((snap.get("scope") or {}).get("item_errors") or []) if isinstance(x,dict)]
+    def _is_fee(row):
+        return (
+            str(row.get("status") or "").strip().lower()=="error_fee"
+            or str(row.get("section") or "").strip().lower()=="error_fee"
+            or int(row.get("message_code") or 0)==2214
+        )
+    fee=[row for row in errors if _is_fee(row)]
+    return {
+        "fee_only": bool(errors) and len(fee)==len(errors),
+        "fee_count": len(fee),
+        "error_count": len(errors),
+        "ad_ids": [str(x.get("ad_id") or "") for x in fee if str(x.get("ad_id") or "")],
+    }
+
+
 def _run_campaign_deliver(db, job, payload):
     """Owner-confirmed delivery with authoritative Avito v4 result watch.
 
@@ -2702,6 +2724,46 @@ def _run_campaign_deliver(db, job, payload):
         _,ff=C._ff_state_load(campaign); now=datetime.now(timezone.utc).isoformat()
         activation={**dict(ff.get("owner_activation") or {}),"upload_id":int(snap.get("upload_id") or upload_id or 0),"report":snap,"updated_at":now,
                     "published":int(snap.get("successful") or 0),"errors":int(snap.get("error") or 0),"blocked":int(snap.get("blocked") or 0),"item_errors":snap.get("item_errors") or []}
+        _fee_wait=_avito_fee_wait_snapshot(snap)
+        if (_fee_wait.get("fee_only") and int(snap.get("successful") or 0)==0):
+            # AVITO_FEE_WAIT_IS_EXTERNAL_V1:
+            # error_fee / message 2214 means the exact upload is already accepted
+            # and Avito promises automatic activation after account advance funding.
+            # Never demote these rows as rejected and never replay the submission.
+            activation.update({
+                "status":"awaiting_external_funding",
+                "funding_required":True,
+                "provider_auto_activation":True,
+                "retryable":False,
+                "retry_policy":"observe_same_upload_after_funding",
+                "failed_ad_ids":[],
+                "unresolved_ad_ids":list(_fee_wait.get("ad_ids") or []),
+                "message":"Avito принял объявления, но ждёт пополнения аванса. После пополнения они должны стать активны автоматически; BORIS не отправляет их повторно.",
+            })
+            ff["step"]="publication_waiting_funding"; ff["owner_activation"]=activation
+            if str(campaign.status or "").lower()!="superseded":
+                campaign.status="pending_review"
+            payload=dict(payload or {})
+            payload["stage"]="awaiting_avito_result"
+            payload["upload_id"]=activation["upload_id"]
+            payload["expected_ad_ids"]=list(expected_ad_ids)
+            payload["_external_funding_wait"]=True
+            payload["_external_funding_first_seen_at"]=payload.get("_external_funding_first_seen_at") or now
+            payload["watch_count"]=int(payload.get("watch_count") or 0)+1
+            payload["publication_watch_delay_seconds"]=900
+            job.payload_json=payload
+            job.scheduled_at=datetime.now(timezone.utc)+timedelta(minutes=15)
+            C._ff_state_save(db,campaign,ff)
+            return {
+                "stage":"awaiting_external_funding",
+                "code":"AVITO_ADVANCE_FUNDING_REQUIRED",
+                "campaign_id":campaign.id,
+                "account_id":account_id,
+                "upload_id":activation["upload_id"],
+                "report":snap,
+                "external_action":False,
+                "message":activation["message"],
+            }, "queued"
         if snap.get("full_success"):
             _delivery_effect=dict(snap.get("delivery_effect") or ((snap.get("scope") or {}).get("delivery_effect") or {}))
             _delivery_state=str(_delivery_effect.get("state") or "")
@@ -3062,6 +3124,43 @@ def _run_campaign_banners_premium(db, job, payload):
     if not all_ids or any(i not in by_id or str(by_id[i].account_id or "") != account_id for i in all_ids):
         return {"stage": "banners_blocked", "unit": "banners", "done": 0,
                 "total": len(all_ids), "code": "BANNER_ITEM_SCOPE_INVALID"}, "partial"
+
+    # PREMIUM_MACHINE_METADATA_RECEIPT_MIGRATION_V1:
+    # Old Premium receipts may predate the visible-pixels-only identity policy.
+    # Migrate only exact existing artifacts before planning any paid work. A prior
+    # clean PASS is rebound locally; a metadata-only REJECT becomes QA-pending on
+    # the same PNG. No image generation occurs in this migration step.
+    from app.services.banner_machine_metadata_migration import migrate_receipt as _migrate_banner_receipt
+    import re as _banner_identity_re
+    _confirmed_artifacts=dict((payload or {}).get("banner_confirmed_artifacts") or {})
+    _migrations=[]
+    for _iid in all_ids:
+        _row=by_id.get(int(_iid))
+        if _row is None:
+            continue
+        _p=C._ff_payload(_row)
+        _qa=dict(_p.get("banner_qa") or {})
+        _bid=str(_qa.get("banner_id") or "").strip()
+        try: _ver=int(_qa.get("version") or 0)
+        except (TypeError,ValueError): _ver=0
+        if not _bid or _ver<=0:
+            _raw=str(_confirmed_artifacts.get(str(_iid)) or "")
+            _m=_banner_identity_re.fullmatch(r"([^:]+):v(\d+):([0-9a-fA-F]{64})",_raw)
+            if _m:
+                _bid=_m.group(1); _ver=int(_m.group(2))
+        if not _bid or _ver<=0:
+            continue
+        _mig=_migrate_banner_receipt(account_id,_bid,_ver)
+        if _mig.get("changed"):
+            _migrations.append({"item_id":int(_iid),**_mig})
+    if _migrations:
+        payload=dict(job.payload_json or payload or {})
+        _hist=[dict(x) for x in (payload.get("_banner_metadata_migrations") or []) if isinstance(x,dict)]
+        _hist.extend(_migrations)
+        payload["_banner_metadata_migrations"]=_hist[-100:]
+        payload["_banner_metadata_migrated_at"]=datetime.now(timezone.utc).isoformat()
+        job.payload_json=payload
+        db.flush()
 
     def passed_ids():
         return [int(r.id) for r in C._ff_items(db, campaign.id, allowed)
