@@ -208,3 +208,10 @@ def test_mortgage_subject_guard_keeps_generic_finance_fail_closed():
     }
     assert sem._clear_subject_family_match(payload, "a house or building") is False
     assert sem._clear_subject_family_match(payload, "man contemplating financial data") is False
+
+
+def test_active_child_does_not_erase_parent_no_progress_debt():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "CHILD_EXISTENCE_IS_NOT_PROGRESS_V1" in src
+    assert 'if int((result or {}).get("child_jobs_active") or 0)>0:' not in src

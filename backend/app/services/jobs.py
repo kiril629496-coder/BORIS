@@ -4413,9 +4413,12 @@ def run_once(verbose=True):
                     # with the SAME pending set must back off and eventually fail closed.
                     _progress_basis = _continuation_progress_basis(result)
                     _progress_sig = json.dumps(_progress_basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                    if int((result or {}).get("child_jobs_active") or 0)>0:
-                        _same=0
-                    elif str(p.get("_last_continuation_signature") or "") == _progress_sig:
+                    # CHILD_EXISTENCE_IS_NOT_PROGRESS_V1:
+                    # An active child job is only work-in-flight, not completed
+                    # progress. The same stage/done/pending coordinates must keep
+                    # accumulating no-progress debt even while child jobs exist;
+                    # otherwise one stuck child can mask an infinite parent loop.
+                    if str(p.get("_last_continuation_signature") or "") == _progress_sig:
                         _same = int(p.get("_same_continuation_count") or 0) + 1
                     else:
                         _same = 0
