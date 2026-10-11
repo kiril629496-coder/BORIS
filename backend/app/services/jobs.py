@@ -555,6 +555,40 @@ def _acquire_job_execution_lock(conn, job_id: int) -> bool:
         return False
 
 
+
+def _job_execution_heartbeat_is_fresh(db, job, now=None, max_age_seconds: int = 5) -> bool:
+    """Secondary fail-closed liveness proof for concurrent stale recovery.
+
+    Multiple worker slots run run_once() concurrently. A slot must never recover
+    a job that another slot is actively executing merely because an advisory-lock
+    probe transiently fails. ExecutionClock persists a heartbeat every ~0.5s.
+    """
+    from app.models.storage import Storage
+    try:
+        account_id = str(getattr(job, "account_id", None) or "__system__")
+        row = db.query(Storage).filter(
+            Storage.account_id == account_id,
+            Storage.key == f"job_execution_clock:{int(job.id)}",
+        ).first()
+        if row is None or not str(getattr(row, "value", "") or "").strip():
+            return False
+        state = json.loads(row.value)
+        heartbeat = str(state.get("heartbeat_at") or state.get("at") or "").strip()
+        if not heartbeat:
+            return False
+        stamp = datetime.fromisoformat(heartbeat)
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        age = (current - stamp).total_seconds()
+        return (
+            -2.0 <= age <= max(1, int(max_age_seconds))
+            and str(state.get("mode") or "") in {"active", "provider", "waiting"}
+        )
+    except Exception:
+        return False
+
+
 def _job_execution_lock_is_held(job_id: int) -> bool:
     """Fail-closed probe used by stale recovery.
 
@@ -4657,8 +4691,13 @@ def run_once(verbose=True):
         stale_changed = 0
         for j in stale:
             # ``started_at`` alone cannot prove a crash: a legitimate provider
-            # call may run longer than the stale threshold. The exact execution
-            # advisory lock is authoritative across processes and worker nodes.
+            # call may run longer than the stale threshold. ExecutionClock writes
+            # a durable heartbeat every ~0.5s; a fresh heartbeat is independent
+            # proof that another slot is alive even if an advisory-lock probe has
+            # a transient false-negative. After the short heartbeat window expires,
+            # the exact advisory lock remains the authoritative ownership check.
+            if _job_execution_heartbeat_is_fresh(db, j, now, max_age_seconds=5):
+                continue
             # Do not UPDATE a live row here: its handler may hold a transaction.
             if _job_execution_lock_is_held(int(j.id)):
                 continue

@@ -435,3 +435,51 @@ def test_avito_fee_wait_preserves_upload_and_never_replays_submit():
     assert '"retry_policy":"observe_same_upload_after_funding"' in src
     assert 'payload["stage"]="awaiting_avito_result"' in src
     assert 'payload["upload_id"]=activation["upload_id"]' in src
+
+
+def test_stale_recovery_respects_fresh_execution_clock_heartbeat():
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    class Query:
+        def __init__(self, value):
+            self.row = SimpleNamespace(value=value)
+        def filter(self, *args, **kwargs):
+            return self
+        def first(self):
+            return self.row
+
+    class DB:
+        def __init__(self, value):
+            self.value = value
+        def query(self, *args, **kwargs):
+            return Query(self.value)
+
+    job = SimpleNamespace(id=11530, account_id="albertardashov_79016")
+    now = datetime.now(timezone.utc)
+
+    active = json.dumps({
+        "mode": "active",
+        "heartbeat_at": (now - timedelta(seconds=1)).isoformat(),
+    })
+    waiting = json.dumps({
+        "mode": "waiting",
+        "heartbeat_at": (now - timedelta(seconds=2)).isoformat(),
+    })
+    stale = json.dumps({
+        "mode": "active",
+        "heartbeat_at": (now - timedelta(seconds=10)).isoformat(),
+    })
+
+    assert jobs._job_execution_heartbeat_is_fresh(DB(active), job, now, 5) is True
+    assert jobs._job_execution_heartbeat_is_fresh(DB(waiting), job, now, 5) is True
+    assert jobs._job_execution_heartbeat_is_fresh(DB(stale), job, now, 5) is False
+    assert jobs._job_execution_heartbeat_is_fresh(DB("not-json"), job, now, 5) is False
+
+
+def test_stale_recovery_checks_heartbeat_before_execution_lock_probe():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    start = src.index("for j in stale:")
+    body = src[start:start + 1600]
+    assert body.index("_job_execution_heartbeat_is_fresh") < body.index("_job_execution_lock_is_held")
