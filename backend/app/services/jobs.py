@@ -1827,8 +1827,15 @@ def _run_campaign_prepare(db, job, payload):
         # Refresh ONLY stale/missing semantic proofs against the current payload;
         # never bypass a genuine visual mismatch or low-confidence result.
         stale_codes={"media_semantic_proof_stale","media_semantic_proof_missing","media_semantic_link_payload_drift"}
-        recuration_codes={"media_semantic_mismatch","media_semantic_low_confidence","media_semantic_unreviewed"}
+        recuration_codes={
+            "media_semantic_mismatch","media_semantic_low_confidence","media_semantic_unreviewed",
+            "media_semantic_subject_context_missing","media_semantic_guard_missing",
+        }
         reports=list(val.get("items") or [])
+        _validation_errors_by_item={
+            int(report.get("id") or 0): list(report.get("errors") or [])
+            for report in reports if int(report.get("id") or 0)>0
+        }
         refresh_ids=[]
         safe_to_refresh=True
         for report in reports:
@@ -1853,6 +1860,101 @@ def _run_campaign_prepare(db, job, payload):
             for row in C._ff_items(db,_campaign_id,allowed):
                 if int(row.id) not in _refresh_set: continue
                 p=C._ff_payload(row); _row_id=int(row.id); _row_account=str(row.account_id)
+                _row_validation_errors=list(_validation_errors_by_item.get(_row_id) or [])
+                _local_recuration_errors=[
+                    e for e in _row_validation_errors
+                    if str(e.get("code") or "") in {
+                        "media_semantic_subject_context_missing",
+                        "media_semantic_guard_missing",
+                    }
+                ]
+                if bool((payload or {}).get("_cost_anomaly_free_only")) and _local_recuration_errors:
+                    # PROVIDERFREE_GUARD_RECURATION_V1:
+                    # A conservative local guard rejection does not justify a new
+                    # Vision purchase. Remove only the rejected/unproven placement
+                    # and return this card to the ordinary zero-paid media refill.
+                    # Subject-context failures become durable negative memory;
+                    # guard-missing means "unproven", so it is NOT blacklisted.
+                    from app.services.media_semantic_validator import semantic_content_fingerprint as _semantic_guard_fp
+                    _guard_fp=str(_semantic_guard_fp(p))
+                    _linked_now=(db.query(MediaLink,MediaAsset).join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+                        .filter(MediaLink.entity_type=="campaign_item",
+                                MediaLink.entity_id==str(_row_id),
+                                MediaAsset.deleted_at.is_(None))
+                        .order_by(MediaLink.position.asc(),MediaLink.id.asc()).all())
+                    _bad_ids=set()
+                    _subject_bad_ids=set()
+                    for _err in _local_recuration_errors:
+                        try: _mid=int(_err.get("media_id") or 0)
+                        except (TypeError,ValueError): _mid=0
+                        if _mid>0:
+                            _bad_ids.add(_mid)
+                            if str(_err.get("code") or "")=="media_semantic_subject_context_missing":
+                                _subject_bad_ids.add(_mid)
+                    if not _bad_ids and any(str(e.get("code") or "")=="media_semantic_guard_missing" for e in _local_recuration_errors):
+                        _bad_ids={int(_a.id) for _l,_a in _linked_now}
+                    if _subject_bad_ids:
+                        _rejects=[
+                            dict(x) for x in (p.get("media_semantic_rejections") or [])
+                            if isinstance(x,dict)
+                        ]
+                        _known={(int(x.get("media_id") or 0),str(x.get("content_fingerprint") or "")) for x in _rejects}
+                        for _err in _local_recuration_errors:
+                            try: _mid=int(_err.get("media_id") or 0)
+                            except (TypeError,ValueError): _mid=0
+                            if _mid not in _subject_bad_ids or (_mid,_guard_fp) in _known:
+                                continue
+                            _rejects.append({
+                                "media_id":_mid,
+                                "content_fingerprint":_guard_fp,
+                                "subject":str(_err.get("subject") or "")[:180],
+                                "reason":"local semantic subject-context guard rejected prior positive proof",
+                                "confidence":float(_err.get("confidence") or 0),
+                                "source":"providerfree_guard_recuration",
+                            })
+                        p["media_semantic_rejections"]=_rejects[-40:]
+                    if _bad_ids:
+                        db.query(MediaLink).filter(
+                            MediaLink.entity_type=="campaign_item",
+                            MediaLink.entity_id==str(_row_id),
+                            MediaLink.media_id.in_(sorted(_bad_ids)),
+                        ).delete(synchronize_session=False)
+                        db.flush()
+                    _kept=(db.query(MediaLink,MediaAsset).join(MediaAsset,MediaAsset.id==MediaLink.media_id)
+                        .filter(MediaLink.entity_type=="campaign_item",
+                                MediaLink.entity_id==str(_row_id),
+                                MediaAsset.deleted_at.is_(None))
+                        .order_by(MediaLink.position.asc(),MediaLink.id.asc()).all())
+                    _kept_ids={int(_a.id) for _l,_a in _kept}
+                    p["media_semantic_evidence"]=[
+                        dict(e) for e in (p.get("media_semantic_evidence") or [])
+                        if isinstance(e,dict) and int(e.get("media_id") or 0) in _kept_ids
+                    ]
+                    p["images"]=[
+                        "/images/"+str(_a.storage_key or "").lstrip("/")
+                        for _l,_a in _kept if str(_a.storage_key or "").strip()
+                    ]
+                    _stack=dict(p.get("photo_stack") or {})
+                    if _stack:
+                        _stack["media_ids"]=[
+                            int(x) for x in (_stack.get("media_ids") or [])
+                            if str(x).isdigit() and int(x) in _kept_ids
+                        ]
+                        p["photo_stack"]=_stack
+                    if int(row.hero_media_id or 0) in _bad_ids:
+                        row.hero_media_id=int(_kept[0][1].id) if _kept else None
+                    if p.get("banner_url") and any(int(_a.id) in _bad_ids for _l,_a in _linked_now):
+                        p["banner_url"]=""; p["banner"]=""; p["banner_qa"]={}
+                    p["media_autocuration"]={
+                        "removed":len(_bad_ids),
+                        "kept":len(_kept),
+                        "reason":"providerfree_guard_recuration",
+                    }
+                    row.payload_json=_json.dumps(p,ensure_ascii=False)
+                    row.content_hash=C.CS.content_hash(p)
+                    row.status="draft"
+                    db.commit()
+                    continue
                 # MEDIA_LINK_PAYLOAD_RECONCILE_V1: payload.images is the concrete
                 # publication source. If local image URLs changed while old MediaLinks
                 # survived, rebuild links before semantic proof refresh. Never let a

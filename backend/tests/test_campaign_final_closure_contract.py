@@ -224,3 +224,13 @@ def test_internal_validation_respects_cost_anomaly_cache_only_mode():
     assert "allow_provider=_internal_allow_provider" in src
     assert "CACHE_ONLY_UNPROVEN_IS_NOT_REJECTION_V1" in src
     assert '=="cost_anomaly_cache_only"' in src
+
+
+def test_providerfree_guard_recuration_is_local_and_non_paid():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "PROVIDERFREE_GUARD_RECURATION_V1" in src
+    assert '"media_semantic_subject_context_missing"' in src
+    assert '"media_semantic_guard_missing"' in src
+    assert '"source":"providerfree_guard_recuration"' in src
+    assert '"reason":"providerfree_guard_recuration"' in src
