@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def load_candidate():
     modules = {}
-    for name in ("sqlalchemy", "app", "app.db", "app.db.session", "app.services", "app.services.image_service", "app.services.media_semantic_validator", "app.services.job_execution_clock", "app.services.banner_media"):
+    for name in ("sqlalchemy", "app", "app.db", "app.db.session", "app.services", "app.services.image_service", "app.services.media_semantic_validator", "app.services.job_execution_clock", "app.services.banner_media", "app.services.campaign_owner_banner_examples"):
         module = types.ModuleType(name)
         module.__path__ = []
         modules[name] = module
@@ -28,6 +28,9 @@ def load_candidate():
     modules["app.services.media_semantic_validator"]._vision_chat_json = lambda *a, **k: (_ for _ in ()).throw(AssertionError("real provider forbidden"))
     modules["app.services.job_execution_clock"].provider_call = lambda fn, *a, **kw: fn(*a, **kw)
     modules["app.services.banner_media"].register_banner = lambda **kw: {"id": 100, **kw}
+    modules["app.services.campaign_owner_banner_examples"].DEFAULT_ACCENT = "#F97316"
+    modules["app.services.campaign_owner_banner_examples"].combine_reference_style = lambda variant, existing: existing
+    modules["app.services.campaign_owner_banner_examples"].owner_variant = lambda *a, **k: None
     sys.modules.update(modules)
     spec = importlib.util.spec_from_file_location("premium_qa_candidate", ROOT / "app/services/banner_full_ai_premium.py")
     module = importlib.util.module_from_spec(spec)
@@ -622,3 +625,57 @@ class ConcurrentTests(Fixture):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class MetadataIdentityFalseRejectTests(Fixture):
+    def test_metadata_only_false_reject_rechecks_same_artifact_without_image_generation(self):
+        row = self.make_row("META")
+        original_sha = row["artifact_sha256"]
+        self.mutate_response = lambda raw: raw["results"][0].update({
+            "pass": False,
+            "issues": ["Malformed ID in banner_id", "Malformed phone number in asset_sha256"],
+        })
+        first = self.finalize("META")
+        self.assertFalse(first["previews"]["META:v1"]["qa_passed"])
+        self.assertEqual("REJECT", first["previews"]["META:v1"]["vision_qa"]["qa_status"])
+        self.assertEqual(1, self.calls)
+
+        old_row = copy.deepcopy(self.rows[("acct", "META")][0])
+        old_receipts = copy.deepcopy(old_row.get("qa_receipts") or {})
+        self.assertEqual(1, len(old_receipts))
+        old_contract_sha = premium._qa_identity("acct", old_row)["contract_sha256"]
+
+        self.mutate_response = None
+        second = self.finalize("META")
+        self.assertTrue(second["previews"]["META:v1"]["qa_passed"], second)
+        self.assertEqual(2, self.calls, "policy upgrade must buy QA only once")
+        new_row = self.rows[("acct", "META")][0]
+        self.assertEqual(original_sha, new_row["artifact_sha256"], "same PNG must be reused")
+        self.assertEqual(premium.VISIBLE_QA_METADATA_POLICY, new_row["qa_contract"]["machine_identity_policy"])
+        self.assertNotEqual(old_contract_sha, premium._qa_identity("acct", new_row)["contract_sha256"])
+        self.assertEqual(2, len(new_row.get("qa_receipts") or {}), "old false REJECT remains auditable beside new receipt")
+        self.assertTrue(new_row.get("qa_policy_upgrades"))
+
+    def test_real_visual_reject_is_never_policy_upgraded_or_rechecked(self):
+        self.make_row("REAL")
+        self.mutate_response = lambda raw: raw["results"][0].update({
+            "pass": False,
+            "exact_text_ok": False,
+            "issues": ["visible headline text mismatch"],
+        })
+        first = self.finalize("REAL")
+        self.assertFalse(first["previews"]["REAL:v1"]["qa_passed"])
+        self.assertEqual(1, self.calls)
+        self.mutate_response = None
+        second = self.finalize("REAL")
+        self.assertFalse(second["previews"]["REAL:v1"]["qa_passed"])
+        self.assertEqual(1, self.calls, "real visual rejection must stay terminal")
+        row = self.rows[("acct", "REAL")][0]
+        self.assertNotIn("machine_identity_policy", row["qa_contract"])
+        self.assertFalse(row.get("qa_policy_upgrades"))
+
+    def test_qa_prompts_explicitly_exclude_machine_identity_from_visible_copy(self):
+        src = (ROOT / "app/services/banner_full_ai_premium.py").read_text(encoding="utf-8")
+        assert "NOT visible banner copy" in src
+        assert "Evaluate ONLY visible pixels against CONTRACT" in src
+        assert "never mention them in issues" in src

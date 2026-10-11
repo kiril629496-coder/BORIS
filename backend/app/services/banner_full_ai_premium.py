@@ -26,6 +26,9 @@ from sqlalchemy import text
 
 from app.db.session import SessionLocal
 from app.services.image_service import estimate_kopeks
+from app.services.campaign_owner_banner_examples import (
+    DEFAULT_ACCENT, combine_reference_style, owner_variant,
+)
 
 MODEL = "gpt-image-2"
 QUALITY = "low"
@@ -43,6 +46,7 @@ VISION_QA_OPERATION = "banner_premium_vision_qa"
 VISION_QA_BATCH_OPERATION = "banner_premium_vision_qa_batch_v1"
 VISION_QA_BATCH_MAX = 4
 VISION_QA_VERSION = "premium_vision_identity_bool_v2_20261008"
+VISIBLE_QA_METADATA_POLICY = "visible_pixels_machine_identity_v1"
 
 FORMAT_PRESETS = {
     "1:1": {"source_size": "1024x1024", "target": (1024, 1024), "label": "1:1"},
@@ -710,6 +714,55 @@ def _current_qa_receipt(account_id, row):
     return receipt
 
 
+def _metadata_only_false_reject(receipt: dict | None) -> bool:
+    """Recognize a narrow Vision false-negative caused only by machine identity fields."""
+    if not isinstance(receipt, dict):
+        return False
+    verdict = receipt.get("verdict")
+    if not isinstance(verdict, dict):
+        return False
+    if verdict.get("qa_terminal") is not True or str(verdict.get("qa_status") or "") != "REJECT":
+        return False
+    visible_checks = (
+        "semantic_match", "headline_ok", "exact_text_ok", "spelling_ok",
+        "forbidden_claims_ok", "composition_ok", "crop_safe_ok",
+        "professional_ok", "mobile_ok", "selling_typography_ok", "palette_ok",
+        "reference_style_match", "editorial_richness_ok", "secondary_copy_density_ok",
+    )
+    if any(verdict.get(key) is not True for key in visible_checks):
+        return False
+    issues = [str(x or "").strip().lower() for x in (verdict.get("issues") or []) if str(x or "").strip()]
+    if not issues:
+        return False
+    machine_fields = ("banner_id", "asset_sha256", "contract_sha256", "qa_version")
+    return all(any(field in issue for field in machine_fields) for issue in issues)
+
+
+def _upgrade_metadata_false_reject_contract(account_id: str, banner_id: str, version: int, receipt: dict) -> bool:
+    """Invalidate only a proven metadata-only false REJECT while preserving its receipt."""
+    if not _metadata_only_false_reject(receipt):
+        return False
+    versions, chosen = _version_row(str(account_id), str(banner_id), int(version))
+    if chosen is None or _current_qa_receipt(str(account_id), chosen) != receipt:
+        return False
+    contract = dict(chosen.get("qa_contract") or {})
+    if not contract or contract.get("machine_identity_policy") == VISIBLE_QA_METADATA_POLICY:
+        return False
+    old_identity = dict(receipt.get("identity") or {})
+    contract["machine_identity_policy"] = VISIBLE_QA_METADATA_POLICY
+    chosen["qa_contract"] = contract
+    history = [dict(x) for x in (chosen.get("qa_policy_upgrades") or []) if isinstance(x, dict)]
+    history.append({
+        "from_contract_sha256": str(old_identity.get("contract_sha256") or ""),
+        "reason": "machine_identity_fields_are_not_visible_banner_copy",
+        "issues": list((receipt.get("verdict") or {}).get("issues") or [])[:8],
+        "at": _now_iso(),
+    })
+    chosen["qa_policy_upgrades"] = history[-8:]
+    _save_versions(str(account_id), str(banner_id), versions)
+    return True
+
+
 def _provider_failure_verdict(exc, operation, identity, *, intent_key=None, slot=1, size=1):
     """Only trusted provider-layer proof can turn a failed attempt into known zero."""
     meta = dict(getattr(exc, "vision_meta", {}) or {})
@@ -933,7 +986,10 @@ def _run_vision_qa(
                 "issues": ["qa_identity_required_or_artifact_changed"], "qa_identity": identity}
     prompt = (
         "You are the final fail-closed QA inspector for one Russian commercial banner. Return strict JSON only. "
-        "Echo banner_id, version, asset_sha256, qa_version, contract_sha256 from IDENTITY exactly. "
+        "IDENTITY is opaque MACHINE METADATA used only to bind your result to the exact file. "
+        "Fields banner_id, version, asset_sha256, qa_version and contract_sha256 are NOT visible banner copy: "
+        "do not judge their spelling, phone/ID format, semantics, claims or typography, and never mention them in issues. "
+        "Echo those IDENTITY fields exactly as supplied. Evaluate ONLY visible pixels against CONTRACT. "
         "Include explicit JSON booleans: pass, semantic_match, headline_ok, exact_text_ok, spelling_ok, "
         "forbidden_claims_ok, composition_ok, crop_safe_ok, professional_ok, mobile_ok, selling_typography_ok, "
         "palette_ok, reference_style_match, editorial_richness_ok, secondary_copy_density_ok. Include issues as an array of strings. "
@@ -1416,6 +1472,16 @@ def _create_preview_budget_locked(
             version=version,
         )
         owner_niche, owner_style = _owner_style_contract(description, exact_title, exact_subtitle)
+        # Owner-approved examples are style references, never product photo proofs.
+        # Select only after exact paid-intent replay and cost gates above.
+        owner_example = owner_variant(
+            account_id, f"{banner_id}|{idem}", version,
+            previous_palettes=tuple(str(row.get("owner_banner_example_palette") or "") for row in versions),
+        )
+        if owner_example is not None:
+            reference_style = combine_reference_style(owner_example, reference_style)
+            if str(accent_color).upper() == DEFAULT_ACCENT:
+                accent_color = owner_example["accent"]
 
         prompt = build_prompt(
             description=description,
@@ -1585,6 +1651,10 @@ def _create_preview_budget_locked(
             "owner_reference_version": OWNER_REFERENCE_VERSION,
             "owner_style_niche": owner_niche,
             "owner_style_palette": owner_style.get("palette"),
+            "owner_banner_example_contract": owner_example["contract"] if owner_example else None,
+            "owner_banner_example_palette": owner_example["palette_key"] if owner_example else None,
+            "owner_banner_example_accent": owner_example["accent"] if owner_example else None,
+            "owner_banner_example_library_file": owner_example["owner_library_file"] if owner_example else None,
             "owner_style_typography": owner_style.get("typography"),
             "owner_reference_image": OWNER_REFERENCE_IMAGES.get(owner_niche),
             "owner_reference_image_present": bool(OWNER_REFERENCE_IMAGES.get(owner_niche) and Path(OWNER_REFERENCE_IMAGES.get(owner_niche)).is_file()),
@@ -1786,11 +1856,29 @@ def _finalize_preview_vision_batch_locked(account_id, rows, provenance):
             unresolved.append(key)
             continue
         replay = _checked_preview_replay(account_id, chosen)
-        if replay.get("artifact_current") is not True or replay.get("preview_status") == "QA_RECEIPT_UPGRADE_REQUIRED":
+        receipt = _current_qa_receipt(account_id, chosen)
+        _metadata_policy_upgraded=False
+        if receipt and _metadata_only_false_reject(receipt):
+            # MACHINE_METADATA_FALSE_REJECT_UPGRADE_V1:
+            # preserve the old terminal receipt for audit, change only the local
+            # QA contract identity, and re-run Vision against the SAME PNG. This
+            # must never regenerate the paid image or auto-upgrade a real visual
+            # rejection.
+            _metadata_policy_upgraded=_upgrade_metadata_false_reject_contract(
+                account_id,banner_id,version,receipt
+            )
+            if _metadata_policy_upgraded:
+                _,chosen=_version_row(account_id,banner_id,version)
+                replay=_checked_preview_replay(account_id,chosen)
+                receipt=_current_qa_receipt(account_id,chosen)
+        if replay.get("artifact_current") is not True:
             resolved[key] = replay
             unresolved.append(key)
             continue
-        receipt = _current_qa_receipt(account_id, chosen)
+        if replay.get("preview_status") == "QA_RECEIPT_UPGRADE_REQUIRED" and not _metadata_policy_upgraded:
+            resolved[key] = replay
+            unresolved.append(key)
+            continue
         verdict = (receipt or {}).get("verdict") or {}
         safe_unpaid_retry = (verdict.get("qa_cost_status") in {"not_requested", "known_not_billed"}
             and (verdict.get("qa_status") == "PENDING" or
@@ -1857,7 +1945,10 @@ def _finalize_preview_vision_batch_locked(account_id, rows, provenance):
     _storage_json(account_id, allocation_key, {"schema": 1, "batch_id": batch_id, "entries": allocations})
     prompt = (
         "BATCH PREMIUM BANNER QA. Inspect each SLOT independently. Return one JSON object with results array. "
-        "Each result must echo slot, banner_id, version, asset_sha256, qa_version, contract_sha256 exactly. "
+        "IDENTITY fields are opaque MACHINE METADATA used only for exact result binding. banner_id, version, asset_sha256, "
+        "qa_version and contract_sha256 are NOT visible banner copy: do not judge their spelling, phone/ID format, semantics, "
+        "claims or typography, and never mention them in issues. Each result must echo slot and every IDENTITY field exactly. "
+        "Evaluate ONLY visible pixels against that SLOT's CONTRACT. "
         "Include explicit JSON booleans pass, semantic_match, headline_ok, exact_text_ok, spelling_ok, forbidden_claims_ok, "
         "composition_ok, crop_safe_ok, professional_ok, mobile_ok, selling_typography_ok, palette_ok, reference_style_match, "
         "editorial_richness_ok, secondary_copy_density_ok, and issues as array of strings. Every check must be true for PASS. "
