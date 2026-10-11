@@ -1556,6 +1556,8 @@ def _run_campaign_prepare(db, job, payload):
             # campaign stop. Child media shards may reuse exact/family semantic
             # proof and approved assets, but classify_item_media_vision is forced
             # into cache-only mode so no new paid QA call can happen.
+            from app.services.media_semantic_validator import backfill_asset_family_cache_from_evidence
+            _family_backfill=backfill_asset_family_cache_from_evidence(db,account_id)
             payload=dict(payload or {})
             payload["_cost_anomaly_free_only"]=True
             payload["_cost_anomaly_snapshot"]={
@@ -1564,6 +1566,7 @@ def _run_campaign_prepare(db, job, payload):
                 "call_limit":_qa_guard["media_call_limit"],
                 "cost_rub":_qa_guard["media_cost_rub"],
             }
+            payload["_cost_anomaly_family_cache_backfill"]=_family_backfill
             job.payload_json=payload
             db.flush()
         # CAMPAIGN_MEDIA_DURABLE_SHARDS_V1:

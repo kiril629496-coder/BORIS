@@ -114,3 +114,37 @@ def test_non_banner_order_does_not_count_unproven_hero():
         "media_semantic_evidence": [],
     }
     assert jobs._campaign_prepared_media_count(item, banner_required=False) == 0
+
+
+def test_existing_positive_glazing_proof_can_seed_family_cache():
+    payload = {
+        "title": "Панорамные окна в частный дом",
+        "direction": "Панорамные окна в частный дом",
+        "category": "Окна",
+    }
+    evidence = {
+        "match": True,
+        "checker": "openai_vision_text_image_cache",
+        "confidence": 0.95,
+        "subject": "Private house exterior with panoramic windows",
+        "media_id": 15568,
+    }
+    candidate = sem.reusable_family_cache_candidate(payload, evidence)
+    assert candidate is not None
+    assert candidate["family"] == "glazing_panoramic"
+    assert candidate["media_id"] == 15568
+
+
+def test_banner_qa_proof_cannot_seed_gallery_family_cache():
+    payload = {
+        "title": "Панорамные окна в частный дом",
+        "direction": "Панорамные окна в частный дом",
+    }
+    evidence = {
+        "match": True,
+        "checker": "campaign_banner_qa",
+        "confidence": 1.0,
+        "subject": "QA-approved campaign banner",
+        "media_id": 17648,
+    }
+    assert sem.reusable_family_cache_candidate(payload, evidence) is None

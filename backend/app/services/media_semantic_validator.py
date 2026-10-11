@@ -1338,6 +1338,120 @@ def classify_item_media_vision(payload: dict, linked_media: list, account_id: st
     return merged
 
 
+
+def reusable_family_cache_candidate(payload: dict, evidence: dict):
+    """Return a conservative asset-family proof candidate from old item evidence."""
+    if not isinstance(payload,dict) or not isinstance(evidence,dict):
+        return None
+    if evidence.get("match") is not True:
+        return None
+    checker=str(evidence.get("checker") or "")
+    if checker not in {
+        "openai_vision_text_image",
+        "openai_vision_text_image_cache",
+        "openai_vision_family_cache",
+    }:
+        return None
+    try:
+        confidence=float(evidence.get("confidence") or 0)
+        media_id=int(evidence.get("media_id") or 0)
+    except (TypeError,ValueError):
+        return None
+    subject=str(evidence.get("subject") or "").strip()
+    family=_semantic_family(payload)
+    if media_id<=0 or confidence<0.80 or not family or not subject:
+        return None
+    if not _clear_subject_family_match(payload,subject):
+        return None
+    return {
+        "media_id":media_id,
+        "family":family,
+        "confidence":confidence,
+        "subject":subject[:180],
+    }
+
+
+def backfill_asset_family_cache_from_evidence(db, account_id: str, campaign_ids=None, limit: int = 3000) -> dict:
+    """Promote existing positive item proofs into reusable asset-family cache.
+
+    This performs no provider calls. It only reuses evidence that already passed
+    the same conservative visible-subject family check used for new Vision PASSes.
+    Existing conflicting asset-family cache is never overwritten.
+    """
+    import json
+    from app.models.campaign_item import CampaignItem
+    from app.models.media_asset import MediaAsset
+
+    aid=str(account_id or "").strip()
+    if not aid:
+        return {"scanned":0,"candidates":0,"stamped":0}
+    q=(db.query(CampaignItem)
+       .filter(CampaignItem.account_id==aid,
+               CampaignItem.status!="superseded")
+       .order_by(CampaignItem.id.desc()))
+    ids=[]
+    for raw in (campaign_ids or []):
+        try:
+            cid=int(raw)
+        except (TypeError,ValueError):
+            cid=0
+        if cid>0 and cid not in ids:
+            ids.append(cid)
+    if ids:
+        q=q.filter(CampaignItem.campaign_id.in_(ids))
+    rows=q.limit(max(1,min(int(limit or 3000),10000))).all()
+    candidates={}
+    for row in rows:
+        raw=getattr(row,"payload_json",None)
+        if isinstance(raw,str):
+            try: payload=json.loads(raw or "{}")
+            except Exception: payload={}
+        elif isinstance(raw,dict):
+            payload=dict(raw)
+        else:
+            payload={}
+        for evidence in (payload.get("media_semantic_evidence") or []):
+            candidate=reusable_family_cache_candidate(payload,evidence)
+            if not candidate:
+                continue
+            mid=int(candidate["media_id"])
+            current=candidates.get(mid)
+            if current is None or float(candidate["confidence"])>float(current["confidence"]):
+                candidates[mid]=candidate
+    if not candidates:
+        return {"scanned":len(rows),"candidates":0,"stamped":0}
+    assets=(db.query(MediaAsset)
+            .filter(MediaAsset.account_id==aid,
+                    MediaAsset.id.in_(sorted(candidates)),
+                    MediaAsset.deleted_at.is_(None),
+                    MediaAsset.status=="approved")
+            .all())
+    stamped=0; conflicts=0; reused=0
+    for asset in assets:
+        candidate=candidates.get(int(asset.id))
+        if not candidate:
+            continue
+        existing_family,existing_conf,_existing_subject=_asset_family_cache(asset)
+        if existing_family and existing_family!=candidate["family"]:
+            conflicts+=1
+            continue
+        if existing_family==candidate["family"] and existing_conf>=float(candidate["confidence"]):
+            reused+=1
+            continue
+        _stamp_asset_family_cache(
+            asset,candidate["family"],float(candidate["confidence"]),candidate["subject"]
+        )
+        stamped+=1
+    if stamped:
+        db.flush()
+    return {
+        "scanned":len(rows),
+        "candidates":len(candidates),
+        "stamped":stamped,
+        "reused":reused,
+        "conflicts":conflicts,
+    }
+
 def stamp_item_semantic_evidence(payload: dict, linked_media: list, verdicts: list[dict]) -> None:
     import datetime
     fp=semantic_content_fingerprint(payload); now=datetime.datetime.now(datetime.timezone.utc).isoformat(); evidence=[]
