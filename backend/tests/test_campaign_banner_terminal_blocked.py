@@ -93,3 +93,36 @@ def test_terminal_block_is_truthful_partial_when_no_siblings_remain():
     assert out["result"]["stage"] == "banners_partial"
     assert out["result"]["blocked_count"] == 1
     assert out["result"]["done"] == 1
+
+
+def test_resume_with_terminal_block_never_becomes_full_completed():
+    ids = [1, 2, 3]
+    payload = _base(ids)
+    payload["banner_terminal_blocked"] = {
+        "1": {
+            "id": 1,
+            "code": "premium_batch_qa_not_passed",
+            "reason": "Awkward crop",
+            "artifact_identity": "banner1:v1:" + "a" * 64,
+        }
+    }
+    plan = plan_banner_slice(
+        job_id=77,
+        payload=payload,
+        item_ids=ids,
+        passed_ids=[2, 3],
+        legacy_attempted=True,
+    )
+    assert plan["final"] == "partial"
+    assert plan["result"]["stage"] == "banners_partial"
+    assert plan["result"]["blocked_count"] == 1
+    assert plan["result"]["pending_item_ids"] == []
+
+
+def test_jobs_continue_only_pass_subset_after_banner_partial():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert 'str(final_result.get("stage") or "") == "banners_partial"' in src
+    assert '_passed_scope=passed_ids()' in src
+    assert '_enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,_passed_scope)' in src
+    assert 'final_result["next_stage"]="prepare_ready_subset"' in src

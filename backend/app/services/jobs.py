@@ -3187,6 +3187,12 @@ def _run_campaign_banners_premium(db, job, payload):
     if plan["final"] != "invoke":
         if plan["final"] == "completed":
             _enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,all_ids)
+        elif plan["final"] == "partial" and str(initial.get("stage") or "") == "banners_partial":
+            _passed_scope=passed_ids()
+            if _passed_scope:
+                _enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,_passed_scope)
+                initial["ready_item_ids"]=_passed_scope
+                initial["next_stage"]="prepare_ready_subset"
         return initial, plan["final"]
     chunk = plan["chunk"]
     # The maps above were committed before entering a possible provider call.
@@ -3209,6 +3215,13 @@ def _run_campaign_banners_premium(db, job, payload):
     if out["final"] == "completed":
         _enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,all_ids)
         final_result["message"] = "Баннеры прошли контроль. BORIS проверяет объявления и Avito-фид."
+    elif out["final"] == "partial" and str(final_result.get("stage") or "") == "banners_partial":
+        _passed_scope=passed_ids()
+        if _passed_scope:
+            _enqueue_scoped_prepare_after_banners(db,job,C,campaign,user,account_id,_passed_scope)
+            final_result["ready_item_ids"]=_passed_scope
+            final_result["next_stage"]="prepare_ready_subset"
+            final_result["message"]="Готовые баннеры продолжают проверку отдельно; проблемные карточки сохранены в partial subset."
     return final_result, out["final"]
 
 

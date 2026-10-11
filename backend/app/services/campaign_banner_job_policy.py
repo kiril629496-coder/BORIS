@@ -69,6 +69,12 @@ def plan_banner_slice(*, job_id, payload, item_ids, passed_ids, legacy_attempted
                         code="BANNER_BLOCKED_SCOPE_INVALID")
     remaining = [i for i in ids if i not in passed and i not in terminal_blocked]
     if not remaining:
+        if terminal_blocked:
+            first = dict(p.get("banner_terminal_blocked") or {}).get(str(sorted(terminal_blocked)[0]), {})
+            return _outcome(
+                p, ids, passed, stage="banners_partial", final="partial",
+                code=str(first.get("code") or "BANNER_TERMINAL_BLOCKED"),
+            )
         return _outcome(p, ids, passed, stage="banners_done", final="completed")
     intents = dict(p.get("banner_item_intents") or {})
     budget_intents = dict(p.get("banner_item_budget_intents") or {})
