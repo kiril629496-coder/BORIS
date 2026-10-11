@@ -17,7 +17,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def load_candidate():
     modules = {}
-    for name in ("sqlalchemy", "app", "app.db", "app.db.session", "app.services", "app.services.image_service", "app.services.media_semantic_validator", "app.services.job_execution_clock", "app.services.banner_media", "app.services.campaign_owner_banner_examples"):
+    names = (
+        "sqlalchemy", "app", "app.db", "app.db.session", "app.services",
+        "app.services.image_service", "app.services.media_semantic_validator",
+        "app.services.job_execution_clock", "app.services.banner_media",
+        "app.services.campaign_owner_banner_examples",
+    )
+    for name in names:
         module = types.ModuleType(name)
         module.__path__ = []
         modules[name] = module
@@ -33,10 +39,25 @@ def load_candidate():
     modules["app.services.campaign_owner_banner_examples"].PROFILES = {}
     modules["app.services.campaign_owner_banner_examples"].combine_reference_style = lambda variant, existing: existing
     modules["app.services.campaign_owner_banner_examples"].owner_variant = lambda *a, **k: None
+
+    # Keep the provider/DB child stubs alive for deferred imports performed
+    # by the Premium candidate during tests, but restore the parent packages and
+    # owner-example module so neighboring tests import the real implementation
+    # instead of this fixture. This removes pytest collection-order coupling
+    # without allowing any real DB/provider access from this offline suite.
+    restore_names = ("app", "app.services", "app.services.campaign_owner_banner_examples")
+    previous = {name: sys.modules.get(name) for name in restore_names}
     sys.modules.update(modules)
-    spec = importlib.util.spec_from_file_location("premium_qa_candidate", ROOT / "app/services/banner_full_ai_premium.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec = importlib.util.spec_from_file_location("premium_qa_candidate", ROOT / "app/services/banner_full_ai_premium.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        for name, prior in previous.items():
+            if prior is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prior
     return module, modules["app.services.media_semantic_validator"]
 
 premium, semantic = load_candidate()
