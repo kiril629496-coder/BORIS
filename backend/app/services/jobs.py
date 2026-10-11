@@ -1521,20 +1521,24 @@ def _run_campaign_prepare(db, job, payload):
         _qa_guard=_campaign_qa_anomaly_snapshot(db,account_id,campaign.id,len(item_ids),media_target)
         if _qa_guard.get("media_anomaly"):
             record_event(db,job_module(job.kind),"duplicate_qa_cost_anomaly",
-                         "BORIS остановил новые платные проверки: обнаружено аномально много повторных Vision-вызовов",
+                         "BORIS запретил новые платные Vision-вызовы и продолжает бесплатное восстановление по кэшу/approved media",
                          severity="warning",account_id=account_id,
-                         details={"campaign_id":campaign.id,**_qa_guard},
+                         details={"campaign_id":campaign.id,**_qa_guard,"recovery_mode":"cache_only"},
                          trace_id=str(payload.get("_trace_id") or "") or None)
-            return {
-                "stage":"cost_anomaly","code":"DUPLICATE_QA_COST_ANOMALY",
-                "campaign_id":campaign.id,"account_id":account_id,
-                "unit":"media_qa","external_action":False,
+            # COST_ANOMALY_FREE_RECOVERY_V1: anomaly is a spending circuit, not a
+            # campaign stop. Child media shards may reuse exact/family semantic
+            # proof and approved assets, but classify_item_media_vision is forced
+            # into cache-only mode so no new paid QA call can happen.
+            payload=dict(payload or {})
+            payload["_cost_anomaly_free_only"]=True
+            payload["_cost_anomaly_snapshot"]={
                 "provider_calls":_qa_guard["media_calls"],
                 "expected_calls":_qa_guard["media_expected_calls"],
                 "call_limit":_qa_guard["media_call_limit"],
                 "cost_rub":_qa_guard["media_cost_rub"],
-                "message":"BORIS остановил новые платные проверки фотографий: расход Vision заметно выше ожидаемого. Нужна автоматическая диагностика повторов перед продолжением."
-            }, "awaiting_confirmation"
+            }
+            job.payload_json=payload
+            db.flush()
         # CAMPAIGN_MEDIA_DURABLE_SHARDS_V1:
         # Parent coordinates only; canonical child jobs perform media work in the
         # same background_jobs queue. Existing worker slots + SKIP LOCKED provide
@@ -1584,6 +1588,7 @@ def _run_campaign_prepare(db, job, payload):
                     "campaign_id":int(campaign.id),"account_id":account_id,
                     "item_ids":[int(x) for x in _chunk],
                     "media_target":int(media_target),
+                    "allow_paid_qa":not bool(payload.get("_cost_anomaly_free_only")),
                     "_parent_campaign_prepare_job_id":int(job.id),
                     "_media_shard_wave":int(_wave),
                     "_priority":10,
@@ -2113,6 +2118,22 @@ def _run_campaign_deliver(db, job, payload):
     # that path before approval/feed mutation. A later real owner may explicitly
     # activate through the dedicated owner endpoint.
     _, _owner_ff = C._ff_state_load(campaign)
+    _owner_activation=dict((_owner_ff or {}).get("owner_activation") or {})
+    _owner_step=str((_owner_ff or {}).get("step") or "").strip().lower()
+    if (str(_owner_activation.get("status") or "").strip().lower()=="completed"
+            or _owner_step=="publication_completed"):
+        # CAMPAIGN_CONFIRMED_PUBLICATION_EXACTLY_ONCE_V1: a provider-confirmed
+        # full-success receipt is immutable business truth. Never submit the
+        # campaign again, even if an old/recovered delivery job wakes later.
+        return {
+            "stage":"already_published_confirmed",
+            "code":"ALREADY_PUBLISHED_CONFIRMED",
+            "campaign_id":campaign.id,
+            "account_id":account_id,
+            "upload_id":_owner_activation.get("upload_id"),
+            "external_action":False,
+            "message":"Avito уже подтвердил публикацию этой кампании. Повторная отправка заблокирована."
+        }, "completed"
     if _campaign_owner_prepare_only_contract(_owner_ff):
         _policy=dict(_owner_ff.get("publication_policy") or {})
         _policy.update({
@@ -3521,7 +3542,7 @@ def _run_campaign_media_shard(db, job, payload):
                 "pending_item_ids":[],"external_action":False}, "completed"
     result=C.ff_workflow_auto_media(
         campaign.id,
-        C.FFAutoMediaBody(item_ids=remaining,count_per_item=target),
+        C.FFAutoMediaBody(item_ids=remaining,count_per_item=target,allow_paid_qa=bool(payload.get("allow_paid_qa",True))),
         db,user,
     )
     refreshed=C.campaign_preview(campaign.id,db,user)
@@ -4174,6 +4195,16 @@ def run_once(verbose=True):
             # Retries get a deterministic spreading window; first attempts remain fast.
             previous_attempts = int(job.attempts or 0)
             ramp_payload = dict(job.payload_json or {})
+            if previous_attempts >= 100 and not bool(ramp_payload.get("_critical_attempt_alert_emitted")):
+                record_event(db,job_module(job.kind),"job_attempts_critical",
+                             "Фоновая задача превысила 100 исполнений",
+                             severity="critical",account_id=job.account_id,
+                             details={"job_id":int(job.id),"kind":str(job.kind),"attempts":previous_attempts,
+                                      "campaign_id":int(ramp_payload.get("campaign_id") or 0)},
+                             trace_id=str(ramp_payload.get("_trace_id") or "") or None)
+                ramp_payload["_critical_attempt_alert_emitted"]=True
+                ramp_payload["_critical_attempt_alert_at"]=datetime.now(timezone.utc).isoformat()
+                job.payload_json=ramp_payload
             retry_pressure = int(ramp_payload.get("_failure_count") or 0) + int(ramp_payload.get("_recovery_count") or 0)
             if retry_pressure > 0 and job.kind not in CRITICAL_KINDS and job.kind not in {"campaign_enhance", "campaign_prepare", "campaign_banners", "campaign_media_shard"}:
                 ramp_key = int(ramp_payload.get("_recovery_ramp_pressure", -1) or -1)

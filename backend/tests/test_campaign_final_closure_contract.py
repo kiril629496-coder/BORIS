@@ -1,0 +1,74 @@
+from types import SimpleNamespace
+
+from app.services import jobs
+from app.services import media_semantic_validator as sem
+
+
+def test_planeta_legacy_banner_density_is_one_in_four():
+    ff = {"order_contract": {"banner_required": True, "account_id": "planetazayavki_65985"}}
+    ids = list(range(1, 121))
+    selected = jobs._campaign_banner_target_ids(ff, ids, "planetazayavki_65985")
+    assert len(selected) == 30
+    assert selected[:4] == [1, 5, 9, 13]
+
+
+def test_explicit_banner_every_one_targets_every_card():
+    ff = {"order_contract": {"banner_required": True, "banner_every_n": 1}}
+    assert jobs._campaign_banner_target_ids(ff, [1, 2, 3], "albertardashov_79016") == [1, 2, 3]
+
+
+def test_banner_required_false_targets_no_cards():
+    ff = {"order_contract": {"banner_required": False, "banner_every_n": 1}}
+    assert jobs._campaign_banner_target_ids(ff, [1, 2, 3], "x") == []
+
+
+def test_semantic_cache_only_reuses_exact_positive_without_provider(monkeypatch):
+    payload = {
+        "title": "Ипотечная консультация",
+        "description": "Помощь с ипотекой",
+        "category": "Услуги",
+    }
+    fp = sem.semantic_content_fingerprint(payload)
+    payload["media_semantic_evidence"] = [{
+        "media_id": 11,
+        "position": 0,
+        "content_fingerprint": fp,
+        "checker": "openai_vision_text_image",
+        "match": True,
+        "confidence": 0.97,
+        "subject": "mortgage consultation",
+        "reason": "matches",
+        "policy_version": sem.SEMANTIC_POLICY_VERSION,
+    }]
+    link = SimpleNamespace(position=0)
+    asset = SimpleNamespace(id=11, tags=[], account_id="mbroker_27859")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("provider must not be called in cache-only mode")
+
+    monkeypatch.setattr(sem, "_vision_chat_json", forbidden)
+    out = sem.classify_item_media_vision(
+        payload, [(link, asset)], account_id="mbroker_27859", allow_provider=False
+    )
+    assert out[0]["match"] is True
+    assert out[0]["cached"] is True
+
+
+def test_semantic_cache_only_fails_closed_when_proof_missing(monkeypatch):
+    payload = {
+        "title": "Окна в Казани",
+        "description": "Изготовление окон",
+        "category": "Ремонт",
+    }
+    link = SimpleNamespace(position=0)
+    asset = SimpleNamespace(id=12, tags=[], account_id="albertardashov_79016")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("provider must not be called in cache-only mode")
+
+    monkeypatch.setattr(sem, "_vision_chat_json", forbidden)
+    out = sem.classify_item_media_vision(
+        payload, [(link, asset)], account_id="albertardashov_79016", allow_provider=False
+    )
+    assert out[0]["match"] is False
+    assert out[0]["checker"] == "cost_anomaly_cache_only"

@@ -1100,7 +1100,7 @@ def _stamp_asset_family_cache(asset, family: str, confidence: float, subject: st
 SEMANTIC_POLICY_VERSION = "20261006_glazing_family_v1"
 
 
-def classify_item_media_vision(payload: dict, linked_media: list, account_id: str | None = None, provenance: dict | None = None) -> list[dict]:
+def classify_item_media_vision(payload: dict, linked_media: list, account_id: str | None = None, provenance: dict | None = None, allow_provider: bool = True) -> list[dict]:
     """Compare actual images directly with title+description+category for ANY category/account.
 
     Exact current evidence is a durable cache: same content fingerprint, same
@@ -1171,6 +1171,22 @@ def classify_item_media_vision(payload: dict, linked_media: list, account_id: st
         pending.append((link, asset))
     if not pending:
         return [cached_by_key[(int(asset.id), int(link.position))] for link, asset in linked_media]
+    if not bool(allow_provider):
+        # COST_ANOMALY_CACHE_ONLY_V1: preserve the budget circuit. Reuse every
+        # existing exact/family proof, but represent unresolved placements as a
+        # deterministic non-PASS instead of invoking Vision. The caller can try a
+        # different already-proven asset or keep only this item in the repair set.
+        blocked_keys={(int(asset.id),int(link.position)) for link,asset in pending}
+        out=[]
+        for link,asset in linked_media:
+            key=(int(asset.id),int(link.position))
+            if key in cached_by_key:
+                out.append(cached_by_key[key])
+            elif key in blocked_keys:
+                out.append({"match":False,"confidence":0.0,"subject":"","reason":"paid semantic QA blocked by campaign cost anomaly; no reusable proof exists","cached":False,"checker":"cost_anomaly_cache_only"})
+            else:
+                out.append({"match":False,"confidence":0.0,"subject":"","reason":"semantic proof unavailable in cache-only mode","cached":False,"checker":"cost_anomaly_cache_only"})
+        return out
 
     title=str(payload.get("title") or "").strip()
     desc=str(payload.get("description") or "").strip()

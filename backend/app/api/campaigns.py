@@ -3467,7 +3467,7 @@ def _ff_near_duplicate_pairs(rows, threshold: float = 0.86, limit: int = 200) ->
 
 @router.get("/{campaign_id}/validation")
 def campaign_validation(campaign_id:int, db=Depends(_db), user=Depends(get_current_user)):
-    allowed=_allowed_accounts(db,user); _campaign_or_404(db,campaign_id,allowed); rows=_ff_items(db,campaign_id,allowed)
+    allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); rows=_ff_items(db,campaign_id,allowed)
     reports=[]
     for _idx,r in enumerate(rows):
         reports.append(_ff_validate_row(r,db))
@@ -3528,8 +3528,38 @@ def campaign_validation(campaign_id:int, db=Depends(_db), user=Depends(get_curre
                     "similarity":pair["ratio"],
                 })
                 rr["valid"]=False
+    # CAMPAIGN_BATCH_BANNER_QA_V1: validate the campaign as a set, not only
+    # card-by-card. Density comes from the durable order contract; composition
+    # diversity uses persisted banner metadata from the actual accepted creative.
+    _,_batch_ff=_ff_state_load(campaign)
+    _batch_order=dict((_batch_ff or {}).get("order_contract") or {})
+    _banner_required=bool(_batch_order.get("banner_required",True))
+    try: _banner_every=max(1,min(int(_batch_order.get("banner_every_n") or 1),20))
+    except (TypeError,ValueError): _banner_every=1
+    _banner_rows=[]; _families={}
+    for _row in rows:
+        _p=_ff_payload(_row)
+        if str(_p.get("banner_url") or _p.get("banner") or "").strip():
+            _banner_rows.append(int(_row.id))
+            _fam=str(_p.get("banner_composition_family") or ((_p.get("banner_visual_metadata") or {}).get("composition_family") if isinstance(_p.get("banner_visual_metadata"),dict) else "") or "").strip().lower()
+            if _fam: _families[_fam]=int(_families.get(_fam) or 0)+1
+    _banner_target=((len(rows)+_banner_every-1)//_banner_every) if (_banner_required and rows) else 0
+    _banner_actual=len(_banner_rows)
+    _density_pass=(not _banner_required and _banner_actual==0) or (_banner_required and abs(_banner_actual-_banner_target)<=1)
+    _family_total=sum(_families.values())
+    _max_family_share=(max(_families.values())/float(_family_total)) if _family_total else 0.0
+    _composition_pass=(
+        (not _banner_required)
+        or _banner_actual<6
+        or (_family_total==_banner_actual and _max_family_share<=0.35)
+    )
+    _batch_errors=[]
+    if not _density_pass:
+        _batch_errors.append({"code":"banner_density_mismatch","target":_banner_target,"actual":_banner_actual,"banner_every_n":_banner_every})
+    if not _composition_pass:
+        _batch_errors.append({"code":"banner_composition_imbalance","families":_families,"max_share":round(_max_family_share,4),"limit":0.35,"metadata_count":_family_total,"banner_count":_banner_actual})
     ready=sum(1 for r in reports if r["valid"])
-    return {"status":"ok","ok":ready==len(reports) and bool(reports),"total":len(reports),"ready":ready,"blocked":len(reports)-ready,"duplicate_pairs":dup[:100],"duplicate_description_pairs":desc_dup[:100],"near_duplicate_description_pairs":near_dup[:100],"items":reports}
+    return {"status":"ok","ok":ready==len(reports) and bool(reports) and not _batch_errors,"total":len(reports),"ready":ready,"blocked":len(reports)-ready,"duplicate_pairs":dup[:100],"duplicate_description_pairs":desc_dup[:100],"near_duplicate_description_pairs":near_dup[:100],"batch_errors":_batch_errors,"banner_batch_qa":{"required":_banner_required,"banner_every_n":_banner_every,"target_count":_banner_target,"actual_count":_banner_actual,"density_pass":_density_pass,"families":_families,"composition_pass":_composition_pass,"max_family_share":round(_max_family_share,4)},"items":reports}
 
 
 def _ff_restore_exact_media_links_from_payload(row, db, created_by=None):
@@ -5562,6 +5592,9 @@ class FFBannerBody(BaseModel):
 class FFAutoMediaBody(BaseModel):
     item_ids: list[int] = []
     count_per_item: int = 1
+    # Cost-anomaly recovery may reuse only already-proven/local assets. When
+    # false, semantic validation is cache-only and cannot invoke Vision.
+    allow_paid_qa: bool = True
 
 class FFPhotoStackBody(BaseModel):
     item_ids: list[int] = []
@@ -5569,6 +5602,7 @@ class FFPhotoStackBody(BaseModel):
     randomize: bool = True
     after_banner: bool = True
     photos_per_item: int = 6
+    allow_paid_qa: bool = True
 
 class FFEnhanceBody(BaseModel):
     item_ids: list[int] = []
@@ -9998,6 +10032,7 @@ def ff_workflow_auto_media(campaign_id:int, body:FFAutoMediaBody, db=Depends(_db
                 FFPhotoStackBody(
                     item_ids=[_row_id], media_ids=mids,
                     photos_per_item=desired_count, randomize=False, after_banner=True,
+                    allow_paid_qa=bool(body.allow_paid_qa),
                 ),
                 db,
                 user,
@@ -10168,7 +10203,7 @@ def ff_workflow_photo_stack(campaign_id:int, body:FFPhotoStackBody, db=Depends(_
         assert_current_execution_owner(db)
         db.commit()
         try:
-            verdicts=_campaign_provider_call(classify_item_media_vision, p,_qa_planned,account_id=_row_account,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_photo_stack"})
+            verdicts=_campaign_provider_call(classify_item_media_vision, p,_qa_planned,account_id=_row_account,provenance={"campaign_id":int(campaign_id),"item_id":int(_row_id),"source":"campaign_photo_stack"},allow_provider=bool(body.allow_paid_qa))
         except Exception as exc:
             db.rollback()
             raise HTTPException(422, detail={"code":"gallery_semantic_check_failed","message":"Не удалось завершить смысловую проверку выбранных фотографий. Старую галерею BORIS не изменил.","item_id":_row_id}) from exc
