@@ -1244,7 +1244,8 @@ def _campaign_premium_validation_snapshot(db, C, campaign, allowed, account_id, 
             return {"ok": False, "code": "PREMIUM_PREPARE_PUBLICATION_LOCKED"}
     ids = sorted(set(int(i) for i in item_ids))
     query = (db.query(CampaignItem).filter(CampaignItem.campaign_id == int(campaign.id),
-             CampaignItem.account_id == account_id, CampaignItem.status != "superseded")
+             CampaignItem.account_id == account_id, CampaignItem.status != "superseded",
+             CampaignItem.id.in_(ids))
              .order_by(CampaignItem.id).populate_existing())
     rows = (query.with_for_update() if lock else query).all()
     if [int(r.id) for r in rows] != ids:
