@@ -28,7 +28,9 @@ def load_candidate():
     modules["app.services.media_semantic_validator"]._vision_chat_json = lambda *a, **k: (_ for _ in ()).throw(AssertionError("real provider forbidden"))
     modules["app.services.job_execution_clock"].provider_call = lambda fn, *a, **kw: fn(*a, **kw)
     modules["app.services.banner_media"].register_banner = lambda **kw: {"id": 100, **kw}
+    modules["app.services.campaign_owner_banner_examples"].CONTRACT_VERSION = "test_stub"
     modules["app.services.campaign_owner_banner_examples"].DEFAULT_ACCENT = "#F97316"
+    modules["app.services.campaign_owner_banner_examples"].PROFILES = {}
     modules["app.services.campaign_owner_banner_examples"].combine_reference_style = lambda variant, existing: existing
     modules["app.services.campaign_owner_banner_examples"].owner_variant = lambda *a, **k: None
     sys.modules.update(modules)
