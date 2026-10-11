@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-BACKUP_DIR=/root/BORIS/backups
+BACKUP_DIR="${BORIS_BACKUP_ROOT:-/root/BORIS/backups}"
 STATUS="$BACKUP_DIR/restore_qa_status.json"
 LOCK=/run/lock/boris-backup-restore.lock
 mkdir -p "$BACKUP_DIR"
