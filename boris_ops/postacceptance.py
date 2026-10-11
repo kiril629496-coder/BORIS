@@ -67,6 +67,14 @@ recovery=run(['/usr/bin/python3',str(ROOT/'recovery_dryrun.py')])
 report={'contract':'BORIS_OPS_POST_ACCEPTANCE_45M','ok':not failures and qa['rc']==0 and hard['rc']==0 and verify['rc']==0 and recovery['rc']==0,'started_at':start,'finished_at':time.time(),'duration_s':round(time.time()-start,1),'samples':len(rows),'failures':len(failures),'failure_rows':failures[:20],'dependency_degraded_events':sum(1 for r in rows if r.get('dependency_degraded')),'qa_e2e':qa,'hardening':hard,'verify_install':verify,'recovery_dryrun':recovery,'runtime_dependency_on_github':False,'runtime_dependency_on_sentinelx':False}
 tmp=OUT.with_suffix('.tmp'); tmp.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); os.replace(tmp,OUT)
 readiness={'contract':'BORIS_OPS_PRODUCTION_READINESS','ok':report['ok'],'version':report.get('version') or ((rows[-1].get('local') or {}).get('body') or {}).get('version') if rows else None,'post_acceptance_samples':len(rows),'runtime_dependency_on_github':False,'runtime_dependency_on_sentinelx':False,'generated_at':time.time()}
-rtmp=(ROOT/'PRODUCTION_READINESS.tmp'); rfinal=ROOT/'PRODUCTION_READINESS.json'; rtmp.write_text(json.dumps(readiness,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); os.replace(rtmp,rfinal)
+rfinal=ROOT/'PRODUCTION_READINESS.json'
+try: _old_readiness=json.loads(rfinal.read_text(encoding='utf-8')) if rfinal.exists() else {}
+except Exception: _old_readiness={}
+_old_semantic=dict(_old_readiness); _old_semantic.pop('generated_at',None)
+_new_semantic=dict(readiness); _new_semantic.pop('generated_at',None)
+if _old_semantic != _new_semantic:
+    rtmp=(ROOT/'PRODUCTION_READINESS.tmp'); rtmp.write_text(json.dumps(readiness,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); os.replace(rtmp,rfinal)
+else:
+    readiness['generated_at']=_old_readiness.get('generated_at')
 print(json.dumps({'ok':report['ok'],'samples':report['samples'],'failures':report['failures'],'duration_s':report['duration_s']}))
 raise SystemExit(0 if report['ok'] else 1)

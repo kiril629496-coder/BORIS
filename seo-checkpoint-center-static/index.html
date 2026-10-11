@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="robots" content="noindex,nofollow">
+  <title>BORIS SEO Checkpoint Center — очередь проверок</title>
+  <meta name="theme-color" content="#f5f8fc">
+  <link rel="stylesheet" href="/seo-checkpoints-assets/app.css?v=20261005-r2">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <button id="mobileMenuButton" class="icon-button mobile-only" type="button" aria-label="Открыть меню">☰</button>
+      <a class="brand" href="/seo-checkpoints" aria-label="BORIS SEO Checkpoint Center">
+        <span class="brand-mark">B</span>
+        <span class="brand-copy">
+          <strong>BORIS</strong>
+          <small>SEO Checkpoint Center</small>
+        </span>
+      </a>
+      <nav class="topnav desktop-nav">
+        <a class="nav-link active" href="/seo-checkpoints"><span>✓</span>Очередь</a>
+        <a class="nav-link" href="/dashboard"><span>▥</span>Статистика</a>
+        <a class="nav-link" href="/settings"><span>⚙</span>Настройки</a>
+      </nav>
+      <div class="topbar-spacer"></div>
+      <div id="headerExtension" class="extension-mini desktop-extension">
+        <span class="chrome-mark"><i></i></span>
+        <span>
+          <strong id="headerExtensionTitle">Расширение не найдено</strong>
+          <small>BORIS Checkpoint Autofill</small>
+        </span>
+      </div>
+      <a class="icon-button desktop-settings" href="/settings" aria-label="Настройки">⚙</a>
+      <span class="avatar">K</span>
+    </header>
+
+    <div id="mobileOverlay" class="mobile-overlay" hidden></div>
+    <aside id="mobileSidebar" class="mobile-sidebar" aria-hidden="true">
+      <div class="mobile-sidebar-head">
+        <a class="brand" href="/seo-checkpoints">
+          <span class="brand-mark">B</span>
+          <span class="brand-copy"><strong>BORIS</strong><small>SEO Checkpoint Center</small></span>
+        </a>
+        <button id="mobileCloseButton" class="icon-button" type="button" aria-label="Закрыть меню">×</button>
+      </div>
+      <div class="side-nav-list">
+        <a class="side-nav active" href="/seo-checkpoints">✓ <span>Очередь проверок</span></a>
+        <a class="side-nav" href="/dashboard">▣ <span>Мои проекты</span></a>
+        <a class="side-nav" href="/dashboard">▥ <span>Статистика</span></a>
+        <a class="side-nav" href="/settings">⚙ <span>Настройки</span></a>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <aside class="sidebar desktop-sidebar">
+        <section class="sidebar-card nav-card">
+          <a class="side-nav active" href="/seo-checkpoints">✓ <span>Очередь проверок</span></a>
+          <a class="side-nav" href="/dashboard">▣ <span>Мои проекты</span></a>
+          <a class="side-nav" href="/dashboard">▥ <span>Статистика</span></a>
+          <a class="side-nav" href="/settings">⚙ <span>Настройки</span></a>
+        </section>
+
+        <section id="sidebarExtension" class="sidebar-card extension-card warning">
+          <div class="extension-title-row">
+            <span class="chrome-mark large"><i></i></span>
+            <strong id="sidebarExtensionTitle">Нужно расширение</strong>
+          </div>
+          <p>BORIS Checkpoint Autofill заполняет обычные поля и экономит время на ручной работе.</p>
+          <a class="secondary-button full" href="/downloads/boris-seo-checkpoint-autofill.zip" download="boris-seo-checkpoint-autofill-v1.2.0.zip">⇩ <span id="extensionDownloadText">Скачать расширение</span></a>
+        </section>
+
+        <section class="sidebar-card security-card">
+          <div class="security-title">◆ <strong>Центр доступен</strong></div>
+          <p>CAPTCHA, Terms и реальные данные остаются только под твоим контролем.</p>
+        </section>
+
+        <footer class="sidebar-footer">© 2026 BORIS<br>SEO Checkpoint Center<br>v1.0.0</footer>
+      </aside>
+
+      <main class="main">
+        <section class="summary">
+          <div class="summary-copy">
+            <div class="eyebrow">BORIS SEO CHECKPOINT CENTER</div>
+            <div class="summary-title-row">
+              <h1>Очередь проверок</h1>
+              <p>Проходи только CAPTCHA, вводи код и подтверждай реальные данные. BORIS заполняет обычные поля, перепроверяет площадку и продолжает публикацию.</p>
+            </div>
+          </div>
+          <div class="summary-stats">
+            <article class="stat-card">
+              <span class="stat-icon violet">▦</span>
+              <span><strong id="uniquePlatforms">—</strong><small>уникальных<br>площадок</small></span>
+            </article>
+            <article class="stat-card">
+              <span class="stat-icon green">✓</span>
+              <span><strong id="entryCount">—</strong><small>конкретных<br>вкладок</small></span>
+            </article>
+            <article class="stat-card extension-stat">
+              <span class="chrome-mark"><i></i></span>
+              <span><strong id="summaryExtensionTitle">Не найдено</strong><small>Autofill</small></span>
+            </article>
+          </div>
+        </section>
+
+        <div class="sticky-controls">
+          <section class="controls-card">
+            <div class="action-row">
+              <button id="startCaptchaModeButton" class="primary-button" type="button"><span>▶</span>Начать проход CAPTCHA <b id="captchaModeCount">0</b></button>
+              <button id="openTopButton" class="secondary-button blue" type="button"><span>★</span>Открыть ТОП-5 <b id="topCount">0</b></button>
+              <button id="openCaptchaButton" class="secondary-button amber" type="button"><span>◉</span>CAPTCHA — <b id="captchaCount">0</b></button>
+              <button id="openFirstFiveButton" class="secondary-button" type="button"><span>↗</span>Первые 5</button>
+              <button id="openNextFiveButton" class="secondary-button" type="button"><span>↗</span>Следующие 5</button>
+              <button id="openAllCaptchaButton" class="secondary-button" type="button"><span>▦</span>Все CAPTCHA</button>
+              <button id="refreshButton" class="secondary-button" type="button"><span>↻</span>Обновить</button>
+              <a class="secondary-button download-button" href="/downloads/boris-seo-checkpoint-autofill.zip" download="boris-seo-checkpoint-autofill-v1.2.0.zip"><span>⇩</span><span class="download-label">Скачать расширение</span></a>
+            </div>
+
+            <div class="filter-row">
+              <label class="search">
+                <span>⌕</span>
+                <input id="searchInput" type="search" placeholder="Поиск по домену, названию или проекту..." autocomplete="off">
+                <kbd>⌘ K</kbd>
+              </label>
+              <div id="quickFilters" class="quick-filters" role="group" aria-label="Быстрые фильтры"></div>
+              <label class="select-wrap"><select id="projectSelect" aria-label="Все проекты"><option value="all">Все проекты</option></select><span>⌄</span></label>
+              <label class="select-wrap"><select id="sortSelect" aria-label="Сортировка"><option value="priority">Сначала приоритет</option><option value="iks">Сначала ИКС</option><option value="name">По названию</option></select><span>⌄</span></label>
+            </div>
+          </section>
+          <section id="bulkBar" class="bulk-bar" hidden>
+            <strong>Выбрано: <span id="selectedCount">0</span></strong>
+            <button id="openSelectedButton" type="button">↗ Открыть выбранные</button>
+            <button id="clearSelectedButton" type="button" class="ghost">Снять выбор</button>
+          </section>
+        </div>
+
+        <div id="errorBox" class="error-box" hidden></div>
+        <div id="toast" class="toast" hidden></div>
+
+        <section class="progress-panel">
+          <div class="progress-copy">
+            <span class="eyebrow">РУЧНЫЕ ПОДТВЕРЖДЕНИЯ</span>
+            <strong><span id="doneHumanCount">0</span> / <span id="humanTotalCount">0</span> выполнено</strong>
+            <div class="progress-track"><i id="humanProgressBar"></i></div>
+          </div>
+          <div class="progress-groups">
+            <span>CAPTCHA: <b id="captchaProgress">0 / 0</b></span>
+            <span>Terms: <b id="termsProgress">0 / 0</b></span>
+            <span>Company data: <b id="companyProgress">0 / 0</b></span>
+          </div>
+        </section>
+
+        <section id="captchaWorkMode" class="captcha-work-mode" hidden>
+          <div class="work-mode-head">
+            <div>
+              <span class="eyebrow">CAPTCHA WORK MODE</span>
+              <h2>CAPTCHA <span id="workModePosition">1 из 1</span></h2>
+            </div>
+            <button id="closeCaptchaModeButton" class="icon-button" type="button" aria-label="Закрыть режим">×</button>
+          </div>
+          <div id="workModeCurrent" class="work-mode-current"></div>
+          <div class="work-mode-actions">
+            <button id="workOpenButton" class="primary-button" type="button">Открыть CAPTCHA</button>
+            <button id="workCopyButton" class="secondary-button blue" type="button">⧉ Копировать ссылку</button>
+            <button id="workSkipButton" class="secondary-button" type="button">Пропустить</button>
+            <button id="workDoneButton" class="secondary-button green" type="button">✓ Уже выполнено</button>
+          </div>
+          <div class="work-mode-batch">
+            <button id="workOpenFiveButton" type="button">Открыть текущие 5</button>
+            <button id="workNextFiveButton" type="button">Следующие 5</button>
+          </div>
+        </section>
+
+        <section class="top-five-panel">
+          <header>
+            <div><span class="eyebrow">ПРИОРИТЕТ СЕЙЧАС</span><h2>TOP-5 ручных действий</h2></div>
+            <button id="topFiveOpenAllButton" class="secondary-button blue" type="button">Открыть TOP-5</button>
+          </header>
+          <div id="topFiveCards" class="top-five-cards"></div>
+        </section>
+
+        <section id="nextFivePanel" class="next-five-panel" hidden>
+          <div><strong>Готово: <span id="batchDoneCount">0</span></strong><small>BORIS уже продолжает работу по выполненным шагам</small></div>
+          <ol id="nextFiveList"></ol>
+          <button id="nextFiveOpenButton" class="primary-button" type="button">Открыть следующие 5</button>
+        </section>
+
+        <section class="queue-shell">
+          <header class="queue-head">
+            <div>
+              <h2>✓ Очередь проверок</h2>
+              <p>Показано <span id="visibleCount">0</span> из <span id="totalCount">0</span></p>
+            </div>
+            <div class="queue-hint">✦ Сначала самые полезные действия</div>
+          </header>
+
+          <div id="loadingState" class="loading-state">
+            <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+          </div>
+
+          <div id="emptyState" class="empty-state" hidden>
+            <span class="empty-icon">⌕</span>
+            <h3>Ничего не найдено</h3>
+            <p>Попробуй изменить фильтр, проект или строку поиска.</p>
+            <button id="resetFiltersButton" class="primary-button" type="button">Сбросить фильтры</button>
+          </div>
+
+          <div id="desktopQueue" class="desktop-queue" hidden>
+            <div class="table-head row-grid">
+              <label><input id="selectAllCheckbox" type="checkbox" aria-label="Выбрать все видимые"></label>
+              <div>#</div><div>Площадка</div><div>Задача</div><div>Проект(ы)</div><div>Ссылка</div><div>Статус</div><div>Приоритет</div><div>Действие</div><div></div>
+            </div>
+            <div id="desktopRows" class="desktop-rows"></div>
+          </div>
+
+          <div id="mobileCards" class="mobile-cards" hidden></div>
+        </section>
+
+        <section class="safety-note">
+          <span>●</span>
+          <p><strong>CAPTCHA не решается автоматически.</strong> BORIS не принимает Terms, не придумывает возраст, адрес или личность.</p>
+          <b>Контроль остаётся у тебя</b>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script src="/seo-checkpoints-assets/app.js?v=20261005-r2" defer></script>
+</body>
+</html>

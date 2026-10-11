@@ -45,5 +45,12 @@ readiness={
  'recovery_dryrun_current':bool(d['recovery_dryrun_current']),
  'generated_at':time.time(),
 }
-rp=ROOT/'PRODUCTION_READINESS.json'; rt=rp.with_suffix('.tmp'); rt.write_text(json.dumps(readiness,ensure_ascii=False,indent=2)+'\n'); os.replace(rt,rp)
+rp=ROOT/'PRODUCTION_READINESS.json'
+_old_readiness=r(rp)
+_old_semantic=dict(_old_readiness); _old_semantic.pop('generated_at',None)
+_new_semantic=dict(readiness); _new_semantic.pop('generated_at',None)
+if _old_semantic != _new_semantic:
+    rt=rp.with_suffix('.tmp'); rt.write_text(json.dumps(readiness,ensure_ascii=False,indent=2)+'\n'); os.replace(rt,rp)
+else:
+    readiness['generated_at']=_old_readiness.get('generated_at')
 print(json.dumps({'ok':readiness['ok'],'version':d.get('production_version'),'pending_or_future':p,'readiness_sha256':sha},ensure_ascii=False))

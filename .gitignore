@@ -198,3 +198,33 @@ backend/client_aliases.local.json
 # --- client-specific QA artifacts kept only on production host ---
 backend/scripts/max150_staged_soak.sh
 frontend/scripts/qa-crm-dynamic-existing.py
+
+# --- repository hygiene 2026-10-11: runtime/build/client workspaces ---
+/secrets/
+/outputs/
+/run/
+/clients/
+.backend-runtime/
+/.frontend-active-source-proof*/
+/.messenger-*-frontend-prechange-hash/
+/.scoped-*/
+/uasaaap-*-live*/
+/uasaaap-*-git/
+/uasaaap-capabilities-*/
+/uasaaap-internal-closure-*/
+/uasaaap-main-closure-*/
+/uasaaap-opswatch-*/
+backend/_pack/
+backend/dev/
+backend/.ext_scale.env
+backend/.ext_report_silence
+backend/_social_*.json
+backend/_social_*.py
+backend/*.pre_*
+backend/prospecting_*.csv
+boris_ops/*.pre-*
+boris_ops/*.newfile-candidate.py
+seo-checkpoint-center-static/.backups/
+seo-checkpoint-center-static/downloads/
+backend/_noop
+docs/AI_HANDOFF/MANUS_SUPERVISOR_STATE.json
