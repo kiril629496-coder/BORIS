@@ -732,3 +732,26 @@ def test_batch_slot_matching_still_fails_closed_on_missing_or_duplicate_slot():
     assert matched == {}
     assert errors[1] == "batch_duplicate_slot"
     assert errors[2] == "batch_missing_slot"
+
+
+def test_legacy_batch_parser_invalid_detects_only_old_parser_failures():
+    assert premium._legacy_batch_parser_invalid({
+        "verdict":{"qa_status":"INVALID_RESPONSE","issues":["batch_identity_mismatch"]}
+    }) is True
+    assert premium._legacy_batch_parser_invalid({
+        "verdict":{"qa_status":"INVALID_RESPONSE","issues":["vision_qa_invalid_schema:pass"]}
+    }) is True
+    assert premium._legacy_batch_parser_invalid({
+        "verdict":{"qa_status":"REJECT","issues":["bad composition"]}
+    }) is False
+    assert premium._legacy_batch_parser_invalid({
+        "verdict":{"qa_status":"INVALID_RESPONSE","issues":["unrelated parser error"]}
+    }) is False
+
+
+def test_slot_parser_retry_is_durable_and_bounded_in_source():
+    src=(ROOT/"app/services/banner_full_ai_premium.py").read_text(encoding="utf-8")
+    assert "BATCH_SLOT_PARSER_UPGRADE_RETRY_V1" in src
+    assert 'not bool(chosen.get("slot_binding_retry_used"))' in src
+    assert 'chosen["slot_binding_retry_used"]=True' in src
+    assert "_save_versions(account_id,banner_id,_versions)" in src

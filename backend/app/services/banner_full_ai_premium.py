@@ -901,6 +901,19 @@ def _budget_scope_locks(account_id, hashes):
                               [{"banner_id": x, "version": 0} for x in sorted(set(hashes))])
 
 
+def _legacy_batch_parser_invalid(receipt) -> bool:
+    """One-time recovery candidate for receipts rejected by the old identity parser."""
+    receipt=receipt if isinstance(receipt,dict) else {}
+    verdict=receipt.get("verdict") or {}
+    if str(verdict.get("qa_status") or "")!="INVALID_RESPONSE":
+        return False
+    issues=[str(x or "").lower() for x in (verdict.get("issues") or [])]
+    return any(
+        "batch_identity_mismatch" in x or "vision_qa_invalid_schema" in x
+        for x in issues
+    )
+
+
 def _matched_batch_results(raw, identities):
     """Malformed or duplicate slots invalidate that item, preserving good neighbours."""
     by_slot = {}
@@ -1851,7 +1864,7 @@ def _finalize_preview_vision_batch_locked(account_id, rows, provenance):
         if not banner_id or type(version) is not int or version <= 0 or counts[key] != 1:
             unresolved.append(key)
             continue
-        _, chosen = _version_row(account_id, banner_id, version)
+        _versions, chosen = _version_row(account_id, banner_id, version)
         if chosen is None:
             unresolved.append(key)
             continue
@@ -1880,10 +1893,23 @@ def _finalize_preview_vision_batch_locked(account_id, rows, provenance):
             unresolved.append(key)
             continue
         verdict = (receipt or {}).get("verdict") or {}
+        _slot_parser_retry=bool(
+            receipt and _legacy_batch_parser_invalid(receipt)
+            and not bool(chosen.get("slot_binding_retry_used"))
+        )
         safe_unpaid_retry = (verdict.get("qa_cost_status") in {"not_requested", "known_not_billed"}
             and (verdict.get("qa_status") == "PENDING" or
                  verdict.get("qa_status") == "PROVIDER_ERROR" and verdict.get("provider_retryable") is True))
-        if receipt and not safe_unpaid_retry:
+        if _slot_parser_retry:
+            # BATCH_SLOT_PARSER_UPGRADE_RETRY_V1:
+            # One bounded QA-only retry on the same immutable PNG after changing
+            # result binding from model-echoed identity to server-authored slot.
+            # Existing QA spend remains in the journal and the normal MAX_COST_RUB
+            # reserve gate below must admit this retry. The durable marker prevents loops.
+            chosen["slot_binding_retry_used"]=True
+            chosen["slot_binding_retry_at"]=_now_iso()
+            _save_versions(account_id,banner_id,_versions)
+        if receipt and not (safe_unpaid_retry or _slot_parser_retry):
             # Includes terminal PASS/REJECT waiting only for accounting. No provider replay.
             updated = _apply_vision_verdict(account_id=account_id, banner_id=banner_id, version=version,
                 vision_qa=receipt["verdict"], qa_mode=str(chosen.get("vision_qa_mode") or "receipt_reuse"),
