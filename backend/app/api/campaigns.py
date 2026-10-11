@@ -3941,10 +3941,29 @@ def _ff_xml(rows):
 class FFOwnerActivationBody(BaseModel):
     account_id: str
     confirmed: bool = False
+    # Empty keeps the historical full-campaign contract. A non-empty list is an
+    # explicit immutable publication/validation scope and must match live rows.
+    item_ids: list[int] = []
 
 
-def _ff_activation_snapshot(db, campaign_id:int, allowed:list, account_id:str):
+def _ff_activation_snapshot(db, campaign_id:int, allowed:list, account_id:str, item_ids=None):
     rows = _ff_items(db, campaign_id, allowed)
+    requested=[]
+    for raw in (item_ids or []):
+        try: iid=int(raw)
+        except (TypeError,ValueError): iid=0
+        if iid>0 and iid not in requested:
+            requested.append(iid)
+    if requested:
+        by_id={int(r.id):r for r in rows}
+        missing=[iid for iid in requested if iid not in by_id]
+        if missing:
+            raise HTTPException(409,detail={
+                "code":"campaign_item_scope_invalid",
+                "message":"Часть выбранных объявлений отсутствует в текущей кампании.",
+                "missing_item_ids":missing[:100],
+            })
+        rows=[by_id[iid] for iid in requested]
     scoped = [r for r in rows if r.account_id == account_id]
     approved = [r for r in scoped if r.status == "ready"]
     accounts = sorted({r.account_id for r in rows})
@@ -4170,7 +4189,7 @@ def _ff_avito_autoload_capability(db, account_id: str, refresh: bool = False) ->
     return result
 
 
-def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoload: bool=False):
+def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoload: bool=False, item_ids=None):
     import hashlib
     from app.models.account import Account
     # DELIVERY_SNAPSHOT_NO_EXPIRE_V1:
@@ -4183,7 +4202,7 @@ def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoloa
     # through a connection that may have been recycled meanwhile.
     _campaign_id=int(campaign.id)
     _campaign_name=str(campaign.name or "")
-    rows,scoped,approved,accounts,images,cities=_ff_activation_snapshot(db,_campaign_id,allowed,account_id)
+    rows,scoped,approved,accounts,images,cities=_ff_activation_snapshot(db,_campaign_id,allowed,account_id,item_ids=item_ids)
     if not scoped or accounts != [account_id]:
         raise HTTPException(409, detail={"message":"Кампания содержит объявления другого аккаунта. Отправка заблокирована."})
     # Legacy/incomplete CampaignItems may not yet satisfy the FeedItem schema
@@ -4204,10 +4223,13 @@ def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoloa
         }
     _,ff=_ff_state_load(campaign); check=ff.get("official_xml_check") or ff.get("official_xmlcheck") or {}
     validated_sha=str(check.get("sha256") or "").strip(); check_status=str(check.get("status") or "").lower()
+    _current_scope_ids=sorted(int(r.id) for r in scoped)
+    _check_scope_ids=sorted(int(x) for x in (check.get("scope_item_ids") or []) if str(x).isdigit())
+    _scope_matches=(_check_scope_ids==_current_scope_ids) if _check_scope_ids else (not bool(item_ids))
     pending_validation_state="CHECKING" if check_status in {"pending","checking","processing"} else None
     if projection_error:
         validation_state="ERROR"
-    elif check_status in {"pass","ok"} and validated_sha and validated_sha==current_sha:
+    elif check_status in {"pass","ok"} and validated_sha and validated_sha==current_sha and _scope_matches:
         validation_state="READY"
     elif check_status in {"pass","ok"}:
         validation_state="STALE"
@@ -4278,6 +4300,7 @@ def _ff_delivery_snapshot(db, campaign, allowed, account_id:str, refresh_autoloa
     return {"status":"ok","campaign_id":_campaign_id,"campaign_name":_campaign_name,"account_id":account_id,"account_name":getattr(acc,"name",None) or account_id,
             "feed_url":f"https://boris-ai.pro/api/avito/feed/{account_id}.xml","feed_url_class":"PUBLIC","feed_mode":"Автозагрузка Avito XML","publication_mode":"Только после подтверждения владельца",
             "items":len(scoped),"approved":len(approved),"photos":images,"cities":cities,"categories":categories,"price_modes":price_modes,
+            "scope_item_ids":[int(r.id) for r in scoped],"scope_mode":"explicit_subset" if item_ids else "full_campaign",
             "current_sha":current_sha or None,"validated_sha":validated_sha or None,"validation_state":validation_state,"validation_message":check.get("message") or check.get("result") or "",
             "projection_error":projection_error,
             "publication_locked":publication_locked,"submitted_snapshot":submitted or None,"submitted_sha":submitted_sha or None,
@@ -4827,7 +4850,7 @@ def campaign_feed_validate(campaign_id:int, body:FFOwnerActivationBody, db=Depen
     import asyncio, hashlib, datetime, os
     allowed=_allowed_accounts(db,user); campaign=_campaign_or_404(db,campaign_id,allowed); target=(body.account_id or campaign.default_account_id or "").strip()
     if not target or target not in allowed: raise HTTPException(403,"Нет доступа к аккаунту")
-    rows,scoped,approved,accounts,images,cities=_ff_activation_snapshot(db,campaign_id,allowed,target)
+    rows,scoped,approved,accounts,images,cities=_ff_activation_snapshot(db,campaign_id,allowed,target,item_ids=body.item_ids)
     if not scoped or accounts != [target]: raise HTTPException(409,detail={"message":"Account scope фида не совпадает с Campaign. Проверка заблокирована."})
     _,ff_now=_ff_state_load(campaign); intake=_ff_direction_intake(db,campaign,ff_now,scoped)
     if not intake.get("all_complete"):
@@ -4845,7 +4868,12 @@ def campaign_feed_validate(campaign_id:int, body:FFOwnerActivationBody, db=Depen
         db.commit()
         raise HTTPException(409,detail={"message":"Проверка Avito заблокирована: сначала исправьте несоответствие фотографий названию/описанию/категории.","semantic_invalid":[x.get("id") for x in semantic_bad]})
     items,xml=_ff_delivery_projection(scoped,db); sha=hashlib.sha256(xml.encode("utf-8")).hexdigest()
-    root="/root/BORIS/backend/images"; rel=f"{target}/feed_factory_validation/campaign_{campaign_id}_owner_check.xml"; path=os.path.join(root,rel); os.makedirs(os.path.dirname(path),exist_ok=True)
+    _scope_item_ids=[int(r.id) for r in scoped]
+    _scope_suffix=""
+    if body.item_ids:
+        _scope_digest=hashlib.sha256(",".join(str(x) for x in sorted(_scope_item_ids)).encode("utf-8")).hexdigest()[:12]
+        _scope_suffix=f"_scope_{_scope_digest}"
+    root="/root/BORIS/backend/images"; rel=f"{target}/feed_factory_validation/campaign_{campaign_id}{_scope_suffix}_owner_check.xml"; path=os.path.join(root,rel); os.makedirs(os.path.dirname(path),exist_ok=True)
     with open(path,"w",encoding="utf-8") as f: f.write(xml)
     url="https://boris-ai.pro/images/"+rel
     from app.api.parser import validate_feed_xmlcheck
@@ -4988,13 +5016,13 @@ def campaign_feed_validate(campaign_id:int, body:FFOwnerActivationBody, db=Depen
     ff["official_required_feedback"]={"issues":result.get("issues") or [],"learned":learned,"docs_enriched":docs_enriched,"checked_at":now}
     _check_status="pass" if ok else ("pending" if pending else "error")
     _check_message="XML соответствует формату" if ok else ("Avito ещё формирует отчёт — BORIS продолжит проверку автоматически" if pending else "Проверка Avito не пройдена")
-    ff["official_xml_check"]={"status":_check_status,"checker":"Avito xmlcheck","message":_check_message,"ready":len(scoped) if ok else 0,"total":len(scoped),"sha256":sha,"url":url,"checked_at":now,"media_placements":images,"warnings":result.get("warnings") or [],"errors":result.get("errors") or [],"issues":result.get("issues") or [],"learned":learned,"transport":result.get("transport"),"check_id":result.get("check_id")}
-    ff["owner_ready_xml"]={"artifact":"/images/"+rel,"sha256":sha,"items":len(scoped),"media_placements":images,"generated_at":now,"external_upload":False,"official_xmlcheck":{"status":_check_status,"message":_check_message,"checked_items":len(scoped),"checked_at":now}}
+    ff["official_xml_check"]={"status":_check_status,"checker":"Avito xmlcheck","message":_check_message,"ready":len(scoped) if ok else 0,"total":len(scoped),"sha256":sha,"url":url,"checked_at":now,"media_placements":images,"scope_item_ids":_scope_item_ids,"scope_mode":"explicit_subset" if body.item_ids else "full_campaign","warnings":result.get("warnings") or [],"errors":result.get("errors") or [],"issues":result.get("issues") or [],"learned":learned,"transport":result.get("transport"),"check_id":result.get("check_id")}
+    ff["owner_ready_xml"]={"artifact":"/images/"+rel,"sha256":sha,"items":len(scoped),"scope_item_ids":_scope_item_ids,"scope_mode":"explicit_subset" if body.item_ids else "full_campaign","media_placements":images,"generated_at":now,"external_upload":False,"official_xmlcheck":{"status":_check_status,"message":_check_message,"checked_items":len(scoped),"checked_at":now}}
     _ff_rule_result(db,_feed_xml_context,xml_written=True,xml_items=len(scoped),xmlcheck_status=_result_status,check_id=result.get("check_id"))
     _ff_state_save(db,campaign,ff)
     # Official XML validation is also the natural point to refresh real Autoload
     # capability, so READY never means "OAuth keys exist but upload is forbidden".
-    return _ff_delivery_snapshot(db,campaign,allowed,target,refresh_autoload=True)
+    return _ff_delivery_snapshot(db,campaign,allowed,target,refresh_autoload=True,item_ids=body.item_ids)
 
 
 @router.get("/{campaign_id}/owner_activation")
@@ -5041,13 +5069,13 @@ def campaign_owner_activate(campaign_id:int, body:FFOwnerActivationBody, db=Depe
     _disabled,_disabled_reason=_module_blocked(db,"marketing",target)
     if _disabled:
         raise HTTPException(409,detail={"code":"account_disabled","message":_disabled_reason or "Действия BORIS для аккаунта отключены","changed_avito":False})
-    rows,scoped,approved,accounts,images,cities=_ff_activation_snapshot(db,campaign_id,allowed,target)
+    rows,scoped,approved,accounts,images,cities=_ff_activation_snapshot(db,campaign_id,allowed,target,item_ids=body.item_ids)
     if not scoped or len(approved)!=len(scoped) or len(scoped)!=len(rows) or accounts!=[target]:
         raise HTTPException(409,detail={"message":f"Согласуйте объявления перед размещением. Сейчас согласовано {len(approved)} из {len(scoped)}.","approved":len(approved),"total":len(scoped)})
     # Delivery always refreshes real Autoload capability immediately before any
     # persistent feed-store mutation or external upload.
     _feed_activation_context=_ff_rule_capture(db,campaign,target,"activation_preflight",_ff_rule_item_input(scoped))
-    delivery=_ff_delivery_snapshot(db,campaign,allowed,target,refresh_autoload=True)
+    delivery=_ff_delivery_snapshot(db,campaign,allowed,target,refresh_autoload=True,item_ids=body.item_ids)
     _ff_rule_result(db,_feed_activation_context,delivery=delivery)
     # _ff_delivery_snapshot already closes bounded read transactions; this closes the ledger-only observation.
     db.commit()
@@ -5459,10 +5487,15 @@ def campaign_owner_activate(campaign_id:int, body:FFOwnerActivationBody, db=Depe
     # officially validated so post-publication review never depends on mutable bytes.
     _,_submit_ff=_ff_state_load(campaign)
     _ready_xml=dict(_submit_ff.get("owner_ready_xml") or {})
+    _submission_scope_ids=[int(r.id) for r in scoped]
+    _ready_scope_ids=[int(x) for x in (_ready_xml.get("scope_item_ids") or []) if str(x).isdigit()]
+    _ready_scope_matches=(sorted(_ready_scope_ids)==sorted(_submission_scope_ids)) if _ready_scope_ids else (not bool(body.item_ids))
     _validated_artifact=None
-    if str(_ready_xml.get("sha256") or "").strip()==str(delivery.get("validated_sha") or "").strip():
+    if (str(_ready_xml.get("sha256") or "").strip()==str(delivery.get("validated_sha") or "").strip()
+            and _ready_scope_matches):
         _validated_artifact=str(_ready_xml.get("artifact") or "").strip() or None
     _submitted_snapshot={"sha256":delivery.get("current_sha"),"validated_sha256":delivery.get("validated_sha"),
+                         "scope_item_ids":_submission_scope_ids,"scope_mode":"explicit_subset" if body.item_ids else "full_campaign",
                          "validation_state":delivery.get("validation_state"),"semantic_ready":bool(delivery.get("semantic_ready")),
                          "cutover_evidence":_cutover_evidence,
                          "targeted_replacement_evidence":_targeted_replacement_evidence,

@@ -234,3 +234,46 @@ def test_providerfree_guard_recuration_is_local_and_non_paid():
     assert '"media_semantic_guard_missing"' in src
     assert '"source":"providerfree_guard_recuration"' in src
     assert '"reason":"providerfree_guard_recuration"' in src
+
+
+def test_explicit_activation_scope_selects_exact_item_ids(monkeypatch):
+    from types import SimpleNamespace
+    from app.api import campaigns as campaign_api
+
+    rows = [
+        SimpleNamespace(id=1, account_id="acc", status="ready", payload_json='{"images":["/images/a.jpg"]}', geo="Moscow"),
+        SimpleNamespace(id=2, account_id="acc", status="ready", payload_json='{"images":["/images/b.jpg"]}', geo="Moscow"),
+        SimpleNamespace(id=3, account_id="acc", status="draft", payload_json='{"images":["/images/c.jpg"]}', geo="Moscow"),
+    ]
+    monkeypatch.setattr(campaign_api, "_ff_items", lambda db, campaign_id, allowed: list(rows))
+    scoped_rows, scoped, approved, accounts, images, cities = campaign_api._ff_activation_snapshot(
+        None, 77, ["acc"], "acc", item_ids=[2]
+    )
+    assert [r.id for r in scoped_rows] == [2]
+    assert [r.id for r in scoped] == [2]
+    assert [r.id for r in approved] == [2]
+    assert accounts == ["acc"]
+    assert images == 1
+
+
+def test_explicit_activation_scope_rejects_missing_item(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+    from types import SimpleNamespace
+    from app.api import campaigns as campaign_api
+
+    rows = [SimpleNamespace(id=1, account_id="acc", status="ready", payload_json='{}', geo="")]
+    monkeypatch.setattr(campaign_api, "_ff_items", lambda db, campaign_id, allowed: list(rows))
+    with pytest.raises(HTTPException) as exc:
+        campaign_api._ff_activation_snapshot(None, 77, ["acc"], "acc", item_ids=[999])
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "campaign_item_scope_invalid"
+
+
+def test_subset_publication_receipt_is_bound_to_exact_scope():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/api/campaigns.py").read_text(encoding="utf-8")
+    assert "scope_item_ids" in src
+    assert '"scope_mode":"explicit_subset" if body.item_ids else "full_campaign"' in src
+    assert "_ready_scope_matches" in src
+    assert "_scope_matches" in src
