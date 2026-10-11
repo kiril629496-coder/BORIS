@@ -1934,7 +1934,12 @@ def _run_campaign_prepare(db, job, payload):
                 detached=[(_SNS(position=int(l.position)),_SNS(id=int(a.id),storage_key=str(a.storage_key),tags=list(a.tags or []),account_id=str(a.account_id or ''),source_provider=str(a.source_provider or ''),source_ref=str(a.source_ref or ''))) for l,a in links]
                 db.commit()
                 try:
-                    verdicts=classify_item_media_vision(p,detached,account_id=_row_account,provenance={"campaign_id":_campaign_id,"item_id":_row_id,"job_id":int(job.id),"source":"campaign_job_internal_validation"})
+                    _internal_allow_provider=not bool((payload or {}).get("_cost_anomaly_free_only"))
+                    verdicts=classify_item_media_vision(
+                        p,detached,account_id=_row_account,
+                        provenance={"campaign_id":_campaign_id,"item_id":_row_id,"job_id":int(job.id),"source":"campaign_job_internal_validation"},
+                        allow_provider=_internal_allow_provider,
+                    )
                 except RuntimeError as _vision_exc:
                     _vmsg=str(_vision_exc or "")
                     if _vmsg.startswith("VISION_DAILY_CAP"):
@@ -1946,6 +1951,17 @@ def _run_campaign_prepare(db, job, payload):
                     if _vmsg.startswith("VISION_BUDGET_RESERVE_FAILED") or _vmsg.startswith("VISION_DB_POOL_BUSY_RETRYABLE"):
                         raise ProviderDeferred("openai_vision_capacity", 60) from _vision_exc
                     raise
+                _cache_only_unproven=[
+                    v for v in verdicts
+                    if str((v or {}).get("checker") or "")=="cost_anomaly_cache_only"
+                ]
+                if _cache_only_unproven:
+                    # CACHE_ONLY_UNPROVEN_IS_NOT_REJECTION_V1:
+                    # Missing reusable proof under a spend circuit is neither a
+                    # positive nor a negative semantic verdict. Keep current media
+                    # untouched and leave the item in the repair subset; never
+                    # poison per-card negative memory with a proof we did not buy.
+                    continue
                 bad=[v for v in verdicts if (not bool(v.get("match"))) or float(v.get("confidence") or 0)<0.80]
                 row=db.query(CampaignItem).filter(CampaignItem.id==_row_id).first()
                 fresh=(db.query(MediaLink,MediaAsset).join(MediaAsset,MediaAsset.id==MediaLink.media_id)

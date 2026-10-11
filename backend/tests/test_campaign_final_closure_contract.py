@@ -215,3 +215,12 @@ def test_active_child_does_not_erase_parent_no_progress_debt():
     src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
     assert "CHILD_EXISTENCE_IS_NOT_PROGRESS_V1" in src
     assert 'if int((result or {}).get("child_jobs_active") or 0)>0:' not in src
+
+
+def test_internal_validation_respects_cost_anomaly_cache_only_mode():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert '_internal_allow_provider=not bool((payload or {}).get("_cost_anomaly_free_only"))' in src
+    assert "allow_provider=_internal_allow_provider" in src
+    assert "CACHE_ONLY_UNPROVEN_IS_NOT_REJECTION_V1" in src
+    assert '=="cost_anomaly_cache_only"' in src
