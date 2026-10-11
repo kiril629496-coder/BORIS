@@ -1,0 +1,196 @@
+BORIS MESSENGER V7.1 — FINAL ACCEPTANCE
+Authoritative state: 2026-10-04 02:22 Europe/Moscow (2026-10-03 23:22 UTC).
+Workstream: sxc_GWGJY164. Основная задача: МЕССЕНДЖЕР ДОРАБОТКА 310.
+Этот файл заменяет прежние STATUS.txt / ACCEPTANCE_RU.txt как итоговое состояние V7.1.
+Область ALL_TESTS — Messenger и связанные invite/role tests; это не утверждение о каждом тесте всего монорепозитория.
+
+BORIS_MESSENGER_CODE_READY=100%
+BORIS_MESSENGER_PRODUCTION_READY=WAITING_PHYSICAL_DEVICE_ACCEPTANCE
+
+ACTIVE IMMUTABLE RELEASES
+SOURCE_COMMIT=f752362022b3249dd7ea5bed66e0f6435d05dbc8
+CURRENT_BUILD=ca40cedd57cf6dd19a30822ebe1aef1f28bda40dd8f69e9078de03e81c98e50f
+PRIMARY_BUILD=ca40cedd57cf6dd19a30822ebe1aef1f28bda40dd8f69e9078de03e81c98e50f
+REPLICA_BUILD=ca40cedd57cf6dd19a30822ebe1aef1f28bda40dd8f69e9078de03e81c98e50f
+PRIMARY_MAINPID=2915729
+REPLICA_MAINPID=2914612
+FRONTEND_BUILD=uyQn9QdjrxmfhtJ5vIS6Z
+FRONTEND_ARTIFACT=20261003T220800Z-2865727-1561
+FRONTEND_SOURCE_HASH=f341a8bb69f09287e008bbcbb03c0940e7d3188cfa0571b0cd7d9e6dcf9b4534
+FRONTEND_SOURCE_EQUALS_ACTIVE=PASS
+BACKEND_SOURCE_EQUALS_ACTIVE=PASS
+Состояние репозитория не использовалось вместо immutable runtime: проверены manifest, actual MainPID/--app-dir, SHA файлов и health.
+
+FINAL MATRIX
+ALL_TESTS=PASS
+MESSENGER_TESTS=186/186 PASS
+MESSENGER_AND_TEAM_REGRESSION=196/196 PASS
+SKIP=0
+XFAIL=0
+TYPESCRIPT=PASS
+PRIVATE_EVENT_ISOLATION=PASS
+PRIVATE_DM_EVENT_ISOLATION=PASS
+PRIVATE_GROUP_EVENT_ISOLATION=PASS
+PRIVATE_EVENT_POLLING=PASS
+PRIVATE_EVENT_SSE=PASS
+PRIVATE_EVENT_REPLAY=PASS
+PRIVATE_EVENT_METADATA_LEAK=0
+CROSS_TENANT_EVENT_ISOLATION=PASS
+GENERAL_CHAT_EVENTS=PASS
+READINESS_PRIVACY=PASS
+DUPLICATE_INVITE_PHONE=409
+DM=PASS
+DM_UI=PASS
+DM_REALTIME=PASS
+DM_DEDUP=PASS
+GROUP=PASS
+GROUP_UI=PASS
+GROUP_REALTIME=PASS
+GROUP_LIFECYCLE=PASS
+VIEWER=PASS
+VIEWER_UI=PASS
+VIEWER_BACKEND_MUTATIONS_403=13/13 PASS
+REPLY=PASS
+EDIT=PASS
+DELETE=PASS
+PIN=PASS
+REACTIONS=PASS
+ATTACHMENTS=PASS
+ATTACHMENT_SECURITY=PASS
+REPORTS=PASS
+SLASH_COMMANDS=PASS
+SLASH_RAW_MESSAGE_SENT=0
+ACCOUNT_SWITCH=PASS
+SESSION_SECURITY=PASS
+PUSH_PRIVACY=PASS
+BACKUP_RESTORE=PASS
+LOAD_TESTS=PASS
+PWA_AUTOMATED=PASS
+ACCESSIBILITY=PASS
+OFFLINE_RECONNECT=PASS
+MISSED_MESSAGES=5/5
+DUPLICATES=0
+MESSAGE_ORDER=PASS
+UNREAD_AFTER_RECONNECT=PASS
+READ_RECEIPT_AFTER_RECONNECT=PASS
+CONCURRENT_SSE_4=PASS
+NATIVE_SELECTS=0
+FAKE_CONTROLS=0
+MISSING_ROUTES=0
+BUTTON_AUDIT_FAIL=0
+RAW_TECH_ERRORS=0
+BACKEND_CANDIDATE_CERTIFICATION=PASS
+BACKEND_ACTIVATION=PASS
+BACKEND_RUNTIME_GENERATION=PASS
+PRIMARY_REPLICA_CONVERGENCE=PASS
+PRODUCTION_CONTRACT=PASS
+PRIMARY_HEALTH=200
+REPLICA_HEALTH=200
+PUBLIC_HEALTH=200
+MOBILE_320=PASS
+MOBILE_360=PASS
+MOBILE_390=PASS
+MOBILE_430=PASS
+DESKTOP_1024=PASS
+DESKTOP_1280=PASS
+DESKTOP_1440=PASS
+BROWSER_ZOOM_200=PASS
+
+ЧТО ВЫПУЩЕНО
+1. P0 private-event isolation ранее штатно активирована в 71f306403a6635daa39803276a296cba8214de2f4c014f3779dd64a2b1ce946b.
+   SQL visibility применяется до LIMIT; nonmember не получает event или cursor.advance placeholder.
+   Polling, SSE, backlog, Last-Event-ID, removed-member, cross-tenant и General подтверждены LIVE.
+2. Финальный scoped release основан на актуальном b1a687278d31c40325a8924e9004aecde49fc7b5dc89976cdde2ec6b20918a19 и сохраняет чужой Campaign delta.
+   Только app/api/team.py и app/api/internal_messenger.py:
+   — конфликт уникального телефона -> controlled 409 на русском, rollback; прочие DB errors не маскируются;
+   — readiness failure counts ограничены собственными Push-подписками, pending — target_user_ids;
+   — приватные conversation counters дополнительно требуют текущего membership.
+   team.py SHA256=4efbb83bec48fe7b6813cd2e8201fa97da34c59ad8bc82197d3d828b4c112ad9
+   internal_messenger.py SHA256=30076923ffbb882feab25bf0a6c5f1d327c755302e6cfc16e323f8bb7b71c882
+   Certification/activation/production-contract: job_4a555856acea.
+   Повторный запрос job_6b1f378c1a4f был штатно отклонён BASELINE_NOT_CURRENT после завершения того же delta; повторной активации не было.
+3. Активный frontend включает group member selector, обновление заголовка после rename, emoji/count,
+   исправленные размеры composer/report menu и keyboard/focus/custom dropdown fixes.
+   Source hash совпадает с активным READY immutable artifact: дополнительной frontend delta нет.
+
+ДОКАЗАТЕЛЬСТВА ПОСЛЕ DEPLOYMENT
+— job_d31400043229: private polling/SSE/replay/metadata/general/cross-tenant/session revoke — 27 PASS;
+  DM/group/Viewer UI — 22 PASS; группа create/rename/add/remove/admin/demote/transfer/leave, четыре emoji во втором браузере.
+  JPG/PDF upload, сообщение, second-user download SHA, nonmember404; 5 report menus, 6 slash, preview-before-share,
+  report-to-chat; 7 отрицательных attachment сценариев — PASS.
+— job_5fd36ec6620e: readiness member/nonmember/removed-member и duplicate phone409 — 7 PASS.
+— job_1aed071ff661: PNG upload200, attachment link200, second-user SHA, nonmember404 — PASS.
+— job_a0b3e4f1dfcd: security_epoch revoke-all, оба старых JWT401, fresh session valid — 6 PASS;
+  account switch — 8 PASS, chats/clients/tasks/members/reports/finance/reactivation/AB,
+  delayed old-account response; old workspace leak frames=0.
+— job_93fa361882ba: offline/reconnect headers, 4 SSE readers, 5 ordered missed messages, no duplicates,
+  unread и read receipt после восстановления — 6 PASS.
+— job_5d26a527c526: production-contract status=pass, accounts20/20, failures=[],
+  backend/background/CRM/telephony/deploy generation и health guards=true.
+— final-runtime-readback.json: actual immutable IDs, PID/--app-dir, source/runtime hashes, health200/200/200.
+
+РЕГРЕССИЯ И СОХРАНЁННЫЕ ПРОВЕРКИ
+job_8b3abda11686: все test_messenger*.py, test_internal_messenger_contract.py,
+test_team_invite*.py, test_team_role_update_contract.py — 196 PASS; TypeScript и frontend deploy contract PASS.
+Единственное предупреждение: python_multipart PendingDeprecationWarning; пропусков/xfail нет.
+job_8b4950fa7db3: control/design/route/PWA-push/security-source audits — PASS.
+Control audit: 129 buttons, 154 controls; native selects0, failures0. Route audit: 45 frontend API calls, missing0.
+Сохранены без необоснованного повтора:
+job_681fba9c5f18 — 320x568,360x800,390x844,430x932,1024x768,1280x800,1440x900:
+Chats/NewDM/NewGroup/More/Team/Settings/Security/Reports/dropdown/Composer, overflow0/native0/JSerrors0.
+job_7e46163886a1 — реальный Chrome zoom200%: innerWidth1440->720, DPR1->2, без горизонтального overflow.
+job_0ad88989f3ff — Viewer13 backend mutations403 и DM dedup.
+job_27cb2b1e6aa1 — reply/edit/delete/pin/unpin/reconnect.
+job_14367227708e — invite/register/login/legal428->own acceptance/General/ACTIVE/revoke API401/UIclear/session revoke.
+Его прежние два role-UI FAIL закрыты job_d213a8a661c4: MANAGER_LEAD/VIEWER/MANAGER readback PASS.
+job_d03d68ad5840 — expired и cancelled invite rejected, PASS; one-time/account-role binding подтверждены.
+Старые FAIL в evidence сохранены для истории, а не перенесены в финальное состояние:
+readiness source-test уточнён до проверки returned payload; endpoint_hash используется только внутри ownership SQL;
+PNG429 подтверждён nginx burst log, закрыт отдельной paced QA без изменения rate limit;
+reconnect fixture исправлен: актуальный label «Нет связи», unread включает system event создания группы.
+
+НАГРУЗКА
+job_1daf25ad152d, реальная QA DB + браузер:
+100 employees picker API52.4ms, UI PASS.
+500 chats API71.6ms, UI492.3ms.
+1000 chats API101.0ms, UI892.5ms; 1001 строк с General.
+10 000 messages: страницы100/100 без пересечения, API80.5/74.0ms;
+DOM100 первоначально ->200 после «Загрузить более ранние», не 10 000.
+4 concurrent readers, 12 GET: median170.55ms/max225.7ms, без ошибок.
+4 одновременных SSE и reconnect подтверждены отдельным post-load job_93fa361882ba.
+Это ограниченная acceptance-нагрузка, не заявление о бесконечной нагрузке или SLA для любого числа одновременных пользователей.
+
+PWA / ACCESSIBILITY
+job_701bb03c5f91 и job_227bce1db981:
+manifest scope/start_url/display, installability errors=[], SW install/activate/control/version/update,
+offline shell, отсутствие private API в cache, reconnect — PASS.
+Push handler и notificationclick выполнены в isolated worker runtime с перехватом showNotification/client.navigate:
+generic body и точный Messenger deep-link PASS; внешняя Push-сеть не эмулируется как physical PASS.
+job_c4194bd90500: реальный headed Chrome149/Xvfb, install, OS app state, launch,
+display-mode:standalone=true в отдельном app window, исходная browser tab=false; uninstall и session cleanup PASS.
+job_36937f41aebd: Tab/Shift+Tab, Enter, Esc, focus return, dropdown arrows/Home/End — 8 PASS.
+200% реальный browser zoom — сохранённый PASS.
+
+BACKUP / CLEANUP
+Backup /root/BORIS/backend/backups/schema/boris_db_20261003T171802Z_messenger_v7.sql.gz
+Size381721977 bytes
+SHA256=883725b60e0d5281e2dd0031f8d67d6612b207c176b7d04b4eb467241c13aff9
+job_741abac2c9cc: восстановление в temporary DB, 9 таблиц с равными counts,
+receipts в internal_conversation_members.last_read_message_id, unvalidated constraints0;
+temporary DB удалена, production DB не восстанавливалась. Не повторялось.
+Каждый QA-run отозвал свои sessions и удалил disposable conversations/messages/attachment files.
+Load fixtures100users/1000conversations/10k messages удалены; readback counts0.
+Readiness test outbox/fake subscriptions удалены; readback0.
+V71 temporary active sessions0. Security/audit evidence не удалялись; synthetic invited employees revoked.
+Реальных Avito sends/publications, рекламного бюджета, paid AI и реальной реактивации эти QA не выполняли.
+final-cleanup-readback.json содержит readback.
+
+ЕДИНСТВЕННАЯ ВНЕШНЯЯ ПРИЁМКА
+PHYSICAL_PUSH_MAC=DEVICE_REQUIRED
+PHYSICAL_PUSH_ANDROID=DEVICE_REQUIRED
+PHYSICAL_PUSH_IOS=DEVICE_REQUIRED
+PHYSICAL_DEVICE_ACCEPTANCE_REQUIRED
+Не подтверждены без физических устройств: закрыть установленное приложение, получить настоящий OS Push,
+нажать уведомление и проверить right chat/privacy body на macOS Chrome/PWA, Android PWA, iPhone Safari Home Screen.
+Чек-листы: PHYSICAL_DEVICE_ACCEPTANCE.txt и DEVICE_CHECKLIST_RU.txt.
+Технических NOT READY по V7.1 на проверенном immutable состоянии не осталось.

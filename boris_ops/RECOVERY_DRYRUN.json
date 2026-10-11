@@ -1,0 +1,19 @@
+{
+  "contract": "BORIS_OPS_RECOVERY_DRYRUN",
+  "ok": true,
+  "pack": "/root/BORIS/backups/boris-ops/recovery-1.4.3-20260904T085950Z.tar.gz",
+  "pack_sha256": "0bf087fd9474b7a107c206be29551105d826447e3101bba29bc9908ef606db2f",
+  "checks": {
+    "pack_exists": true,
+    "pack_sha256": true,
+    "manifest_no_runtime_dependencies": true,
+    "manifest_no_secrets": true,
+    "internal_sha256s": true,
+    "secret_files_absent": true,
+    "credential_values_absent": true,
+    "python_compile": true,
+    "recovery_instructions": true,
+    "extract": true
+  },
+  "errors": []
+}

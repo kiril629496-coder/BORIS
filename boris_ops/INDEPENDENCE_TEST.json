@@ -1,0 +1,16 @@
+{
+  "test": "BORIS_OPS_INDEPENDENCE_FROM_SENTINELX",
+  "passed": true,
+  "started_at": 1788381292,
+  "finished_at": 1788381315,
+  "duration_s": 23,
+  "sentinelx_was_stopped": true,
+  "checks": [
+    "local_health",
+    "external_https_health",
+    "signed_hmac_version",
+    "systemd_service"
+  ],
+  "failures": [],
+  "runtime_dependency_on_sentinelx": false
+}

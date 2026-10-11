@@ -1,0 +1,14 @@
+{
+  "contract": "BORIS_OPS_60M_CERTIFICATION",
+  "ok": true,
+  "expected_version": "1.4.2",
+  "expected_agent_sha256": "41458ac138a29b687244d3398ed6aa29d006967b4a786d9a54411bcaac3bdb1d",
+  "final_agent_sha256": "41458ac138a29b687244d3398ed6aa29d006967b4a786d9a54411bcaac3bdb1d",
+  "samples": 120,
+  "failures": 0,
+  "duration_s": 3587.9,
+  "started_at": 1788435050.9690907,
+  "finished_at": 1788438638.8489072,
+  "failure_rows": [],
+  "degraded_events": []
+}

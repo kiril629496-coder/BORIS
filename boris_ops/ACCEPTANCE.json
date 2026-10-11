@@ -1,0 +1,46 @@
+{
+  "contract": "BORIS_OPS_ACCEPTANCE",
+  "generated_at": 1788434899.592442,
+  "runtime_version": "1.4.2",
+  "runtime_agent_sha256": "8e6682e709a59e617c107567185d4b98c30b9ac8252a7a9f88812a42096e022b",
+  "current": {
+    "production_qa_19_19": true,
+    "hardening_qa_20_20": true,
+    "external_https_health": true,
+    "mcp_stdio_borisops": true,
+    "runtime_dependency_on_sentinelx": false,
+    "runtime_dependency_on_github": false,
+    "nonce_replay_persists_across_restart": true,
+    "job_restart_state_persists_to_disk": true,
+    "certification_single_instance_lock": true,
+    "self_update_rollback_evidence_preserved": true,
+    "offline_recovery_pack": "/root/BORIS/backups/boris-ops/recovery-20260903T112719Z.tar.gz"
+  },
+  "pending": {
+    "certify60": "running_fresh_1.4.2",
+    "stress45": "running_fresh_1.4.2"
+  },
+  "artifacts": {
+    "agent.py": {
+      "sha256": "8e6682e709a59e617c107567185d4b98c30b9ac8252a7a9f88812a42096e022b"
+    },
+    "qa_e2e.py": {
+      "sha256": "2d35813f8357d6f06d5b0f0776d0dbd88584268d938815ee9e44fab21d2fbb85"
+    },
+    "hardening_qa.py": {
+      "sha256": "3f48aa171aed2a4a3c34b5785e9aec1f4c93b2c569584af76d3a329a5dd10f32"
+    },
+    "certify60.py": {
+      "sha256": "38d48489096433d65ae71fdfb1aa5825f358e0ffd8fd826710dc89a0bbadde69"
+    },
+    "stress45.py": {
+      "sha256": "c84a6bbd1a2068fe6c4f78574271c43e72440ad9a772c51c42f5a749c102669d"
+    },
+    "verify_install.py": {
+      "sha256": "70d10ea8dab494de51a34f97d2684eff98823d724ec5840eaad404c03b6d7b95"
+    },
+    "INSTALL_MANIFEST.json": {
+      "sha256": "c8c1415b96205564316b0c4af2356a867066b40b96bcf43b58042fd8bfb39343"
+    }
+  }
+}

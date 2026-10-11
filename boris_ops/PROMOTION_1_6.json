@@ -1,0 +1,30 @@
+{
+  "contract": "BORIS_OPS_PROMOTE_1_6",
+  "started_at": 1788393464.5563822,
+  "candidate": "/root/BORIS/boris_ops/releases/agent-1.6.0-candidate.py",
+  "candidate_sha256": "c7ba8dfde5055a793d287f9bef3e359a7e9d5bc64f83192b8405e462e8635739",
+  "steps": [
+    {
+      "self_update_request": 403,
+      "response": {
+        "ok": false,
+        "error": "self_update_gate_closed"
+      }
+    }
+  ],
+  "pre_promotion_cert": {
+    "contract": "BORIS_OPS_60M_CERTIFICATION",
+    "ok": true,
+    "expected_version": "1.3.0",
+    "samples": 120,
+    "failures": 0,
+    "duration_s": 3583.1,
+    "started_at": 1788392931.8764982,
+    "finished_at": 1788396514.952993,
+    "failure_rows": [],
+    "degraded_events": []
+  },
+  "ok": false,
+  "error": "self_update_request_failed",
+  "finished_at": 1788396526.539696
+}

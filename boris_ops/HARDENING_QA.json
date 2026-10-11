@@ -1,0 +1,32 @@
+{
+  "contract": "BORIS_OPS_HARDENING_QA",
+  "ok": true,
+  "passed": 23,
+  "total": 23,
+  "checks": {
+    "public_health": true,
+    "unauthorized_denied": true,
+    "version": true,
+    "diagnostics": true,
+    "audit_recent": true,
+    "dangerous_exec_denied": true,
+    "arbitrary_exec_denied": true,
+    "service_deny": true,
+    "read_root_deny": true,
+    "write_root_deny": true,
+    "patch_ok": true,
+    "stale_patch_deny": true,
+    "backup_unique_same_second": true,
+    "upload_hash_deny": true,
+    "upload_ok": true,
+    "soft_delete": true,
+    "restore": true,
+    "mcp_tools": true,
+    "mcp_unknown": true,
+    "state_dirs_private": true,
+    "state_files_private": true,
+    "strict_public_5xx_cert_policy": true,
+    "strict_cert_acceptance_budget": true
+  },
+  "failed": []
+}

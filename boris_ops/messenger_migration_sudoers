@@ -1,0 +1,2 @@
+Cmnd_Alias BORIS_MESSENGER_MIGRATION = /usr/local/sbin/boris-messenger-migration status, /usr/local/sbin/boris-messenger-migration verify, /usr/local/sbin/boris-messenger-migration apply060
+borisops ALL=(root) NOPASSWD: BORIS_MESSENGER_MIGRATION

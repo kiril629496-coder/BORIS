@@ -1,0 +1,34 @@
+{
+  "name": "boris-messenger-internal-backend",
+  "scope": "Messenger internal employee chat only",
+  "activation": "protected-backend-scoped-deploy",
+  "migration": {
+    "runner": "/root/BORIS/backend/migrations/run_all.py",
+    "range": "060..060",
+    "mode": "canonical protected runner",
+    "destructive": false
+  },
+  "tests": [
+    "/root/BORIS/backend/tests/test_internal_messenger_contract.py"
+  ],
+  "source_files": [
+    "/root/BORIS/backend/app/api/internal_messenger.py",
+    "/root/BORIS/backend/app/models/internal_messenger.py",
+    "/root/BORIS/backend/migrations/060_internal_messenger.sql",
+    "/root/BORIS/backend/tests/test_internal_messenger_contract.py"
+  ],
+  "fixed_actions": [
+    "messenger_migration_status",
+    "messenger_migration_verify",
+    "messenger_migration_060",
+    "messenger_backend_tests",
+    "backend_scoped_deploy"
+  ],
+  "runtime_exclusions": [
+    "customer Inbox/Avito outbound",
+    "real client messages",
+    "money and billing paths",
+    "direct SQL",
+    "force and skip-verify"
+  ]
+}

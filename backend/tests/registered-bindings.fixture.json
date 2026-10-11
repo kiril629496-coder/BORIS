@@ -1,0 +1,4402 @@
+{
+  "requirements": [
+    {
+      "id": "e19fb884-3f7f-4c2c-b82a-a54666024c25",
+      "key": "rule.marketing.budget_brake",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Budget brake блокирует повышение до перерасхода",
+      "normalized_rule": "Budget brake блокирует повышение до перерасхода Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-007",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-007",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "ff8dc03c-e83b-4345-a1d0-f6b6a4c8ecdc",
+      "key": "rule.marketing.budget_owner_provenance",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Бюджет имеет подтверждённое происхождение от владельца",
+      "normalized_rule": "Бюджет имеет подтверждённое происхождение от владельца Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-006",
+        "enforced": true,
+        "operation": "AVITO_BUDGET_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-006",
+        "operation": "AVITO_BUDGET_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "c4bec44e-32dc-4f7e-8461-a10b8ce03495",
+      "key": "rule.marketing.cpl_redline",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "CPL redline блокирует невыгодное повышение",
+      "normalized_rule": "CPL redline блокирует невыгодное повышение Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-009",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-009",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "6435276c-c3bd-4b89-a3d6-4d55a7181011",
+      "key": "rule.marketing.daily_action_limit",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Суточный лимит денежных действий",
+      "normalized_rule": "Суточный лимит денежных действий Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "AVITO_BID_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MKT-003",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-003",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "bf584731-9d4e-4d59-858c-8e26a34633ed",
+      "key": "rule.marketing.daily_budget",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Только явно подтверждённый суточный бюджет разрешает расход",
+      "normalized_rule": "Только явно подтверждённый суточный бюджет разрешает расход Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "AVITO_BUDGET_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MKT-005",
+        "enforced": true,
+        "operation": "AVITO_BUDGET_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-005",
+        "operation": "AVITO_BUDGET_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "f156bf2d-ebd9-477e-aed0-a874d4ac16eb",
+      "key": "rule.marketing.experiment_isolation",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Одновременно действует одна измеряемая гипотеза на item",
+      "normalized_rule": "Одновременно действует одна измеряемая гипотеза на item Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-022",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-022",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "fa13c5cc-5457-4bbc-9c68-9d4fcd271f62",
+      "key": "rule.marketing.feed_ramp",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Feed ramp ограничен теми же budget/CPL guards",
+      "normalized_rule": "Feed ramp ограничен теми же budget/CPL guards Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-017",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-017",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "1e4ead0b-eff0-42da-8684-e0b0c1a97c61",
+      "key": "rule.marketing.first_bid_hourly_limit",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Первое повышение ставки ограничено часовым атомарным лимитом",
+      "normalized_rule": "Первое повышение ставки ограничено часовым атомарным лимитом Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "AVITO_BID_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MKT-001",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-001",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "d3c32cc1-315e-425e-93c6-2a844d805e4f",
+      "key": "rule.marketing.first_bid_policy",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Первая ставка проходит те же денежные guards",
+      "normalized_rule": "Первая ставка проходит те же денежные guards Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-016",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-016",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "97b65f25-8245-4625-915e-bff4d02702f4",
+      "key": "rule.marketing.hard_bid_cap",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Абсолютный hard cap ставки",
+      "normalized_rule": "Абсолютный hard cap ставки Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "AVITO_BID_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MKT-004",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-004",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "885855f1-a9bd-4bd7-85bc-26e38244e030",
+      "key": "rule.marketing.hourly_action_limit",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Почасовой лимит денежных действий",
+      "normalized_rule": "Почасовой лимит денежных действий Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "AVITO_BID_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MKT-002",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-002",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "2758d5fb-cd99-47dd-a357-8b41c2315977",
+      "key": "rule.marketing.live_balance_guard",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Денежное действие требует достаточный live balance",
+      "normalized_rule": "Денежное действие требует достаточный live balance Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-010",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-010",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "72fdf4d4-774d-4a0b-9476-ba4b2a1d4729",
+      "key": "rule.marketing.low_views",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Low views запускает ограниченное измеряемое действие",
+      "normalized_rule": "Low views запускает ограниченное измеряемое действие Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-011",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-011",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "e6942ca9-d650-41d3-b6a0-52f943c449c8",
+      "key": "rule.marketing.money_idempotency",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Каждое денежное действие имеет стабильную idempotency identity",
+      "normalized_rule": "Каждое денежное действие имеет стабильную idempotency identity Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-020",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-020",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "fc10c4b3-c1bd-4c12-8c27-ebb894161c12",
+      "key": "rule.marketing.mutation_per_cycle",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Число мутаций за цикл ограничено",
+      "normalized_rule": "Число мутаций за цикл ограничено Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-021",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-021",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "0f1f2036-192a-4cf3-9123-479abb18961f",
+      "key": "rule.marketing.negative_feedback",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Негативный эффект блокирует дальнейшее усиление",
+      "normalized_rule": "Негативный эффект блокирует дальнейшее усиление Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-019",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-019",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "e93a904f-cc8b-4e3d-8320-a25740550b99",
+      "key": "rule.marketing.new_ad_activation",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Новая карточка активируется только через canonical money contour",
+      "normalized_rule": "Новая карточка активируется только через canonical money contour Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "AVITO_PROMOTION_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MKT-015",
+        "enforced": true,
+        "operation": "AVITO_PROMOTION_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-015",
+        "operation": "AVITO_PROMOTION_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "7609c4ea-b514-4121-b077-daa48d868140",
+      "key": "rule.marketing.profitable_day_continue",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Выгодный день может продолжать масштабирование в рамках лимитов",
+      "normalized_rule": "Выгодный день может продолжать масштабирование в рамках лимитов Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-013",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-013",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "5925f130-da73-4bb6-bb2f-c0a7de8e249b",
+      "key": "rule.marketing.promotion_90_10",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Основной пул держится на минимуме, усиление только ограниченной доли",
+      "normalized_rule": "Основной пул держится на минимуме, усиление только ограниченной доли Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-014",
+        "enforced": true,
+        "operation": "AVITO_PROMOTION_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-014",
+        "operation": "AVITO_PROMOTION_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "acb5c36d-6790-4284-9765-78103999d18a",
+      "key": "rule.marketing.rollback",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Rollback подтверждается provider readback",
+      "normalized_rule": "Rollback подтверждается provider readback Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "AVITO_BID_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MKT-018",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-018",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "6aa3f3f5-1101-4032-bcac-152a6c6ed3af",
+      "key": "rule.marketing.spend_freshness",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Денежное действие требует свежий расход",
+      "normalized_rule": "Денежное действие требует свежий расход Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-008",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-008",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "ec39a197-6c8d-48d5-969c-8df89b7c93c0",
+      "key": "rule.marketing.winner_scaling",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "marketing",
+      "version": 1,
+      "status": "active",
+      "title": "Победители масштабируются ограниченным шагом",
+      "normalized_rule": "Победители масштабируются ограниченным шагом Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MKT-012",
+        "enforced": true,
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": true,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "marketer_action_outcome_contract",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "avito_money_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MKT-012",
+        "operation": "AVITO_BID_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "marketer_action_outcome_contract",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": true,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "33a6661f-9d8e-48c9-b3db-19b324ca4f5a",
+      "key": "rule.messages.autosend_eligibility",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Autosend разрешён только при полной eligibility",
+      "normalized_rule": "Autosend разрешён только при полной eligibility Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-016",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-016",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "f12c3f83-98a0-4386-b681-f4ec97978d19",
+      "key": "rule.messages.crm_handoff",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "CRM handoff фиксируется доказательством",
+      "normalized_rule": "CRM handoff фиксируется доказательством Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "CRM_STATE_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MSG-014",
+        "enforced": true,
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-014",
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "fda950b9-13f9-4c6c-ad61-f27ef19afc07",
+      "key": "rule.messages.empty_chat",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Empty chat обрабатывается одним canonical trigger",
+      "normalized_rule": "Empty chat обрабатывается одним canonical trigger Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-006",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-006",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "3ecaaa8e-bca5-4290-834c-4910a48e6a7b",
+      "key": "rule.messages.entitlement_402",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "402/entitlement становится WAIT_EXTERNAL без опасного replay",
+      "normalized_rule": "402/entitlement становится WAIT_EXTERNAL без опасного replay Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-012",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-012",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "dddfcbcc-6c9f-473a-a3ba-b60e1e19fb9e",
+      "key": "rule.messages.first_response",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Новое входящее состояние получает один главный ответ",
+      "normalized_rule": "Новое входящее состояние получает один главный ответ Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "MESSAGE_SEND",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MSG-001",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-001",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "7c447a7a-f574-44a6-be23-8510eb466387",
+      "key": "rule.messages.first_turn_identity",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Первый ответ не раскрывает внутреннюю identity automation",
+      "normalized_rule": "Первый ответ не раскрывает внутреннюю identity automation Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-015",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-015",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "e091b0b4-2450-4947-9275-c5aba422abfc",
+      "key": "rule.messages.greeting",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Первый ответ содержит корректное приветствие",
+      "normalized_rule": "Первый ответ содержит корректное приветствие Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-002",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-002",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "c86749bc-271f-46fa-bdbf-28d08937b7f1",
+      "key": "rule.messages.human_takeover",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Human takeover переводит automation в явное состояние",
+      "normalized_rule": "Human takeover переводит automation в явное состояние Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-005",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-005",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "2aebfbbe-86c8-42e8-ab65-73a32e166dbf",
+      "key": "rule.messages.job_seeker",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Соискатель не проходит sales automation",
+      "normalized_rule": "Соискатель не проходит sales automation Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-009",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-009",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "b633e44d-b4bf-4d6f-8499-433d5e1b19f1",
+      "key": "rule.messages.phone_received",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Полученный телефон переводит lead по canonical CRM handoff",
+      "normalized_rule": "Полученный телефон переводит lead по canonical CRM handoff Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-008",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-008",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "a7c37699-5318-4c71-88c7-89b9613678b3",
+      "key": "rule.messages.provider_wait",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Provider недоступен становится WAIT, не FAIL и не дубль",
+      "normalized_rule": "Provider недоступен становится WAIT, не FAIL и не дубль Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-011",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-011",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "14b4fa58-f40a-48da-82b5-8565c2932419",
+      "key": "rule.messages.reply_dedupe",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Повторный ответ на то же состояние не отправляется",
+      "normalized_rule": "Повторный ответ на то же состояние не отправляется Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-003",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-003",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "13a18f90-15e5-4168-ae94-adc85cbf07cb",
+      "key": "rule.messages.send_ownership",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Отправку сообщения выполняет только canonical message contour",
+      "normalized_rule": "Отправку сообщения выполняет только canonical message contour Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "MESSAGE_SEND",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "MSG-004",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-004",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "6c52cf2c-b4a5-4a7f-b2e2-366c7611ca00",
+      "key": "rule.messages.stale_inbound",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Устаревшее входящее не вызывает новый autosend",
+      "normalized_rule": "Устаревшее входящее не вызывает новый autosend Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-010",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-010",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "40ded965-6504-4840-aa42-3ea36a0ab807",
+      "key": "rule.messages.technical_handoff",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Технический handoff не считается завершённой продажей",
+      "normalized_rule": "Технический handoff не считается завершённой продажей Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-013",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-013",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "ca5be505-1362-4655-b838-13f138dce8ea",
+      "key": "rule.messages.viewed_phone",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "messages",
+      "version": 1,
+      "status": "active",
+      "title": "Viewed phone не создаёт дублирующий ответ",
+      "normalized_rule": "Viewed phone не создаёт дублирующий ответ Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "MSG-007",
+        "enforced": true,
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "mop_no_duplicate_reply_guard",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "sales_conversation_pipeline",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "MSG-007",
+        "operation": "MESSAGE_SEND",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "ec451350-ed7b-424f-953d-7a10bdc55a0d",
+      "key": "rule.crm.answered_inquiry_cleanup",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "Уже отвеченный inquiry не остаётся открытой задачей",
+      "normalized_rule": "Уже отвеченный inquiry не остаётся открытой задачей Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "CRM-009",
+        "enforced": true,
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-009",
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "a39d83a7-1807-4b2e-bd86-4f8c3922e825",
+      "key": "rule.crm.calltracking_handoff",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "CRM↔Calltracking связь использует canonical call identity",
+      "normalized_rule": "CRM↔Calltracking связь использует canonical call identity Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "CRM_STATE_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "CRM-012",
+        "enforced": true,
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-012",
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "e6172193-f94d-41d3-b3b1-c074dada0cac",
+      "key": "rule.crm.deal_creation",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "Сделка создаётся один раз по canonical client identity",
+      "normalized_rule": "Сделка создаётся один раз по canonical client identity Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "CRM_DEAL_CREATE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "CRM-001",
+        "enforced": true,
+        "operation": "CRM_DEAL_CREATE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-001",
+        "operation": "CRM_DEAL_CREATE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "8eae0bf4-2598-4fff-afe9-44a723c0e722",
+      "key": "rule.crm.human_mop_ownership",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "Human и MOP ownership взаимоисключающи",
+      "normalized_rule": "Human и MOP ownership взаимоисключающи Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "CRM-006",
+        "enforced": true,
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-006",
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "6c158c7d-b210-4eb1-9356-0113fa5b78e4",
+      "key": "rule.crm.missed_calls",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "Missed call создаёт один coalesced follow-up",
+      "normalized_rule": "Missed call создаёт один coalesced follow-up Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "CRM-007",
+        "enforced": true,
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-007",
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "71524173-e745-42af-869b-423c1e3f61b4",
+      "key": "rule.crm.mop_handoff",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "CRM↔MOP handoff имеет одну state transition",
+      "normalized_rule": "CRM↔MOP handoff имеет одну state transition Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "CRM_STATE_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "CRM-010",
+        "enforced": true,
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-010",
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "06096874-3118-404f-ab12-768f1ea240f4",
+      "key": "rule.crm.next_action",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "Next action отражает фактическое необработанное обязательство",
+      "normalized_rule": "Next action отражает фактическое необработанное обязательство Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "CRM-002",
+        "enforced": true,
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-002",
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "91b5f8c6-a683-4825-a8b0-b1c8caec8626",
+      "key": "rule.crm.owner_assignment",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "Owner assignment имеет один canonical source",
+      "normalized_rule": "Owner assignment имеет один canonical source Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "CRM_STATE_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "CRM-003",
+        "enforced": true,
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-003",
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "34daf602-3a45-4de5-857b-0f57e942cd61",
+      "key": "rule.crm.phone_handoff",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "CRM↔Phone связь использует canonical phone identity",
+      "normalized_rule": "CRM↔Phone связь использует canonical phone identity Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "CRM_STATE_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "CRM-011",
+        "enforced": true,
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-011",
+        "operation": "CRM_STATE_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "f26f09f3-52bc-40e4-a010-650f991a2545",
+      "key": "rule.crm.stale_task_cleanup",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "Устаревшая задача закрывается только после проверки факта",
+      "normalized_rule": "Устаревшая задача закрывается только после проверки факта Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "CRM-008",
+        "enforced": true,
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-008",
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "4b9a4418-baf0-43a3-8dd8-7a52345cb79a",
+      "key": "rule.crm.task_completion",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "Task completion требует outcome evidence",
+      "normalized_rule": "Task completion требует outcome evidence Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "CRM_TASK_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "CRM-005",
+        "enforced": true,
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-005",
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "b602d36a-9f84-4b0c-be17-ca41f367eb00",
+      "key": "rule.crm.task_creation",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "crm",
+      "version": 1,
+      "status": "active",
+      "title": "Задача CRM создаётся идемпотентно",
+      "normalized_rule": "Задача CRM создаётся идемпотентно Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "CRM_TASK_WRITE",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "CRM-004",
+        "enforced": true,
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "crm_inbound",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "crm_integration_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "CRM-004",
+        "operation": "CRM_TASK_WRITE",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "crm_inbound",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "6bf07903-438b-42b8-9238-6d8b437a4e6d",
+      "key": "rule.feed_factory.draft",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Draft создаётся атомарно и versioned",
+      "normalized_rule": "Draft создаётся атомарно и versioned Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-001",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-001",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "21436fda-e550-449d-93ef-a4361822a2ec",
+      "key": "rule.feed_factory.duplicate",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Cross-campaign duplicate блокируется до provider",
+      "normalized_rule": "Cross-campaign duplicate блокируется до provider Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-010",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-010",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "66d13678-8998-432f-be59-9bdf3166ff36",
+      "key": "rule.feed_factory.media_quality",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Media quality fail закрывает publish fail-closed",
+      "normalized_rule": "Media quality fail закрывает publish fail-closed Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-003",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-003",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "7b225bf5-759b-402f-a1e9-b03053bf4ff4",
+      "key": "rule.feed_factory.partial_publish",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Partial publish отражает item-level truth",
+      "normalized_rule": "Partial publish отражает item-level truth Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-008",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-008",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "94e6cbb6-cdef-475a-915f-9cec8b691429",
+      "key": "rule.feed_factory.publish",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Publish выполняется одним canonical owner",
+      "normalized_rule": "Publish выполняется одним canonical owner Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "FEED_PUBLISH",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "FED-005",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-005",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "90244372-eeb3-4928-b3ce-feecfebc6752",
+      "key": "rule.feed_factory.rejection",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Provider rejection terminal до нового artifact",
+      "normalized_rule": "Provider rejection terminal до нового artifact Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-007",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-007",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "2c862920-0562-4f59-b04d-396754248a4e",
+      "key": "rule.feed_factory.replacement",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Replacement требует explicit authorization",
+      "normalized_rule": "Replacement требует explicit authorization Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [
+        {
+          "operation": "FEED_PUBLISH",
+          "must_use_action_owner": true
+        }
+      ],
+      "desired_state_json": {
+        "rule_id": "FED-011",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "external_side_effect",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": true
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-011",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": true
+      }
+    },
+    {
+      "id": "4d0240f5-aaca-4b1f-adfa-03f22cca2b35",
+      "key": "rule.feed_factory.retry",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Retry не создаёт повторную публикацию",
+      "normalized_rule": "Retry не создаёт повторную публикацию Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-009",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-009",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "f9386c44-2050-4307-94a0-f36bf1321278",
+      "key": "rule.feed_factory.review",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Review state материализован и доказуем",
+      "normalized_rule": "Review state материализован и доказуем Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-006",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-006",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "6c0f9a47-e53c-45ae-8e8b-7bbc8da7a6af",
+      "key": "rule.feed_factory.schedule",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Scheduled publish учитывает due/backoff",
+      "normalized_rule": "Scheduled publish учитывает due/backoff Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-013",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-013",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "c78d8e95-c809-4160-a622-40d11fe0cb90",
+      "key": "rule.feed_factory.superseded",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Новый artifact supersedes старый явно",
+      "normalized_rule": "Новый artifact supersedes старый явно Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-012",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-012",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "d47402ae-4d7a-4d0c-94bf-8ecfc87947ca",
+      "key": "rule.feed_factory.terminal_states",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Published/rejected/failed имеют durable terminal proof",
+      "normalized_rule": "Published/rejected/failed имеют durable terminal proof Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-014",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-014",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "e03b201b-97c1-41ec-92e2-18522eca88fe",
+      "key": "rule.feed_factory.validation",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "Невалидный artifact не публикуется",
+      "normalized_rule": "Невалидный artifact не публикуется Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-002",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-002",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    },
+    {
+      "id": "9b784e9b-ab91-4951-8176-e24a23e80f12",
+      "key": "rule.feed_factory.xml_generation",
+      "requirement_type": "business_rule",
+      "scope_type": "global",
+      "scope_id": "*",
+      "module": "feed_factory",
+      "version": 1,
+      "status": "active",
+      "title": "XML соответствует canonical category/schema contract",
+      "normalized_rule": "XML соответствует canonical category/schema contract Canonical BORIS business rule; a caller may not bypass the registered owner or terminal-state contract.",
+      "conditions_json": [],
+      "actions_json": [],
+      "desired_state_json": {
+        "rule_id": "FED-004",
+        "enforced": true,
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mutation_type": "policy_or_internal_state",
+        "allowed_states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "money_side_effect": false,
+        "external_side_effect": false
+      },
+      "verification_json": [
+        {
+          "type": "production_contract",
+          "check": "feed_quantity_e2e",
+          "required": true
+        },
+        {
+          "path": "tests/test_business_rule_registry.py",
+          "type": "architecture_test",
+          "required": true
+        }
+      ],
+      "source_json": {
+        "owner": "content_engine_core",
+        "reason": "architecture audit completion",
+        "catalog": "architecture_business_rule_v1",
+        "rule_id": "FED-004",
+        "operation": "FEED_PUBLISH",
+        "tenant_scope": "account_required",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "tests/test_business_rule_registry.py"
+        ],
+        "source_of_truth": "control_plane",
+        "money_side_effect": false,
+        "external_side_effect": false
+      }
+    }
+  ],
+  "module_contracts": [
+    {
+      "module": "crm",
+      "enabled": true,
+      "verification_stale_seconds": 1800,
+      "contract_json": {
+        "input": "lead/call/message event",
+        "retry": "bounded; RETRY only; ambiguous external responses are reconciled before replay",
+        "state": "contact/deal/task",
+        "action": "create/update",
+        "errors": "blocked/deferred/failed",
+        "output": "tenant-scoped CRM entity/task + evidence",
+        "states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "writer": "crm_integration_core",
+        "evidence": "entity id",
+        "done_proof": "required durable readback/evidence before OK",
+        "idempotency": "required for every state mutation or external side effect",
+        "dependencies": [
+          "messages",
+          "telephony"
+        ],
+        "post_condition": "entity readable",
+        "mandatory_tests": [
+          "crm_inbound",
+          "crm_next_action_unanswered_only"
+        ],
+        "source_of_truth": "CRM DB entities + exact external evidence",
+        "contract_version": 2,
+        "tenant_isolation": "required for account/client scoped actions"
+      },
+      "capabilities_json": {
+        "apply": false,
+        "verify": true,
+        "diagnose": true,
+        "rollback": false,
+        "get_state": true,
+        "preflight": false,
+        "control_mode": "safe_recovery",
+        "rule_registry": "control_requirements/control_requirement_versions",
+        "safe_recovery": true,
+        "mutation_scope": "internal_tasks_and_next_actions_only; no generic external write",
+        "runtime_ledger": "control_executions/control_execution_steps/control_evidence",
+        "contract_enforced": true,
+        "rollback_strategy": "idempotent_evidence_reconcile_and_audit_log",
+        "external_actions_gated": true
+      }
+    },
+    {
+      "module": "marketing",
+      "enabled": true,
+      "verification_stale_seconds": 900,
+      "contract_json": {
+        "input": "KPI/account/budget/provider state",
+        "retry": "bounded; RETRY only; ambiguous external responses are reconciled before replay",
+        "state": "autopilot_settings + kpi_settings + virtual_marketer_runtime",
+        "action": "domain-owned KPI controller",
+        "errors": "blocked/deferred/failed",
+        "output": "one canonical operation result + provider evidence",
+        "states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "writer": "avito_money_core",
+        "evidence": "runtime + external state",
+        "done_proof": "required durable readback/evidence before OK",
+        "idempotency": "required for every state mutation or external side effect",
+        "dependencies": [
+          "analytics",
+          "crm",
+          "billing"
+        ],
+        "post_condition": "actual bid/state confirmed",
+        "mandatory_tests": [
+          "marketer_tenant_isolation",
+          "marketer_action_outcome_contract",
+          "marketer_rollout_guard_block_not_failure"
+        ],
+        "source_of_truth": "Control Plane KPI + Avito provider readback + CPX receipt ledger",
+        "contract_version": 2,
+        "tenant_isolation": "required for account/client scoped actions"
+      },
+      "capabilities_json": {
+        "apply": true,
+        "verify": true,
+        "diagnose": true,
+        "rollback": true,
+        "get_state": true,
+        "preflight": true,
+        "control_mode": "safe_mutation",
+        "rule_registry": "control_requirements/control_requirement_versions",
+        "safe_recovery": true,
+        "mutation_scope": "account_config",
+        "runtime_ledger": "control_executions/control_execution_steps/control_evidence",
+        "contract_enforced": true,
+        "rollback_strategy": "compare_and_set_compensation",
+        "external_actions_gated": true
+      }
+    },
+    {
+      "module": "mop",
+      "enabled": true,
+      "verification_stale_seconds": 900,
+      "contract_json": {
+        "input": "one new client dialogue state",
+        "retry": "bounded; RETRY only; ambiguous external responses are reconciled before replay",
+        "state": "dialogue + CRM context",
+        "action": "qualify/reply",
+        "errors": "blocked/deferred/failed",
+        "output": "one canonical reply/task state + evidence",
+        "states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "writer": "sales_conversation_pipeline",
+        "evidence": "message id / CRM id",
+        "done_proof": "required durable readback/evidence before OK",
+        "idempotency": "required for every state mutation or external side effect",
+        "dependencies": [
+          "messages",
+          "crm"
+        ],
+        "post_condition": "reply/task exists",
+        "mandatory_tests": [
+          "mop_first_turn_all_entrypoints",
+          "mop_no_duplicate_reply_guard"
+        ],
+        "source_of_truth": "messenger dialogue + CRM context",
+        "contract_version": 2,
+        "tenant_isolation": "required for account/client scoped actions"
+      },
+      "capabilities_json": {
+        "apply": false,
+        "verify": true,
+        "diagnose": true,
+        "rollback": false,
+        "get_state": true,
+        "preflight": false,
+        "control_mode": "safe_recovery",
+        "rule_registry": "control_requirements/control_requirement_versions",
+        "safe_recovery": true,
+        "mutation_scope": "internal_queue_recovery",
+        "runtime_ledger": "control_executions/control_execution_steps/control_evidence",
+        "contract_enforced": true,
+        "rollback_strategy": "idempotent_exactly_once",
+        "external_actions_gated": true
+      }
+    },
+    {
+      "module": "reactivation",
+      "enabled": true,
+      "verification_stale_seconds": 1800,
+      "contract_json": {
+        "input": "eligible inactive dialogue + entitlement",
+        "retry": "bounded; RETRY only; ambiguous external responses are reconciled before replay",
+        "state": "reactivation candidates/messages/settings/runtime",
+        "action": "prepare/preflight/send/reconcile",
+        "errors": "blocked/deferred/failed",
+        "output": "ready/sent/replied/converted or explicit block",
+        "states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "writer": "reactivation_core",
+        "evidence": "message id + event ledger + scheduler heartbeat",
+        "done_proof": "required durable readback/evidence before OK",
+        "idempotency": "required for every state mutation or external side effect",
+        "dependencies": [
+          "messages",
+          "crm"
+        ],
+        "post_condition": "candidate is safely progressed or explicitly blocked",
+        "mandatory_tests": [
+          "reactivation_auto_authority_epoch",
+          "reactivation_avito_transport"
+        ],
+        "source_of_truth": "reactivation state machine + message receipt ledger",
+        "contract_version": 2,
+        "tenant_isolation": "required for account/client scoped actions"
+      },
+      "capabilities_json": {
+        "apply": false,
+        "verify": true,
+        "diagnose": true,
+        "rollback": false,
+        "get_state": true,
+        "preflight": false,
+        "control_mode": "safe_recovery",
+        "rule_registry": "control_requirements/control_requirement_versions",
+        "safe_recovery": true,
+        "mutation_scope": "scheduler_and_receipt_reconciliation_only",
+        "runtime_ledger": "control_executions/control_execution_steps/control_evidence",
+        "contract_enforced": true,
+        "rollback_strategy": "idempotent_timer_restart_no_resend",
+        "external_actions_gated": true
+      }
+    },
+    {
+      "module": "messages",
+      "enabled": true,
+      "verification_stale_seconds": 900,
+      "contract_json": {
+        "input": "new inbound state or explicit outbound intent",
+        "retry": "bounded; RETRY only; ambiguous external responses are reconciled before replay",
+        "state": "thread",
+        "action": "reply/queue",
+        "errors": "blocked/deferred/failed",
+        "output": "one main reply/delivery state + provider evidence",
+        "states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "writer": "sales_conversation_pipeline",
+        "evidence": "provider message id",
+        "done_proof": "required durable readback/evidence before OK",
+        "idempotency": "required for every state mutation or external side effect",
+        "dependencies": [
+          "crm"
+        ],
+        "post_condition": "delivery/read state",
+        "mandatory_tests": [
+          "mop_no_duplicate_reply_guard",
+          "messages_to_mop_dispatch_truth"
+        ],
+        "source_of_truth": "messenger thread + provider message identity",
+        "contract_version": 2,
+        "tenant_isolation": "required for account/client scoped actions"
+      },
+      "capabilities_json": {
+        "apply": false,
+        "verify": true,
+        "diagnose": true,
+        "rollback": false,
+        "get_state": true,
+        "preflight": false,
+        "control_mode": "read_verify",
+        "rule_registry": "control_requirements/control_requirement_versions",
+        "safe_recovery": false,
+        "mutation_scope": "none",
+        "runtime_ledger": "control_executions/control_execution_steps/control_evidence",
+        "contract_enforced": true,
+        "rollback_strategy": "no_mutation",
+        "external_actions_gated": true
+      }
+    },
+    {
+      "id": 7,
+      "module": "feed_factory",
+      "enabled": true,
+      "contract_json": {
+        "input": "catalog/brief/category contract",
+        "retry": "bounded; RETRY only; ambiguous external responses are reconciled before replay",
+        "state": "campaign items",
+        "action": "build/validate/export",
+        "errors": "blocked/deferred/failed",
+        "output": "validated immutable feed artifact + publication state",
+        "states": [
+          "OK",
+          "BLOCKED_POLICY",
+          "WAIT_EXTERNAL",
+          "RETRY",
+          "DEGRADED",
+          "FAILED_INTERNAL"
+        ],
+        "writer": "content_engine_core",
+        "evidence": "artifact + validation",
+        "done_proof": "required durable readback/evidence before OK",
+        "idempotency": "required for every state mutation or external side effect",
+        "dependencies": [
+          "marketing"
+        ],
+        "post_condition": "validation/pass or explicit block",
+        "mandatory_tests": [
+          "feed_quantity_e2e",
+          "feed_publication_item_status_commit"
+        ],
+        "source_of_truth": "campaign/feed storage + submitted artifact",
+        "contract_version": 2,
+        "tenant_isolation": "required for account/client scoped actions"
+      },
+      "capabilities_json": {
+        "apply": false,
+        "verify": true,
+        "diagnose": true,
+        "rollback": false,
+        "get_state": true,
+        "preflight": false,
+        "control_mode": "safe_recovery",
+        "rule_registry": "control_requirements/control_requirement_versions",
+        "safe_recovery": true,
+        "mutation_scope": "interrupted_job_recovery",
+        "runtime_ledger": "control_executions/control_execution_steps/control_evidence",
+        "contract_enforced": true,
+        "rollback_strategy": "idempotent_job_recovery",
+        "external_actions_gated": true
+      },
+      "verification_stale_seconds": 1800,
+      "created_at": "2026-09-03 16:01:35.930341+00:00",
+      "updated_at": "2026-09-11 17:42:37.309138+00:00"
+    }
+  ],
+  "action_owners": [
+    {
+      "action_key": "AVITO_BID_WRITE",
+      "title": "Изменение ставки продвижения Avito",
+      "owner_module": "marketing",
+      "owner_workstream": "avito_money_core",
+      "owner_service": "boris-ai-marketer.service",
+      "canonical_entrypoint": "app.api.cpx_advisor:apply_one",
+      "allowed_callers_json": [],
+      "source_of_truth": "Avito provider readback + CPX receipt ledger",
+      "terminal_states_json": [
+        "OK",
+        "BLOCKED_POLICY",
+        "WAIT_EXTERNAL",
+        "RETRY",
+        "DEGRADED",
+        "FAILED_INTERNAL"
+      ],
+      "idempotency_required": true,
+      "runtime_ledger_required": true,
+      "tenant_scope_required": true,
+      "proof_required": true,
+      "external_side_effect": true,
+      "money_side_effect": true,
+      "enabled": true,
+      "version": 1,
+      "source_json": {
+        "seed": "migration_046",
+        "source_of_truth": "control_plane",
+        "registry_version": 1
+      },
+      "created_at": "2026-09-11 20:14:03.208790+00:00",
+      "updated_at": "2026-09-11 20:18:11.646071+00:00"
+    },
+    {
+      "action_key": "AVITO_BUDGET_WRITE",
+      "title": "Изменение суточного рекламного бюджета Avito",
+      "owner_module": "marketing",
+      "owner_workstream": "avito_money_core",
+      "owner_service": "boris-backend.service",
+      "canonical_entrypoint": "app.api.avito:set_kpi_settings",
+      "allowed_callers_json": [],
+      "source_of_truth": "authenticated owner KPI settings + Control Plane",
+      "terminal_states_json": [
+        "OK",
+        "BLOCKED_POLICY",
+        "WAIT_EXTERNAL",
+        "RETRY",
+        "DEGRADED",
+        "FAILED_INTERNAL"
+      ],
+      "idempotency_required": true,
+      "runtime_ledger_required": true,
+      "tenant_scope_required": true,
+      "proof_required": true,
+      "external_side_effect": true,
+      "money_side_effect": true,
+      "enabled": true,
+      "version": 1,
+      "source_json": {
+        "seed": "migration_046",
+        "source_of_truth": "control_plane",
+        "registry_version": 1
+      },
+      "created_at": "2026-09-11 20:14:03.208790+00:00",
+      "updated_at": "2026-09-11 20:18:11.646071+00:00"
+    },
+    {
+      "action_key": "AVITO_PROMOTION_WRITE",
+      "title": "Изменение платного продвижения Avito",
+      "owner_module": "marketing",
+      "owner_workstream": "avito_money_core",
+      "owner_service": "boris-ai-marketer.service",
+      "canonical_entrypoint": "app.api.cpx_advisor:apply_one",
+      "allowed_callers_json": [],
+      "source_of_truth": "Avito provider readback + CPX receipt ledger",
+      "terminal_states_json": [
+        "OK",
+        "BLOCKED_POLICY",
+        "WAIT_EXTERNAL",
+        "RETRY",
+        "DEGRADED",
+        "FAILED_INTERNAL"
+      ],
+      "idempotency_required": true,
+      "runtime_ledger_required": true,
+      "tenant_scope_required": true,
+      "proof_required": true,
+      "external_side_effect": true,
+      "money_side_effect": true,
+      "enabled": true,
+      "version": 1,
+      "source_json": {
+        "seed": "migration_046",
+        "source_of_truth": "control_plane",
+        "registry_version": 1
+      },
+      "created_at": "2026-09-11 20:14:03.208790+00:00",
+      "updated_at": "2026-09-11 20:18:11.646071+00:00"
+    },
+    {
+      "action_key": "CRM_DEAL_CREATE",
+      "title": "Создание сделки CRM",
+      "owner_module": "crm",
+      "owner_workstream": "crm_integration_core",
+      "owner_service": "boris-background-worker.service",
+      "canonical_entrypoint": "app.crm.bridge:sync_dialog_for_account",
+      "allowed_callers_json": [],
+      "source_of_truth": "CRM DB entity + exact source evidence",
+      "terminal_states_json": [
+        "OK",
+        "BLOCKED_POLICY",
+        "WAIT_EXTERNAL",
+        "RETRY",
+        "DEGRADED",
+        "FAILED_INTERNAL"
+      ],
+      "idempotency_required": true,
+      "runtime_ledger_required": true,
+      "tenant_scope_required": true,
+      "proof_required": true,
+      "external_side_effect": true,
+      "money_side_effect": false,
+      "enabled": true,
+      "version": 2,
+      "source_json": {
+        "seed": "migration_046",
+        "source_of_truth": "control_plane",
+        "registry_version": 1,
+        "entrypoint_verified": "migration_050"
+      },
+      "created_at": "2026-09-11 20:14:03.208790+00:00",
+      "updated_at": "2026-09-12 09:39:44.005004+00:00"
+    },
+    {
+      "action_key": "CRM_STATE_WRITE",
+      "title": "Изменение состояния CRM",
+      "owner_module": "crm",
+      "owner_workstream": "crm_integration_core",
+      "owner_service": "boris-background-worker.service",
+      "canonical_entrypoint": "app.crm.bridge:sync_dialog_for_account",
+      "allowed_callers_json": [],
+      "source_of_truth": "CRM DB entity + exact source evidence",
+      "terminal_states_json": [
+        "OK",
+        "BLOCKED_POLICY",
+        "WAIT_EXTERNAL",
+        "RETRY",
+        "DEGRADED",
+        "FAILED_INTERNAL"
+      ],
+      "idempotency_required": true,
+      "runtime_ledger_required": true,
+      "tenant_scope_required": true,
+      "proof_required": true,
+      "external_side_effect": true,
+      "money_side_effect": false,
+      "enabled": true,
+      "version": 2,
+      "source_json": {
+        "seed": "migration_046",
+        "source_of_truth": "control_plane",
+        "registry_version": 1,
+        "entrypoint_verified": "migration_050"
+      },
+      "created_at": "2026-09-11 20:14:03.208790+00:00",
+      "updated_at": "2026-09-12 09:39:44.005004+00:00"
+    },
+    {
+      "action_key": "CRM_TASK_WRITE",
+      "title": "Создание/изменение задачи CRM",
+      "owner_module": "crm",
+      "owner_workstream": "crm_integration_core",
+      "owner_service": "boris-backend.service",
+      "canonical_entrypoint": "app.services.crm_service:create_task",
+      "allowed_callers_json": [],
+      "source_of_truth": "CRM task row + account/chat identity",
+      "terminal_states_json": [
+        "OK",
+        "BLOCKED_POLICY",
+        "WAIT_EXTERNAL",
+        "RETRY",
+        "DEGRADED",
+        "FAILED_INTERNAL"
+      ],
+      "idempotency_required": true,
+      "runtime_ledger_required": true,
+      "tenant_scope_required": true,
+      "proof_required": true,
+      "external_side_effect": true,
+      "money_side_effect": false,
+      "enabled": true,
+      "version": 1,
+      "source_json": {
+        "seed": "migration_046",
+        "source_of_truth": "control_plane",
+        "registry_version": 1
+      },
+      "created_at": "2026-09-11 20:14:03.208790+00:00",
+      "updated_at": "2026-09-11 20:18:11.646071+00:00"
+    },
+    {
+      "action_key": "MESSAGE_SEND",
+      "title": "Отправка сообщения клиенту",
+      "owner_module": "messages",
+      "owner_workstream": "sales_conversation_pipeline",
+      "owner_service": "boris-background-worker.service",
+      "canonical_entrypoint": "app.api.messenger:send_message",
+      "allowed_callers_json": [],
+      "source_of_truth": "messenger thread + provider message identity",
+      "terminal_states_json": [
+        "OK",
+        "BLOCKED_POLICY",
+        "WAIT_EXTERNAL",
+        "RETRY",
+        "DEGRADED",
+        "FAILED_INTERNAL"
+      ],
+      "idempotency_required": true,
+      "runtime_ledger_required": true,
+      "tenant_scope_required": true,
+      "proof_required": true,
+      "external_side_effect": true,
+      "money_side_effect": false,
+      "enabled": true,
+      "version": 1,
+      "source_json": {
+        "seed": "migration_046",
+        "source_of_truth": "control_plane",
+        "registry_version": 1
+      },
+      "created_at": "2026-09-11 20:14:03.208790+00:00",
+      "updated_at": "2026-09-11 20:18:11.646071+00:00"
+    },
+    {
+      "action_key": "FEED_PUBLISH",
+      "title": "Публикация Feed Factory artifact",
+      "owner_module": "feed_factory",
+      "owner_workstream": "content_engine_core",
+      "owner_service": "boris-background-worker.service",
+      "canonical_entrypoint": "app.api.avito:feed_send_to_avito",
+      "allowed_callers_json": [],
+      "source_of_truth": "validated submitted artifact + publication receipt",
+      "terminal_states_json": [
+        "OK",
+        "BLOCKED_POLICY",
+        "WAIT_EXTERNAL",
+        "RETRY",
+        "DEGRADED",
+        "FAILED_INTERNAL"
+      ],
+      "idempotency_required": true,
+      "runtime_ledger_required": true,
+      "tenant_scope_required": true,
+      "proof_required": true,
+      "external_side_effect": true,
+      "money_side_effect": false,
+      "enabled": true,
+      "version": 1,
+      "source_json": {
+        "seed": "migration_046",
+        "source_of_truth": "control_plane",
+        "registry_version": 1
+      },
+      "created_at": "2026-09-11 20:14:03.208790+00:00",
+      "updated_at": "2026-09-11 20:18:11.646071+00:00"
+    }
+  ]
+}

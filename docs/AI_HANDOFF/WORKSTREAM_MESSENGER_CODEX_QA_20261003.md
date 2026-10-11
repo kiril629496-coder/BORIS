@@ -1,0 +1,86 @@
+BORIS Messenger — 2026-10-03, проверка продолжения
+RESULT: NOT READY. Исправления и deploy этой задачей не выполнялись; подтверждён параллельный writer Messenger.
+
+Проверенные релизы:
+Frontend 7Dnn56LD-btztY_RcbxP4, artifact 20261003T141228Z-2399311-15120.
+Active snapshot hash: 12d08109c959d38c6baa8702fd35605a2783be035e1b32533a1ec92bde79566b.
+На старте текущий source hash совпадал; после чужих изменений: e111f46e984bee8aa578b38b52afd76698601379456ff4fb3f8942b34485bda8.
+Backend current manifest: 176cd7da3fcc2a32209f67cbdfb069a6e40dcba9d2d94e185c8100f8a4abfd57.
+Оба /health ответили 200; совпадение фактически загруженных backend generation отдельно не доказано.
+Git HEAD f752362022b3249dd7ea5bed66e0f6435d05dbc8; много чужих изменений.
+
+PASS:
+- TypeScript --noEmit --incremental false.
+- Static controls: 129 buttons, 0 native select, 154 controls, 0 failures.
+- Design V5, PWA/Push static, security source audit.
+- Routes: 45 calls, 959 routes, 0 missing.
+- Settings 320x568,360x800,390x844,430x932,1024x768,1280x800,1440x900: overflow=0, mobile body/control=16px, desktop=15px, titles=17px, secondary=13–14px.
+- Desktop independent columns; App below Appearance, Access below Push; Push height distinct.
+- Settings -> section=security; browser back -> Settings; forward -> Security.
+- Custom report chat picker; native selects=0.
+- Tasks/reports/settings/security: click/deep-link/reload.
+- General chat two-way browser contexts, read receipt.
+- Legacy session gate HTTP 401; Viewer conversation-create API HTTP 403.
+Owner sessions were issued through existing server session QA; OWNER_LOGIN was not tested.
+
+FAIL / unresolved:
+- Regression at tested source: 148 passed, 2 failed. Both expect canManageTeam guard on team menu.
+- More QA: Team item missing; overall FAIL.
+- Multi-user QA: DM owner->employee and group two-way checks failed. Need distinguish locator/orchestration from product bug before patch.
+- Viewer readonly UI failed; API guard passed.
+- Mobile Settings also displays Inbox: shellHidden display:none overridden by later .shell display:block @media rules. Not yet fixed.
+- Full requested acceptance (fresh invite/registration/legal, edit/delete/reactions/pin, JPG/PDF, offline/reconnect, isolation, backup restore, 100-user load, full accessibility/200% browser text zoom) not completed.
+- Physical Mac Chrome/Android/iOS install and Push not tested. Headless Chromium is not real-device acceptance.
+- Push privacy exact current runtime source not yet established; do not infer from static audit.
+
+Concurrent ownership blocker:
+Observed qa-messenger-more-menu.py content change between reads, followed by independent changes to page.tsx team-menu permission/loading UI, messenger.module.css moreMenuItemLoading, and test_messenger_v70_navigation_contract.py. This task made none of those source edits. Source hash changed while active artifact remained unchanged. Other frontend builds/backend rollout also observed.
+User asked asynchronously to identify/stop parallel Messenger writer; response pending.
+Do not overwrite these changes or deploy shared source until ownership is resolved.
+
+Cleanup:
+Multiuser job reported deleting its 6 prefixed messages and 2 conversations; restored QA viewer previous MANAGER role, revoked its sessions.
+More-menu failed run left one session: exact user_id=2 / device_label=QA More Menu / created_at=2026-10-03T14:18:52.568515Z was revoked by this task, rowcount=1.
+No production application source was edited by this task, no build/deploy initiated.
+
+NEXT_ACTION:
+1. Resolve single-writer ownership for Messenger.
+2. Read latest page.tsx, CSS, relevant tests and hash; preserve newly added permission-loading UI.
+3. Diagnose remaining menu timing, mobile shellHidden specificity, multiuser selectors/API data.
+4. Fix within existing Messenger only; rerun affected tests then complete regression.
+5. Canonical immutable frontend build/deploy only after source scope review and verify-frontend-deploy-contract.sh PASS.
+6. Complete remaining V7 acceptance; report physical device gaps honestly.
+Evidence files: job_dad11cfdcdce.json, job_ad4ccde76bb3.json, job_7cdd3cb5a3f0.json, job_4e05e09677df.json.
+
+
+## Continuation checkpoint 2026-10-03 16:25 UTC — SXC revision 43
+
+IN PROGRESS 2026-10-03 16:25 UTC. User latest V7 instruction explicitly makes Codex sole Messenger executor; previous concurrent-writer authorization blocker resolved. Preserve other workstreams. Full Messenger pytest now 168 PASS (job_e0710fc02360); TypeScript and all static audits passed before latest composer edits. More menu all5 click URL reload Back/Forward + main BORIS, Settings7 sizes typography layout overflow0, native selects0 and report chat picker passed live (job_8e39e17cfdf3). General DM Group two-way and read receipt repeatedly passed, but group visibility intermittent under repeated read-event loop. Isolated feature E2E job_fa7b78cb3a8d: edit/reply/delete/pin/unpin realtime PASS,4 reactions API PASS,offline header PASS; five-message send stopped on composer race. User-session invite flow UI invite binding/registration PASS, login failed because QA email example.invalid rejected; new script uses example.com and running. QA1934/1935 revoked canonically. Important deploy state: frontend custom build artifacts activated/rolled back by canonical + auto-convergence. Latest observed current 20261003T161707Z-2541962-21964; reverify. Manual frontend jobs job_2f454cbd5551 and job_a636f34d4eb9 failed global mobile gate /dashboard/company transient and Campaign504 campaign-business-status-missing; both rolled back to9NpZnzooDqQPtjcpsxBzp. Do NOT modify Campaign or bypass gate. Backend scoped candidate713f92a... passed certification but full deployment job_f033753ca8a2 orphaned in SentinelX; host continued then rolled back to a8655496f2d233b3ae49fd1a27c1f9e749e6fba3e32e93813ddf95ec953c4418. Last global failures backend_runtime_generation + frontend_source_deployed (our later source edits overlapped backend convergence). Reattempt only after stable frontend, no simultaneous source edits, refreshed manifest. Current backend candidate only app/api/internal_messenger.py: redact nonmember internal events to cursor.advance, feed requires user_id, SSE fresh session/epoch check, emit read event only on advancing cursor, reject traversal filenames before basename normalization. Candidate not accepted live. Initial baseline file SHA24d6486dcd0e25f6a566f059d99600a2cc4bb2d6b5897de7512c08cc23baa96d unchanged in current. Latest candidate hash must refresh; old manifest messenger-v7-20261003-stream-security.json now stale after filename guard. New behavioral tests test_messenger_v7_stream_security.py candidate-relative source. Frontend changes page+CSS: mobile hidden shell specificity, viewer newchat disabled, deep-link applied once, history primary restore, optimistic own+dedup, explicit action aria labels, hide full workspace before account-switch navigation/SSE403, empty-team invite permission guard. Composer guard edits IN PROGRESS tool cell165: state added, guard added, remaining mutations may be pending; finish/inspect before build. Scripts qa-messenger-v7-message-features.py standalone avoids repeated proven DM/group tests; qa-messenger-v7-onboarding.py; qa-messenger-v7-stream-security.py prepared not yet run; wrapper qa-messenger-v7-closure.py generated compilePASS after fix. QA roles restored and per-run sessions revoked. Local evidence outputs/messenger-v7-closure; no secrets. Huge remaining acceptance: backend live security, group lifecycle, viewer full matrix, onboarding login/legal/revoke, attachments3types/security, reports slash/composer, isolation browser,200%zoom/accessibility,100/500/1000/10k scale,backup restore,observability,physical devices. No100% readiness claim. Current task continues.
+
+Correction after saving SXC: composer edits all six completed successfully; next TypeScript/build pending. Onboarding diagnostic retry now job_14367227708e. Work continues, this is not final acceptance.
+
+
+## 2026-10-03 17:36 UTC checkpoint
+2026-10-03 17:36 UTC in progress NOT READY. Sole Codex Messenger per user. Continue no duplicate audit. Full Messenger suite 176 PASS job_78a9da4d352f after equivalent Send disabled condition reorder. Frontend network offline/online now aborts active SSE controller to unblock reader/reconnect; TS/build/static PASS job_df51c46c2893, artifact /root/BORIS/frontend/.boris-builds/artifacts/20261003T171700Z-2604089-2855 build lxRPvwG0FVM6VeMxYOyte source84e1ffa4c2bf171631f54a820521ad8f5f9a9e1fb57ef08801d53a6edec6a2a8. canonical deploy job_1dd0b3827a5c PASS (NOOP sameactive, mobile and Campaign gates PASS). Group/Viewer job_0ad88989f3ff PASS:13mutation403 incl take-client, UIcomposer/actions/create disabled,DMdedup,groupremove404/add/rename/admin/demote/transfer/leave,cleanup. Fresh fullbackup /root/BORIS/backend/backups/schema/boris_db_20261003T171802Z_messenger_v7.sql.gz 381721977bytes sha883725b60e0d5281e2dd0031f8d67d6612b207c176b7d04b4eb467241c13aff9 created without pruning. Restore tempDB job_741abac2c9cc PASS all9tables counts exact incl audit60/sessions544/legal10,0unvalidated,tempDBremoved,productionDBunmodified. Olderbackup missed securityaudit. Backend scopeddeployv2 job_17e9eeadb34b FAILED rolledback a8655496...953c4418;candidatebb0fcb... notlive;onlybackend_runtime_generationfailed. No bypass/restart. APIs unchangedMainPID2517968/2516885. Deploy service discards returned diagnostic tick result; rolling subprocess timeout300 vsKPIlockwait600 possible cause NOT proven; no oldnginxworkers atlatestcheck. FeatureQA job_05170f0c838a edit/reply/delete/pin/unpinPASS butreactionsFAIL/reconnectOnlineTimeout; afternetworkfix job9024failedinitialdelivery. QA now waitsreal sendHTTP and assertsactual conversationID; currentjob_fe8bf541cc8b running. Onboardingnewretry jobfe10 failedlogin waitHTTP,cleanup1937revoked; prior1936fullonboarding/revoke PASS stillvalid,rolesnotconfirmed. SentinelX transportintermittent retryreadonly beforeuncertainwrite. Many remaining acceptance areas in localoutputs/messenger-v7-closure/STATUS.txt. No production100claim. Physicaldevicechecklistprepared. Next inspect latestfeatureQA,attachments/report/a11y/performance/sessionsecurity;backendlivecandidateacceptance blockedcanonicalgeneration.
+
+
+## Later verified acceptance checkpoint 2026-10-03
+ 17:49-18:00 UTC: job_d4078ceda75d fullsuite176PASS afterreconnectfix. job_27cb2b1e6aa1 featureQA PASS:sendHTTP200exactconversation,edit/reply/delete/pin/unpin,4reactionPOST200+APIreadback,offline/reconnect5orderednoduplicates. Peremoji second-browser visualstillpending. Mostrecentfrontendobservedartifact20261003T174300Z-2627664-19958 buildou2tzsezNCv5g4WEcnvCS auto-convergence afterQAfilechanges; nofullmanualdeploygateclaimforthisbuild. Backendstillbaselinea865. LIVE securityjob_6c07c9ae7812 provesNONMEMBER_EVENT_REDACTED=FAIL,REMOVED_MEMBER_EVENT_REDACTED=FAIL,READ_RECEIPT_IDEMPOTENT=FAIL. Sessionrevoke200->events401PASS; SSEcloseNOTCONFIRMED(timeout,cleanupAttributeError). Candidate fixesnotlive; criticalsecurityblocker. Health8000/8001/public200. Attachment/reportQA scriptstoredlocalwork+outputs/messenger-v7-closure/qa-messenger-v7-attachments-reports.py; remote safeedit twiceautomaticapproval deadlineTIMEOUT notunsafe rejection. Askeduserconfirmation async; donotrun dependentblockuntilanswer. LatestfullRussianacceptancematrixlocaloutputs/messenger-v7-closure/ACCEPTANCE_RU.txt. PhysicalchecklistDEVICE_CHECKLIST_RU.txt. No100claim. Resume remainingitems withoutrestartaudit.
+
+
+## V7.1 update 2026-10-03 21:38 UTC — checkpoint sxc_GWGJY164 rev47
+Both P0 LIVE closed. Scoped canonical deploy job_4457a13d93e8: certification/activation/production_contract PASS. Current primary replica converge on 71f306403a6635daa39803276a296cba8214de2f4c014f3779dd64a2b1ce946b; health8000/8001/public200. Runtime generation allTrue. Two runtimefiles only: internal_messenger.py privateevents/readiness/session/attachment/readhardening and reliability.py periodicheartbeat SLA (inventory1200sec for900cadence,guardian600 canonical invariant). No safeguards bypassed.
+Live privacy job_0c067603fbbd PASS: nonmembers noDM/group events polling/SSE/replay/LastEventID, no readinesscursor/rate leak,removedmembersblocked,generalworks,crosstenant403,legacy401,revokeAPI401+SSEclose. Revokeall epoch job_714dc9139ad1 PASS. FullMessenger186PASS job_7ea11c90beda. Backuprestore previousPASS unchanged.
+Attachments/reports job_63a429993b4d: all5menu+6slash+share and all7negative securityPASS; JPGPDFseconduserhashPASS; PNG429 mustretry. UI job_1b0596f75875: DMcreate/unread/readreceipt/twoway,groupcreate/twoway,4emoji secondbrowserPASS; renameheaderstale fixed selectedthreadrefresh. Added missinggroupmember customselector and visibleemojicounts. Browsermatrix job_b14cac0558ec all7main screenswidth/native/jsPASS but composerreportmenu width60/topnegative causedglobalminwidth0 specificity. Fixed CSS anchor/explicitwidth/maxviewport. Build job_89b014ec4b85 pending; verifyactualcurrent beforeQA. Remaining groupUIlifecycle+Viewer,final7matrix,accountswitchMoscow/Penza,inviteedge/roleUI,PNGdelta/offlinereceipts/finalregression andphysicaldeviceacceptance. No100claim yet. Scripts backend/scripts/qa_messenger_v71_*.py; output evidence saved locally outputs/messenger-v7-closure. Do not redeploybackend withoutnewruntimechange.
+
+
+## FINAL V7.1 — 2026-10-04 02:22 MSK
+Authoritative acceptance: docs/AI_HANDOFF/MESSENGER_V71_FINAL_ACCEPTANCE_20261004.txt and local outputs/messenger-v7-closure/FINAL_ACCEPTANCE_RU.txt. CODE_READY=100%; PRODUCTION_READY=WAITING_PHYSICAL_DEVICE_ACCEPTANCE. Backend current=primary=replica ca40cedd57cf6dd19a30822ebe1aef1f28bda40dd8f69e9078de03e81c98e50f; frontend uyQn9QdjrxmfhtJ5vIS6Z source f341a8bb69f09287e008bbcbb03c0940e7d3188cfa0571b0cd7d9e6dcf9b4534. Scoped job4a555856acea cert/activation/production_contract PASS; final contract5d26a527c526 PASS20/20, runtime generation true, health200/200/public200. Full196tests+TS+auditsPASS. Postdeploy privacy27/DMgroupViewer22PASS d31400043229; readiness+4097PASS5fd36ec6620e; PNGfullPASS1aed071ff661 closes prior nginx429; JPGPDF/reports/slash/negativeguardsPASSd314. Epoch+8accountswitchPASSa0b3. Finalreconnect93fa361882ba6PASS including4SSE,5orderedmessages,nodup,unread,readreceipt. Load1daf25ad152dPASS100employees500/1000chats10khistoryDOM100->200,exactcleanupreadback0. PWA701bb runtimePASS, realChrome149Xvfb install/standalone/uninstall c4194bd90500PASS; keyboard36937PASS;7viewport681fba andrealzoom7e461 retained. All QA disposable rows/files cleaned, own sessions revoked, audit kept. No additional technical blocker. Physical Mac/Android/iPhone Push/PWA must not be marked PASS without device. No competing Messenger writer now; coordinated01a103b8 only load/PWA support complete. Preserve this final release evidence before V8 integration.
+
+
+## V8 revalidation checkpoint 2026-10-04
+2026-10-04 V8 revalidation: SentinelX operational after transient transport failures. Foreign CAMPAIGN-DURABLE-AFTER318 rollout PID3471376 active, manifest backend/run/scoped-release-requests/campaign-after318-20261004.json. Backend current changed during read-only checks from 1e4985a073f07c870e7c241ce6d6343562abb578dce58299e8fef2e50c8a0e29 to 8e8241f2fac4d389009f64868a197aa5c566cfe82b7c6e0878e26a077e639ee4; convergence NOT verified. Frontend coQuLmUXnN0l9mypCkmDK artifact20261004T070838Z-3338241-21264 snapshot e062668afce09f4b3f6d7ec9c794d2214bb5151809256c6d05912c584098d4c1. Public health200. Messenger internal_messenger.py SHA30076923ffbb882feab25bf0a6c5f1d327c755302e6cfc16e323f8bb7b71c882 unchanged vs V71. Server voice services, worker and migration064 ABSENT; existing local work/v8 preserved. ffmpeg/ffprobe/model-cache directory exist; full model/flags not yet verified. No production/source/DB mutations or load performed. Existing thread01a103b8 single-writer physical login/PWA fix, separate from this V8 QA; do not include its unfinished delta. V71 accepted report remains frozen historical evidence, not assertion of current runtime or physical PASS. Next: after foreign rollout completes verify convergence, flags, hashes and current contracts; stage existing V8 isolated candidate, real server QA/benchmark. Preserve 5local/7harness evidence; do not redo without reason.
+
+
+## Physical iPhone PWA scoped fix 2026-10-04
+User reported orange HomeScreen BORIS -> login -> CommandCenter. Diagnosed /messenger401 leaving scope to root /login metadata; SVG-only Apple icon. Seven frontend runtime files fixed only Messenger auth scope/default return and PNG180. Full196/TS/targeted6/static PASS job6d25c2583981; Chromium+WebKit runtime6PASS job72d837433145 (login response fixture, not physical). Active SI1MD-2N6cfawcBL0oUA8 source06d3c6e1e065ed80898a4ff5600d305c48e100412ecabad61e5ef1813d74c0c3. Canonical deploy2254d0e27b1d PASS NOOP already autoactivated, all deploy gatesPASS. Backend not changed (foreign Campaign current1e4985a... at readback). Full report MESSENGER_V71_PHYSICAL_IOS_FIX_20261004.txt. NEXT user physical iPhone reinstall/launch retest, then real Push. MAC install/standalone/relaunchsession confirmed physical; real Push not tested. V8 owned separately01a1021e and not integrated by this task. Preserve separate V8 context state.

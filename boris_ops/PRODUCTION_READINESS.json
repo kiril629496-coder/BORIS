@@ -1,0 +1,16 @@
+{
+  "contract": "BORIS_OPS_PRODUCTION_READINESS",
+  "ok": false,
+  "version": "1.4.5",
+  "agent_sha256": "29c6b1d4f877ee5170a84c365a4ff431cf0e6599bdb493524f9a8c3c75820cd4",
+  "post_acceptance_samples": 45,
+  "remote_mcp_samples": 60,
+  "cert60_samples": 60,
+  "stress45_samples": 45,
+  "independence_samples": 20,
+  "runtime_dependency_on_github": false,
+  "runtime_dependency_on_sentinelx": null,
+  "sentinelx_retirement_ready": false,
+  "recovery_dryrun_current": true,
+  "generated_at": 1791694678.200856
+}

@@ -1,0 +1,111 @@
+"""Owner/employee UI lifecycle and Viewer read-only, QA tenant only."""
+from pathlib import Path
+exec(Path("/root/BORIS/frontend/scripts/qa-messenger-v70-multiuser.py").read_text().split("access0,team0=set_viewer()")[0])
+tokens={};sessions=[];checks={};before_dm=dm_ids();access0=team0=None
+def check(k,v,detail=None):checks[k]={"ok":bool(v),"detail":detail}
+def expect_action(page,method,suffix,action):
+ with page.expect_response(lambda r:r.request.method==method and r.url.split("?")[0].endswith(suffix),timeout=20000) as event:action()
+ r=event.value;assert r.status==200,(suffix,r.status)
+ return r.json()
+def send_confirmed(page,cid,body):
+ composer(page).locator("textarea").fill(body)
+ data=expect_action(page,"POST",f"/conversations/{cid}/messages",lambda:composer(page).get_by_role("button",name="Отправить",exact=True).click())
+ mid=data["message"]["id"];page.locator("#internal-message-"+str(mid)).wait_for(timeout=15000)
+ return mid
+def row(page,name):return page.locator('[class*="internalInfo"] [class*="personRow"]').filter(has_text=name)
+def go(page,token,section="chats"):
+ page.goto(WEB+"/login",wait_until="domcontentloaded")
+ page.evaluate("([t,a])=>{localStorage.setItem('boris_token',t);localStorage.setItem('account_id',a)}",[token,ACCOUNT])
+ page.goto(WEB+f"/messenger?account_id={ACCOUNT}&section={section}",wait_until="domcontentloaded")
+def open_more(page,label):
+ page.get_by_role("button",name="Ещё",exact=True).click()
+ page.get_by_role("dialog",name="Ещё").get_by_role("button",name=label,exact=False).click()
+try:
+ for uid in (OWNER_ID,EMPLOYEE_ID,VIEWER_ID):
+  token,sid,_=issue(uid,"V71 UI lifecycle");tokens[uid]=token;sessions.append((uid,sid))
+ emp_name=dbrow("SELECT name FROM team_memberships WHERE account_id=:a AND user_id=:u",{"a":ACCOUNT,"u":EMPLOYEE_ID})["name"]
+ viewer_name=dbrow("SELECT name FROM team_memberships WHERE account_id=:a AND user_id=:u",{"a":ACCOUNT,"u":VIEWER_ID})["name"]
+ with sync_playwright() as pw:
+  browser=pw.chromium.launch(headless=True,args=["--no-sandbox"])
+  owner=browser.new_page(viewport={"width":1440,"height":900})
+  emp=browser.new_page(viewport={"width":1440,"height":900})
+  for p,u in ((owner,OWNER_ID),(emp,EMPLOYEE_ID)):
+   go(p,tokens[u]);p.get_by_role("button",name="Новый чат",exact=True).wait_for(timeout=25000);open_general(p)
+  owner.get_by_role("button",name="Новый чат",exact=True).click()
+  dlg=owner.get_by_role("dialog",name="Новый чат")
+  dlg.locator('[class*="newChatPeople"] > button').filter(has_text=emp_name).first.click()
+  result=expect_action(owner,"POST","/api/internal-messenger/conversations",lambda:owner.get_by_role("button",name="Начать диалог",exact=True).click())
+  dm=result["conversation_id"];check("DM_UI_CREATE",True)
+  owner.locator('[class*="internalChatHead"] h2').filter(has_text=emp_name).wait_for(timeout=15000)
+  mid=send_confirmed(owner,dm,PREFIX+" DM OWNER")
+  dmrow=emp.locator('button[class*="internalRow"]').filter(has_text=PREFIX+" DM OWNER")
+  dmrow.wait_for(timeout=20000);dmrow.locator("b").wait_for(timeout=10000)
+  check("DM_UNREAD",int(dmrow.locator("b").inner_text())>=1)
+  dmrow.click();emp.locator("#internal-message-"+str(mid)).wait_for(timeout=15000)
+  check("DM_REALTIME_OWNER_TO_EMPLOYEE",True)
+  owner.locator("#internal-message-"+str(mid)).get_by_text(re.compile("Прочитано")).wait_for(timeout=15000)
+  check("DM_READ_RECEIPT",True)
+  reply=send_confirmed(emp,dm,PREFIX+" DM EMPLOYEE");owner.locator("#internal-message-"+str(reply)).wait_for(timeout=15000)
+  check("DM_REALTIME_EMPLOYEE_TO_OWNER",True)
+  owner.get_by_role("button",name="Новый чат",exact=True).click()
+  dlg=owner.get_by_role("dialog",name="Новый чат");dlg.get_by_role("button",name="Группа",exact=True).click()
+  dlg.get_by_role("textbox",name="Название новой группы").fill(GROUP_TITLE)
+  dlg.locator('[class*="newChatPeople"] > button').filter(has_text=emp_name).first.click()
+  result=expect_action(owner,"POST","/api/internal-messenger/conversations",lambda:dlg.get_by_role("button",name="Создать группу",exact=True).click())
+  group=result["conversation_id"]
+  owner.get_by_role("heading",name=GROUP_TITLE,exact=True).wait_for(timeout=15000)
+  grow=emp.locator('button[class*="internalRow"]').filter(has_text=GROUP_TITLE);grow.wait_for(timeout=15000);grow.click()
+  check("GROUP_UI_CREATE_REALTIME",True)
+  mid=send_confirmed(owner,group,PREFIX+" GROUP OWNER");emp.locator("#internal-message-"+str(mid)).wait_for(timeout=15000)
+  reply=send_confirmed(emp,group,PREFIX+" GROUP EMPLOYEE");owner.locator("#internal-message-"+str(reply)).wait_for(timeout=15000)
+  check("GROUP_TWO_WAY_REALTIME",True)
+  for index,emoji in enumerate(["👍","✅","❤️","😂"],1):
+   bubble=owner.locator("#internal-message-"+str(mid));bubble.hover()
+   bubble.get_by_role("button",name=re.compile("^😊")).click()
+   expect_action(owner,"POST",f"/messages/{mid}/reactions",lambda:bubble.get_by_role("button",name=emoji,exact=True).click())
+   emp.locator("#internal-message-"+str(mid)).get_by_label("Реакции сообщения").get_by_text(emoji+" 1",exact=True).wait_for(timeout=12000)
+   check("REACTION_SECOND_BROWSER_"+emoji,True)
+  owner.get_by_placeholder("Новое название группы").fill(GROUP_TITLE+" renamed")
+  expect_action(owner,"PATCH",f"/conversations/{group}",lambda:owner.get_by_role("button",name="Переименовать группу",exact=True).click())
+  emp.get_by_role("heading",name=GROUP_TITLE+" renamed",exact=True).wait_for(timeout=15000);check("GROUP_RENAME_UI_REALTIME",True)
+  owner.get_by_role("button",name="Сотрудник для добавления в группу",exact=True).click()
+  owner.get_by_role("listbox",name="Сотрудник для добавления в группу").get_by_role("option").filter(has_text=viewer_name).click()
+  expect_action(owner,"POST",f"/conversations/{group}/members",lambda:owner.get_by_role("button",name="Добавить выбранного сотрудника",exact=True).click())
+  row(owner,viewer_name).wait_for(timeout=15000);check("GROUP_ADD_UI",True)
+  expect_action(owner,"DELETE",f"/members/{VIEWER_ID}",lambda:row(owner,viewer_name).get_by_role("button",name="Удалить",exact=True).click())
+  row(owner,viewer_name).wait_for(state="detached",timeout=15000);check("GROUP_REMOVE_UI",True)
+  for label,result_label in [("Сделать администратором","Снять администратора"),("Снять администратора","Сделать администратором")]:
+   expect_action(owner,"PATCH",f"/members/{EMPLOYEE_ID}",lambda:row(owner,emp_name).get_by_role("button",name=label,exact=True).click())
+   row(owner,emp_name).get_by_role("button",name=result_label,exact=True).wait_for(timeout=15000);check("GROUP_ROLE_"+label,True)
+  expect_action(owner,"POST",f"/conversations/{group}/transfer-ownership",lambda:row(owner,emp_name).get_by_role("button",name="Передать владение",exact=True).click())
+  row(owner,emp_name).get_by_text("Владелец",exact=False).wait_for(timeout=15000);check("GROUP_TRANSFER_UI",True)
+  owner.once("dialog",lambda d:d.accept())
+  expect_action(owner,"POST",f"/conversations/{group}/leave",lambda:owner.get_by_role("button",name="Покинуть группу",exact=True).click())
+  check("GROUP_LEAVE_UI",True)
+  access0,team0=set_viewer()
+  viewer=browser.new_page(viewport={"width":1440,"height":900});go(viewer,tokens[VIEWER_ID])
+  viewer.get_by_role("button",name="Новый чат",exact=True).wait_for(timeout=20000);open_general(viewer)
+  check("VIEWER_SEND_UI",composer(viewer).locator("textarea").is_disabled() and composer(viewer).get_by_role("button",name="Отправить",exact=True).is_disabled())
+  check("VIEWER_CREATE_UI",viewer.get_by_role("button",name="Новый чат",exact=True).is_disabled())
+  viewer.get_by_role("button",name="Ещё",exact=True).click()
+  team_button=viewer.get_by_role("dialog",name="Ещё").get_by_role("button",name="Команда и доступы",exact=False)
+  if team_button.count()==0 or team_button.is_disabled():
+   check("VIEWER_TEAM_UI",True,"Team route disabled by role")
+   viewer.keyboard.press("Escape")
+  else:
+   team_button.click()
+   viewer.wait_for_url("**section=team",timeout=15000)
+   active=viewer.get_by_role("button").filter(has_text=re.compile("Пригласить|Отозвать|Изменить роль"))
+   check("VIEWER_TEAM_UI",all(not active.nth(i).is_visible() or active.nth(i).is_disabled() for i in range(active.count())))
+  open_more(viewer,"Задачи и напоминания")
+  viewer.get_by_role("heading",name="Задачи и напоминания",exact=True).wait_for(timeout=15000)
+  active=viewer.get_by_role("button").filter(has_text=re.compile("Создать задачу|Добавить задачу|Взять клиента"))
+  check("VIEWER_CRM_UI",all(not active.nth(i).is_visible() or active.nth(i).is_disabled() for i in range(active.count())))
+  browser.close()
+except Exception as exc:check("UNEXPECTED",False,type(exc).__name__+":"+str(exc))
+finally:
+ if access0 is not None:restore_viewer(access0,team0)
+ for uid,sid in sessions:revoke(uid,sid)
+ cleanup_result=cleanup(before_dm)
+print(json.dumps({"status":"PASS" if checks and all(v["ok"] for v in checks.values()) else "FAIL","checks":checks,"cleanup":cleanup_result},ensure_ascii=False,indent=2))
+raise SystemExit(0 if checks and all(v["ok"] for v in checks.values()) else 1)

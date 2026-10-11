@@ -1,0 +1,82 @@
+{
+  "contract": "BORIS_OPS_1_4_3_BOUNDED_RESOURCES_QA",
+  "ok": true,
+  "candidate_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+  "tools": 34,
+  "checks": {
+    "bounded_search": true,
+    "job_concurrency": true,
+    "queued_cancel_sticky": true,
+    "timeout_state": true,
+    "sha_stable": true
+  },
+  "bounded_search": {
+    "ok": true,
+    "count": 10,
+    "hits": [
+      {
+        "path": "/root/BORIS/boris_ops/reload_nginx_safe.py",
+        "line": 12,
+        "text": "    for name,url in [('ops','https://boris-ai.pro/_ops/health'),('public','https://boris-ai.pro/health')]:"
+      },
+      {
+        "path": "/root/BORIS/boris_ops/reload_nginx_safe.py",
+        "line": 15,
+        "text": "    print(json.dumps({'ok':True,'contract':'BORIS_NGINX_SAFE_RELOAD','health':ok,'steps':steps},ensure_ascii=False))"
+      },
+      {
+        "path": "/root/BORIS/boris_ops/reload_nginx_safe.py",
+        "line": 17,
+        "text": "    print(json.dumps({'ok':False,'contract':'BORIS_NGINX_SAFE_RELOAD','error':str(e),'steps':steps},ensure_ascii=False)); raise SystemExit(1)"
+      },
+      {
+        "path": "/root/BORIS/boris_ops/agent.py.bak.v13a-20260902-203725",
+        "line": 22,
+        "text": "DISABLE_FILE = Path(os.getenv(\"BORIS_OPS_DISABLE_FILE\", \"/etc/boris-ops/disabled\"))"
+      },
+      {
+        "path": "/root/BORIS/boris_ops/agent.py.bak.v13a-20260902-203725",
+        "line": 23,
+        "text": "DISK_WRITE_BLOCK_PERCENT = int(os.getenv(\"BORIS_OPS_DISK_WRITE_BLOCK_PERCENT\", \"92\"))"
+      },
+      {
+        "path": "/root/BORIS/boris_ops/agent.py.bak.v13a-20260902-203725",
+        "line": 24,
+        "text": "BIND = os.getenv(\"BORIS_OPS_BIND\", \"127.0.0.1\")"
+      },
+      {
+        "path": "/root/BORIS/boris_ops/agent.py.bak.v13a-20260902-203725",
+        "line": 25,
+        "text": "PORT = int(os.getenv(\"BORIS_OPS_PORT\", \"8741\"))"
+      },
+      {
+        "path": "/root/BORIS/boris_ops/agent.py.bak.v13a-20260902-203725",
+        "line": 26,
+        "text": "TOKEN = os.getenv(\"BORIS_OPS_TOKEN\", \"\")"
+      },
+      {
+        "path": "/root/BORIS/boris_ops/agent.py.bak.v13a-20260902-203725",
+        "line": 27,
+        "text": "HMAC_SECRET = os.getenv(\"BORIS_OPS_HMAC_SECRET\", \"\")"
+      },
+      {
+        "path": "/root/BORIS/boris_ops/agent.py.bak.v13a-20260902-203725",
+        "line": 28,
+        "text": "AUDIT = Path(os.getenv(\"BORIS_OPS_AUDIT\", \"/var/log/boris-ops/audit.jsonl\"))"
+      }
+    ],
+    "scanned_files": 10,
+    "truncated": true,
+    "stop_reason": "hit_limit",
+    "duration_s": 0.02
+  },
+  "job_states_initial": {
+    "job_0202f8226ee34124": "running",
+    "job_b9c0ca406a92428d": "running",
+    "job_817913ff922c4818": "queued",
+    "job_1c86131369d645b1": "queued",
+    "job_c381d4b961b54f02": "queued"
+  },
+  "timeout_status": "timeout",
+  "ts": 1788467288.711855
+}

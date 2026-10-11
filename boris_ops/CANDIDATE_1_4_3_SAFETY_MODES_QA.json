@@ -1,0 +1,40 @@
+{
+  "contract": "BORIS_OPS_1_4_3_SAFETY_MODES_QA",
+  "ok": true,
+  "candidate_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+  "checks": {
+    "agent_rate_limit": true,
+    "read_only_denies_write": true,
+    "read_only_allows_read": true,
+    "read_only_allows_safe_exec": true,
+    "read_only_diagnostic": true,
+    "read_only_no_file_created": true,
+    "sha_stable": true
+  },
+  "details": {
+    "rate_codes": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      429,
+      429,
+      429
+    ],
+    "read_only_runtime": {
+      "pid": 1710857,
+      "uid": 993,
+      "gid": 984,
+      "max_concurrent_requests": 12,
+      "max_concurrent_jobs": 3,
+      "search_max_files": 4000,
+      "search_max_seconds": 8.0,
+      "rate_limit_per_min": 120.0,
+      "rate_limit_burst": 50.0,
+      "read_only": true,
+      "write_guard": "read_only_mode"
+    }
+  },
+  "ts": 1788467280.3429186
+}

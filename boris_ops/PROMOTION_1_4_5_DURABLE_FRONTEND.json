@@ -1,0 +1,38 @@
+{
+  "contract": "guarded_promotion_1_4_5_durable_frontend",
+  "started_at": 1790857520.9920597,
+  "candidate": "/root/BORIS/boris_ops/releases/agent-1.4.5-durable-frontend-candidate.py",
+  "expected_sha256": "29c6b1d4f877ee5170a84c365a4ff431cf0e6599bdb493524f9a8c3c75820cd4",
+  "steps": [
+    {
+      "candidate_sha256": "29c6b1d4f877ee5170a84c365a4ff431cf0e6599bdb493524f9a8c3c75820cd4"
+    },
+    {
+      "python_validation": "PASS"
+    },
+    {
+      "preflight_health": {
+        "status": 200,
+        "ok": true,
+        "version": "1.4.5"
+      }
+    },
+    {
+      "gate": {
+        "sha256": "29c6b1d4f877ee5170a84c365a4ff431cf0e6599bdb493524f9a8c3c75820cd4",
+        "ttl_seconds": 120,
+        "purpose": "guarded_promotion_1_4_5_durable_frontend"
+      }
+    },
+    {
+      "self_update_request": {
+        "status": 202,
+        "ok": true,
+        "status_value": "started",
+        "error": null
+      }
+    }
+  ],
+  "ok": true,
+  "finished_at": 1790857521.0979517
+}

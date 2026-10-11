@@ -1,0 +1,33 @@
+{
+  "contract": "BORIS_OPS_POST_ACCEPTANCE_45M",
+  "ok": true,
+  "started_at": 1788455274.2976246,
+  "finished_at": 1788457934.1737092,
+  "duration_s": 2659.9,
+  "samples": 45,
+  "failures": 0,
+  "failure_rows": [],
+  "dependency_degraded_events": 10,
+  "qa_e2e": {
+    "rc": 0,
+    "stdout": "{\"ok\": true, \"contract\": \"BORIS_OPS_PRODUCTION_QA\", \"started_at\": 1788457931.5396018, \"finished_at\": 1788457932.082375, \"duration_s\": 0.543, \"checks\": {\"public_health\": true, \"authenticated_version\": true, \"least_privilege_capability\": true, \"dangerous_scripts_default_off\": true, \"unauthorized_denied\": true, \"replay_denied\": true, \"safe_exec\": true, \"arbitrary_exec_denied\": true, \"project_write\": true, \"file_stat\": true, \"optimistic_patch\": true, \"nginx_generic_write_denied\": true, \"agent_generic_write_denied\": true, \"mcp_initialize\": true, \"mcp_tools\": true, \"mcp_call\": true, \"boris_health\": true, \"disk_guard_sane\": true, \"runtime_user_borisops\": true}, \"passed\": 19, \"total\": 19, \"failed\": []}\n",
+    "stderr": ""
+  },
+  "hardening": {
+    "rc": 0,
+    "stdout": "{\"contract\": \"BORIS_OPS_HARDENING_QA\", \"ok\": true, \"passed\": 23, \"total\": 23, \"checks\": {\"public_health\": true, \"unauthorized_denied\": true, \"version\": true, \"diagnostics\": true, \"audit_recent\": true, \"dangerous_exec_denied\": true, \"arbitrary_exec_denied\": true, \"service_deny\": true, \"read_root_deny\": true, \"write_root_deny\": true, \"patch_ok\": true, \"stale_patch_deny\": true, \"backup_unique_same_second\": true, \"upload_hash_deny\": true, \"upload_ok\": true, \"soft_delete\": true, \"restore\": true, \"mcp_tools\": true, \"mcp_unknown\": true, \"state_dirs_private\": true, \"state_files_private\": true, \"strict_public_5xx_cert_policy\": true, \"strict_cert_acceptance_budget\": true}, \"failed\": []}\n",
+    "stderr": ""
+  },
+  "verify_install": {
+    "rc": 0,
+    "stdout": "{\"ok\": true, \"contract\": \"BORIS_OPS_VERIFY_INSTALL\", \"version\": \"1.4.2\", \"files\": 56, \"services\": {\"boris-ops.service\": \"active\", \"boris-ops-watchdog.timer\": \"active\", \"boris-ops-guardian.timer\": \"active\", \"boris-ops-longqa.timer\": \"active\", \"boris-ops-qa.timer\": \"active\", \"boris-ops-cleanup.timer\": \"active\", \"boris-ops-pipeline-guardian.timer\": \"active\", \"nginx.service\": \"active\"}, \"http\": {\"local\": 200, \"external\": 200}, \"recovery\": {\"pack\": \"/root/BORIS/backups/boris-ops/recovery-1.4.2-20260903T175043Z.tar.gz\", \"exists\": true, \"sha256_match\": true, \"runtime_dependency_on_sentinelx\": false, \"runtime_dependency_on_github\": false, \"secrets_included\": false}}\n",
+    "stderr": ""
+  },
+  "recovery_dryrun": {
+    "rc": 0,
+    "stdout": "{\"contract\": \"BORIS_OPS_RECOVERY_DRYRUN\", \"ok\": true, \"pack\": \"/root/BORIS/backups/boris-ops/recovery-1.4.2-20260903T175043Z.tar.gz\", \"pack_sha256\": \"614151f2852e62ee053c28d011c7d5d66f3a24d048b84357d8b784b385bbfea7\", \"checks\": {\"pack_exists\": true, \"pack_sha256\": true, \"manifest_no_runtime_dependencies\": true, \"manifest_no_secrets\": true, \"internal_sha256s\": true, \"secret_files_absent\": true, \"credential_values_absent\": true, \"python_compile\": true, \"recovery_instructions\": true, \"extract\": true}, \"errors\": []}\n",
+    "stderr": ""
+  },
+  "runtime_dependency_on_github": false,
+  "runtime_dependency_on_sentinelx": false
+}

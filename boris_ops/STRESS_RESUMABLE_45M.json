@@ -1,0 +1,17 @@
+{
+  "contract": "BORIS_OPS_RESUMABLE_STRESS45",
+  "ok": true,
+  "policy": "strict-public-v3-autoretry",
+  "attempt": 2,
+  "version": "1.4.5",
+  "agent_sha256": "29c6b1d4f877ee5170a84c365a4ff431cf0e6599bdb493524f9a8c3c75820cd4",
+  "samples": 45,
+  "target_samples": 45,
+  "failures": 0,
+  "dependency_degraded_events": 0,
+  "started_at": 1790857666.042078,
+  "finished_at": 1790860322.827946,
+  "duration_s": 2656.8,
+  "failure_rows": [],
+  "degraded_rows": []
+}

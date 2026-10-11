@@ -1,0 +1,14 @@
+{
+  "contract": "BORIS_OPS_CANDIDATE_1_4_3_SOAK",
+  "ok": true,
+  "complete": true,
+  "candidate_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+  "final_candidate_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+  "samples": 60,
+  "target_samples": 60,
+  "failures": 0,
+  "duration_s": 2667.8,
+  "started_at": 1788441523.828418,
+  "finished_at": 1788444191.6478682,
+  "failure_rows": []
+}

@@ -1,0 +1,126 @@
+{
+  "contract": "BORIS_OPS_PROMOTE_1_4_3",
+  "started_at": 1788459683.9687161,
+  "candidate": "/root/BORIS/boris_ops/releases/agent-1.4.3-candidate.py",
+  "expected_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+  "steps": [
+    {
+      "resume_identity": {
+        "version": "1.4.3",
+        "sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+        "already_installed": true
+      }
+    },
+    {
+      "recovered_after_s": 0.0,
+      "sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65"
+    },
+    {
+      "name": "qa_e2e",
+      "attempt": 1,
+      "rc": 0,
+      "stdout": "{\"ok\": true, \"contract\": \"BORIS_OPS_PRODUCTION_QA\", \"started_at\": 1788459702.183445, \"finished_at\": 1788459702.4672666, \"duration_s\": 0.284, \"checks\": {\"public_health\": true, \"authenticated_version\": true, \"least_privilege_capability\": true, \"dangerous_scripts_default_off\": true, \"unauthorized_denied\": true, \"replay_denied\": true, \"safe_exec\": true, \"arbitrary_exec_denied\": true, \"project_write\": true, \"file_stat\": true, \"optimistic_patch\": true, \"nginx_generic_write_denied\": true, \"agent_generic_write_denied\": true, \"mcp_initialize\": true, \"mcp_tools\": true, \"mcp_call\": true, \"boris_health\": true, \"disk_guard_sane\": true, \"runtime_user_borisops\": true}, \"passed\": 19, \"total\": 19, \"failed\": []}\n",
+      "stderr": ""
+    },
+    {
+      "name": "hardening",
+      "attempt": 1,
+      "rc": 0,
+      "stdout": "{\"contract\": \"BORIS_OPS_HARDENING_QA\", \"ok\": true, \"passed\": 23, \"total\": 23, \"checks\": {\"public_health\": true, \"unauthorized_denied\": true, \"version\": true, \"diagnostics\": true, \"audit_recent\": true, \"dangerous_exec_denied\": true, \"arbitrary_exec_denied\": true, \"service_deny\": true, \"read_root_deny\": true, \"write_root_deny\": true, \"patch_ok\": true, \"stale_patch_deny\": true, \"backup_unique_same_second\": true, \"upload_hash_deny\": true, \"upload_ok\": true, \"soft_delete\": true, \"restore\": true, \"mcp_tools\": true, \"mcp_unknown\": true, \"state_dirs_private\": true, \"state_files_private\": true, \"strict_public_5xx_cert_policy\": true, \"strict_cert_acceptance_budget\": true}, \"failed\": []}\n",
+      "stderr": ""
+    },
+    {
+      "name": "recovery_pack",
+      "attempt": 1,
+      "rc": 0,
+      "stdout": "{\"ok\": true, \"version\": \"1.4.3\", \"path\": \"/root/BORIS/backups/boris-ops/recovery-1.4.3-20260903T182201Z.tar.gz\", \"sha256\": \"31ff332523a271750fad47aacc145911984885e9ab6a526d2df3aa305e56152a\", \"files\": 58, \"secrets_included\": false, \"runtime_dependency_on_github\": false, \"runtime_dependency_on_sentinelx\": false}\n",
+      "stderr": ""
+    },
+    {
+      "name": "verify",
+      "attempt": 1,
+      "rc": 0,
+      "stdout": "{\"ok\": true, \"contract\": \"BORIS_OPS_VERIFY_INSTALL\", \"version\": \"1.4.3\", \"files\": 56, \"services\": {\"boris-ops.service\": \"active\", \"boris-ops-watchdog.timer\": \"active\", \"boris-ops-guardian.timer\": \"active\", \"boris-ops-longqa.timer\": \"active\", \"boris-ops-qa.timer\": \"active\", \"boris-ops-cleanup.timer\": \"active\", \"boris-ops-pipeline-guardian.timer\": \"active\", \"nginx.service\": \"active\"}, \"http\": {\"local\": 200, \"external\": 200}, \"recovery\": {\"pack\": \"/root/BORIS/backups/boris-ops/recovery-1.4.3-20260903T182201Z.tar.gz\", \"exists\": true, \"sha256_match\": true, \"runtime_dependency_on_sentinelx\": false, \"runtime_dependency_on_github\": false, \"secrets_included\": false}}\n",
+      "stderr": ""
+    },
+    {
+      "name": "recovery_dryrun",
+      "attempt": 1,
+      "rc": 0,
+      "stdout": "{\"contract\": \"BORIS_OPS_RECOVERY_DRYRUN\", \"ok\": true, \"pack\": \"/root/BORIS/backups/boris-ops/recovery-1.4.3-20260903T182201Z.tar.gz\", \"pack_sha256\": \"31ff332523a271750fad47aacc145911984885e9ab6a526d2df3aa305e56152a\", \"checks\": {\"pack_exists\": true, \"pack_sha256\": true, \"manifest_no_runtime_dependencies\": true, \"manifest_no_secrets\": true, \"internal_sha256s\": true, \"secret_files_absent\": true, \"credential_values_absent\": true, \"python_compile\": true, \"recovery_instructions\": true, \"extract\": true}, \"errors\": []}\n",
+      "stderr": ""
+    }
+  ],
+  "remote_mcp_60m": {
+    "ok": true,
+    "samples": 60,
+    "failures": 0,
+    "versions_seen": [
+      "1.4.2"
+    ],
+    "duration_s": 3548.5,
+    "dependency_degraded_events": 1
+  },
+  "candidate_soak": {
+    "ok": true,
+    "complete": true,
+    "samples": 60,
+    "failures": 0,
+    "duration_s": 2667.8,
+    "candidate_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+    "final_candidate_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65"
+  },
+  "bounded_resources_qa": {
+    "ok": true,
+    "candidate_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+    "tools": 34,
+    "checks": {
+      "bounded_search": true,
+      "job_concurrency": true,
+      "queued_cancel_sticky": true,
+      "timeout_state": true,
+      "sha_stable": true
+    }
+  },
+  "full_preflight": {
+    "ok": true,
+    "candidate_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+    "tools": 34,
+    "checks": {
+      "start": true,
+      "initialize": true,
+      "ping": true,
+      "toolset": true,
+      "file_download": true,
+      "file_trash": true,
+      "process_list": true,
+      "http_check": true,
+      "postgres_check": true,
+      "nginx_validate": true,
+      "runtime_capabilities": true,
+      "bounded_search": true,
+      "job_concurrency": true,
+      "queued_cancel_sticky": true,
+      "timeout_state": true,
+      "dangerous_script_default_off": true,
+      "generic_systemctl_denied": true,
+      "sha_stable": true
+    }
+  },
+  "safety_modes_qa": {
+    "ok": true,
+    "candidate_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+    "checks": {
+      "agent_rate_limit": true,
+      "read_only_denies_write": true,
+      "read_only_allows_read": true,
+      "read_only_allows_safe_exec": true,
+      "read_only_diagnostic": true,
+      "read_only_no_file_created": true,
+      "sha_stable": true
+    }
+  },
+  "ok": true,
+  "finished_at": 1788459723.5590587,
+  "version": "1.4.3"
+}

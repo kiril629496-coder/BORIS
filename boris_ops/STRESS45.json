@@ -1,0 +1,12 @@
+{
+  "contract": "BORIS_OPS_STRESS45",
+  "ok": true,
+  "expected_version": "1.4.2",
+  "expected_agent_sha256": "41458ac138a29b687244d3398ed6aa29d006967b4a786d9a54411bcaac3bdb1d",
+  "final_agent_sha256": "41458ac138a29b687244d3398ed6aa29d006967b4a786d9a54411bcaac3bdb1d",
+  "samples": 60,
+  "failures": 0,
+  "duration_s": 2663.8,
+  "failure_rows": [],
+  "degraded_events": []
+}

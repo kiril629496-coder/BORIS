@@ -1,0 +1,15 @@
+{
+  "contract": "BORIS_OPS_SENTINELX_RETIREMENT_READINESS",
+  "ok": true,
+  "version": "1.4.3",
+  "final_production_ok": true,
+  "independence_ok": true,
+  "recovery_dryrun_ok": true,
+  "recovery_current": true,
+  "independence_strict": true,
+  "agent_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+  "runtime_dependency_on_sentinelx": false,
+  "runtime_dependency_on_github": false,
+  "sentinelx_retirement_ready": true,
+  "generated_at": 1788510395.200979
+}

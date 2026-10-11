@@ -1,0 +1,17 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const ts = require("../node_modules/typescript");
+const source = fs.readFileSync(require("node:path").join(__dirname, "../app/lib/accountSelection.ts"), "utf8");
+const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+const moduleBox = { exports: {} };
+vm.runInNewContext(js, { module: moduleBox, exports: moduleBox.exports, require }, { filename: "accountSelection.js" });
+const resolve = moduleBox.exports.resolveAccountSelection;
+const accounts = [{account_id:"first"},{account_id:"linked"},{account_id:"current"},{account_id:"saved"}];
+assert.equal(resolve(accounts,"linked","current","saved"),"linked");
+assert.equal(resolve(accounts,"foreign","current","saved"),"current");
+assert.equal(resolve(accounts,"foreign","missing","saved"),"saved");
+assert.equal(resolve(accounts,"foreign","missing","bad"),"first");
+assert.equal(resolve([],"linked","current","saved"),null);
+assert.equal(resolve(accounts," null "," undefined ","saved"),"saved");
+console.log("ACCOUNT_SELECTION_PRIORITY=PASS cases=6");

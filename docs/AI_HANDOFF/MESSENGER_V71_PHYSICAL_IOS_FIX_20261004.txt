@@ -1,0 +1,44 @@
+V7.1 — исправление physical iPhone PWA launch, 2026-10-04
+STATUS=DEPLOYED_AWAITING_PHYSICAL_RETEST
+User reproduction: Home Screen orange BORIS -> shared login -> Command Center instead of Messenger.
+Automated reproduction before fix: unauthenticated /messenger?section=settings -> /login; /login exposes root manifest and orange root Apple PNG. Messenger Apple metadata was SVG only. Exact iOS installed shortcut URL was unavailable; final device root-cause confirmation requires reinstallation/retest.
+
+Minimal scope:
+frontend/app/messenger/layout.tsx
+frontend/app/messenger/manifest.webmanifest/route.ts
+frontend/app/messenger/page.tsx
+frontend/app/messenger/legal/page.tsx
+frontend/app/messenger/login/page.tsx (reuse existing login)
+frontend/app/login/page.tsx (Messenger-only fallback when stored return absent)
+frontend/public/messenger/apple-touch-icon.png (180x180 raster of existing Messenger SVG)
+No backend application changes. No V8 integration.
+
+Behavior: unauthenticated /messenger and legal/SSE/poll session expiry stay at /messenger/login, inheriting Messenger manifest/icon/scope. Existing auth/OTP is reused. Login from this route defaults /messenger if storage is empty; stored Messenger deep-link retained. Regular /login, phone-app and verification behavior retained.
+
+TARGETED_AUTH=6 PASS
+PWA_SCOPE_PNG=PASS
+MESSENGER_TEAM_REGRESSION=196/196 PASS
+TYPESCRIPT=PASS
+STATIC_AUDITS=PASS
+job_6d25c2583981
+
+BROWSER_RUNTIME=6/6 PASS, Chromium and WebKit:
+cold unauthenticated navigation to Messenger login metadata, PNG signature;
+empty-storage login -> Messenger; stored deep-link -> exact Messenger chat URL.
+Login response was intercepted with a synthetic payload; not a real credential login and not a physical iPhone test.
+job_72d837433145
+
+FRONTEND_BUILD=SI1MD-2N6cfawcBL0oUA8
+ARTIFACT=20261004T100829Z-3482277-27001
+SOURCE_HASH=06d3c6e1e065ed80898a4ff5600d305c48e100412ecabad61e5ef1813d74c0c3
+SOURCE_EQUALS_ACTIVE=PASS
+DEPLOY=PASS (job_2254d0e27b1d)
+Canonical automatic convergence had already activated this READY artifact; explicit canonical deploy confirmed NOOP same build, FRESH runtime, health200/200, mobile/Campaign deploy gates PASS. No redundant activation/restart.
+API_HEALTH=200/200/PUBLIC200 at readback.
+Backend current observed 1e4985a073f07c870e7c241ce6d6343562abb578dce58299e8fef2e50c8a0e29 due foreign Campaign releases; not modified or deployed by this fix, no claim of its complete certification.
+
+MAC prior physical evidence: install/standalone/relaunch-session PASS. Push permissions enabled in Chrome and macOS; real message Push delivery/privacy/click/background NOT_TESTED.
+IPHONE_LAUNCH=AWAITING_PHYSICAL_RETEST
+ANDROID=NOT_TESTED
+BORIS_MESSENGER_PRODUCTION_READY=WAITING_PHYSICAL_DEVICE_ACCEPTANCE
+Next: use Safari /messenger on real iPhone, verify blue Messenger metadata in Add to Home Screen and reinstall the newly created incorrect shortcut; confirm authenticated launch remains Messenger. Then resume one-step physical Push acceptance.

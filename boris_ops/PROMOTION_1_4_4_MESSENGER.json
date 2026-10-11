@@ -1,0 +1,52 @@
+{
+  "contract": "BORIS_OPS_PROMOTE_1_4_4_MESSENGER",
+  "started_at": 1790769781.421662,
+  "candidate": "/root/BORIS/boris_ops/releases/agent-1.4.4-messenger-p0-candidate.py",
+  "expected_sha256": "59fd7830931b054f0eafa20561b6112b9e79905e430bf47f385fc34ab819b3b2",
+  "steps": [
+    {
+      "candidate_sha256": "59fd7830931b054f0eafa20561b6112b9e79905e430bf47f385fc34ab819b3b2"
+    },
+    {
+      "preflight_health": {
+        "status": 200,
+        "ok": true,
+        "version": "1.4.3"
+      }
+    },
+    {
+      "gate": {
+        "sha256": "59fd7830931b054f0eafa20561b6112b9e79905e430bf47f385fc34ab819b3b2",
+        "ttl_seconds": 120,
+        "mode": "0640",
+        "owner": "root:borisops",
+        "purpose": "messenger_p0_selftest_action"
+      }
+    },
+    {
+      "self_update_request": {
+        "status": 202,
+        "ok": true,
+        "status_value": "started",
+        "error": null
+      }
+    },
+    {
+      "recovered_after_seconds": 0.5,
+      "active_sha256": "59fd7830931b054f0eafa20561b6112b9e79905e430bf47f385fc34ab819b3b2",
+      "version": "1.4.4"
+    },
+    {
+      "update_status": {
+        "status": 200,
+        "ok": true,
+        "status_value": "success",
+        "installed_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+        "installed_version": "1.4.3"
+      }
+    }
+  ],
+  "ok": false,
+  "error": "update_status_failed",
+  "finished_at": 1790769782.0106473
+}

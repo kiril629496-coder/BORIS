@@ -1,0 +1,10 @@
+{
+  "contract": "BORIS_OPS_PROMOTE_1_4_3",
+  "started_at": 1788457934.4234073,
+  "candidate": "/root/BORIS/boris_ops/releases/agent-1.4.3-candidate.py",
+  "expected_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+  "steps": [],
+  "ok": false,
+  "error": "remote_mcp_60m_not_pass",
+  "finished_at": 1788457934.423647
+}

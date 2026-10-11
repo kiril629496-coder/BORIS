@@ -1,0 +1,12 @@
+{
+  "contract": "BORIS_OPS_AUTONOMOUS_90M",
+  "ok": true,
+  "samples": 90,
+  "failures": 0,
+  "started_at": 1788439572.177387,
+  "finished_at": 1788444926.94686,
+  "duration_s": 5354.8,
+  "failure_rows": [],
+  "runtime_dependency_on_github": false,
+  "runtime_dependency_on_sentinelx": false
+}

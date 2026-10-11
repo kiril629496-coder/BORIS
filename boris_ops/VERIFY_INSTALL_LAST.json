@@ -1,0 +1,374 @@
+{
+  "contract": "BORIS_OPS_VERIFY_INSTALL",
+  "ok": true,
+  "files": {
+    "/root/BORIS/boris_ops/agent.py": {
+      "exists": true,
+      "sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+      "expected_sha256": "5afb45b81bf7cc7339d1ec05f8ed0e0d97fd4d611f9c295a77967a6cd5e85b65",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/opsctl.py": {
+      "exists": true,
+      "sha256": "062c64639b10c3f824b2d5690f17d94e9723e9e317d7c0d1550be05c699926fb",
+      "expected_sha256": "062c64639b10c3f824b2d5690f17d94e9723e9e317d7c0d1550be05c699926fb",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/mcp_stdio.py": {
+      "exists": true,
+      "sha256": "624d4d17bc9364aab91d8f3b43b635e58df338137197985343c10806693ea86c",
+      "expected_sha256": "624d4d17bc9364aab91d8f3b43b635e58df338137197985343c10806693ea86c",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/qa_e2e.py": {
+      "exists": true,
+      "sha256": "1a46c0d995ef2705d97a60ead270c5b9f30e8be03fbe8b301ffa81dee21bd29d",
+      "expected_sha256": "1a46c0d995ef2705d97a60ead270c5b9f30e8be03fbe8b301ffa81dee21bd29d",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/hardening_qa.py": {
+      "exists": true,
+      "sha256": "cfcfe2fbf98cdb12cc69a8ba7560ca31d2ec68bd3b3989b6b22fe2390fdbd630",
+      "expected_sha256": "cfcfe2fbf98cdb12cc69a8ba7560ca31d2ec68bd3b3989b6b22fe2390fdbd630",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/verify_install.py": {
+      "exists": true,
+      "sha256": "572f1c8bbd7500b10def9d35775dbedc31dc06a17fc5c8267c8c835f641ba3d6",
+      "expected_sha256": "572f1c8bbd7500b10def9d35775dbedc31dc06a17fc5c8267c8c835f641ba3d6",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/state_cleanup.py": {
+      "exists": true,
+      "sha256": "51b639cc4dd14301bac56f924eb4189cfab45ac6dddc3da16c59eecfab7fbe1c",
+      "expected_sha256": "51b639cc4dd14301bac56f924eb4189cfab45ac6dddc3da16c59eecfab7fbe1c",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/rolling_backend_restart.py": {
+      "exists": true,
+      "sha256": "aa072dd670e05ca9f672cfc627f798122e00e19d526738eb3e70a2ebedb35ff9",
+      "expected_sha256": "aa072dd670e05ca9f672cfc627f798122e00e19d526738eb3e70a2ebedb35ff9",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/reload_nginx_safe.py": {
+      "exists": true,
+      "sha256": "4285056125ea4c35c1ccee547f234785e9c5ea398d01962cbb71ef77aefe61f1",
+      "expected_sha256": "4285056125ea4c35c1ccee547f234785e9c5ea398d01962cbb71ef77aefe61f1",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/longqa_tick.py": {
+      "exists": true,
+      "sha256": "c3767cd905fdaa83259a17447d287fb1e1e47df5f7eb3dbd3aba21bfde155fa1",
+      "expected_sha256": "c3767cd905fdaa83259a17447d287fb1e1e47df5f7eb3dbd3aba21bfde155fa1",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/guardian.py": {
+      "exists": true,
+      "sha256": "44fadfd991700fd8ac3446ef87b6811ed33b272ed935554119a429c39445ca73",
+      "expected_sha256": "44fadfd991700fd8ac3446ef87b6811ed33b272ed935554119a429c39445ca73",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/pipeline_guardian.py": {
+      "exists": true,
+      "sha256": "c764c4b02fa9441a56fdc4a7ea8549112af586e340dfd83949574e7089877a37",
+      "expected_sha256": "c764c4b02fa9441a56fdc4a7ea8549112af586e340dfd83949574e7089877a37",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/acceptance_matrix_refresh.py": {
+      "exists": true,
+      "sha256": "34a34148af3da08ca593c31ceb4d5081c03cd869776c30ba3100317faa979aaf",
+      "expected_sha256": "34a34148af3da08ca593c31ceb4d5081c03cd869776c30ba3100317faa979aaf",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/autonomous_90m.py": {
+      "exists": true,
+      "sha256": "193deedf3916b2b9b4b947e1e773786dae1fbc18bf27dfe660de45970ef3ed9f",
+      "expected_sha256": "193deedf3916b2b9b4b947e1e773786dae1fbc18bf27dfe660de45970ef3ed9f",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/acceptance_orchestrator.py": {
+      "exists": true,
+      "sha256": "173b750005aef1e5520428ec5df91c80a3ea4b5e5f39dbde522ade57e795d08b",
+      "expected_sha256": "173b750005aef1e5520428ec5df91c80a3ea4b5e5f39dbde522ade57e795d08b",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/postacceptance.py": {
+      "exists": true,
+      "sha256": "8c85685a5ebd009d12edf7b077518a7da74e8ceac7350e83cee5bbaa39a68e23",
+      "expected_sha256": "8c85685a5ebd009d12edf7b077518a7da74e8ceac7350e83cee5bbaa39a68e23",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/promote_1_4_3.py": {
+      "exists": true,
+      "sha256": "fc6e112caa708f24737fcb6bd971bd7081de2211be593bd6928127611b6f94e3",
+      "expected_sha256": "fc6e112caa708f24737fcb6bd971bd7081de2211be593bd6928127611b6f94e3",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/candidate_1_4_3_soak.py": {
+      "exists": true,
+      "sha256": "d2afb85d7d8681358259622c5363ab220a50d9324d2795eb8d0ac205048350ba",
+      "expected_sha256": "d2afb85d7d8681358259622c5363ab220a50d9324d2795eb8d0ac205048350ba",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/candidate_1_4_3_full_preflight.py": {
+      "exists": true,
+      "sha256": "1763489fbf0a0a084a14bc397e2aa80ce74617d32d9b41a81ba4222ecec34cf7",
+      "expected_sha256": "1763489fbf0a0a084a14bc397e2aa80ce74617d32d9b41a81ba4222ecec34cf7",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/candidate_1_4_3_safety_modes_qa.py": {
+      "exists": true,
+      "sha256": "07af7c2145ac9b4e7f1ea660c3fd741cd814127544cf5303f60bc66d2265ce5c",
+      "expected_sha256": "07af7c2145ac9b4e7f1ea660c3fd741cd814127544cf5303f60bc66d2265ce5c",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/finalize_1_4_3.py": {
+      "exists": true,
+      "sha256": "67297beb4db7367740cacfb46e2cd0b9e453a793bdcbf0162b8a379bc3818bad",
+      "expected_sha256": "67297beb4db7367740cacfb46e2cd0b9e453a793bdcbf0162b8a379bc3818bad",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/independence_1_4_3.py": {
+      "exists": true,
+      "sha256": "18e167863f14db2c81d482a4929b56c7a30a0a14e4a586975100bb3dabecedff",
+      "expected_sha256": "18e167863f14db2c81d482a4929b56c7a30a0a14e4a586975100bb3dabecedff",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/retirement_readiness.py": {
+      "exists": true,
+      "sha256": "030af778c8f99b4924083aea35e033eda07790e9bc952fcac5657f57e217d65b",
+      "expected_sha256": "030af778c8f99b4924083aea35e033eda07790e9bc952fcac5657f57e217d65b",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/recovery_dryrun.py": {
+      "exists": true,
+      "sha256": "3359bfbcce096bfe2252a744d3769f01fb2f35b2812b07924a9bf49654f5725d",
+      "expected_sha256": "3359bfbcce096bfe2252a744d3769f01fb2f35b2812b07924a9bf49654f5725d",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/offline_restore.py": {
+      "exists": true,
+      "sha256": "a2befc79430efe10418fa76038cd8748a23693decd92645cba488a7f9c167f96",
+      "expected_sha256": "a2befc79430efe10418fa76038cd8748a23693decd92645cba488a7f9c167f96",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/refresh_manifest.py": {
+      "exists": true,
+      "sha256": "6fef8dcefe22d7ef027b54aab6690e0c7724f38eaea810955c786a15370e3149",
+      "expected_sha256": "6fef8dcefe22d7ef027b54aab6690e0c7724f38eaea810955c786a15370e3149",
+      "match": true
+    },
+    "/root/BORIS/boris_ops/build_recovery_pack.py": {
+      "exists": true,
+      "sha256": "560d807cdbb878d53709cf0b72617ff63c6eafaa461e8fcfc2ed62132e3cd010",
+      "expected_sha256": "560d807cdbb878d53709cf0b72617ff63c6eafaa461e8fcfc2ed62132e3cd010",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops.service": {
+      "exists": true,
+      "sha256": "47d740c2b2cbc110da2748d1630ed84cfee9619af1e21a217d291be1d0d447c8",
+      "expected_sha256": "47d740c2b2cbc110da2748d1630ed84cfee9619af1e21a217d291be1d0d447c8",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-watchdog.service": {
+      "exists": true,
+      "sha256": "ce91f4b72af4e4ff054ad309b70cf45dc0d79099e12bd06f53d1e3973cbdb6df",
+      "expected_sha256": "ce91f4b72af4e4ff054ad309b70cf45dc0d79099e12bd06f53d1e3973cbdb6df",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-watchdog.timer": {
+      "exists": true,
+      "sha256": "ec185396f1c1ef3dba6a8e80929e4812a87fa928aa853e5c8294cfe98b6bda19",
+      "expected_sha256": "ec185396f1c1ef3dba6a8e80929e4812a87fa928aa853e5c8294cfe98b6bda19",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-updater.service": {
+      "exists": true,
+      "sha256": "8d9a825b892a495429d2689bee95a2ccadced08e7db056bd64afc14b0c03a8de",
+      "expected_sha256": "8d9a825b892a495429d2689bee95a2ccadced08e7db056bd64afc14b0c03a8de",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-guardian.service": {
+      "exists": true,
+      "sha256": "339bad0831f34b7244f6fc6db218712428f9be4cdaf03f7334dac743e0a67898",
+      "expected_sha256": "339bad0831f34b7244f6fc6db218712428f9be4cdaf03f7334dac743e0a67898",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-guardian.timer": {
+      "exists": true,
+      "sha256": "e737ccff2f9d955dc7b1b90ed1da4ca8824186b15e4dc84b531fef8d6c27f508",
+      "expected_sha256": "e737ccff2f9d955dc7b1b90ed1da4ca8824186b15e4dc84b531fef8d6c27f508",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-longqa.service": {
+      "exists": true,
+      "sha256": "fb01395259ab272b81e5de737be2846988e91d359c227bbeb28beb0e26160592",
+      "expected_sha256": "fb01395259ab272b81e5de737be2846988e91d359c227bbeb28beb0e26160592",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-longqa.timer": {
+      "exists": true,
+      "sha256": "26b04e4d00d8cc1cfe3a5fece54b3600d673588f18afa7d8df8d74a6bef73035",
+      "expected_sha256": "26b04e4d00d8cc1cfe3a5fece54b3600d673588f18afa7d8df8d74a6bef73035",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-qa.service": {
+      "exists": true,
+      "sha256": "83c55c97e206a496b872c63ad2416c8a1e1a32e152ad93b081fa8ea2f74a3f7f",
+      "expected_sha256": "83c55c97e206a496b872c63ad2416c8a1e1a32e152ad93b081fa8ea2f74a3f7f",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-qa.timer": {
+      "exists": true,
+      "sha256": "29b51e586b2fc1bf93910b774b35730683a4ed3f8cdb3e64c7a07ddd958c4763",
+      "expected_sha256": "29b51e586b2fc1bf93910b774b35730683a4ed3f8cdb3e64c7a07ddd958c4763",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-cleanup.service": {
+      "exists": true,
+      "sha256": "8e15a72390d0701f6aa951a96add90a55026761acf03fb3fc9e643ddd7357579",
+      "expected_sha256": "8e15a72390d0701f6aa951a96add90a55026761acf03fb3fc9e643ddd7357579",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-cleanup.timer": {
+      "exists": true,
+      "sha256": "404f7117f6d21d514c7209d3261237f70c8a2d9108cf994850e53b83c0aafa9a",
+      "expected_sha256": "404f7117f6d21d514c7209d3261237f70c8a2d9108cf994850e53b83c0aafa9a",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-final-acceptance.service": {
+      "exists": true,
+      "sha256": "09dd3a947531fa2bf3324056d4802b13eeb949e56c3e2958381cbcaefdfa334b",
+      "expected_sha256": "09dd3a947531fa2bf3324056d4802b13eeb949e56c3e2958381cbcaefdfa334b",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-candidate-1-4-3-soak.service": {
+      "exists": true,
+      "sha256": "1ef6b0d9e296577f6400d7bfe74ebfb43669051ca399b978862cc8698f5e7fe6",
+      "expected_sha256": "1ef6b0d9e296577f6400d7bfe74ebfb43669051ca399b978862cc8698f5e7fe6",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-postacceptance.service": {
+      "exists": true,
+      "sha256": "c6dcdd1c0b2779858c3a5acc4450e76cee6e8e886ba3c2b1063fcc343fd6d1f8",
+      "expected_sha256": "c6dcdd1c0b2779858c3a5acc4450e76cee6e8e886ba3c2b1063fcc343fd6d1f8",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-promote-1-4-3.service": {
+      "exists": true,
+      "sha256": "46701f00188508ea7ebd76cc571ff9811366d17bf1893dc9c5523f7fddd19680",
+      "expected_sha256": "46701f00188508ea7ebd76cc571ff9811366d17bf1893dc9c5523f7fddd19680",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-finalize-1-4-3.service": {
+      "exists": true,
+      "sha256": "79b0b29ee35dcae799f71af70df5197a09a85115bc56e2bab06879a184ab052a",
+      "expected_sha256": "79b0b29ee35dcae799f71af70df5197a09a85115bc56e2bab06879a184ab052a",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-pipeline-guardian.service": {
+      "exists": true,
+      "sha256": "dc69c81ea3ed2be8ec73b0834a77ff24aa5e3baeced8856cb5b988b1a7f5e879",
+      "expected_sha256": "dc69c81ea3ed2be8ec73b0834a77ff24aa5e3baeced8856cb5b988b1a7f5e879",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-pipeline-guardian.timer": {
+      "exists": true,
+      "sha256": "8b8f286f386a0f95f490919264a171db34e1cdc9d7efe4ec07d2c3259e34b384",
+      "expected_sha256": "8b8f286f386a0f95f490919264a171db34e1cdc9d7efe4ec07d2c3259e34b384",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-autonomous-90m.service": {
+      "exists": true,
+      "sha256": "33a2c21b9722e25d6f5e7d5b92ecffa83367f2db56b74a3e6b9eff0593d1bd7f",
+      "expected_sha256": "33a2c21b9722e25d6f5e7d5b92ecffa83367f2db56b74a3e6b9eff0593d1bd7f",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-remote-mcp-60m.service": {
+      "exists": true,
+      "sha256": "f98826d8805eff2915acb19bbfdfbbb0dab7bb330210388e9ea1cf76a27aec21",
+      "expected_sha256": "f98826d8805eff2915acb19bbfdfbbb0dab7bb330210388e9ea1cf76a27aec21",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-independence-1-4-3.service": {
+      "exists": true,
+      "sha256": "6ae6ca9661154cea35564521fe315f2f8bac118eb7ed2a62670fb8c81a7b8f3f",
+      "expected_sha256": "6ae6ca9661154cea35564521fe315f2f8bac118eb7ed2a62670fb8c81a7b8f3f",
+      "match": true
+    },
+    "/etc/systemd/system/boris-ops-retirement-readiness.service": {
+      "exists": true,
+      "sha256": "ae06e49d8e6e58b479c8f97223fc0b612062df9d2bed49c56c66997421fbab37",
+      "expected_sha256": "ae06e49d8e6e58b479c8f97223fc0b612062df9d2bed49c56c66997421fbab37",
+      "match": true
+    },
+    "/usr/local/sbin/boris-ops-watchdog": {
+      "exists": true,
+      "sha256": "dd776cc0b4b8f4f14e40beb09db11820602e1e3d167551a93cea9f3054c015f6",
+      "expected_sha256": "dd776cc0b4b8f4f14e40beb09db11820602e1e3d167551a93cea9f3054c015f6",
+      "match": true
+    },
+    "/usr/local/sbin/boris-ops-self-update": {
+      "exists": true,
+      "sha256": "88e5fbf4a29221b6b4faccca97e1d4bb4d920a567b8887ffefea1a85dc968e91",
+      "expected_sha256": "88e5fbf4a29221b6b4faccca97e1d4bb4d920a567b8887ffefea1a85dc968e91",
+      "match": true
+    },
+    "/etc/sudoers.d/boris-ops": {
+      "exists": true,
+      "sha256": "6e99673019db745e150fff49825ecd62084460adf36d7e10c3fd160bc1a67cbd",
+      "expected_sha256": "6e99673019db745e150fff49825ecd62084460adf36d7e10c3fd160bc1a67cbd",
+      "match": true
+    },
+    "/etc/logrotate.d/boris-ops": {
+      "exists": true,
+      "sha256": "be500d63a66e9cd3c31865a6719303f969ca4d7ac854c16d952ce856ef13e4fd",
+      "expected_sha256": "be500d63a66e9cd3c31865a6719303f969ca4d7ac854c16d952ce856ef13e4fd",
+      "match": true
+    },
+    "/var/lib/boris-ops/mcp_remote_60m.py": {
+      "exists": true,
+      "sha256": "094028c8336eb5c1299b16aa681802776a1560e775d3fd560347540ca8e5a6d3",
+      "expected_sha256": "094028c8336eb5c1299b16aa681802776a1560e775d3fd560347540ca8e5a6d3",
+      "match": true
+    },
+    "/etc/nginx/sites-enabled/boris-ai": {
+      "exists": true,
+      "sha256": "f022b912365c651d0444b502da4c78a2d6029e8cf56da838bff1e7afc42e0b3c",
+      "expected_sha256": "f022b912365c651d0444b502da4c78a2d6029e8cf56da838bff1e7afc42e0b3c",
+      "match": true
+    }
+  },
+  "services": {
+    "boris-ops.service": "active",
+    "boris-ops-watchdog.timer": "active",
+    "boris-ops-guardian.timer": "active",
+    "boris-ops-longqa.timer": "active",
+    "boris-ops-qa.timer": "active",
+    "boris-ops-cleanup.timer": "active",
+    "boris-ops-pipeline-guardian.timer": "active",
+    "nginx.service": "active"
+  },
+  "http": {
+    "local": 200,
+    "external": 200
+  },
+  "checked_at": 1788514312.355859,
+  "recovery": {
+    "pack": "/root/BORIS/backups/boris-ops/recovery-1.4.3-20260904T085950Z.tar.gz",
+    "exists": true,
+    "sha256_match": true,
+    "runtime_dependency_on_sentinelx": false,
+    "runtime_dependency_on_github": false,
+    "secrets_included": false
+  },
+  "manifest": {
+    "schema": 3,
+    "version": "1.4.3",
+    "files": 56,
+    "systemd_units": 23,
+    "runtime_dependency_on_sentinelx": false,
+    "runtime_dependency_on_github": false,
+    "secrets_included": false
+  }
+}
