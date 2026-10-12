@@ -4869,6 +4869,9 @@ def campaign_feed_control(campaign_id:int, account_id:str="", db=Depends(_db), u
 
 @router.post("/{campaign_id}/feed_control/validate")
 def campaign_feed_validate(campaign_id:int, body:FFOwnerActivationBody, db=Depends(_db), user=Depends(get_current_user)):
+    # Internal workers may provide a durable Premium validation snapshot through
+    # this SQLAlchemy-session-only channel. HTTP callers cannot set db.info.
+    _prevalidated_cards = db.info.pop("campaign_prevalidated_cards", None)
     from app.services.campaign_editor_jobs import maybe_enqueue
     _queued = maybe_enqueue(db, user, campaign_id, 'validate', body)
     if _queued is not None:
@@ -4883,11 +4886,58 @@ def campaign_feed_validate(campaign_id:int, body:FFOwnerActivationBody, db=Depen
         raise HTTPException(409,detail={"message":"Проверка фида заблокирована: сначала завершите опрос по каждому направлению.","directions":[d.get("direction") for d in intake.get("directions") or [] if not d.get("complete")]})
     _feed_local_context=_ff_rule_capture(db,campaign,target,"local_validation",_ff_rule_item_input(scoped))
     semantic_reports=[]
-    for _idx,_row in enumerate(scoped):
-        semantic_reports.append(_ff_validate_row(_row,db))
-        if (_idx+1)%8==0:
-            db.commit()
-    _ff_rule_result(db,_feed_local_context,source="campaigns._ff_validate_row",expected_item_ids=[int(r.id) for r in scoped],reports=semantic_reports)
+    if isinstance(_prevalidated_cards,dict):
+        # PREMIUM_FEED_REUSES_DURABLE_VALIDATION_V1:
+        # This path is available only to an in-process worker through db.info.
+        # Re-check exact row/media/file identity before reusing the earlier
+        # expensive semantic/Premium proof; any drift falls closed.
+        from pathlib import Path as _FeedPath
+        from app.models.media_link import MediaLink as _FeedMediaLink
+        from app.models.media_asset import MediaAsset as _FeedMediaAsset
+        from app.services.media_storage import IMAGES_DIR as _FEED_IMAGES_DIR
+        _scope_keys={str(int(r.id)) for r in scoped}
+        if set(str(k) for k in _prevalidated_cards.keys()) != _scope_keys:
+            raise HTTPException(409,detail={"code":"PREVALIDATED_SCOPE_CHANGED","message":"Состав проверенного subset изменился."})
+        _feed_root=_FeedPath(_FEED_IMAGES_DIR).resolve()
+        for _row in scoped:
+            _card=dict(_prevalidated_cards.get(str(int(_row.id))) or {})
+            _payload_serial=json.dumps(_ff_payload(_row),ensure_ascii=False,sort_keys=True,separators=(",",":"))
+            _version=_row.updated_at.isoformat() if _row.updated_at else None
+            if (_card.get("version") != _version
+                    or _card.get("payload") != _payload_serial
+                    or _card.get("hero_media_id") != _row.hero_media_id):
+                raise HTTPException(409,detail={"code":"PREVALIDATED_CARD_CHANGED","item_id":int(_row.id)})
+            _pairs=(db.query(_FeedMediaLink,_FeedMediaAsset)
+                    .join(_FeedMediaAsset,_FeedMediaAsset.id==_FeedMediaLink.media_id)
+                    .filter(_FeedMediaLink.entity_type=="campaign_item",
+                            _FeedMediaLink.entity_id==str(_row.id),
+                            _FeedMediaAsset.deleted_at.is_(None))
+                    .order_by(_FeedMediaLink.position.asc(),_FeedMediaLink.id.asc()).all())
+            _media_state=[]
+            for _link,_asset in _pairs:
+                try:
+                    _path=(_feed_root / str(_asset.storage_key or "")).resolve()
+                    _path.relative_to(_feed_root)
+                    _st=_path.stat()
+                except (OSError,ValueError):
+                    raise HTTPException(409,detail={"code":"PREVALIDATED_MEDIA_CHANGED","item_id":int(_row.id)})
+                _media_state.append([
+                    int(_link.id),int(_asset.id),str(_link.role or ""),int(_link.position or 0),
+                    str(_asset.storage_key or ""),str(_asset.sha256 or ""),int(_st.st_size),int(_st.st_mtime_ns),
+                ])
+            if _media_state != list(_card.get("media") or []):
+                raise HTTPException(409,detail={"code":"PREVALIDATED_MEDIA_CHANGED","item_id":int(_row.id)})
+            semantic_reports.append({"id":int(_row.id),"account_id":str(_row.account_id or ""),
+                                     "status":str(_row.status or ""),"valid":True,
+                                     "errors":[],"warnings":[],"reused_durable_validation":True})
+        _ff_rule_result(db,_feed_local_context,source="campaigns.durable_premium_validation_snapshot",
+                        expected_item_ids=[int(r.id) for r in scoped],reports=semantic_reports)
+    else:
+        for _idx,_row in enumerate(scoped):
+            semantic_reports.append(_ff_validate_row(_row,db))
+            if (_idx+1)%8==0:
+                db.commit()
+        _ff_rule_result(db,_feed_local_context,source="campaigns._ff_validate_row",expected_item_ids=[int(r.id) for r in scoped],reports=semantic_reports)
     semantic_bad=[x for x in semantic_reports if not x.get("valid")]
     if semantic_bad:
         # Persist observed negative validation before the existing blocked response.

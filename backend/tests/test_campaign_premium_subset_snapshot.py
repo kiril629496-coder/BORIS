@@ -101,3 +101,34 @@ def test_canonical_validation_supports_wider_batch_scope_for_chunks():
     assert "_batch_scope_rows" in body
     assert "_batch_scope_ids" in body
     assert "_batch_rows=[r for r in rows if int(r.id) in _batch_scope_ids]" in body
+
+
+def test_subset_quantity_gate_does_not_require_full_commercial_order():
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    start = src.index('stage="quantity_gate"')
+    end = src.index('payload = _campaign_checkpoint(db, job, payload, "official_avito_validation"', start)
+    body = src[start:end]
+    assert '_subset_quantity_scope=bool(payload.get("_subset_continuation")) and bool(item_ids)' in body
+    assert '"PREMIUM_SUBSET_QUANTITY_UNPROVEN"' in body
+    assert '_validated_count != len(item_ids)' in body
+    assert 'if _requested and _created < _requested:' in body
+
+
+def test_official_feed_uses_exact_subset_and_internal_snapshot_only():
+    jobs = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    start = jobs.index('payload = _campaign_checkpoint(db, job, payload, "official_avito_validation"')
+    end = jobs.index('_, ff_after = C._ff_state_load', start)
+    body = jobs[start:end]
+    assert 'db.info["campaign_prevalidated_cards"]' in body
+    assert 'item_ids=item_ids' in body
+
+    campaigns = (Path(__file__).resolve().parents[1] / "app/api/campaigns.py").read_text(encoding="utf-8")
+    start = campaigns.index("def campaign_feed_validate")
+    end = campaigns.index("\n\n@router.", start)
+    body = campaigns[start:end]
+    assert 'db.info.pop("campaign_prevalidated_cards", None)' in body
+    assert "PREMIUM_FEED_REUSES_DURABLE_VALIDATION_V1" in body
+    assert "PREVALIDATED_SCOPE_CHANGED" in body
+    assert "PREVALIDATED_CARD_CHANGED" in body
+    assert "PREVALIDATED_MEDIA_CHANGED" in body
+    assert "semantic_reports.append(_ff_validate_row(_row,db))" in body

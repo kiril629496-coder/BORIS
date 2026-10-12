@@ -2399,18 +2399,34 @@ def _run_campaign_prepare(db, job, payload):
     _requested=int(_order.get("requested_total") or 0)
     _created=int(_order.get("created_count") or 0)
     _qa=int(_order.get("qa_pass_count") or 0)
-    if _requested and _created < _requested:
-        return {"stage":"materialize","campaign_id":campaign.id,"account_id":account_id,
-                "requested":_requested,"created":_created,"qa_pass":_qa,"retryable":True}, "retry"
-    if _requested and _created > _requested:
-        return {"stage":"order_scope_blocked","campaign_id":campaign.id,"account_id":account_id,
-                "requested":_requested,"created":_created,"qa_pass":_qa}, "partial"
-    if _requested and _qa != _requested:
-        return {"stage":"order_qa_blocked","campaign_id":campaign.id,"account_id":account_id,
-                "requested":_requested,"created":_created,"qa_pass":_qa}, "partial"
+    _subset_quantity_scope=bool(payload.get("_subset_continuation")) and bool(item_ids)
+    if _subset_quantity_scope:
+        _validated_count=len(dict((_premium_validated_snapshot or {}).get("cards") or {}))
+        if _validated_count != len(item_ids):
+            return {"stage":"order_qa_blocked","code":"PREMIUM_SUBSET_QUANTITY_UNPROVEN",
+                    "campaign_id":campaign.id,"account_id":account_id,
+                    "requested":_requested,"subset_total":len(item_ids),
+                    "subset_validated":_validated_count,"retryable":False}, "partial"
+    else:
+        if _requested and _created < _requested:
+            return {"stage":"materialize","campaign_id":campaign.id,"account_id":account_id,
+                    "requested":_requested,"created":_created,"qa_pass":_qa,"retryable":True}, "retry"
+        if _requested and _created > _requested:
+            return {"stage":"order_scope_blocked","campaign_id":campaign.id,"account_id":account_id,
+                    "requested":_requested,"created":_created,"qa_pass":_qa}, "partial"
+        if _requested and _qa != _requested:
+            return {"stage":"order_qa_blocked","campaign_id":campaign.id,"account_id":account_id,
+                    "requested":_requested,"created":_created,"qa_pass":_qa}, "partial"
 
     payload = _campaign_checkpoint(db, job, payload, "official_avito_validation", 6, total)
-    feed = C.campaign_feed_validate(campaign.id, C.FFOwnerActivationBody(account_id=account_id, confirmed=False, item_ids=ids), db, user)
+    if _premium_prepare and _premium_validated_snapshot:
+        db.info["campaign_prevalidated_cards"] = dict(_premium_validated_snapshot.get("cards") or {})
+    feed = C.campaign_feed_validate(
+        campaign.id,
+        C.FFOwnerActivationBody(account_id=account_id, confirmed=False, item_ids=item_ids),
+        db,
+        user,
+    )
     _, ff_after = C._ff_state_load(campaign)
     intake_after = C._ff_direction_intake(db, campaign, ff_after, C._ff_items(db, campaign.id, allowed))
     if not intake_after.get("all_complete"):
