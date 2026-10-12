@@ -58,6 +58,36 @@ class TestOwnerBannerExamples(unittest.TestCase):
             self.assertEqual(c["cta"], "Напишите в Avito")
             self.assertEqual(c["owner_palette"], v["palette"])
 
+    def test_mobile_central_safe_zone_and_one_design_per_image(self):
+        from app.services.banner_full_ai_premium import build_prompt, _vision_contract
+        for account in M.PROFILES:
+            with self.subTest(account=account):
+                variant = M.owner_variant(account, "mobile-preview")
+                style = variant["reference_style"]
+                self.assertIn("ONE BANNER PER IMAGE", style)
+                self.assertIn("x=15%-85%, y=15%-85%", style)
+                self.assertIn("320px mobile thumbnail", style)
+                self.assertIn("9-12% of final image height", style)
+                self.assertIn("NO small footer badges", style)
+                merged = M.combine_reference_style(variant, "client preference")
+                self.assertIn("ONE BANNER PER IMAGE", merged)
+                self.assertIn("x=15%-85%, y=15%-85%", merged)
+                prompt = build_prompt(
+                    description="Verified offer", exact_title="ОКНА НА ЗАКАЗ",
+                    exact_cta="Напишите в Avito",
+                    reference_style=merged, fmt="1:1",
+                )
+                self.assertIn("ONE BANNER PER IMAGE", prompt)
+                self.assertIn("320px mobile thumbnail", prompt)
+                qa = _vision_contract(
+                    description="Verified offer", exact_title="ОКНА НА ЗАКАЗ",
+                    exact_subtitle="", exact_cta="Напишите в Avito",
+                    exact_price="", advantages=[], hypothesis="product_focus",
+                    fmt="1:1", owner_example=variant,
+                )
+                self.assertIn("ONE BANNER PER IMAGE", qa["owner_reference_notes"])
+                self.assertIn("x=15%-85%, y=15%-85%", qa["owner_reference_notes"])
+
     def test_custom(self):
         v=M.owner_variant("mbroker_27859","case")
         self.assertIn("CUSTOMER STYLE",M.combine_reference_style(v,"special"))

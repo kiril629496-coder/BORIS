@@ -116,8 +116,26 @@ def owner_variant(account_id: str, identity: str, version: int = 1,
     angle = angles[layout_seed % len(angles)]
     provenance_label = ("OWNER-PROVIDED OCT-2026 STYLE REFERENCE" if profile.get("owner_library_ref")
                         else "OWNER-REQUESTED PREMIUM CATEGORY QUALITY DIRECTION (NO IMAGE REFERENCE)")
+    # Owner's mobile-first quality bar; injected before all optional references
+    # so the existing prompt-size limiter cannot silently remove it.
+    mobile_contract = (
+        "ONE BANNER PER IMAGE. Never make a grid, contact sheet, collage, "
+        "side-by-side variants, split-screen comparison or 5-ad composition. "
+        "MOBILE-FIRST CENTRAL SAFE ZONE: keep ALL visible text, icons, benefits, "
+        "prices and CTA completely inside the central x=15%-85%, y=15%-85% "
+        "of the FINAL cropped image. Background photography alone may bleed to edges. "
+        "No letters touching the four borders, no clipped panels. "
+        "TYPE MUST BE MUCH LARGER: headline is the dominant element, around "
+        "9-12% of final image height per line, at most 2 short lines; "
+        "supporting labels at least ~4.5% and CTA at least ~5% of image height. "
+        "Check true readability as a 320px mobile thumbnail, with clean high contrast; "
+        "delete tiny secondary copy rather than shrinking type. "
+        "One exact confirmed offer, at most two short factual benefits and one "
+        "unmissable message CTA; NO small footer badges, fake awards or unreadable icons. "
+    )
     guidance = (
-        f"{provenance_label} FOR {profile['niche']}; style inspiration ONLY, "
+        mobile_contract
+        + f"{provenance_label} FOR {profile['niche']}; style inspiration ONLY, "
         f"not a product photo or permission to publish. Visual direction: {profile['style']}. "
         f"Color variant {family}: {palette}. Hero angle: {angle}. "
         f"Subject rule: {profile['subject']}. "
@@ -148,5 +166,12 @@ def combine_reference_style(variant: dict | None, existing_style: str) -> str:
     current = str(existing_style or "").strip()[:1000]
     if not variant:
         return current
-    # Keep the owner benchmark within the existing prompt's 2500-char limit.
-    return (str(variant["reference_style"]) + ("\nCUSTOMER STYLE: " + current if current else ""))[:2350]
+    # Keep the 2350-char existing prompt budget, while reserving space for
+    # the customer's explicit instructions. Never truncate away the user's
+    # style to fit optional reference prose, especially after mobile rules.
+    suffix = ("\nCUSTOMER STYLE: " + current[:850]) if current else ""
+    reference_budget = 2350 - len(suffix)
+    reference = str(variant["reference_style"])[:reference_budget]
+    if len(reference) == reference_budget:
+        reference = reference.rsplit(" ", 1)[0].rstrip(" ,;.")
+    return reference + suffix
