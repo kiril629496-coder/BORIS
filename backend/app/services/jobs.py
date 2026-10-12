@@ -4572,11 +4572,10 @@ def _auto_resume_waiting_campaign_jobs(db):
             # keep the owner as an operator after the campaign is already
             # superseded or preparation has reached ready_for_review.
             payload=dict(job.payload_json or {})
-            if stage=="providerfree_repair_exhausted" or bool(payload.get("_providerfree_terminalized_at")):
-                # PROVIDERFREE_EXHAUSTED_IS_TERMINAL_V1: this is a truthful
-                # business terminal state, not a transient blocker. Never hot-
-                # resume it; a later explicit repair decision must create a new
-                # execution window/subset.
+            if (stage in {"providerfree_repair_exhausted","ready_subset_for_review","banners_partial"}
+                    or bool(payload.get("_providerfree_terminalized_at"))):
+                # PARTIAL_BUSINESS_TERMINALS_DO_NOT_HOT_RESUME_V1:
+                # These are terminal-partial business outcomes, not transient blockers.
                 continue
             campaign_id=int(payload.get("campaign_id") or 0)
             campaign=db.query(Campaign).filter(Campaign.id==campaign_id).first() if campaign_id else None

@@ -349,8 +349,8 @@ def test_providerfree_exhaustion_finalizer_is_terminal_and_subset_scoped():
 def test_providerfree_terminal_state_is_not_auto_resumed():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
-    assert "PROVIDERFREE_EXHAUSTED_IS_TERMINAL_V1" in src
-    assert 'stage=="providerfree_repair_exhausted"' in src
+    assert "PARTIAL_BUSINESS_TERMINALS_DO_NOT_HOT_RESUME_V1" in src
+    assert '"providerfree_repair_exhausted"' in src
     assert 'payload.get("_providerfree_terminalized_at")' in src
 
 
@@ -557,3 +557,12 @@ def test_waiting_heartbeat_grace_is_bound_to_exact_lease():
         "lease_token": "lease-old",
     })
     assert jobs._job_execution_heartbeat_is_fresh(DB(foreign), job, now, 5, 120) is False
+
+
+def test_terminal_partial_campaign_stages_never_hot_resume():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert "PARTIAL_BUSINESS_TERMINALS_DO_NOT_HOT_RESUME_V1" in src
+    assert '"ready_subset_for_review"' in src
+    assert '"banners_partial"' in src
+    assert '"providerfree_repair_exhausted"' in src
