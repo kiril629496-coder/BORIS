@@ -3395,16 +3395,51 @@ def _run_campaign_banners_premium(db, job, payload):
                 if int(r.id) in set(all_ids) and str(r.account_id or "") == account_id
                 and C._ff_premium_banner_ready(db, r, payload=C._ff_payload(r))]
 
+    def _persist_terminal_banner_blocks(state):
+        """Keep card readiness truthful when one Premium banner is terminally blocked."""
+        blocks=dict((state or {}).get("banner_terminal_blocked") or {})
+        changed=[]
+        for _raw_id,_detail in blocks.items():
+            try: _iid=int(_raw_id)
+            except (TypeError,ValueError): continue
+            if _iid not in set(all_ids):
+                continue
+            _row=by_id.get(_iid)
+            if _row is None or str(_row.account_id or "") != account_id:
+                continue
+            _p=C._ff_payload(_row)
+            _d=dict(_detail or {})
+            _block={
+                "code":str(_d.get("code") or "BANNER_TERMINAL_BLOCKED"),
+                "reason":str(_d.get("reason") or "")[:240],
+                "artifact_identity":str(_d.get("artifact_identity") or ""),
+                "source_job_id":int(job.id),
+                "updated_at":datetime.now(timezone.utc).isoformat(),
+            }
+            if _p.get("banner_terminal_block") != _block:
+                # Service-only QA metadata must not mutate semantic content_hash:
+                # title/description/category/direction/offer did not change.
+                _p["banner_terminal_block"]=_block
+                _row.payload_json=json.dumps(_p,ensure_ascii=False)
+            if str(getattr(_row,"status","draft") or "draft").lower()=="ready":
+                _row.status="draft"
+            changed.append(_iid)
+        return sorted(set(changed))
+
     def persist(out):
         state = out["payload"]
         before = dict(job.payload_json or {})
+        _terminal_demoted=_persist_terminal_banner_blocks(state)
+        if _terminal_demoted:
+            state["_banner_terminal_demoted_ids"]=_terminal_demoted
         if (out["result"]["done"] > int(job.progress_done or 0)
                 or dict(state.get("banner_confirmed_artifacts") or {})
                 != dict(before.get("banner_confirmed_artifacts") or {})):
             state["_banner_last_progress_at"] = datetime.now(timezone.utc).isoformat()
         _campaign_checkpoint(db, job, state, out["result"]["stage"],
                              out["result"]["done"], out["result"]["total"])
-        return {**out["result"], "campaign_id": campaign.id, "account_id": account_id}
+        return {**out["result"], "campaign_id": campaign.id, "account_id": account_id,
+                "terminal_demoted_ids":_terminal_demoted}
 
     plan = plan_banner_slice(
         job_id=job.id, payload=payload, item_ids=all_ids, passed_ids=passed_ids(),

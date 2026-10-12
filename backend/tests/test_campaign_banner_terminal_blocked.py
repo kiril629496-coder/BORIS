@@ -148,3 +148,17 @@ def test_resume_with_only_terminal_blocked_items_stays_partial_not_completed():
     assert plan["final"] == "partial"
     assert plan["result"]["stage"] == "banners_partial"
     assert plan["result"]["blocked_count"] == 1
+
+
+def test_banner_worker_persists_terminal_block_and_demotes_ready_status():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    start = src.index("def _run_campaign_banners_premium")
+    end = src.index("\ndef _run_campaign_post_publish_watch", start)
+    body = src[start:end]
+    assert "def _persist_terminal_banner_blocks" in body
+    assert '"banner_terminal_block"' in body
+    assert 'if str(getattr(_row,"status","draft") or "draft").lower()=="ready":' in body
+    assert '_row.status="draft"' in body
+    assert 'state["_banner_terminal_demoted_ids"]' in body
+    assert '"terminal_demoted_ids":_terminal_demoted' in body
