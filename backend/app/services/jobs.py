@@ -2618,7 +2618,11 @@ def _run_campaign_deliver(db, job, payload):
             "external_action":False,
             "message":"Avito уже подтвердил публикацию этой кампании. Повторная отправка заблокирована."
         }, "completed"
-    if _campaign_owner_prepare_only_contract(_owner_ff):
+    _report_only_stage=str(payload.get("stage") or "").strip().lower()
+    _report_only_reconcile = _report_only_stage in {
+        "publication_watch","awaiting_avito_result","awaiting_scheduled_url_result"
+    }
+    if _campaign_owner_prepare_only_contract(_owner_ff) and not _report_only_reconcile:
         _policy=dict(_owner_ff.get("publication_policy") or {})
         _policy.update({
             "mode":"prepare_only",

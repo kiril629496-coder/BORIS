@@ -28,3 +28,16 @@ def test_prepare_only_guard_prefers_durable_policy():
 def test_prepare_only_guard_allows_normal_order_without_negative_clause():
     ff = {"order_contract": {"original_user_prompt": "publish after review"}}
     assert jobs._campaign_owner_prepare_only_contract(ff) is False
+
+
+def test_prepare_only_allows_only_report_reconciliation_stages():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    start = src.index("def _run_campaign_deliver")
+    end = src.index("\ndef _run_campaign_banners_standard", start)
+    body = src[start:end]
+    assert '"publication_watch","awaiting_avito_result","awaiting_scheduled_url_result"' in body
+    assert "and not _report_only_reconcile" in body
+    send_call = "FFOwnerActivationBody(account_id=account_id, confirmed=True"
+    assert send_call in body
+    assert body.index("and not _report_only_reconcile") < body.index(send_call)
