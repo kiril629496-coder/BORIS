@@ -1300,8 +1300,14 @@ def _campaign_premium_prepare_banner_gate(db, job, payload, C, campaign, user, a
             "child_result": child_result}, final
 
 
-def _campaign_premium_validation_snapshot(db, C, campaign, allowed, account_id, item_ids, *, lock=False):
-    """Bind READY to the same exact card/media revision that was validated."""
+def _campaign_premium_validation_snapshot(db, C, campaign, allowed, account_id, item_ids, *, lock=False, verify_expensive=True):
+    """Bind READY to the same exact card/media revision that was validated.
+
+    verify_expensive=True performs current Premium receipt and full file-hash proof.
+    Finalization may set it False only when comparing against a durable snapshot
+    produced by this same helper; payload/media identity plus file size/mtime must
+    still match exactly under row/campaign locks.
+    """
     from app.models.campaign_item import CampaignItem
     from app.models.campaign import Campaign
     from app.models.media_link import MediaLink
@@ -1328,7 +1334,7 @@ def _campaign_premium_validation_snapshot(db, C, campaign, allowed, account_id, 
     snapshot = {}
     for row in rows:
         payload = C._ff_payload(row)
-        if not C._ff_premium_banner_ready(db, row, payload=payload):
+        if verify_expensive and not C._ff_premium_banner_ready(db, row, payload=payload):
             return {"ok": False, "code": "PREMIUM_READY_RECEIPT_MISSING", "item_id": int(row.id)}
         pairs = (db.query(MediaLink, MediaAsset).join(MediaAsset, MediaAsset.id == MediaLink.media_id)
                  .filter(MediaLink.entity_type == "campaign_item", MediaLink.entity_id == str(row.id),
@@ -1336,14 +1342,27 @@ def _campaign_premium_validation_snapshot(db, C, campaign, allowed, account_id, 
                  .order_by(MediaLink.position.asc(), MediaLink.id.asc()).all())
         if any(str(asset.account_id or "") != account_id for _, asset in pairs):
             return {"ok": False, "code": "PREMIUM_READY_MEDIA_ACCOUNT_MISMATCH", "item_id": int(row.id)}
-        if any(not linked_file_current(asset) for _, asset in pairs):
+        if verify_expensive and any(not linked_file_current(asset) for _, asset in pairs):
             return {"ok": False, "code": "PREMIUM_READY_MEDIA_BYTES_CHANGED", "item_id": int(row.id)}
+        from pathlib import Path as _PremiumPath
+        from app.services.media_storage import IMAGES_DIR as _PREMIUM_IMAGES_DIR
+        _media_state=[]
+        for link, asset in pairs:
+            _path=(_PremiumPath(_PREMIUM_IMAGES_DIR) / str(asset.storage_key or "")).resolve()
+            try:
+                _stat=_path.stat()
+                _size=int(_stat.st_size); _mtime=int(_stat.st_mtime_ns)
+            except OSError:
+                return {"ok": False, "code": "PREMIUM_READY_MEDIA_BYTES_CHANGED", "item_id": int(row.id)}
+            _media_state.append([
+                int(link.id), int(asset.id), str(link.role or ""), int(link.position or 0),
+                str(asset.storage_key or ""), str(asset.sha256 or ""), _size, _mtime,
+            ])
         snapshot[str(row.id)] = {
             "version": row.updated_at.isoformat() if row.updated_at else None,
             "payload": json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             "hero_media_id": row.hero_media_id,
-            "media": [(int(link.id), int(asset.id), str(link.role or ""), int(link.position or 0),
-                       str(asset.storage_key or ""), str(asset.sha256 or "")) for link, asset in pairs],
+            "media": _media_state,
         }
     return {"ok": True, "cards": snapshot, "rows": rows, "campaign": campaign}
 
@@ -1351,7 +1370,7 @@ def _campaign_premium_validation_snapshot(db, C, campaign, allowed, account_id, 
 def _campaign_premium_finalize_ready(db, job, payload, C, campaign, allowed, account_id,
                                      item_ids, validated_snapshot):
     current = _campaign_premium_validation_snapshot(
-        db, C, campaign, allowed, account_id, item_ids, lock=True)
+        db, C, campaign, allowed, account_id, item_ids, lock=True, verify_expensive=False)
     if not current.get("ok") or current.get("cards") != validated_snapshot.get("cards"):
         db.rollback()
         return {"stage": "prepare_reconciliation_required", "code": current.get("code") or "PREMIUM_VALIDATED_REVISION_CHANGED",
@@ -1971,20 +1990,65 @@ def _run_campaign_prepare(db, job, payload):
             }, "retry"
 
     payload = _campaign_checkpoint(db, job, payload, "internal_validation", 5, total)
+    def _scoped_validation(_validate_ids=None):
+        _now=C._ff_items(db,campaign.id,allowed)
+        _full_scope=set(int(x) for x in item_ids)
+        _validate_scope=set(int(x) for x in (_validate_ids or item_ids))
+        _rows=[r for r in _now if int(r.id) in _validate_scope]
+        _batch=[r for r in _now if int(r.id) in _full_scope]
+        _compare=[r for r in _now if int(r.id) in _full_scope or str(r.status or "").lower() in {"ready","published"}]
+        return C._campaign_validation_for_rows(
+            campaign,_rows,db,comparison_rows=_compare,batch_rows=_batch)
     _premium_validated_snapshot = None
     if _premium_prepare and _explicit_banner_required:
-        _premium_validated_snapshot = _campaign_premium_validation_snapshot(
-            db, C, campaign, allowed, account_id, item_ids)
-        if not _premium_validated_snapshot.get("ok"):
-            return {"stage": "prepare_reconciliation_required", "code": _premium_validated_snapshot.get("code"),
-                    "item_id": _premium_validated_snapshot.get("item_id"), "retryable": False}, "partial"
-    def _scoped_validation():
-        _now=C._ff_items(db,campaign.id,allowed)
-        _scope=set(int(x) for x in item_ids)
-        _rows=[r for r in _now if int(r.id) in _scope]
-        _compare=[r for r in _now if int(r.id) in _scope or str(r.status or "").lower() in {"ready","published"}]
-        return C._campaign_validation_for_rows(campaign,_rows,db,comparison_rows=_compare)
-    val = _scoped_validation()
+        # PREMIUM_INTERNAL_VALIDATION_CHUNKS_V1:
+        # Premium receipt/file proof is expensive. Validate a bounded exact subset
+        # per execution and persist its immutable snapshot. Batch-level QA still
+        # sees the entire requested scope via batch_rows above.
+        _validated_cards={
+            str(k):dict(v) for k,v in dict(payload.get("_premium_validated_cards") or {}).items()
+            if str(k).isdigit() and int(k) in set(int(x) for x in item_ids) and isinstance(v,dict)
+        }
+        _pending_validation=[int(x) for x in item_ids if str(int(x)) not in _validated_cards]
+        if _pending_validation:
+            try:
+                _validation_chunk_size=max(1,min(8,int(__import__("os").environ.get(
+                    "BORIS_PREMIUM_VALIDATION_CHUNK_SIZE","4") or 4)))
+            except Exception:
+                _validation_chunk_size=4
+            _validation_chunk=_pending_validation[:_validation_chunk_size]
+            _chunk_snapshot=_campaign_premium_validation_snapshot(
+                db,C,campaign,allowed,account_id,_validation_chunk)
+            if not _chunk_snapshot.get("ok"):
+                return {"stage":"prepare_reconciliation_required","code":_chunk_snapshot.get("code"),
+                        "item_id":_chunk_snapshot.get("item_id"),"retryable":False}, "partial"
+            _chunk_validation=_scoped_validation(_validation_chunk)
+            if not _chunk_validation.get("ok"):
+                return {"stage":"prepare_reconciliation_required","code":"PREMIUM_INTERNAL_VALIDATION_BLOCKED",
+                        "campaign_id":campaign.id,"account_id":account_id,
+                        "validation":_chunk_validation,"retryable":False}, "partial"
+            _validated_cards.update(dict(_chunk_snapshot.get("cards") or {}))
+            _validated_ids=[int(x) for x in item_ids if str(int(x)) in _validated_cards]
+            _pending_after=[int(x) for x in item_ids if str(int(x)) not in _validated_cards]
+            _state=dict(payload)
+            _state["_premium_validated_cards"]=_validated_cards
+            _state["_premium_validated_ids"]=_validated_ids
+            _state["_premium_validation_policy"]="chunked_v1"
+            payload=_campaign_checkpoint(db,job,_state,"internal_validation",5,total)
+            return {
+                "stage":"internal_validation",
+                "code":"PREMIUM_INTERNAL_VALIDATION_CHUNK",
+                "campaign_id":campaign.id,
+                "account_id":account_id,
+                "done":len(_validated_ids),
+                "total":len(item_ids),
+                "pending_item_ids":_pending_after,
+                "retryable":True,
+            }, "retry"
+        _premium_validated_snapshot={"ok":True,"cards":_validated_cards}
+        val={"ok":True,"total":len(item_ids),"ready":len(item_ids),"blocked":0,"items":[]}
+    else:
+        val = _scoped_validation()
     if not val.get("ok"):
         if _premium_prepare:
             # Legacy cleanup below erases images/evidence and rebinds a stale

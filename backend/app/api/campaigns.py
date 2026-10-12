@@ -3558,15 +3558,18 @@ def _ff_near_duplicate_pairs(rows, threshold: float = 0.86, limit: int = 200) ->
     return found
 
 
-def _campaign_validation_for_rows(campaign, rows, db, comparison_rows=None):
+def _campaign_validation_for_rows(campaign, rows, db, comparison_rows=None, batch_rows=None):
     """Canonical campaign validation for an explicit immutable item scope.
 
-    Per-card and batch-banner checks apply only to the validation rows. Duplicate
-    and near-duplicate comparisons may additionally include already-ready or
-    published rows so a repaired later subset cannot collide with earlier output.
+    Per-card checks apply only to rows. Duplicate comparisons may inspect
+    comparison_rows. Batch banner density/composition may inspect a wider
+    immutable batch_rows scope so durable workers can validate expensive card
+    proofs in chunks without weakening campaign-level QA.
     """
     _scope_rows=list(rows or [])
     _scope_ids={int(r.id) for r in _scope_rows}
+    _batch_scope_rows=list(batch_rows if batch_rows is not None else _scope_rows)
+    _batch_scope_ids={int(r.id) for r in _batch_scope_rows}
     reports=[]
     for _idx,r in enumerate(_scope_rows):
         reports.append(_ff_validate_row(r,db))
@@ -3575,8 +3578,11 @@ def _campaign_validation_for_rows(campaign, rows, db, comparison_rows=None):
     from types import SimpleNamespace as _SimpleNamespace
     def _snap(_r):
         return _SimpleNamespace(id=int(_r.id),account_id=str(getattr(_r,"account_id","") or ""),segment=str(getattr(_r,"segment","") or ""),payload_json=str(getattr(_r,"payload_json","") or "{}"))
-    rows=[_snap(r) for r in (comparison_rows if comparison_rows is not None else _scope_rows)]
-    _batch_rows=[r for r in rows if int(r.id) in _scope_ids]
+    _compare_source=list(comparison_rows if comparison_rows is not None else _scope_rows)
+    _compare_ids={int(r.id) for r in _compare_source}
+    _compare_source.extend(r for r in _batch_scope_rows if int(r.id) not in _compare_ids)
+    rows=[_snap(r) for r in _compare_source]
+    _batch_rows=[r for r in rows if int(r.id) in _batch_scope_ids]
     db.commit()
     seen={}; dup=[]; lead_seen={}; lead_dup=[]; desc_seen={}; desc_dup=[]; near_dup=_ff_near_duplicate_pairs(rows)
     import re as _copy_re
