@@ -118,27 +118,30 @@ def owner_variant(account_id: str, identity: str, version: int = 1,
                         else "OWNER-REQUESTED PREMIUM CATEGORY QUALITY DIRECTION (NO IMAGE REFERENCE)")
     # Owner's mobile-first quality bar; injected before all optional references
     # so the existing prompt-size limiter cannot silently remove it.
+    # The required visual, factual and mobile contracts must ALL survive
+    # the existing 2350-character combined-style budget, including when the
+    # client supplies 850 characters of custom direction.
     mobile_contract = (
-        "ONE BANNER PER IMAGE. Never make a grid, contact sheet, collage, "
-        "side-by-side variants, split-screen comparison or 5-ad composition. "
-        "MOBILE-FIRST CENTRAL SAFE ZONE: keep ALL visible text, icons, benefits, "
-        "prices and CTA completely inside the central x=15%-85%, y=15%-85% "
-        "of the FINAL cropped image. Background photography alone may bleed to edges. "
-        "No letters touching the four borders, no clipped panels. "
-        "TYPE MUST BE MUCH LARGER: headline is the dominant element, around "
-        "9-12% of final image height per line, at most 2 short lines; "
-        "supporting labels at least ~4.5% and CTA at least ~5% of image height. "
-        "Check true readability as a 320px mobile thumbnail, with clean high contrast; "
-        "delete tiny secondary copy rather than shrinking type. "
-        "One exact confirmed offer, at most two short factual benefits and one "
-        "unmissable message CTA; NO small footer badges, fake awards or unreadable icons. "
+        "ONE BANNER PER IMAGE: never a collage, grid or multiple advertisements. "
+        "MOBILE-FIRST CENTRAL SAFE ZONE: all visible text, price, icons and CTA "
+        "inside x=15%-85%, y=15%-85% of the FINAL cropped image; only photo "
+        "background may bleed to the edges. "
+        "TYPE MUST BE MUCH LARGER: headline 9-12% of final image height per "
+        "line, at most 2 lines; supporting text >=4.5%, CTA >=5%. "
+        "Judge as a 320px mobile thumbnail: no tiny text. "
+        "One hero product, up to two VERIFIED benefits and one prominent CTA. "
+        "NO small footer badges, awards or illegible icons. "
+        "Reject cropped or misspelled Russian headline/CTA. "
+        "No made-up prices, claims, discounts, guarantees, sizes, materials, "
+        "free services, delivery, installation or other customer promises. "
+        "Only supplied exact text may appear. "
     )
     guidance = (
         mobile_contract
+        + f"Subject rule: {profile['subject']}. "
         + f"{provenance_label} FOR {profile['niche']}; style inspiration ONLY, "
         f"not a product photo or permission to publish. Visual direction: {profile['style']}. "
         f"Color variant {family}: {palette}. Hero angle: {angle}. "
-        f"Subject rule: {profile['subject']}. "
         "Make the Russian main headline unusually LARGE, bold and mobile-readable, ideally "
         "one or two strong lines; prioritize one factual offer, up to three SHORT proof-safe "
         "benefits and ONE prominent Avito chat CTA. Use generous contrast and negative space. "

@@ -88,6 +88,37 @@ class TestOwnerBannerExamples(unittest.TestCase):
                 self.assertIn("ONE BANNER PER IMAGE", qa["owner_reference_notes"])
                 self.assertIn("x=15%-85%, y=15%-85%", qa["owner_reference_notes"])
 
+    def test_required_claim_and_product_guards_survive_long_customer_style(self):
+        from app.services.banner_full_ai_premium import build_prompt, _vision_contract
+        for account, profile in M.PROFILES.items():
+            with self.subTest(account=account):
+                v = M.owner_variant(account, "large-customer-brief")
+                merged = M.combine_reference_style(v, "X" * 850)
+                self.assertLessEqual(len(merged), 2350)
+                for required in (
+                    "ONE BANNER PER IMAGE", "No made-up prices",
+                    "Subject rule: " + profile["subject"],
+                    "x=15%-85%, y=15%-85%", "320px mobile thumbnail",
+                    "CUSTOMER STYLE:",
+                ):
+                    self.assertIn(required, merged)
+                prompt = build_prompt(
+                    description="Товар по подтверждённой спецификации",
+                    exact_title="ТОЛЬКО ПРОВЕРЕННЫЙ ТЕКСТ",
+                    exact_cta="Напишите в Avito",
+                    reference_style=merged,
+                )
+                self.assertIn("No made-up prices", prompt)
+                self.assertIn("Subject rule: " + profile["subject"], prompt)
+                c = _vision_contract(
+                    description="Товар по подтверждённой спецификации",
+                    exact_title="ТОЛЬКО ПРОВЕРЕННЫЙ ТЕКСТ",
+                    exact_subtitle="", exact_cta="Напишите в Avito",
+                    exact_price="", advantages=[], hypothesis="product_hero",
+                    fmt="1:1", owner_example=v,
+                )
+                self.assertIn("Subject rule: " + profile["subject"], c["owner_reference_notes"])
+
     def test_custom(self):
         v=M.owner_variant("mbroker_27859","case")
         self.assertIn("CUSTOMER STYLE",M.combine_reference_style(v,"special"))
