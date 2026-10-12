@@ -2896,7 +2896,12 @@ def _run_campaign_deliver(db, job, payload):
         # _campaign_job_context performed ORM reads on the worker session. End
         # that transaction before Avito report HTTP; the helper owns no worker DB state.
         db.commit()
-        snap=_autoload_upload_snapshot(account_id, upload_id or None, expected_ad_ids=expected_ad_ids)
+        snap=_autoload_upload_snapshot(
+            account_id,
+            upload_id or None,
+            expected_ad_ids=expected_ad_ids,
+            allow_newer_scope_reconciliation=not bool(payload.get("_external_funding_wait")),
+        )
         if snap.get("status") in {"pending","error"} or not snap.get("terminal"):
             watch_count += 1
             # DIRECT_UPLOAD_TIME_BOUNDARY_V1: retries are a transport mechanism, not

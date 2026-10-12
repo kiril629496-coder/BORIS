@@ -1669,8 +1669,14 @@ def _autoload_scope_delivery_effect(scoped: list[dict], *, expected_total: int,
     }
 
 
-def _autoload_upload_snapshot(account_id: str, upload_id: int|None=None, expected_ad_ids=None) -> dict:
-    """Read authoritative Avito v4 upload state. No mutation and no guessing."""
+def _autoload_upload_snapshot(account_id: str, upload_id: int|None=None, expected_ad_ids=None, *, allow_newer_scope_reconciliation: bool=True) -> dict:
+    """Read authoritative Avito v4 upload state. No mutation and no guessing.
+
+    `allow_newer_scope_reconciliation=False` pins observation to the submitted
+    upload identity. Funding-wait and other exactly-once direct-upload watchers
+    must never adopt an unrelated newer account upload merely because Avito's
+    bounded history no longer lists the original receipt.
+    """
     from app.db.session import SessionLocal
     from app.models.account import Account
     from app.crypto_utils import decrypt_secret
@@ -1749,11 +1755,10 @@ def _autoload_upload_snapshot(account_id: str, upload_id: int|None=None, expecte
             for x in (rr.json() or {}).get("uploads") or []:
                 if int(x.get("upload_id") or 0)==int(upload_id): selected=x; break
             if selected is None:
-                # Avito keeps only a bounded upload history. A durable BORIS watcher
-                # may outlive that window; with exact campaign ad_ids reconcile the
-                # current upload instead of waiting forever for an evicted receipt.
-                # Scope logic below remains fail-closed on those exact identities.
-                if expected_ad_ids:
+                # Avito keeps only a bounded upload history. Most scheduled/replacement
+                # watchers may reconcile a newer upload by exact scope, but exactly-once
+                # direct/funding watchers must stay pinned to the submitted upload id.
+                if expected_ad_ids and allow_newer_scope_reconciliation:
                     _block = _autoload_shared_block()
                     if _block:
                         return _block
@@ -1783,7 +1788,7 @@ def _autoload_upload_snapshot(account_id: str, upload_id: int|None=None, expecte
         # caller supplied the exact campaign identities, a newer account-feed upload
         # is valid evidence for the same desired canonical XML and must supersede the
         # original receipt instead of leaving the durable watcher stuck on old stats.
-        if expected_ad_ids:
+        if expected_ad_ids and allow_newer_scope_reconciliation:
             try:
                 _block = _autoload_shared_block()
                 if _block:

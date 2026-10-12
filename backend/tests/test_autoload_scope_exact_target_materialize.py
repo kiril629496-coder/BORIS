@@ -28,3 +28,10 @@ def test_scoped_autoload_keeps_provider_rejection_truth_when_materializing():
     tail = block[second_bind:second_bind + 700]
     assert "report_section=_bind_section" in tail
     assert "avito_status=_bind_status" in tail
+
+
+def test_strict_upload_identity_disables_newer_upload_reconciliation():
+    block = _snapshot_block()
+    assert "allow_newer_scope_reconciliation: bool=True" in block
+    assert "if expected_ad_ids and allow_newer_scope_reconciliation:" in block
+    assert block.count("if expected_ad_ids and allow_newer_scope_reconciliation:") >= 2

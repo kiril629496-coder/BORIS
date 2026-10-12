@@ -566,3 +566,10 @@ def test_terminal_partial_campaign_stages_never_hot_resume():
     assert '"ready_subset_for_review"' in src
     assert '"banners_partial"' in src
     assert '"providerfree_repair_exhausted"' in src
+
+
+def test_funding_wait_pins_original_upload_identity():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    assert 'allow_newer_scope_reconciliation=not bool(payload.get("_external_funding_wait"))' in src
+    assert '"retry_policy":"observe_same_upload_after_funding"' in src
