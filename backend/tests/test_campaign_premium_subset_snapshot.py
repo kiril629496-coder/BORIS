@@ -37,3 +37,28 @@ def test_normal_prepare_keeps_full_materialize_path():
     end = src.index("\ndef _run_campaign_deliver", start)
     body = src[start:end]
     assert "C.ff_workflow_materialize(campaign.id, C.FFMaterializeBody(account_id=account_id), db, user)" in body
+
+
+def test_subset_finalize_marks_only_verified_subset_partial_ready():
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    start = src.index("def _campaign_premium_finalize_ready")
+    end = src.index("\ndef _run_campaign_prepare", start)
+    body = src[start:end]
+    assert "PREMIUM_READY_SUBSET_IS_PARTIAL_V1" in body
+    assert 'campaign.status = "partial"' in body
+    assert 'ff["step"] = "ready_subset_for_review"' in body
+    assert 'order["status"] = "PARTIAL_READY"' in body
+    assert '"code": "PREMIUM_READY_SUBSET_PARTIAL"' in body
+    assert '"ready_ids": [int(x) for x in item_ids]' in body
+    assert '"full_order_complete": False' in body
+    assert '"external_action": False' in body
+
+
+def test_full_order_finalize_still_requires_full_requested_quantity():
+    src = (Path(__file__).resolve().parents[1] / "app/services/jobs.py").read_text(encoding="utf-8")
+    start = src.index("def _campaign_premium_finalize_ready")
+    end = src.index("\ndef _run_campaign_prepare", start)
+    body = src[start:end]
+    assert "requested != len(item_ids)" in body
+    assert '"PREMIUM_READY_QUANTITY_UNPROVEN"' in body
+    assert 'campaign.status = "ready_for_review"' in body

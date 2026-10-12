@@ -1360,15 +1360,56 @@ def _campaign_premium_finalize_ready(db, job, payload, C, campaign, allowed, acc
     _, ff = C._ff_state_load(campaign)
     order = C._ff_order_progress(db, campaign, ff, account_id, stage="ready_for_review", persist=False)
     requested = int(order.get("requested_total") or 0)
+    _subset_continuation = bool(payload.get("_subset_continuation")) and bool(item_ids)
+    # ORM writes preserve the existing mapper revision/history mechanism.
+    # No broad UPDATE may promote a card edited after external XML validation.
+    for row in current["rows"]:
+        row.status = "ready"
+    if _subset_continuation:
+        # PREMIUM_READY_SUBSET_IS_PARTIAL_V1:
+        # An exact repair/banner subset is not the whole commercial order. Persist
+        # only the verified rows as READY and keep the Campaign/order incomplete.
+        # This prevents 42/100 from being mislabeled as a fully ready campaign while
+        # still making the completed subset durable and visible to the owner.
+        _now = datetime.now(timezone.utc).isoformat()
+        if str(campaign.status or "").lower() != "superseded":
+            campaign.status = "partial"
+        _ready_subset = {
+            "status": "ready",
+            "item_ids": [int(x) for x in item_ids],
+            "ready_count": len(item_ids),
+            "requested_total": requested,
+            "full_order_complete": False,
+            "source_job_id": int(job.id),
+            "source_banner_job_id": payload.get("_source_banner_job_id"),
+            "updated_at": _now,
+        }
+        ff["step"] = "ready_subset_for_review"
+        ff["ready_subset"] = _ready_subset
+        order["status"] = "PARTIAL_READY"
+        order["blocking_reason"] = "remaining_items_not_ready"
+        ff["order_contract"] = order
+        state = dict(payload)
+        state.update(stage="ready_subset_for_review", checkpoint_at=_now)
+        job.payload_json, job.progress_done, job.progress_total = state, 8, 8
+        C._ff_state_save(db, campaign, ff)
+        return {
+            "stage": "ready_subset_for_review",
+            "code": "PREMIUM_READY_SUBSET_PARTIAL",
+            "campaign_id": int(campaign.id),
+            "account_id": account_id,
+            "ready_count": len(item_ids),
+            "ready_ids": [int(x) for x in item_ids],
+            "requested_total": requested,
+            "full_order_complete": False,
+            "external_action": False,
+            "message": "Проверенная часть кампании готова отдельно; оставшиеся карточки продолжают ремонт и не блокируют готовый subset.",
+        }, "partial"
     if (requested != len(item_ids) or int(order.get("created_count") or 0) != requested
             or int(order.get("qa_pass_count") or 0) != requested):
         db.rollback()
         return {"stage": "order_qa_blocked", "code": "PREMIUM_READY_QUANTITY_UNPROVEN",
                 "requested": requested, "retryable": False}, "partial"
-    # ORM writes preserve the existing mapper revision/history mechanism.
-    # No broad UPDATE may promote a card edited after external XML validation.
-    for row in current["rows"]:
-        row.status = "ready"
     campaign.status = "ready_for_review"
     order.update(status="READY_FOR_OWNER_REVIEW", blocking_reason=None,
                  completed_at=datetime.now(timezone.utc).isoformat())
