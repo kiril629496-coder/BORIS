@@ -38,7 +38,7 @@ def _clean(value: object) -> str:
 
 
 def _bold(title: str, message: str) -> str:
-    return "<strong>" + title + "</strong>\n" + message
+    return "<strong>" + title + ":</strong>\n" + message
 
 
 def compose_niche_copy(topic: str, payload: dict) -> str | None:
@@ -51,10 +51,29 @@ def compose_niche_copy(topic: str, payload: dict) -> str | None:
     # Correct colloquial listing phrasing without changing the product identity.
     if kind == "shower":
         name = re.sub(r"(?i)\bв душ\b", "для душа", name)
-    city = _clean(p.get("city")) or _clean(p.get("address"))
+    address = _clean(p.get("address"))
+    city = _clean(p.get("city")) or (_clean(address.split(",", 1)[0]) if "," in address else "")
     variant = max(1, int(p.get("variant") or 1))
-    location = " — " + city if city else ""
-    first = "<strong>" + name.upper() + location.upper() + "</strong>"
+    city_forms = {
+        "Казань": "в Казани", "Москва": "в Москве",
+        "Уфа": "в Уфе", "Санкт-Петербург": "в Санкт-Петербурге",
+        "Ижевск": "в Ижевске", "Стерлитамак": "в Стерлитамаке",
+    }
+    location = (" " + city_forms[city]) if city in city_forms else ((" — " + city) if city else "")
+    # The owner-approved «под ключ / от производителя» are factual claims.
+    # Render them only when they are explicitly confirmed for THIS card.
+    verified = p.get("verified_claims")
+    verified = ({x.strip().lower() for x in verified if isinstance(x, str)}
+                if isinstance(verified, (tuple, list, set)) else set())
+    claims = []
+    if "custom_made" in verified:
+        claims.append("индивидуально")
+    if "turnkey" in verified:
+        claims.append("под ключ")
+    if "manufacturer" in verified:
+        claims.append("от производителя")
+    claim_text = (" " + " ".join(claims)) if claims else ""
+    first = "<strong>" + (name + location + claim_text).upper() + " — ОБРАЩАЙТЕСЬ!</strong>"
     plans = {
         "shower": (
             "Уточните размеры душевой зоны, желаемый тип открывания и особенности крепления. "
@@ -180,14 +199,22 @@ def compose_niche_copy(topic: str, payload: dict) -> str | None:
         "estate": "Стоимость недвижимости и стоимость услуг по подбору — разные суммы. Условия консультации и помощи уточняйте до начала сотрудничества.",
         "mortgage": "Финансовые условия определяются кредитором. Ставку, платёж и полную стоимость кредита нужно проверять в актуальном предложении банка.",
     }
+    headings = {
+        "shower": ("📐 РАЗМЕРЫ И КОМПЛЕКТАЦИЯ", "💬 ПРИШЛИТЕ ФОТО И РАЗМЕРЫ ДУШЕВОЙ"),
+        "building": ("📐 РАЗМЕРЫ И ХАРАКТЕРИСТИКИ", "💬 ПРИШЛИТЕ РАЗМЕРЫ И ОБЪЁМ"),
+        "glazing": ("📐 РАЗМЕРЫ И КОМПЛЕКТАЦИЯ", "💬 ПРИШЛИТЕ ФОТО И РАЗМЕРЫ ПРОЁМА"),
+        "furniture": ("📐 ПЛАНИРОВКА И КОМПЛЕКТАЦИЯ", "💬 ПРИШЛИТЕ РАЗМЕРЫ И ФОТО ПОМЕЩЕНИЯ"),
+        "estate": ("🏡 ПАРАМЕТРЫ ПОДБОРА", "💬 ПРИШЛИТЕ БЮДЖЕТ И ПОЖЕЛАНИЯ"),
+        "mortgage": ("📋 УСЛОВИЯ ИПОТЕЧНОЙ ПРОГРАММЫ", "💬 ПРИШЛИТЕ ПАРАМЕТРЫ ИПОТЕКИ"),
+    }
+    specifications_heading, action_heading = headings[kind]
     return "\n\n".join((
         first,
         intro,
-        _bold("✅ НА ЧТО ОБРАТИТЬ ВНИМАНИЕ", concern),
-        _bold("🔎 ЧТО УТОЧНИТЬ ПЕРЕД ВЫБОРОМ", focus),
-        _bold("💰 КАК ФОРМИРУЕТСЯ СТОИМОСТЬ", costs[kind]),
-        _bold("📍 ГЕОГРАФИЯ", "Город: " + city + "." if city else "Уточните место покупки или выполнения работ."),
-        _bold("💬 СЛЕДУЮЩИЙ ШАГ", cta),
+        _bold(specifications_heading, concern),
+        _bold("✅ ЧТО НУЖНО ДЛЯ ПОДБОРА", focus),
+        _bold("💰 СТОИМОСТЬ И РАСЧЁТ", costs[kind]),
+        _bold(action_heading, cta),
     ))
 
 

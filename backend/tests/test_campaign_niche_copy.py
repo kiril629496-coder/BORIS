@@ -1,6 +1,7 @@
 """Offline, no-money regression tests for Russian niche copy quality."""
 import unittest
 from app.services.campaign_niche_copy import compose_niche_copy, factual_niche_example
+from app.api.campaigns import _ff_plain_description_for_avito
 
 
 class TestNicheCopy(unittest.TestCase):
@@ -20,12 +21,14 @@ class TestNicheCopy(unittest.TestCase):
                     copy = compose_niche_copy(title, {"city": city, "variant": variant})
                     self.assertIsNotNone(copy)
                     self.assertIn("СТЕКЛЯННАЯ ПЕРЕГОРОДКА ДЛЯ ДУША" if "в душ" in title.lower() else title.upper(), copy)
-                    self.assertIn(city.upper(), copy)
+                    self.assertTrue(any(form in copy for form in {"Казань":("КАЗАНИ",),"Уфа":("УФЕ",),"Москва":("МОСКВЕ",),"Санкт-Петербург":("САНКТ-ПЕТЕРБУРГЕ",)}.get(city,(city.upper(),))), (city, copy[:140]))
                     self.assertIn("<strong>✅", copy)
+                    self.assertIn(":</strong>", copy)
+                    self.assertIn("ОБРАЩАЙТЕСЬ!</strong>", copy)
                     self.assertIn("<strong>💬", copy)
                     self.assertTrue(any(x in copy for x in ("Пришлите в чат Avito", "Пришлите в Avito", "Отправьте в чат Avito", "Отправьте в Avito")))
                     self.assertNotIn("</strong>.", copy)
-                    self.assertNotIn(":</strong>", copy)
+                    self.assertNotIn(".</strong>", copy)
                     self.assertGreater(len(copy), 650)
                     self.assertNotIn("под ваш сценарий", copy.lower())
                     self.assertNotIn("Пример услуги: Направление:", copy)
@@ -72,20 +75,32 @@ class TestNicheCopy(unittest.TestCase):
         self.assertNotIn("количество комнат", text.lower())
 
     def test_rendered_copy_has_no_stray_heading_punctuation(self):
-        from app.api.campaigns import _ff_plain_description_for_avito
         for title, city in self.cases:
             with self.subTest(title=title):
                 raw = compose_niche_copy(title, {"city": city, "variant": 1})
                 rendered = _ff_plain_description_for_avito(raw)
                 headings = [line for line in rendered.splitlines() if line.startswith("<strong>")]
-                self.assertGreaterEqual(len(headings), 6)
+                self.assertGreaterEqual(len(headings), 5)
                 for line in headings:
                     self.assertTrue(line.endswith("</strong>"), line)
-                    self.assertNotIn(":</strong>", line)
+                    self.assertNotIn(":</strong>", line) if line is headings[0] else self.assertIn(":</strong>", line)
                     self.assertNotIn(".</strong>", line)
                 for line in rendered.splitlines():
                     if line and not line.startswith("<strong>"):
                         self.assertIn(line[-1], ".!?", line)
+
+    def test_owner_albert_benchmark_claims_are_conditional(self):
+        normal = compose_niche_copy("Панорамные окна", {"city":"Казань"})
+        verified = compose_niche_copy("Панорамные окна", {
+            "city":"Казань", "verified_claims": ["custom_made", "turnkey", "manufacturer"]
+        })
+        self.assertIn("ПАНОРАМНЫЕ ОКНА В КАЗАНИ", normal)
+        self.assertIn("ПОД КЛЮЧ ОТ ПРОИЗВОДИТЕЛЯ", verified)
+        self.assertNotIn("ОТ ПРОИЗВОДИТЕЛЯ", normal)
+        self.assertNotIn("ПОД КЛЮЧ", normal)
+        self.assertIn("📐 РАЗМЕРЫ И КОМПЛЕКТАЦИЯ:</strong>", normal)
+        self.assertNotIn("ОТ ПРОИЗВОДИТЕЛЯ", compose_niche_copy("Панорамные окна", {"city":"Казань", "verified_claims":[{"untrusted":True}]}))
+        self.assertIn("💬 ПРИШЛИТЕ ФОТО И РАЗМЕРЫ ПРОЁМА:</strong>", normal)
 
     def test_unknown_topic_keeps_legacy_path(self):
         self.assertIsNone(compose_niche_copy("Ремонт компьютеров", {"city": "Тула"}))

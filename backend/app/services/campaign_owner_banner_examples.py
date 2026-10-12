@@ -11,6 +11,8 @@ import hashlib
 
 CONTRACT_VERSION = "owner_banner_examples_20261011_v1"
 DEFAULT_ACCENT = "#F97316"
+# Small local visual contact sheet is for style review only, never an ad image.
+LOCAL_REFERENCE_PREVIEW = "/root/BORIS/backend/images/owner-reference-library/owner-style-maria-albert-planeta-20261011-small.jpg"
 PROFILES = {
     "mbroker_27859": {
         "niche": "real_estate",
@@ -54,6 +56,34 @@ PROFILES = {
             ("midnight_beige", "#252E3A", "midnight blue + beige + champagne"),
         ),
     },
+    "greench84_48016": {
+        "niche": "roofing_and_facades",
+        "owner_library_file": None,
+        "owner_library_ref": None,
+        "style": "high-end architecture and roofing product campaign; spectacular real roof detail, clean contemporary house or roof section, tactile metal profiles, polished architectural photography, decisive headline hierarchy, no generic blue sky stock photo",
+        "subject": "Show only the exact roofing or facade product named in the offer; distinguish metal tile from profiled sheet and facade panels, no imagined sheet thickness, colors, product authenticity, installation, delivery or guarantees",
+        "palettes": (
+            ("anthracite_silver", "#363E45", "deep anthracite + pale silver + bright white"),
+            ("copper_graphite", "#81563C", "warm copper + graphite + ivory"),
+            ("forest_stone", "#43564A", "deep forest + stone beige + white"),
+            ("navy_steel", "#31485C", "deep navy + brushed steel + pearl"),
+            ("terracotta_black", "#A65B40", "terracotta + warm black + cream"),
+        ),
+    },
+    "evgeniy_peregorodki_12447": {
+        "niche": "glass_shower_partitions",
+        "owner_library_file": None,
+        "owner_library_ref": None,
+        "style": "premium architectural bathroom editorial; elegant believable glass partitions as the unmistakable hero, clean real-world proportions, luxurious stone and soft light, frosted and transparent areas only when confirmed, airy legible typographic grid",
+        "subject": "Depict a plausible glass shower partition matching the stated construction, not a generic shower cabin; never invent pane dimensions, glass tint, metal color, installation service, product guarantee or delivery conditions",
+        "palettes": (
+            ("smoke_bronze", "#524B47", "smoked glass neutral + bronze + ivory"),
+            ("graphite_cream", "#3B4448", "graphite + warm cream + glass"),
+            ("sage_marble", "#697768", "soft sage + marble + charcoal"),
+            ("navy_white", "#334A61", "deep navy + pearl white + chrome-like neutral"),
+            ("sand_black", "#A88764", "sandstone + matte black + white"),
+        ),
+    },
 }
 
 
@@ -84,8 +114,10 @@ def owner_variant(account_id: str, identity: str, version: int = 1,
               "bright lifestyle interior", "editorial foreground/background contrast",
               "detail-led scene with spacious typography")
     angle = angles[layout_seed % len(angles)]
+    provenance_label = ("OWNER-PROVIDED OCT-2026 STYLE REFERENCE" if profile.get("owner_library_ref")
+                        else "OWNER-REQUESTED PREMIUM CATEGORY QUALITY DIRECTION (NO IMAGE REFERENCE)")
     guidance = (
-        f"OWNER-APPROVED OCT-2026 REFERENCE FOR {profile['niche']}; style inspiration ONLY, "
+        f"{provenance_label} FOR {profile['niche']}; style inspiration ONLY, "
         f"not a product photo or permission to publish. Visual direction: {profile['style']}. "
         f"Color variant {family}: {palette}. Hero angle: {angle}. "
         f"Subject rule: {profile['subject']}. "
@@ -94,8 +126,12 @@ def owner_variant(account_id: str, identity: str, version: int = 1,
         "benefits and ONE prominent Avito chat CTA. Use generous contrast and negative space. "
         "Create a visibly original design; change camera/viewpoint, color and composition across "
         "new ads, never cloning the reference or another generated banner. "
-        "No made-up prices, claims, discounts, guarantees, logos, property photos or phone numbers. "
-        "Only render provided, confirmed offer text; no invented fine print. "
+        "No made-up prices, claims, discounts, guarantees, warranty badges, logos, case studies, "
+        "specific product dimensions, free services, promised timelines, installed works or phone numbers. "
+        "Do not add any proof icons, brand marks, benefit checklists or awards unless explicitly supplied "
+        "and verified in the exact banner brief. "
+        "Reject cropped, misspelled, mistranslated, gibberish or truncated Russian headline/CTA. "
+        "Only render provided, confirmed offer text, and keep it fully within the safe region; no invented fine print. "
         "Maintain the preselected campaign composition and icon diversification rules."
     )
     return {
@@ -103,6 +139,7 @@ def owner_variant(account_id: str, identity: str, version: int = 1,
         "palette_key": family, "accent": accent, "palette": palette,
         "owner_library_file": profile["owner_library_file"],
         "owner_library_ref": profile["owner_library_ref"],
+        "local_preview_image": LOCAL_REFERENCE_PREVIEW if profile.get("owner_library_ref") else None,
         "reference_style": guidance,
     }
 
