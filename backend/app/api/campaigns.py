@@ -9179,7 +9179,9 @@ def _ff_plain_description_for_avito(raw: str, *, brief: str = "", price: int = 0
             for _part in _parts:
                 # Add a terminal full stop to ordinary prose that accidentally lacks punctuation.
                 _plain=_re.sub(r"<[^>]+>","",_part).strip()
-                if _plain and not _re.search(r"[.!?:;…]$",_plain) and not _re.match(r"^[A-ZА-ЯЁ0-9 \-/]{4,}$",_plain):
+                # All-uppercase standalone bold lines are headings, not sentences.
+                _standalone_heading=bool(_re.fullmatch(r"<strong>[^<>]+</strong>",_part)) and _plain.upper()==_plain
+                if _plain and not _standalone_heading and not _re.search(r"[.!?:;…]$",_plain) and not _re.match(r"^[A-ZА-ЯЁ0-9 \-/]{4,}$",_plain):
                     _part=_part+"."
                 _lines.append(_part)
         if _lines: _blocks.append("\n".join(_lines))

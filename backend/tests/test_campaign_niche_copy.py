@@ -19,11 +19,13 @@ class TestNicheCopy(unittest.TestCase):
                 with self.subTest(title=title, variant=variant):
                     copy = compose_niche_copy(title, {"city": city, "variant": variant})
                     self.assertIsNotNone(copy)
-                    self.assertIn(title.upper(), copy)
+                    self.assertIn("СТЕКЛЯННАЯ ПЕРЕГОРОДКА ДЛЯ ДУША" if "в душ" in title.lower() else title.upper(), copy)
                     self.assertIn(city.upper(), copy)
                     self.assertIn("<strong>✅", copy)
                     self.assertIn("<strong>💬", copy)
-                    self.assertTrue("Напишите в Avito" in copy or "Пришлите в Avito" in copy)
+                    self.assertTrue(any(x in copy for x in ("Пришлите в чат Avito", "Пришлите в Avito", "Отправьте в чат Avito", "Отправьте в Avito")))
+                    self.assertNotIn("</strong>.", copy)
+                    self.assertNotIn(":</strong>", copy)
                     self.assertGreater(len(copy), 650)
                     self.assertNotIn("под ваш сценарий", copy.lower())
                     self.assertNotIn("Пример услуги: Направление:", copy)
@@ -38,7 +40,7 @@ class TestNicheCopy(unittest.TestCase):
             a = compose_niche_copy(title, {"city": city, "variant": 1})
             b = compose_niche_copy(title, {"city": city, "variant": 2})
             self.assertNotEqual(a, b)
-            self.assertIn(title.upper(), b)
+            self.assertIn("СТЕКЛЯННАЯ ПЕРЕГОРОДКА ДЛЯ ДУША" if "в душ" in title.lower() else title.upper(), b)
 
     def test_factual_glass_specs_exact_only(self):
         fields = {"glass_type": "Закалённое", "glass_thickness": "8 мм",
@@ -59,10 +61,31 @@ class TestNicheCopy(unittest.TestCase):
             self.assertTrue(meta["needs_data"])
             self.assertEqual(text, "")
 
+    def test_shower_heading_has_correct_russian_case(self):
+        text = compose_niche_copy("Стеклянная перегородка в душ", {"city": "Санкт-Петербург"})
+        self.assertIn("СТЕКЛЯННАЯ ПЕРЕГОРОДКА ДЛЯ ДУША", text)
+        self.assertNotIn("ПЕРЕГОРОДКА В ДУШ", text)
+
     def test_mortgage_is_not_mistaken_for_real_estate_search(self):
         text = compose_niche_copy("Семейная ипотека", {"city": "Москва"})
         self.assertIn("предложении банка", text.lower())
         self.assertNotIn("количество комнат", text.lower())
+
+    def test_rendered_copy_has_no_stray_heading_punctuation(self):
+        from app.api.campaigns import _ff_plain_description_for_avito
+        for title, city in self.cases:
+            with self.subTest(title=title):
+                raw = compose_niche_copy(title, {"city": city, "variant": 1})
+                rendered = _ff_plain_description_for_avito(raw)
+                headings = [line for line in rendered.splitlines() if line.startswith("<strong>")]
+                self.assertGreaterEqual(len(headings), 6)
+                for line in headings:
+                    self.assertTrue(line.endswith("</strong>"), line)
+                    self.assertNotIn(":</strong>", line)
+                    self.assertNotIn(".</strong>", line)
+                for line in rendered.splitlines():
+                    if line and not line.startswith("<strong>"):
+                        self.assertIn(line[-1], ".!?", line)
 
     def test_unknown_topic_keeps_legacy_path(self):
         self.assertIsNone(compose_niche_copy("Ремонт компьютеров", {"city": "Тула"}))
