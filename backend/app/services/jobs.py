@@ -2498,23 +2498,46 @@ def _run_campaign_prepare(db, job, payload):
 def _campaign_owner_prepare_only_contract(ff):
     """Return True when the durable owner order explicitly forbids publication.
 
-    This guard is intentionally narrow: it protects autonomous delivery workers.
-    A later real owner action may still use the dedicated owner-activation endpoint,
-    but BORIS itself must never translate a prepare-only order into confirmed=True.
+    Durable publication_policy is authoritative. Prompt parsing exists only as a
+    backward-compatible recovery path for older campaigns that predate the policy.
+    Autonomous BORIS workers may never reinterpret a prepare-only order as consent.
     """
     if not isinstance(ff, dict):
         return False
+
+    policy=dict(ff.get("publication_policy") or {})
+    mode=str(policy.get("mode") or "").strip().lower()
+    if (mode=="prepare_only"
+            or policy.get("automatic_external_write") is False
+            or policy.get("requires_real_owner_activation") is True):
+        return True
+
     order=dict(ff.get("order_contract") or {})
     raw=str(order.get("original_user_prompt") or "").lower().replace("ё","е")
     if not raw:
         return False
-    strong_no_publish=any(x in raw for x in (
+
+    # OWNER_PREPARE_ONLY_NEGATION_ORDER_V2:
+    # Russian owner instructions frequently use either "не публиковать" or the
+    # reversed form "публикацию ... не выполнять". Recognize both while still
+    # requiring publication/Avito context so unrelated "не выполнять" text does
+    # not disable external actions.
+    direct_no_publish=any(x in raw for x in (
         "не публиков", "не размещ", "не отправля", "без публикац",
         "не выгруж", "не передавать в avito", "не передавать в авито",
     ))
+    publication_context=any(x in raw for x in (
+        "публикац", "размещен", "размещение", "выгруз", "отправ", "передач",
+    ))
+    delayed_negation=publication_context and any(x in raw for x in (
+        "не выполнять", "не запускать", "не активировать", "не начинать",
+        "на этом этапе не выполнять", "пока не выполнять",
+    ))
+    strong_no_publish=bool(direct_no_publish or delayed_negation)
+
     prepare_only=any(x in raw for x in (
         "только draft", "только ready", "draft/ready", "draft / ready",
-        "внутри boris", "внутри борис",
+        "внутри boris", "внутри борис", "сначала полностью подготовить",
     ))
     avito_context=("avito" in raw or "авито" in raw or "фид" in raw or "feed" in raw)
     return bool(strong_no_publish and (avito_context or prepare_only))
