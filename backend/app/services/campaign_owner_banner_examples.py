@@ -74,7 +74,7 @@ PROFILES = {
         "niche": "glass_shower_partitions",
         "owner_library_file": None,
         "owner_library_ref": None,
-        "style": "premium architectural bathroom editorial; elegant believable glass partitions as the unmistakable hero, clean real-world proportions, luxurious stone and soft light, frosted and transparent areas only when confirmed, airy legible typographic grid",
+        "style": "flagship premium bathroom advertising: striking and physically realistic glass shower partition is the single dominant hero; architectural lighting, elegant stone and natural materials, editorial campaign layout, expressive central headline, vivid high-contrast call-to-action; no generic bathroom stock-photo poster, no tiny bottom labels",
         "subject": "Depict a plausible glass shower partition matching the stated construction, not a generic shower cabin; never invent pane dimensions, glass tint, metal color, installation service, product guarantee or delivery conditions",
         "palettes": (
             ("smoke_bronze", "#524B47", "smoked glass neutral + bronze + ivory"),
