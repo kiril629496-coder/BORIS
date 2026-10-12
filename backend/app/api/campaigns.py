@@ -2890,6 +2890,13 @@ def _ff_search_keywords(topic: str, payload: dict | None = None) -> list[str]:
 def _ff_factual_example(topic: str, city: str, payload: dict | None = None) -> tuple[str,dict]:
     """Build a concrete bottom example only from already-confirmed card fields."""
     p=payload if isinstance(payload,dict) else {}
+    # Niche-specific footers must contain at least two real, item-scoped
+    # characteristics. A product category, city or arbitrary price are not
+    # evidence of a distinct configuration. Missing facts fail closed.
+    from app.services.campaign_niche_copy import factual_niche_example
+    niche_example=factual_niche_example(topic,p)
+    if niche_example is not None:
+        return niche_example
     facts=[]
     candidates=[
         ("Направление", topic),
@@ -9192,6 +9199,13 @@ def _ff_bulk_safe_copy(topic: str, payload: dict, ff: dict) -> tuple[str,str]:
     payload.update(formula)
     existing_title=" ".join(str(payload.get("title") or "").split()).strip()
     title=_ff_clean_title_for_avito(existing_title,clean_topic) if existing_title else _ff_select_title(clean_topic,variant,str(ff.get("brief") or ""))
+
+    # Product-specific, punctuation-checked text comes from confirmed card subject
+    # and location. No external provider, tariff change, or publication here.
+    from app.services.campaign_niche_copy import compose_niche_copy
+    niche_copy=compose_niche_copy(clean_topic,payload)
+    if niche_copy is not None:
+        return title,niche_copy
 
     internal=_re.compile(
         r"(?:\bBORIS\b|не\s+обещат|не\s+выдум|не\s+подстав|"
