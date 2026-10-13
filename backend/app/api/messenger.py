@@ -3115,9 +3115,22 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
     if not _pilot_reservation.get("allowed"):
         return _wrap("[Ошибка генерации: " + str(_pilot_reservation.get("reason") or "pilot_blocked") + "]",
                      None, return_meta)
+    _customer_continuity = {}
     db = SessionLocal()
     try:
         account = db.query(Account).filter(Account.account_id == account_id).first()
+        # UAS-835: resolve the same buyer across separate item chats. This is
+        # strictly account-scoped; the provider id is hashed before persistence.
+        try:
+            from app.services.mop_customer_brain import upsert_identity, customer_context
+            with db.begin_nested():
+                upsert_identity(db, account_id, chat)
+            _customer_continuity = customer_context(
+                db, account_id, str(chat_id or ""), max_chats=8, max_messages=32
+            )
+        except Exception as _customer_brain_exc:
+            observe_suppressed(__name__, _customer_brain_exc, line=3125)
+            _customer_continuity = {}
         # MOP_FIRST_TURN_ALL_ENTRYPOINTS_V1:
         # Proactive Avito system events are still the first company turn when
         # there is no earlier outgoing message. Greeting/company identity must
@@ -3125,6 +3138,9 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
         _first_manager_turn = bool(
             _mop_first_manager_turn(db, account_id, str(chat_id or ""), chat)
         )
+        # Same buyer in another listing is not a cold first contact.
+        if int((_customer_continuity or {}).get("prior_chat_count") or 0) > 0:
+            _first_manager_turn = False
         _first_account_intro = ""
         _first_account_name = str(getattr(account, "name", "") or "").strip()
         if _first_manager_turn:
@@ -3565,6 +3581,18 @@ def generate_ai_draft_reply(account_id: str, chat: dict, proactive_event: str = 
             sender = "Клиент" if direction == "in" else "Мы"
             history_lines.append(f"{sender}: {text}")
         history_text = "\n".join(history_lines)
+
+    # UAS-835 CROSS-LISTING CONTINUITY V1.
+    _customer_prior_history = str(
+        (_customer_continuity or {}).get("role_history") or ""
+    ).strip()
+    if _customer_prior_history:
+        history_text = (
+            "Ранее в других объявлениях этой же компании:\n"
+            + _customer_prior_history
+            + "\nТекущий диалог:\n"
+            + history_text
+        ).strip()
 
     # PLANETA_PHONE_HISTORY_HANDOFF_V1:
     # Once Planeta already has the client's phone in this dialogue, the MOP must
@@ -8362,6 +8390,15 @@ def sync_chats(account_id: str, limit: int = 50):
                 ),
                 "",
             )
+
+            # UAS-835: preserve stable buyer identity before message sync so
+            # separate item chats from the same Avito profile share continuity.
+            try:
+                from app.services.mop_customer_brain import upsert_identity
+                with db.begin_nested():
+                    upsert_identity(db, account_id, ch)
+            except Exception as _customer_identity_exc:
+                observe_suppressed(__name__, _customer_identity_exc, line=8366)
 
             mr = fetch_chat_messages(account_id, chat_id)
             if mr.get("status") != "ok":
