@@ -660,9 +660,20 @@ def push_card(db, draft_id, chat_id=None, thread_id=0, city=None, account_name=N
     if chat_id is None:
         tgt = target_for(db, d["account_id"])
         if not tgt:
-            log_event(db, draft_id, "card_posted", channel="telegram",
-                      actor_type="system", payload=ROUTE_MISSING)
-            db.commit()
+            # Route absence is a persistent account configuration issue, not
+            # a new notification every poll tick.  Keep one durable failure
+            # signal per draft, without flooding the event log or attempting to
+            # notify some other tenant. When the route is later configured,
+            # push_card proceeds through the normal delivery path.
+            already_reported = db.execute(text("""
+                SELECT 1 FROM mop_draft_events
+                 WHERE draft_id=:d AND event='card_posted' AND payload=:reason
+                 LIMIT 1
+            """), {"d": draft_id, "reason": ROUTE_MISSING}).first()
+            if not already_reported:
+                log_event(db, draft_id, "card_posted", channel="telegram",
+                          actor_type="system", payload=ROUTE_MISSING)
+                db.commit()
             return ROUTE_MISSING
         chat_id, thread_id = tgt
     if account_name is None or city is None:

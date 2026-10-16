@@ -694,7 +694,15 @@ def _real_last_incoming(account_id, chat_id):
             return None
         if txt.startswith(_SYSTEM_NUDGE_PREFIX):
             continue
-        return {"id": mid, "text": txt}
+        # The real Avito v3 message carries its own creation timestamp.  A
+        # later human answer may precede this incoming while the local inbox
+        # cache is still catching up; preserve the provider timestamp so the
+        # takeover fence can compare the exact buyer turn, not stale cache.
+        try:
+            created_epoch = int(m.get("created") or 0)
+        except (TypeError, ValueError):
+            created_epoch = 0
+        return {"id": mid, "text": txt, "created_at": created_epoch}
     return None
 
 _PROACTIVE_EVENT_INSTRUCTIONS = {
@@ -5893,7 +5901,7 @@ def _mop_close_if_avito_assistant_already_replied(db, account_id: str, chat_id: 
 
 
 def _mop_incoming(account_id, chat_id, avito_message_id, incoming_text, chat,
-                  proactive_event=None):
+                  proactive_event=None, incoming_created_at=None):
     # MOP_SYSTEM_EVENT_DRAFT_GUARD_V1: Avito service notifications are not
     # client dialogue and must never become a canonical MOP draft. Proactive
     # viewed-phone logic may still annotate a *real* inbound message via
@@ -6314,10 +6322,18 @@ def _mop_incoming(account_id, chat_id, avito_message_id, incoming_text, chat,
              WHERE account_id=:a AND avito_message_id=:m
              ORDER BY id DESC LIMIT 1
         """), {"a": account_id, "m": str(avito_message_id)}).scalar()
+        # Prefer the exact Avito v3 timestamp over the asynchronous local cache.
+        # No guessed clock time: if neither source has the message, the
+        # existing takeover fence remains fail-closed to prevent double sends.
+        try:
+            _provider_inbound_epoch = int(incoming_created_at or 0)
+        except (TypeError, ValueError):
+            _provider_inbound_epoch = 0
+        _exact_inbound_epoch = _provider_inbound_epoch or _current_inbound_epoch
         st = _mc.begin_incoming(db, account_id, str(chat_id),
                                 str(avito_message_id), incoming_text or "",
                                 ai_enabled=_ai_enabled,
-                                incoming_created_at=_current_inbound_epoch)
+                                incoming_created_at=_exact_inbound_epoch)
     except Exception as e:
         print("MOP_BEGIN_ERR %s/%s: %s" % (account_id, chat_id, e), flush=True)
         return "begin_failed"
@@ -6781,7 +6797,8 @@ def _process_account_messenger_check(account_id: str, telegram_chat_id: str):
                                    if _SYSTEM_NUDGE_PREFIX in real_text else None)
                 _mop_result = _mop_incoming(
                     account_id, chat_id, real_message_id,
-                    real_text, chat, proactive_event
+                    real_text, chat, proactive_event,
+                    incoming_created_at=_real.get("created_at"),
                 )
                 if _mop_result in {
                     "card_sent",
